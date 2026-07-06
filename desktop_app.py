@@ -1,6 +1,6 @@
 """
-Phone Backup Server — Desktop Application
-Wraps the FastAPI server in a native dark-mode GUI (customtkinter).
+Phone Backup Server — Desktop Application  (Modernized v2)
+Wraps the FastAPI server in a premium dark-mode GUI (customtkinter).
 
 Run with:  python desktop_app.py
 """
@@ -14,12 +14,12 @@ import threading
 import time
 from datetime import datetime
 from tkinter import filedialog, messagebox
+import tkinter as tk
 
 import customtkinter as ctk
 import uvicorn
 
 # ── Local imports ──────────────────────────────────────────────────────────────
-# Import state first (no side-effects) so other modules can use it
 from state import (
     add_log,
     clear_logs,
@@ -34,25 +34,29 @@ from database import get_devices, get_stats, init_db, remove_device
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-# Palette (mirrors the Android app's palette)
-C_BG = "#090D1A"
-C_SURFACE = "#0F1729"
-C_ELEVATED = "#162033"
-C_BORDER = "#1E2D45"
-C_PRIMARY = "#6366F1"
-C_SUCCESS = "#22C55E"
-C_ERROR = "#EF4444"
-C_WARNING = "#F59E0B"
-C_TEXT = "#F1F5F9"
-C_MUTED = "#64748B"
+# ── Palette ────────────────────────────────────────────────────────────────────
+C_BG        = "#07091A"
+C_SURFACE   = "#0D1426"
+C_ELEVATED  = "#13203A"
+C_CARD      = "#172440"
+C_BORDER    = "#1F3052"
+C_ACCENT    = "#6366F1"
+C_ACCENT2   = "#8B5CF6"
+C_SUCCESS   = "#10B981"
+C_ERROR     = "#EF4444"
+C_WARNING   = "#F59E0B"
+C_INFO      = "#3B82F6"
+C_TEXT      = "#F0F4FF"
+C_MUTED     = "#5B7BA0"
+C_HIGHLIGHT = "#A5B4FC"
 
-# Fonts are initialised inside BackupServerApp.__init__ (after the root window
-# exists) and then assigned to these module-level names for shared use.
-FONT_TITLE: ctk.CTkFont
+# Module-level font references (populated after root window exists)
+FONT_TITLE:   ctk.CTkFont
 FONT_SECTION: ctk.CTkFont
-FONT_BODY: ctk.CTkFont
-FONT_SMALL: ctk.CTkFont
-FONT_MONO: ctk.CTkFont
+FONT_BODY:    ctk.CTkFont
+FONT_SMALL:   ctk.CTkFont
+FONT_MONO:    ctk.CTkFont
+FONT_CAPTION: ctk.CTkFont
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -97,25 +101,36 @@ def fmt_rel(ts: int | None) -> str:
     return f"{secs // 86400}d ago"
 
 
+def _resolve_asset(filename: str) -> str:
+    """Return absolute path to an asset, works for both dev and PyInstaller bundle."""
+    if getattr(sys, "frozen", False):
+        base = sys._MEIPASS  # type: ignore[attr-defined]
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, "assets", filename)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
-# Custom confirm dialog (avoids un-themed tk.messagebox)
+# Custom Confirm Dialog
 # ──────────────────────────────────────────────────────────────────────────────
 
 def confirm_dialog(parent, title: str, message: str) -> bool:
     result: list[bool] = [False]
     dlg = ctk.CTkToplevel(parent)
     dlg.title(title)
-    dlg.geometry("380x180")
+    dlg.geometry("400x200")
     dlg.resizable(False, False)
     dlg.attributes("-topmost", True)
     dlg.grab_set()
+    dlg.configure(fg_color=C_SURFACE)
 
-    ctk.CTkLabel(dlg, text=message, font=FONT_BODY, wraplength=340, justify="center").pack(
-        expand=True, pady=(24, 12), padx=20
-    )
+    ctk.CTkLabel(
+        dlg, text=message, font=FONT_BODY, wraplength=360,
+        justify="center", text_color=C_TEXT,
+    ).pack(expand=True, pady=(28, 12), padx=24)
 
     bf = ctk.CTkFrame(dlg, fg_color="transparent")
-    bf.pack(fill="x", padx=20, pady=(0, 20))
+    bf.pack(fill="x", padx=24, pady=(0, 24))
 
     def _yes():
         result[0] = True
@@ -124,13 +139,72 @@ def confirm_dialog(parent, title: str, message: str) -> bool:
     def _no():
         dlg.destroy()
 
-    ctk.CTkButton(bf, text="Cancel", fg_color=C_ELEVATED, hover_color=C_BORDER,
-                  width=120, command=_no).pack(side="left")
-    ctk.CTkButton(bf, text="Confirm", fg_color=C_ERROR, hover_color="#B91C1C",
-                  width=120, command=_yes).pack(side="right")
+    ctk.CTkButton(
+        bf, text="Cancel", fg_color=C_ELEVATED, hover_color=C_BORDER,
+        border_width=1, border_color=C_BORDER, width=130, height=38,
+        font=FONT_BODY, command=_no,
+    ).pack(side="left")
+    ctk.CTkButton(
+        bf, text="Confirm", fg_color="#7F1D1D", hover_color="#991B1B",
+        width=130, height=38, font=FONT_BODY, command=_yes,
+    ).pack(side="right")
 
     dlg.wait_window()
     return result[0]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Animated Breathing Dot
+# ──────────────────────────────────────────────────────────────────────────────
+
+class BreathingDot(ctk.CTkCanvas):
+    """A small canvas that pulses between two colours to show server status."""
+
+    _PERIOD = 1800  # ms for one full breath cycle
+
+    def __init__(self, parent, size: int = 10, **kwargs):
+        super().__init__(
+            parent, width=size, height=size,
+            highlightthickness=0, bd=0,
+            bg=C_SURFACE, **kwargs,
+        )
+        self._size = size
+        self._color_on  = C_SUCCESS
+        self._color_off = "#0D3D2A"
+        self._step = 0
+        self._running = True
+        self._oval = self.create_oval(1, 1, size - 1, size - 1, fill=self._color_on, outline="")
+        self._animate()
+
+    def set_running(self, running: bool):
+        self._color_on  = C_SUCCESS if running else C_ERROR
+        self._color_off = "#0D3D2A"  if running else "#3D0D0D"
+
+    def _lerp_color(self, t: float) -> str:
+        """Interpolate hex color between _color_off and _color_on."""
+        def parse(h: str):
+            h = h.lstrip("#")
+            return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+        r0, g0, b0 = parse(self._color_off)
+        r1, g1, b1 = parse(self._color_on)
+        r = int(r0 + (r1 - r0) * t)
+        g = int(g0 + (g1 - g0) * t)
+        b = int(b0 + (b1 - b0) * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _animate(self):
+        if not self._running:
+            return
+        import math
+        t = (math.sin(self._step * math.pi / (self._PERIOD / 50)) + 1) / 2
+        color = self._lerp_color(t)
+        self.itemconfig(self._oval, fill=color)
+        self._step += 1
+        self.after(50, self._animate)
+
+    def stop(self):
+        self._running = False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -139,50 +213,78 @@ def confirm_dialog(parent, title: str, message: str) -> bool:
 
 class BackupServerApp(ctk.CTk):
 
-    PAGES = ["dashboard", "devices", "settings", "logs"]
-    PAGE_ICONS = {"dashboard": "📊", "devices": "📱", "settings": "⚙️", "logs": "📋"}
+    PAGES      = ["dashboard", "devices", "settings", "logs"]
+    PAGE_ICONS = {
+        "dashboard": "󰕇",   # fallback to text if font missing
+        "devices":   "󰄛",
+        "settings":  "󰒓",
+        "logs":      "󰉩",
+    }
+    PAGE_LABELS = {
+        "dashboard": "Dashboard",
+        "devices":   "Devices",
+        "settings":  "Settings",
+        "logs":      "Logs",
+    }
+    # Emoji fallbacks (used in labels that can't use Nerd Font)
+    PAGE_EMOJI = {
+        "dashboard": "📊",
+        "devices":   "📱",
+        "settings":  "⚙️",
+        "logs":      "📋",
+    }
 
     def __init__(self):
         super().__init__()
 
-        # Fonts must be created after the root window exists
-        global FONT_TITLE, FONT_SECTION, FONT_BODY, FONT_SMALL, FONT_MONO
-        FONT_TITLE = ctk.CTkFont(size=22, weight="bold")
-        FONT_SECTION = ctk.CTkFont(size=13, weight="bold")
-        FONT_BODY = ctk.CTkFont(size=13)
-        FONT_SMALL = ctk.CTkFont(size=11)
-        FONT_MONO = ctk.CTkFont(size=12, family="Consolas")
+        # Fonts
+        global FONT_TITLE, FONT_SECTION, FONT_BODY, FONT_SMALL, FONT_MONO, FONT_CAPTION
+        FONT_TITLE   = ctk.CTkFont(family="Segoe UI", size=24, weight="bold")
+        FONT_SECTION = ctk.CTkFont(family="Segoe UI", size=11, weight="bold")
+        FONT_BODY    = ctk.CTkFont(family="Segoe UI", size=13)
+        FONT_SMALL   = ctk.CTkFont(family="Segoe UI", size=11)
+        FONT_MONO    = ctk.CTkFont(family="Consolas",  size=12)
+        FONT_CAPTION = ctk.CTkFont(family="Segoe UI", size=10)
 
         self.title("Phone Backup Server")
-        self.geometry("1060x680")
-        self.minsize(820, 540)
+        self.geometry("1120x700")
+        self.minsize(860, 560)
+        self.configure(fg_color=C_BG)
 
-        # Server control
+        # Try to set window icon
+        _ico = _resolve_asset("icon.ico")
+        if os.path.exists(_ico):
+            try:
+                self.iconbitmap(_ico)
+            except Exception:
+                pass
+
+        # Server state
         self._uvicorn_server: uvicorn.Server | None = None
-        self._server_thread: threading.Thread | None = None
-        self._server_running = False
-        self._current_page: str | None = None
+        self._server_thread:  threading.Thread | None = None
+        self._server_running  = False
+        self._current_page:   str | None = None
+        self._server_start_time: float | None = None
 
         # Build layout
         self._setup_grid()
         self._build_sidebar()
         self._build_statusbar()
-        self._build_content_area()  # must come after sidebar (uses self._frames_container)
+        self._build_content_area()
 
-        # Navigate to dashboard
         self._show_page("dashboard")
 
-        # Background polling
-        self.after(500, self._poll_pending_connections)
-        self.after(6000, self._auto_refresh)
+        # Polling loops
+        self.after(500,  self._poll_pending_connections)
+        self.after(2000, self._auto_refresh)
+        self.after(1000, self._tick_uptime)
 
-        # Start server immediately
+        # Auto-start server
         self._start_server()
 
-        # Graceful close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ─── Grid setup ──────────────────────────────────────────────────────────
+    # ─── Grid ────────────────────────────────────────────────────────────────
 
     def _setup_grid(self):
         self.grid_columnconfigure(1, weight=1)
@@ -191,86 +293,148 @@ class BackupServerApp(ctk.CTk):
     # ─── Sidebar ─────────────────────────────────────────────────────────────
 
     def _build_sidebar(self):
-        sb = ctk.CTkFrame(self, width=210, corner_radius=0, fg_color=C_SURFACE)
+        sb = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color=C_SURFACE)
         sb.grid(row=0, column=0, rowspan=2, sticky="nsew")
         sb.grid_propagate(False)
         sb.pack_propagate(False)
 
-        # Logo
-        logo = ctk.CTkFrame(sb, fg_color="transparent")
-        logo.pack(fill="x", padx=18, pady=(28, 20))
-        ctk.CTkLabel(logo, text="☁️", font=ctk.CTkFont(size=44)).pack()
-        ctk.CTkLabel(logo, text="Phone Backup", font=ctk.CTkFont(size=17, weight="bold"),
-                     text_color=C_TEXT).pack()
-        ctk.CTkLabel(logo, text="Server Console", font=FONT_SMALL,
-                     text_color=C_MUTED).pack(pady=(2, 0))
+        # ── Logo / header bar ────────────────────────────────────────────────
+        header = ctk.CTkFrame(sb, height=130, fg_color=C_ELEVATED, corner_radius=0)
+        header.pack(fill="x")
+        header.pack_propagate(False)
 
-        # Divider
-        ctk.CTkFrame(sb, height=1, fg_color=C_BORDER).pack(fill="x", padx=16, pady=6)
+        # Cloud icon
+        cloud_lbl = ctk.CTkLabel(
+            header, text="☁️", font=ctk.CTkFont(size=42),
+        )
+        cloud_lbl.pack(pady=(20, 4))
 
-        # Nav buttons
-        self._nav_btns: dict[str, ctk.CTkButton] = {}
+        ctk.CTkLabel(
+            header, text="Phone Backup",
+            font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
+            text_color=C_TEXT,
+        ).pack()
+        ctk.CTkLabel(
+            header, text="SERVER CONSOLE",
+            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
+            text_color=C_ACCENT,
+        ).pack(pady=(2, 0))
+
+        # Thin accent line below header
+        ctk.CTkFrame(sb, height=2, fg_color=C_ACCENT, corner_radius=0).pack(fill="x")
+
+        # ── Nav items ────────────────────────────────────────────────────────
+        nav_container = ctk.CTkFrame(sb, fg_color="transparent")
+        nav_container.pack(fill="x", padx=10, pady=(14, 0))
+
+        self._nav_btns:   dict[str, ctk.CTkButton] = {}
+        self._nav_accents: dict[str, ctk.CTkFrame]  = {}
+
         for page in self.PAGES:
-            icon = self.PAGE_ICONS[page]
+            emoji = self.PAGE_EMOJI[page]
+            label = self.PAGE_LABELS[page]
+
+            row = ctk.CTkFrame(nav_container, fg_color="transparent", height=46)
+            row.pack(fill="x", pady=3)
+            row.pack_propagate(False)
+
+            # Left accent strip (hidden by default)
+            accent = ctk.CTkFrame(row, width=3, fg_color=C_ACCENT, corner_radius=2)
+            accent.pack(side="left", fill="y", padx=(0, 6))
+            accent.pack_propagate(False)
+            self._nav_accents[page] = accent
+
             btn = ctk.CTkButton(
-                sb,
-                text=f"  {icon}   {page.title()}",
+                row,
+                text=f" {emoji}   {label}",
                 anchor="w",
-                corner_radius=10,
-                height=44,
+                corner_radius=8,
+                height=42,
                 fg_color="transparent",
                 hover_color=C_ELEVATED,
                 text_color=C_MUTED,
-                font=ctk.CTkFont(size=14),
+                font=ctk.CTkFont(family="Segoe UI", size=13),
                 command=lambda p=page: self._show_page(p),
             )
-            btn.pack(fill="x", padx=12, pady=3)
+            btn.pack(side="left", fill="both", expand=True)
             self._nav_btns[page] = btn
 
-        # Bottom: server toggle
-        ctk.CTkFrame(sb, height=1, fg_color=C_BORDER).pack(fill="x", padx=16, pady=6, side="bottom")
+        # ── Bottom controls ──────────────────────────────────────────────────
+        ctk.CTkFrame(sb, height=1, fg_color=C_BORDER).pack(
+            fill="x", padx=14, pady=14, side="bottom"
+        )
         self._toggle_btn = ctk.CTkButton(
             sb,
             text="⏹  Stop Server",
             fg_color="#7F1D1D",
             hover_color="#991B1B",
-            height=42,
+            height=44,
+            corner_radius=10,
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
             command=self._toggle_server,
         )
-        self._toggle_btn.pack(fill="x", padx=12, pady=(0, 16), side="bottom")
+        self._toggle_btn.pack(fill="x", padx=14, pady=(0, 18), side="bottom")
 
     # ─── Status bar ──────────────────────────────────────────────────────────
 
     def _build_statusbar(self):
-        bar = ctk.CTkFrame(self, height=38, corner_radius=0, fg_color=C_SURFACE)
+        bar = ctk.CTkFrame(self, height=40, corner_radius=0, fg_color=C_SURFACE)
         bar.grid(row=1, column=1, sticky="ew")
         bar.grid_propagate(False)
 
-        self._dot_lbl = ctk.CTkLabel(bar, text="●", text_color=C_SUCCESS,
-                                      font=ctk.CTkFont(size=14))
-        self._dot_lbl.pack(side="left", padx=(14, 4), pady=10)
+        left = ctk.CTkFrame(bar, fg_color="transparent")
+        left.pack(side="left", fill="y", padx=(16, 0))
 
-        self._status_lbl = ctk.CTkLabel(bar, text="Starting…", font=FONT_SMALL,
-                                         text_color=C_TEXT)
-        self._status_lbl.pack(side="left", pady=10)
+        # Animated dot
+        self._dot = BreathingDot(left, size=10)
+        self._dot.pack(side="left", padx=(0, 8), pady=15)
 
-        self._addr_lbl = ctk.CTkLabel(bar, text="", font=FONT_MONO, text_color=C_MUTED)
-        self._addr_lbl.pack(side="right", padx=14, pady=10)
+        self._status_lbl = ctk.CTkLabel(
+            left, text="Starting…",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color=C_TEXT,
+        )
+        self._status_lbl.pack(side="left")
+
+        right = ctk.CTkFrame(bar, fg_color="transparent")
+        right.pack(side="right", fill="y", padx=16)
+
+        self._uptime_lbl = ctk.CTkLabel(
+            right, text="", font=FONT_MONO, text_color=C_MUTED,
+        )
+        self._uptime_lbl.pack(side="right", padx=(8, 0))
+
+        self._addr_lbl = ctk.CTkLabel(
+            right, text="", font=FONT_MONO, text_color=C_HIGHLIGHT,
+        )
+        self._addr_lbl.pack(side="right")
+
+        # Separator
+        ctk.CTkFrame(bar, width=1, fg_color=C_BORDER).pack(side="right", fill="y", pady=8)
 
     def _set_status(self, running: bool, addr: str = ""):
+        self._dot.set_running(running)
         if running:
-            self._dot_lbl.configure(text_color=C_SUCCESS)
-            self._status_lbl.configure(text="Server Running")
+            self._status_lbl.configure(text="Server Running", text_color=C_SUCCESS)
             self._addr_lbl.configure(text=addr)
         else:
-            self._dot_lbl.configure(text_color=C_ERROR)
-            self._status_lbl.configure(text="Server Stopped")
+            self._status_lbl.configure(text="Server Stopped", text_color=C_ERROR)
             self._addr_lbl.configure(text="")
+            self._uptime_lbl.configure(text="")
 
-    # ─── Content frames ───────────────────────────────────────────────────────
+    def _tick_uptime(self):
+        if self._server_running and self._server_start_time:
+            elapsed = int(time.time() - self._server_start_time)
+            h = elapsed // 3600
+            m = (elapsed % 3600) // 60
+            s = elapsed % 60
+            self._uptime_lbl.configure(text=f"  ⏱ {h:02d}:{m:02d}:{s:02d}")
+        self.after(1000, self._tick_uptime)
+
+    # ─── Content area ─────────────────────────────────────────────────────────
 
     def _build_content_area(self):
-        container = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        container = ctk.CTkFrame(self, corner_radius=0, fg_color=C_BG)
         container.grid(row=0, column=1, sticky="nsew")
         container.grid_columnconfigure(0, weight=1)
         container.grid_rowconfigure(0, weight=1)
@@ -285,54 +449,154 @@ class BackupServerApp(ctk.CTk):
         for f in self._pages.values():
             f.grid(row=0, column=0, sticky="nsew")
 
+    # ─── Shared UI helpers ────────────────────────────────────────────────────
+
+    def _page_header(self, parent, title: str, subtitle: str = "") -> ctk.CTkFrame:
+        hdr = ctk.CTkFrame(parent, fg_color="transparent")
+        hdr.pack(fill="x", padx=30, pady=(26, 0))
+        ctk.CTkLabel(
+            hdr, text=title, font=FONT_TITLE, text_color=C_TEXT, anchor="w",
+        ).pack(side="left", fill="y")
+        if subtitle:
+            ctk.CTkLabel(
+                hdr, text=subtitle, font=FONT_SMALL, text_color=C_MUTED,
+            ).pack(side="left", padx=(12, 0), pady=(6, 0))
+        return hdr
+
+    def _divider(self, parent):
+        ctk.CTkFrame(parent, height=1, fg_color=C_BORDER).pack(
+            fill="x", padx=30, pady=(14, 0)
+        )
+
+    def _section_label(self, parent, text: str):
+        ctk.CTkLabel(
+            parent, text=text.upper(),
+            font=FONT_SECTION, text_color=C_MUTED,
+        ).pack(anchor="w", padx=30, pady=(18, 6))
+
     # ─── Page: Dashboard ─────────────────────────────────────────────────────
 
     def _build_dashboard(self, parent) -> ctk.CTkFrame:
-        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame = ctk.CTkFrame(parent, fg_color=C_BG)
 
-        # Title
-        ctk.CTkLabel(frame, text="Dashboard", font=FONT_TITLE, text_color=C_TEXT).pack(
-            anchor="w", padx=28, pady=(22, 16)
+        self._page_header(frame, "Dashboard", "Live overview")
+        self._divider(frame)
+
+        # ── Stat cards ────────────────────────────────────────────────────
+        cards_row = ctk.CTkFrame(frame, fg_color="transparent")
+        cards_row.pack(fill="x", padx=24, pady=(18, 0))
+
+        card_defs = [
+            ("📦", "Total Files",   C_ACCENT,   "_s_files"),
+            ("📱", "Devices",       C_ACCENT2,  "_s_devices"),
+            ("💾", "Total Size",    C_INFO,     "_s_size"),
+            ("🕐", "Last Backup",   C_SUCCESS,  "_s_last"),
+        ]
+        for icon, label, color, attr in card_defs:
+            lbl = self._stat_card(cards_row, icon, label, "—", color)
+            setattr(self, attr, lbl)
+
+        # ── Recent activity ───────────────────────────────────────────────
+        self._section_label(frame, "Recent Activity")
+
+        log_frame = ctk.CTkFrame(
+            frame, fg_color=C_SURFACE,
+            corner_radius=14, border_width=1, border_color=C_BORDER,
         )
-
-        # Stat cards row
-        cards = ctk.CTkFrame(frame, fg_color="transparent")
-        cards.pack(fill="x", padx=28)
-
-        self._s_files   = self._stat_card(cards, "📦", "Total Files", "—")
-        self._s_devices = self._stat_card(cards, "📱", "Devices", "—")
-        self._s_size    = self._stat_card(cards, "💾", "Total Size", "—")
-        self._s_last    = self._stat_card(cards, "🕐", "Last Backup", "—")
-
-        # Divider + log preview
-        ctk.CTkFrame(frame, height=1, fg_color=C_BORDER).pack(fill="x", padx=28, pady=(20, 0))
-        ctk.CTkLabel(frame, text="Recent Activity", font=FONT_SECTION,
-                     text_color=C_MUTED).pack(anchor="w", padx=28, pady=(12, 6))
+        log_frame.pack(fill="both", expand=True, padx=30, pady=(6, 24))
 
         self._dash_log = ctk.CTkTextbox(
-            frame, state="disabled", fg_color=C_SURFACE,
-            border_color=C_BORDER, border_width=1,
-            font=FONT_MONO, text_color=C_TEXT
+            log_frame, state="disabled", fg_color="transparent",
+            border_width=0, font=FONT_MONO, text_color=C_TEXT,
+            wrap="word",
         )
-        self._dash_log.pack(fill="both", expand=True, padx=28, pady=(0, 20))
+        self._dash_log.pack(fill="both", expand=True, padx=4, pady=4)
+        self._setup_log_tags(self._dash_log)
 
         return frame
 
-    def _stat_card(self, parent, icon, label, value) -> ctk.CTkLabel:
-        card = ctk.CTkFrame(parent, fg_color=C_ELEVATED, corner_radius=14,
-                            border_width=1, border_color=C_BORDER)
-        card.pack(side="left", fill="both", expand=True, padx=6, pady=4)
+    def _stat_card(self, parent, icon: str, label: str, value: str, accent: str) -> ctk.CTkLabel:
+        # Outer glow border wrapper
+        outer = ctk.CTkFrame(parent, fg_color=accent, corner_radius=16)
+        outer.pack(side="left", fill="both", expand=True, padx=7, pady=4)
 
-        ctk.CTkLabel(card, text=icon, font=ctk.CTkFont(size=30)).pack(pady=(18, 4))
-        val_lbl = ctk.CTkLabel(card, text=value, font=ctk.CTkFont(size=24, weight="bold"),
-                               text_color=C_PRIMARY)
-        val_lbl.pack()
-        ctk.CTkLabel(card, text=label, font=FONT_SMALL, text_color=C_MUTED).pack(pady=(2, 16))
+        inner = ctk.CTkFrame(outer, fg_color=C_CARD, corner_radius=14)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+
+        # Icon badge — use a dark-tint lookup (tkinter only supports 6-char hex)
+        _BADGE_TINTS = {
+            C_ACCENT:  "#1A1B4B",
+            C_ACCENT2: "#2E1B4B",
+            C_INFO:    "#0F2A4A",
+            C_SUCCESS: "#0A2E20",
+        }
+        badge = ctk.CTkFrame(
+            inner,
+            width=48, height=48,
+            fg_color=_BADGE_TINTS.get(accent, C_ELEVATED),
+            corner_radius=12,
+        )
+        badge.pack(pady=(20, 4))
+        badge.pack_propagate(False)
+        ctk.CTkLabel(badge, text=icon, font=ctk.CTkFont(size=24)).pack(expand=True)
+
+        val_lbl = ctk.CTkLabel(
+            inner, text=value,
+            font=ctk.CTkFont(family="Segoe UI", size=26, weight="bold"),
+            text_color=accent,
+        )
+        val_lbl.pack(pady=(4, 0))
+        ctk.CTkLabel(
+            inner, text=label, font=FONT_SMALL, text_color=C_MUTED,
+        ).pack(pady=(2, 20))
+
+        # Hover lift
+        def _enter(e):
+            outer.configure(fg_color=C_ACCENT2 if accent == C_ACCENT else accent)
+        def _leave(e):
+            outer.configure(fg_color=accent)
+        outer.bind("<Enter>", _enter)
+        outer.bind("<Leave>", _leave)
+
         return val_lbl
+
+    def _setup_log_tags(self, box: ctk.CTkTextbox):
+        """Configure colour tags on a CTkTextbox's internal tk.Text widget."""
+        txt: tk.Text = box._textbox
+        txt.tag_config("success", foreground=C_SUCCESS)
+        txt.tag_config("error",   foreground=C_ERROR)
+        txt.tag_config("warning", foreground=C_WARNING)
+        txt.tag_config("info",    foreground=C_INFO)
+        txt.tag_config("muted",   foreground=C_MUTED)
+        txt.tag_config("ts",      foreground="#3A5070")
+
+    def _insert_log_line(self, box: ctk.CTkTextbox, entry: dict):
+        """Insert one log entry with coloured tags into box."""
+        box.configure(state="normal")
+        ts = datetime.fromtimestamp(entry["time"]).strftime("%H:%M:%S")
+        msg: str = entry["message"]
+
+        txt: tk.Text = box._textbox
+        txt.insert("end", f"[{ts}]  ", ("ts",))
+
+        # Pick tag by emoji prefix
+        if msg.startswith(("✅", "🚀", "✓", "☁️")):
+            tag = "success"
+        elif msg.startswith(("❌", "✕", "🗑️")):
+            tag = "error"
+        elif msg.startswith(("⚠️", "⚙️")):
+            tag = "warning"
+        elif msg.startswith(("ℹ️", "🔵", "📋", "📱", "📦")):
+            tag = "info"
+        else:
+            tag = "muted"
+
+        txt.insert("end", msg + "\n", (tag,))
+        box.configure(state="disabled")
 
     def _refresh_dashboard(self):
         try:
-            stats = get_stats()
+            stats   = get_stats()
             devices = get_devices()
 
             self._s_files.configure(text=f"{stats['total_files']:,}")
@@ -340,35 +604,34 @@ class BackupServerApp(ctk.CTk):
             self._s_size.configure(text=fmt_bytes(stats["total_size_bytes"] or 0))
             self._s_last.configure(text=fmt_rel(stats.get("last_backup_time")))
 
-            logs = get_logs()[-15:]
+            logs = get_logs()[-20:]
             self._dash_log.configure(state="normal")
             self._dash_log.delete("1.0", "end")
-            for entry in reversed(logs):
-                ts = datetime.fromtimestamp(entry["time"]).strftime("%H:%M:%S")
-                self._dash_log.insert("end", f"[{ts}]  {entry['message']}\n")
             self._dash_log.configure(state="disabled")
+            for entry in reversed(logs):
+                self._insert_log_line(self._dash_log, entry)
         except Exception:
             pass
 
     # ─── Page: Devices ────────────────────────────────────────────────────────
 
     def _build_devices(self, parent) -> ctk.CTkFrame:
-        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame = ctk.CTkFrame(parent, fg_color=C_BG)
 
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=28, pady=(22, 0))
+        hdr = self._page_header(frame, "Connected Devices")
+        ctk.CTkButton(
+            hdr, text="↻  Refresh", width=110, height=34,
+            fg_color=C_ELEVATED, hover_color=C_BORDER,
+            border_width=1, border_color=C_BORDER,
+            command=self._refresh_devices,
+        ).pack(side="right")
 
-        ctk.CTkLabel(hdr, text="Connected Devices", font=FONT_TITLE,
-                     text_color=C_TEXT).pack(side="left")
-        ctk.CTkButton(hdr, text="↻  Refresh", width=110,
-                      command=self._refresh_devices).pack(side="right")
-
-        ctk.CTkFrame(frame, height=1, fg_color=C_BORDER).pack(fill="x", padx=28, pady=12)
+        self._divider(frame)
 
         self._devices_scroll = ctk.CTkScrollableFrame(
-            frame, fg_color="transparent", label_text=""
+            frame, fg_color="transparent", label_text="",
         )
-        self._devices_scroll.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+        self._devices_scroll.pack(fill="both", expand=True, padx=22, pady=(10, 16))
 
         return frame
 
@@ -379,52 +642,98 @@ class BackupServerApp(ctk.CTk):
         devices = get_devices()
 
         if not devices:
+            empty = ctk.CTkFrame(
+                self._devices_scroll, fg_color=C_SURFACE,
+                corner_radius=20, border_width=1, border_color=C_BORDER,
+            )
+            empty.pack(fill="x", padx=8, pady=30)
             ctk.CTkLabel(
-                self._devices_scroll,
+                empty, text="📱",
+                font=ctk.CTkFont(size=52),
+            ).pack(pady=(36, 4))
+            ctk.CTkLabel(
+                empty, text="No devices connected yet",
+                font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+                text_color=C_TEXT,
+            ).pack()
+            ctk.CTkLabel(
+                empty,
                 text=(
-                    "📱\n\nNo devices connected yet.\n\n"
                     "Open Phone Backup on your Android device,\n"
                     "go to Settings → Server, and tap Discover\n"
                     "or enter this machine's IP address."
                 ),
-                font=FONT_BODY,
-                text_color=C_MUTED,
-                justify="center",
-            ).pack(pady=60)
+                font=FONT_BODY, text_color=C_MUTED, justify="center",
+            ).pack(pady=(8, 36))
             return
 
         for dev in devices:
             self._device_card(self._devices_scroll, dev)
 
     def _device_card(self, parent, dev: dict):
-        card = ctk.CTkFrame(parent, fg_color=C_ELEVATED, corner_radius=14,
-                            border_width=1, border_color=C_BORDER)
-        card.pack(fill="x", padx=8, pady=6)
+        # Outer accent border
+        outer = ctk.CTkFrame(parent, fg_color=C_ACCENT, corner_radius=16)
+        outer.pack(fill="x", padx=8, pady=6)
+
+        card = ctk.CTkFrame(outer, fg_color=C_ELEVATED, corner_radius=14)
+        card.pack(fill="x", padx=1, pady=1)
         card.grid_columnconfigure(1, weight=1)
 
-        # Icon
-        ctk.CTkLabel(card, text="📱", font=ctk.CTkFont(size=34)).grid(
-            row=0, column=0, rowspan=2, padx=(18, 10), pady=18
+        # ── Phone icon with badge ──────────────────────────────────────────
+        icon_wrap = ctk.CTkFrame(
+            card, width=56, height=56, fg_color="#1A1B4B",
+            corner_radius=14,
         )
+        icon_wrap.grid(row=0, column=0, rowspan=2, padx=(18, 12), pady=18)
+        icon_wrap.grid_propagate(False)
+        ctk.CTkLabel(
+            icon_wrap, text="📱", font=ctk.CTkFont(size=28),
+        ).pack(expand=True)
 
-        # Name
-        ctk.CTkLabel(card, text=dev["device_name"],
-                     font=ctk.CTkFont(size=15, weight="bold"),
-                     text_color=C_TEXT).grid(row=0, column=1, sticky="sw", padx=4, pady=(16, 2))
+        # ── Name ──────────────────────────────────────────────────────────
+        name_row = ctk.CTkFrame(card, fg_color="transparent")
+        name_row.grid(row=0, column=1, sticky="sw", padx=4, pady=(18, 2))
 
-        # Details
-        info = (
-            f"IP: {dev['device_ip']}  ·  "
-            f"Files: {dev['files_backed_up']:,}  ·  "
-            f"Last: {fmt_rel(dev['last_seen'])}  ·  "
-            f"Since: {fmt_ts(dev['first_seen'])[:10]}"
-        )
-        ctk.CTkLabel(card, text=info, font=FONT_SMALL, text_color=C_MUTED).grid(
-            row=1, column=1, sticky="nw", padx=4, pady=(0, 16)
-        )
+        ctk.CTkLabel(
+            name_row, text=dev["device_name"],
+            font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
+            text_color=C_TEXT,
+        ).pack(side="left")
 
-        # Remove button
-        dev_id = dev["id"]
+        # Last-seen pill badge
+        last_seen_text = fmt_rel(dev["last_seen"])
+        pill_color = C_SUCCESS if dev.get("last_seen") and (int(time.time()) - dev["last_seen"]) < 300 else C_MUTED
+        _PILL_TINTS = {C_SUCCESS: "#0A2E20", C_MUTED: "#1A2535"}
+        pill = ctk.CTkFrame(name_row, fg_color=_PILL_TINTS.get(pill_color, C_ELEVATED), corner_radius=8)
+        pill.pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(
+            pill, text=f"  {last_seen_text}  ",
+            font=FONT_CAPTION, text_color=pill_color,
+        ).pack()
+
+        # ── Details row ───────────────────────────────────────────────────
+        details_row = ctk.CTkFrame(card, fg_color="transparent")
+        details_row.grid(row=1, column=1, sticky="nw", padx=4, pady=(0, 18))
+
+        _CHIP_TINTS = {
+            C_INFO:   "#0F2A4A",
+            C_ACCENT: "#1A1B4B",
+            C_MUTED:  "#1A2535",
+        }
+        for chip_text, chip_color in [
+            (f"📍 {dev['device_ip']}", C_INFO),
+            (f"📦 {dev['files_backed_up']:,} files", C_ACCENT),
+            (f"📅 since {fmt_ts(dev['first_seen'])[:10]}", C_MUTED),
+        ]:
+            chip = ctk.CTkFrame(details_row, fg_color=_CHIP_TINTS.get(chip_color, C_ELEVATED), corner_radius=8)
+            chip.pack(side="left", padx=(0, 8))
+            ctk.CTkLabel(
+                chip, text=f"  {chip_text}  ",
+                font=FONT_CAPTION, text_color=chip_color,
+            ).pack()
+
+        # ── Remove button ─────────────────────────────────────────────────
+        dev_id   = dev["id"]
         dev_name = dev["device_name"]
 
         def do_remove(did=dev_id, dname=dev_name):
@@ -439,84 +748,109 @@ class BackupServerApp(ctk.CTk):
                 self._refresh_devices()
 
         ctk.CTkButton(
-            card, text="Remove", width=96, height=34,
+            card, text="Remove", width=90, height=34,
             fg_color="#7F1D1D", hover_color="#991B1B",
+            font=FONT_SMALL, corner_radius=8,
             command=do_remove,
         ).grid(row=0, column=2, rowspan=2, padx=16)
 
     # ─── Page: Settings ───────────────────────────────────────────────────────
 
     def _build_settings(self, parent) -> ctk.CTkFrame:
-        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame = ctk.CTkFrame(parent, fg_color=C_BG)
 
-        ctk.CTkLabel(frame, text="Settings", font=FONT_TITLE, text_color=C_TEXT).pack(
-            anchor="w", padx=28, pady=(22, 16)
-        )
+        self._page_header(frame, "Settings", "Server configuration")
+        self._divider(frame)
 
         scroll = ctk.CTkScrollableFrame(frame, fg_color="transparent", label_text="")
-        scroll.pack(fill="both", expand=True, padx=20, pady=(0, 16))
+        scroll.pack(fill="both", expand=True, padx=22, pady=(6, 16))
 
         cfg = load_config()
 
-        def section(text):
-            ctk.CTkLabel(scroll, text=text, font=FONT_SECTION,
-                         text_color=C_MUTED).pack(anchor="w", padx=8, pady=(18, 6))
+        def settings_card(title: str) -> ctk.CTkFrame:
+            ctk.CTkLabel(
+                scroll, text=title.upper(),
+                font=FONT_SECTION, text_color=C_MUTED,
+            ).pack(anchor="w", padx=8, pady=(20, 6))
+            card = ctk.CTkFrame(
+                scroll, fg_color=C_SURFACE,
+                corner_radius=14, border_width=1, border_color=C_BORDER,
+            )
+            card.pack(fill="x", padx=8, pady=(0, 4))
+            return card
 
-        def labeled_entry(label, default="") -> ctk.CTkEntry:
-            ctk.CTkLabel(scroll, text=label, font=FONT_BODY,
-                         text_color=C_TEXT).pack(anchor="w", padx=8, pady=(6, 2))
-            e = ctk.CTkEntry(scroll, height=40, fg_color=C_ELEVATED,
-                             border_color=C_BORDER, text_color=C_TEXT)
+        def labeled_entry(card, label: str, default: str = "", placeholder: str = "") -> ctk.CTkEntry:
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(fill="x", padx=18, pady=(14, 0))
+            ctk.CTkLabel(row, text=label, font=FONT_BODY, text_color=C_TEXT).pack(anchor="w")
+            e = ctk.CTkEntry(
+                card, height=42, fg_color=C_ELEVATED,
+                border_color=C_BORDER, border_width=1,
+                text_color=C_TEXT, corner_radius=10,
+                placeholder_text=placeholder,
+            )
             e.insert(0, default)
-            e.pack(fill="x", padx=8, pady=(0, 4))
+            e.pack(fill="x", padx=18, pady=(6, 14))
             return e
 
-        # ── Server ──────────────────────────────────────────────────────────
-        section("SERVER")
-        self._e_host = labeled_entry("Listen IP  (0.0.0.0 = all interfaces)",
-                                      cfg.get("HOST", "0.0.0.0"))
-        self._e_port = labeled_entry("Port", str(cfg.get("PORT", 8000)))
+        # ── SERVER ────────────────────────────────────────────────────────
+        srv_card = settings_card("Server")
+        self._e_host = labeled_entry(srv_card, "Listen IP  (0.0.0.0 = all interfaces)",
+                                     cfg.get("HOST", "0.0.0.0"), "0.0.0.0")
+        self._e_port = labeled_entry(srv_card, "Port",
+                                     str(cfg.get("PORT", 8000)), "8000")
 
-        # ── Storage ─────────────────────────────────────────────────────────
-        section("STORAGE")
-        self._e_root = labeled_entry("Backup Root Folder", cfg.get("BACKUP_ROOT", ""))
+        # ── STORAGE ───────────────────────────────────────────────────────
+        stor_card = settings_card("Storage")
+        self._e_root = labeled_entry(stor_card, "Backup Root Folder",
+                                     cfg.get("BACKUP_ROOT", ""), "e.g. D:\\PhoneBackup")
 
-        browse_btn = ctk.CTkButton(
-            scroll, text="📂  Browse…", width=130, anchor="w",
+        browse_row = ctk.CTkFrame(stor_card, fg_color="transparent")
+        browse_row.pack(fill="x", padx=18, pady=(0, 14))
+        ctk.CTkButton(
+            browse_row, text="📂  Browse…", width=140, height=36,
             fg_color=C_ELEVATED, hover_color=C_BORDER,
+            border_width=1, border_color=C_BORDER,
+            corner_radius=10, font=FONT_BODY,
             command=self._browse_root,
+        ).pack(side="left")
+
+        # ── SECURITY ──────────────────────────────────────────────────────
+        sec_card = settings_card("Security")
+        self._e_key = labeled_entry(sec_card, "API Key  (must match Android app)",
+                                    cfg.get("API_KEY", ""), "Enter secret key…")
+
+        sw_row = ctk.CTkFrame(sec_card, fg_color="transparent")
+        sw_row.pack(fill="x", padx=18, pady=(6, 18))
+
+        self._sw_approval = ctk.CTkSwitch(
+            sw_row, text="", width=52, height=26,
+            button_color=C_ACCENT, progress_color=C_ACCENT,
         )
-        browse_btn.pack(anchor="w", padx=8, pady=4)
-
-        # ── Security ────────────────────────────────────────────────────────
-        section("SECURITY")
-        self._e_key = labeled_entry("API Key  (must match Android app)", cfg.get("API_KEY", ""))
-
-        ctk.CTkLabel(scroll, text="Require Approval for New Devices",
-                     font=FONT_BODY, text_color=C_TEXT).pack(anchor="w", padx=8, pady=(12, 4))
-
-        sw_row = ctk.CTkFrame(scroll, fg_color="transparent")
-        sw_row.pack(anchor="w", padx=8, pady=(0, 4))
-
-        self._sw_approval = ctk.CTkSwitch(sw_row, text="", width=50)
         self._sw_approval.pack(side="left")
         if cfg.get("REQUIRE_APPROVAL", True):
             self._sw_approval.select()
-        ctk.CTkLabel(sw_row, text="Show accept/reject dialog when a device first connects",
-                     font=FONT_SMALL, text_color=C_MUTED).pack(side="left", padx=10)
 
-        # ── Save ────────────────────────────────────────────────────────────
+        ctk.CTkLabel(
+            sw_row,
+            text="Require approval for new device connections",
+            font=FONT_BODY, text_color=C_TEXT,
+        ).pack(side="left", padx=12)
+
+        # ── Save button ───────────────────────────────────────────────────
         ctk.CTkButton(
-            scroll, text="💾   Save & Restart Server", height=46,
-            font=ctk.CTkFont(size=14, weight="bold"),
+            scroll, text="💾   Save & Restart Server", height=50,
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+            fg_color=C_ACCENT, hover_color=C_ACCENT2,
+            corner_radius=12,
             command=self._save_settings,
         ).pack(fill="x", padx=8, pady=(24, 4))
 
         ctk.CTkLabel(
             scroll,
-            text="The server will restart automatically to apply changes.",
+            text="Server will restart automatically to apply changes.",
             font=FONT_SMALL, text_color=C_MUTED,
-        ).pack(anchor="w", padx=8, pady=(0, 24))
+        ).pack(anchor="w", padx=8, pady=(4, 24))
 
         return frame
 
@@ -534,10 +868,10 @@ class BackupServerApp(ctk.CTk):
             return
 
         cfg = {
-            "HOST": self._e_host.get().strip() or "0.0.0.0",
-            "PORT": port,
-            "BACKUP_ROOT": self._e_root.get().strip(),
-            "API_KEY": self._e_key.get().strip() or "YOUR_SECRET_KEY",
+            "HOST":             self._e_host.get().strip() or "0.0.0.0",
+            "PORT":             port,
+            "BACKUP_ROOT":      self._e_root.get().strip(),
+            "API_KEY":          self._e_key.get().strip() or "YOUR_SECRET_KEY",
             "REQUIRE_APPROVAL": bool(self._sw_approval.get()),
         }
         save_config(cfg)
@@ -547,41 +881,69 @@ class BackupServerApp(ctk.CTk):
     # ─── Page: Logs ───────────────────────────────────────────────────────────
 
     def _build_logs(self, parent) -> ctk.CTkFrame:
-        frame = ctk.CTkFrame(parent, fg_color="transparent")
+        frame = ctk.CTkFrame(parent, fg_color=C_BG)
 
-        hdr = ctk.CTkFrame(frame, fg_color="transparent")
-        hdr.pack(fill="x", padx=28, pady=(22, 0))
+        hdr = self._page_header(frame, "Activity Logs")
 
-        ctk.CTkLabel(hdr, text="Activity Logs", font=FONT_TITLE,
-                     text_color=C_TEXT).pack(side="left")
+        # Right-side controls
+        ctrl = ctk.CTkFrame(hdr, fg_color="transparent")
+        ctrl.pack(side="right")
 
-        btn_row = ctk.CTkFrame(hdr, fg_color="transparent")
-        btn_row.pack(side="right")
-        ctk.CTkButton(btn_row, text="↻  Refresh", width=100,
-                      command=self._refresh_logs).pack(side="left", padx=4)
-        ctk.CTkButton(btn_row, text="🗑️  Clear", width=90,
-                      fg_color=C_ELEVATED, hover_color=C_BORDER,
-                      command=self._clear_logs).pack(side="left")
+        # Filter entry
+        self._log_filter = ctk.CTkEntry(
+            ctrl, width=180, height=34, placeholder_text="🔍  Filter logs…",
+            fg_color=C_ELEVATED, border_color=C_BORDER, border_width=1,
+            text_color=C_TEXT, corner_radius=8,
+        )
+        self._log_filter.pack(side="left", padx=(0, 8))
+        self._log_filter.bind("<KeyRelease>", lambda e: self._refresh_logs())
 
-        ctk.CTkFrame(frame, height=1, fg_color=C_BORDER).pack(fill="x", padx=28, pady=12)
+        ctk.CTkButton(
+            ctrl, text="↻  Refresh", width=100, height=34,
+            fg_color=C_ELEVATED, hover_color=C_BORDER,
+            border_width=1, border_color=C_BORDER,
+            command=self._refresh_logs,
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            ctrl, text="🗑️  Clear", width=90, height=34,
+            fg_color="#7F1D1D", hover_color="#991B1B",
+            command=self._clear_logs,
+        ).pack(side="left")
+
+        self._divider(frame)
+
+        log_wrap = ctk.CTkFrame(
+            frame, fg_color=C_SURFACE,
+            corner_radius=14, border_width=1, border_color=C_BORDER,
+        )
+        log_wrap.pack(fill="both", expand=True, padx=30, pady=(10, 24))
 
         self._log_box = ctk.CTkTextbox(
-            frame, state="disabled", fg_color=C_SURFACE,
-            border_color=C_BORDER, border_width=1,
-            font=FONT_MONO, text_color=C_TEXT,
+            log_wrap, state="disabled", fg_color="transparent",
+            border_width=0, font=FONT_MONO, text_color=C_TEXT, wrap="word",
         )
-        self._log_box.pack(fill="both", expand=True, padx=28, pady=(0, 20))
+        self._log_box.pack(fill="both", expand=True, padx=4, pady=4)
+        self._setup_log_tags(self._log_box)
 
         return frame
 
     def _refresh_logs(self):
+        query = ""
+        try:
+            query = self._log_filter.get().lower().strip()
+        except Exception:
+            pass
+
         logs = get_logs()
+        if query:
+            logs = [e for e in logs if query in e["message"].lower()]
+
         self._log_box.configure(state="normal")
         self._log_box.delete("1.0", "end")
-        for entry in reversed(logs):
-            ts = datetime.fromtimestamp(entry["time"]).strftime("%H:%M:%S")
-            self._log_box.insert("end", f"[{ts}]  {entry['message']}\n")
         self._log_box.configure(state="disabled")
+        for entry in reversed(logs):
+            self._insert_log_line(self._log_box, entry)
 
     def _clear_logs(self):
         clear_logs()
@@ -591,10 +953,13 @@ class BackupServerApp(ctk.CTk):
 
     def _show_page(self, page: str):
         for name, btn in self._nav_btns.items():
+            accent = self._nav_accents[name]
             if name == page:
                 btn.configure(fg_color=C_ELEVATED, text_color=C_TEXT)
+                accent.configure(fg_color=C_ACCENT)
             else:
                 btn.configure(fg_color="transparent", text_color=C_MUTED)
+                accent.configure(fg_color="transparent")
 
         self._pages[page].tkraise()
         self._current_page = page
@@ -611,11 +976,10 @@ class BackupServerApp(ctk.CTk):
     # ─── Auto-refresh ─────────────────────────────────────────────────────────
 
     def _refresh_settings(self):
-        """Re-populate Settings fields from the current saved config."""
         cfg = load_config()
         for entry, key, default in [
-            (self._e_host, "HOST", "0.0.0.0"),
-            (self._e_port, "PORT", "8000"),
+            (self._e_host, "HOST",        "0.0.0.0"),
+            (self._e_port, "PORT",        "8000"),
             (self._e_root, "BACKUP_ROOT", ""),
             (self._e_key,  "API_KEY",     "YOUR_SECRET_KEY"),
         ]:
@@ -638,15 +1002,9 @@ class BackupServerApp(ctk.CTk):
     # ─── Server control ───────────────────────────────────────────────────────
 
     def _start_server(self):
-        """
-        Reload all modules in dependency order so that any config changes
-        (BACKUP_ROOT, API_KEY, PORT, …) take full effect on restart.
-        Load order: config → storage → upload → server
-        """
+        """Reload modules in dependency order and start uvicorn."""
         import importlib
-        import sys
 
-        # Reload in strict dependency order so each layer sees fresh values
         for mod_name in ("config", "storage", "database", "upload", "server"):
             if mod_name in sys.modules:
                 importlib.reload(sys.modules[mod_name])
@@ -662,30 +1020,31 @@ class BackupServerApp(ctk.CTk):
 
         self._server_thread = threading.Thread(target=_run, daemon=True)
         self._server_thread.start()
-        self._server_running = True
+        self._server_running  = True
+        self._server_start_time = time.time()
 
         local_ip = get_local_ip()
         addr = f"http://{local_ip}:{PORT}"
         self.after(0, lambda: self._set_status(True, addr))
         self.after(0, lambda: self._toggle_btn.configure(
-            text="⏹  Stop Server", fg_color="#7F1D1D", hover_color="#991B1B"
+            text="⏹  Stop Server", fg_color="#7F1D1D", hover_color="#991B1B",
         ))
         add_log(f"🚀 Server started  →  {addr}")
-
 
     def _stop_server(self):
         if self._uvicorn_server:
             self._uvicorn_server.should_exit = True
-        self._server_running = False
+        self._server_running    = False
+        self._server_start_time = None
         self.after(0, lambda: self._set_status(False))
         self.after(0, lambda: self._toggle_btn.configure(
-            text="▶  Start Server", fg_color="#14532D", hover_color="#166534"
+            text="▶  Start Server", fg_color="#14532D", hover_color="#166534",
         ))
         add_log("⏹  Server stopped")
 
     def _restart_server(self):
         self._stop_server()
-        self.after(3500, self._start_server)  # give uvicorn time to release port
+        self.after(3500, self._start_server)
 
     def _toggle_server(self):
         if self._server_running:
@@ -696,7 +1055,6 @@ class BackupServerApp(ctk.CTk):
     # ─── Connection approval ──────────────────────────────────────────────────
 
     def _poll_pending_connections(self):
-        """Check every 500 ms for new connection requests from Android devices."""
         for req_id, conn in list(pending_connections.items()):
             if not conn.get("_shown", False):
                 conn["_shown"] = True
@@ -710,37 +1068,66 @@ class BackupServerApp(ctk.CTk):
     def _show_approval_dialog(self, req_id: str, device_name: str, device_ip: str):
         dlg = ctk.CTkToplevel(self)
         dlg.title("New Connection Request")
-        dlg.geometry("460x330")
+        dlg.geometry("480x400")
         dlg.resizable(False, False)
         dlg.attributes("-topmost", True)
         dlg.grab_set()
+        dlg.configure(fg_color=C_SURFACE)
 
-        # Icon + headline
-        ctk.CTkLabel(dlg, text="📱", font=ctk.CTkFont(size=52)).pack(pady=(26, 6))
-        ctk.CTkLabel(dlg, text="New Device Wants to Connect",
-                     font=ctk.CTkFont(size=17, weight="bold"),
-                     text_color=C_TEXT).pack()
+        # Header
+        hdr = ctk.CTkFrame(dlg, fg_color=C_ELEVATED, corner_radius=0)
+        hdr.pack(fill="x")
+        ctk.CTkLabel(hdr, text="📱", font=ctk.CTkFont(size=44)).pack(pady=(22, 4))
+        ctk.CTkLabel(
+            hdr, text="New Device Wants to Connect",
+            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            text_color=C_TEXT,
+        ).pack(pady=(0, 18))
+
+        # Thin accent line
+        ctk.CTkFrame(dlg, height=2, fg_color=C_ACCENT, corner_radius=0).pack(fill="x")
 
         # Info card
-        info = ctk.CTkFrame(dlg, fg_color=C_ELEVATED, corner_radius=12,
-                            border_width=1, border_color=C_BORDER)
-        info.pack(fill="x", padx=36, pady=18)
+        info = ctk.CTkFrame(
+            dlg, fg_color=C_ELEVATED, corner_radius=14,
+            border_width=1, border_color=C_BORDER,
+        )
+        info.pack(fill="x", padx=28, pady=20)
 
-        for label, val in [("Device Name", device_name), ("IP Address", device_ip),
-                            ("Time", datetime.now().strftime("%H:%M:%S"))]:
+        for icon, label, val in [
+            ("📱", "Device Name", device_name),
+            ("📍", "IP Address",  device_ip),
+            ("🕐", "Time",        datetime.now().strftime("%H:%M:%S")),
+        ]:
             row = ctk.CTkFrame(info, fg_color="transparent")
-            row.pack(fill="x", padx=16, pady=5)
-            ctk.CTkLabel(row, text=label, font=FONT_SMALL,
-                         text_color=C_MUTED, width=100, anchor="w").pack(side="left")
-            ctk.CTkLabel(row, text=val, font=FONT_BODY,
-                         text_color=C_TEXT, anchor="w").pack(side="left")
+            row.pack(fill="x", padx=16, pady=6)
+            ctk.CTkLabel(
+                row, text=f"{icon}  {label}", font=FONT_SMALL,
+                text_color=C_MUTED, width=120, anchor="w",
+            ).pack(side="left")
+            ctk.CTkLabel(
+                row, text=val, font=FONT_BODY,
+                text_color=C_TEXT, anchor="w",
+            ).pack(side="left")
 
-        # Auto-reject countdown label
-        countdown_lbl = ctk.CTkLabel(dlg, text="Auto-reject in 30s",
-                                      font=FONT_SMALL, text_color=C_MUTED)
-        countdown_lbl.pack(pady=(0, 8))
+        # Countdown bar + label
+        countdown_frame = ctk.CTkFrame(dlg, fg_color="transparent")
+        countdown_frame.pack(fill="x", padx=28, pady=(0, 8))
 
-        resolved = [False]
+        countdown_lbl = ctk.CTkLabel(
+            countdown_frame, text="Auto-reject in 30s",
+            font=FONT_SMALL, text_color=C_MUTED,
+        )
+        countdown_lbl.pack(side="right")
+
+        progress = ctk.CTkProgressBar(
+            countdown_frame, height=4, fg_color=C_ELEVATED,
+            progress_color=C_WARNING, corner_radius=2,
+        )
+        progress.set(1.0)
+        progress.pack(side="left", fill="x", expand=True, padx=(0, 12))
+
+        resolved     = [False]
         countdown_val = [30]
 
         def tick():
@@ -750,6 +1137,10 @@ class BackupServerApp(ctk.CTk):
             if countdown_val[0] <= 0:
                 _reject()
                 return
+            ratio = countdown_val[0] / 30
+            color = C_WARNING if ratio > 0.4 else C_ERROR
+            progress.configure(progress_color=color)
+            progress.set(ratio)
             countdown_lbl.configure(text=f"Auto-reject in {countdown_val[0]}s")
             dlg.after(1000, tick)
 
@@ -773,30 +1164,31 @@ class BackupServerApp(ctk.CTk):
 
         # Buttons
         btns = ctk.CTkFrame(dlg, fg_color="transparent")
-        btns.pack(fill="x", padx=36, pady=(4, 24))
+        btns.pack(fill="x", padx=28, pady=(4, 24))
 
         ctk.CTkButton(
             btns, text="✕  Reject",
             fg_color="#7F1D1D", hover_color="#991B1B",
-            height=44, font=ctk.CTkFont(size=14, weight="bold"),
-            command=_reject,
+            height=48, font=ctk.CTkFont(size=14, weight="bold"),
+            corner_radius=12, command=_reject,
         ).pack(side="left", expand=True, padx=(0, 8))
 
         ctk.CTkButton(
             btns, text="✓  Accept",
             fg_color="#14532D", hover_color="#166534",
-            height=44, font=ctk.CTkFont(size=14, weight="bold"),
-            command=_accept,
+            height=48, font=ctk.CTkFont(size=14, weight="bold"),
+            corner_radius=12, command=_accept,
         ).pack(side="right", expand=True, padx=(8, 0))
 
         dlg.after(1000, tick)
-        self.bell()  # Flash taskbar / play system sound
+        self.bell()
 
     # ─── Window close ─────────────────────────────────────────────────────────
 
     def _on_close(self):
         if messagebox.askyesno("Quit", "Stop the backup server and quit?"):
             self._stop_server()
+            self._dot.stop()
             self.after(600, self.destroy)
 
 
@@ -805,7 +1197,6 @@ class BackupServerApp(ctk.CTk):
 # ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Ensure DB is up to date before launching
     init_db()
     app = BackupServerApp()
     app.mainloop()
