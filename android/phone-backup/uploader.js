@@ -71,15 +71,9 @@ export async function uploadFile(item, onProgress) {
 
     onProgress && onProgress(item.size || 0);
 
-    // 200 = uploaded, treat "skipped" (already on server) as success too
+    // Any 200 response means the server accepted the file successfully
     if (res.status === 200) {
-      try {
-        const body = JSON.parse(res.body || '{}');
-        // Both "uploaded" and "skipped" mean the file is safe on the server
-        return body.status === 'uploaded' || body.status === 'skipped';
-      } catch {
-        return true; // non-JSON 200 → assume success
-      }
+      return true;
     }
 
     // 401 = wrong API key — throw so the caller can surface this prominently

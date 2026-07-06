@@ -181,7 +181,10 @@ export async function runSync(onProgress) {
 
   const skipped = files.length - pending.length;
 
-  if (totalUploads > 0 && skipped === 0 && uploaded === 0 && errors === totalUploads) {
+  // Only surface a hard error when every single file failed AND nothing was
+  // already present on the server — this indicates a real connectivity /
+  // auth problem rather than a partial success.
+  if (totalUploads > 0 && uploaded === 0 && errors === totalUploads && present.size === 0) {
     throw new Error(`Upload failed for all ${errors} file(s). Check folder permissions and API key.`);
   }
 
