@@ -2,7 +2,6 @@ import { Tabs } from 'expo-router';
 import { useEffect } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import * as MediaLibrary from 'expo-media-library';
 import { registerBackgroundTask } from '../../backgroundTask';
 import { setupNotifications } from '../../notificationService';
 import { Colors, Radius, TextScale } from '@/constants/theme';
@@ -28,7 +27,10 @@ export default function RootLayout() {
   useEffect(() => {
     (async () => {
       // Request permissions — errors are non-fatal
-      await MediaLibrary.requestPermissionsAsync().catch(() => {});
+      try {
+        const MediaLibrary = require('expo-media-library');
+        await MediaLibrary.requestPermissionsAsync().catch(() => {});
+      } catch {}
       // Set up notification channel — errors are non-fatal
       await setupNotifications().catch(() => {});
       // Register background fetch — may fail on first launch before permissions

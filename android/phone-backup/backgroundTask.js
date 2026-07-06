@@ -1,5 +1,3 @@
-import * as TaskManager from 'expo-task-manager';
-import * as BackgroundFetch from 'expo-background-fetch';
 import { scan } from './scanner';
 import { uploadFile } from './uploader';
 import {
@@ -18,10 +16,74 @@ import {
 
 const TASK_NAME = 'backup-task';
 
+// ─── Lazy native module guard ──────────────────────────────────────────────────
+//
+// `expo-task-manager` and `expo-background-fetch` both need native modules that
+// are only present in a compiled development/production build — not in Expo Go.
+// Using require() in try/catch prevents the crash at module initialization time
+// (same pattern as notificationService.js).
+//
+// • TaskManager: Needed for defineTask() — must be called at module-load time
+//   once the native module is available.
+// • BackgroundFetch: Needed for register/unregister helpers.
+
+/** @type {import('expo-task-manager') | null} */
+let TaskManager = null;
+
+/** @type {import('expo-background-fetch') | null} */
+let BackgroundFetch = null;
+
+try {
+  TaskManager = require('expo-task-manager');
+  BackgroundFetch = require('expo-background-fetch');
+
+  // defineTask MUST be called at module-load time (not inside a function),
+  // but only once the native module is confirmed to be present.
+  TaskManager.defineTask(TASK_NAME, async () => {
+    try {
+      const paused = await getSyncPaused();
+      if (paused) {
+        return BackgroundFetch.BackgroundFetchResult.NoData;
+      }
+
+      await showSyncProgressNotification(0, 0);
+
+      const result = await runSync(async (current, total) => {
+        await showSyncProgressNotification(current, total);
+      });
+
+      await setLastSyncTime(Date.now());
+
+      if (result.uploaded > 0) {
+        await incrementTotalSynced(result.uploaded);
+      }
+
+      await showSyncCompleteNotification(result.uploaded, result.skipped);
+
+      return result.uploaded > 0
+        ? BackgroundFetch.BackgroundFetchResult.NewData
+        : BackgroundFetch.BackgroundFetchResult.NoData;
+    } catch (err) {
+      console.error('[BackupTask] Error:', err);
+      await showSyncErrorNotification(err?.message || 'Unknown error');
+      return BackgroundFetch.BackgroundFetchResult.Failed;
+    }
+  });
+} catch (e) {
+  console.warn(
+    '[BackgroundTask] Native modules not available — background sync disabled. ' +
+    'Build a development client with: eas build --profile development --platform android\n' +
+    'Reason:', e?.message
+  );
+}
+
+// ─── Core sync logic ───────────────────────────────────────────────────────────
+
 /**
  * Core sync logic — scans, filters already-uploaded files, uploads pending ones.
+ * Can be called from the background task OR directly from the UI (Sync Now button).
  * @param {(current: number, total: number) => void} [onProgress]
- * @returns {Promise<{uploaded: number, skipped: number, total: number}>}
+ * @returns {Promise<{uploaded: number, skipped: number, total: number, errors: number}>}
  */
 export async function runSync(onProgress) {
   const files = await scan();
@@ -41,7 +103,6 @@ export async function runSync(onProgress) {
   for (let i = 0; i < pending.length; i++) {
     const file = pending[i];
     try {
-      // Bug fix: pass a per-file progress callback so bytes are tracked
       const success = await uploadFile(file, () => {});
       if (success) {
         await markUploaded(file.relativePath, file.modifiedTime);
@@ -62,47 +123,19 @@ export async function runSync(onProgress) {
   return { uploaded, skipped: skipped < 0 ? 0 : skipped, total, errors };
 }
 
-// ─── Background task definition ────────────────────────────────────────────────
-
-TaskManager.defineTask(TASK_NAME, async () => {
-  try {
-    const paused = await getSyncPaused();
-    if (paused) {
-      return BackgroundFetch.BackgroundFetchResult.NoData;
-    }
-
-    await showSyncProgressNotification(0, 0);
-
-    const result = await runSync(async (current, total) => {
-      await showSyncProgressNotification(current, total);
-    });
-
-    await setLastSyncTime(Date.now());
-
-    if (result.uploaded > 0) {
-      await incrementTotalSynced(result.uploaded);
-    }
-
-    await showSyncCompleteNotification(result.uploaded, result.skipped);
-
-    return result.uploaded > 0
-      ? BackgroundFetch.BackgroundFetchResult.NewData
-      : BackgroundFetch.BackgroundFetchResult.NoData;
-  } catch (err) {
-    console.error('[BackupTask] Error:', err);
-    await showSyncErrorNotification(err?.message || 'Unknown error');
-    return BackgroundFetch.BackgroundFetchResult.Failed;
-  }
-});
-
 // ─── Registration helpers ──────────────────────────────────────────────────────
 
 /**
  * Register (or re-register) the background sync task.
  * Unregisters the existing task first so the new interval takes effect.
+ * No-ops silently if the native module is not available.
  * @param {number} [intervalMinutes]
  */
 export async function registerBackgroundTask(intervalMinutes) {
+  if (!TaskManager || !BackgroundFetch) {
+    console.warn('[BackgroundTask] registerBackgroundTask skipped — native modules unavailable.');
+    return;
+  }
   try {
     const minutes = intervalMinutes ?? (await getSyncInterval());
 
@@ -124,5 +157,6 @@ export async function registerBackgroundTask(intervalMinutes) {
 }
 
 export async function unregisterBackgroundTask() {
+  if (!BackgroundFetch) return;
   await BackgroundFetch.unregisterTaskAsync(TASK_NAME).catch(() => {});
 }

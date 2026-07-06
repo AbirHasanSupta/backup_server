@@ -8,9 +8,17 @@
  *   { status: 'accepted' | 'rejected' | 'error', reason?: string }
  */
 
-import * as Device from 'expo-device';
+// Lazy-load expo-device: requires native module, not available in Expo Go.
+/** @type {import('expo-device') | null} */
+let Device = null;
+try {
+  Device = require('expo-device');
+} catch (e) {
+  console.warn('[connectToServer] expo-device not available, device name will be generic:', e?.message);
+}
 
 const CONNECT_TIMEOUT_MS = 35_000; // slightly longer than server's 30s timeout
+
 
 /**
  * @param {string} serverIp
@@ -20,8 +28,8 @@ const CONNECT_TIMEOUT_MS = 35_000; // slightly longer than server's 30s timeout
  */
 export async function connectToServer(serverIp, serverPort, apiKey) {
   const deviceName =
-    Device.deviceName ||
-    Device.modelName ||
+    Device?.deviceName ||
+    Device?.modelName ||
     `Android Device`;
 
   const controller = new AbortController();

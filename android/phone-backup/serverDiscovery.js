@@ -1,8 +1,32 @@
-import * as Network from 'expo-network';
 import { getServerPort } from './settings';
 
-const TIMEOUT_MS  = 1200;
-const BATCH_SIZE  = 25;
+const TIMEOUT_MS = 1200;
+const BATCH_SIZE = 25;
+
+// ─── Lazy native module guard ──────────────────────────────────────────────────
+//
+// `expo-network` requires the native 'ExpoNetwork' module which is only present
+// in a compiled dev-client or production build — not in Expo Go.
+// Same lazy require() pattern used in notificationService.js and backgroundTask.js.
+//
+// • If native module is absent → Network stays null, discoverServers() throws a
+//   user-friendly error that the UI will display in the discovery sheet.
+// • If native module is present → full LAN scanning works normally.
+
+/** @type {import('expo-network') | null} */
+let Network = null;
+
+try {
+  Network = require('expo-network');
+} catch (e) {
+  console.warn(
+    '[ServerDiscovery] Native module "ExpoNetwork" not available — ' +
+    'server discovery disabled. Build a dev client: eas build --profile development --platform android\n' +
+    'Reason:', e?.message
+  );
+}
+
+// ─── Internal helpers ──────────────────────────────────────────────────────────
 
 async function fetchWithTimeout(url, timeoutMs) {
   const controller = new AbortController();
@@ -35,6 +59,8 @@ function buildSubnetIps(deviceIp) {
   return ips;
 }
 
+// ─── Public API ────────────────────────────────────────────────────────────────
+
 /**
  * Scans the current LAN subnet for backup servers.
  * Uses the user-configured port (default 8000) so custom ports are found.
@@ -43,6 +69,13 @@ function buildSubnetIps(deviceIp) {
  * @returns {Promise<Array<{ip, port, name, version}>>}
  */
 export async function discoverServers(onProgress) {
+  if (!Network) {
+    throw new Error(
+      'Network scanning is not available in Expo Go. ' +
+      'Build a development client with: eas build --profile development --platform android'
+    );
+  }
+
   const state = await Network.getNetworkStateAsync();
   if (!state.isConnected) throw new Error('Not connected to a network');
 
@@ -54,13 +87,13 @@ export async function discoverServers(onProgress) {
   // Use the configured port so non-default setups are discoverable
   const port = await getServerPort();
 
-  const ips    = buildSubnetIps(deviceIp);
-  const found  = [];
-  let scanned  = 0;
-  const total  = ips.length;
+  const ips = buildSubnetIps(deviceIp);
+  const found = [];
+  let scanned = 0;
+  const total = ips.length;
 
   for (let i = 0; i < ips.length; i += BATCH_SIZE) {
-    const batch   = ips.slice(i, i + BATCH_SIZE);
+    const batch = ips.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(batch.map((ip) => probeServer(ip, port)));
     results.forEach((r) => { if (r) found.push(r); });
     scanned += batch.length;
@@ -71,5 +104,6 @@ export async function discoverServers(onProgress) {
 }
 
 export function getDeviceIp() {
+  if (!Network) return Promise.resolve(null);
   return Network.getIpAddressAsync();
 }

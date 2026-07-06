@@ -1,87 +1,142 @@
-import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
 
 const SYNC_CHANNEL_ID = 'backup-sync';
 const SYNC_NOTIFICATION_ID = 'backup-sync-progress';
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: false,
-    shouldSetBadge: false,
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
-});
+// ─── Lazy native module guard ──────────────────────────────────────────────────
+//
+// `expo-notifications` requires the native 'ExpoPushTokenManager' module which is
+// only available in a compiled development client or production build — NOT in
+// Expo Go or a dev-client build that was run without `eas build`.
+//
+// We use require() inside try/catch instead of a top-level `import` because
+// ES module imports run SYNCHRONOUSLY before any try/catch in the module body
+// can protect them. A top-level import crash propagates up the entire module
+// graph (_layout.tsx → backgroundTask.js → notificationService.js) and kills
+// all three routes before React can mount anything.
+//
+// With require() in try/catch:
+//  • If the native module is absent  → N stays null, all functions no-op silently
+//  • If the native module is present → full notification support is enabled
+
+/** @type {import('expo-notifications') | null} */
+let N = null;
+
+try {
+  N = require('expo-notifications');
+
+  N.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true,
+      shouldPlaySound: false,
+      shouldSetBadge: false,
+      shouldShowBanner: true,
+      shouldShowList: true,
+    }),
+  });
+} catch (e) {
+  console.warn(
+    '[Notifications] Native module "ExpoPushTokenManager" not available — ' +
+    'push notifications are disabled. To enable them, build a development ' +
+    'client with: eas build --profile development --platform android\n' +
+    'Reason:', e?.message
+  );
+}
+
+// ─── Public API ────────────────────────────────────────────────────────────────
 
 export async function setupNotifications() {
-  if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync(SYNC_CHANNEL_ID, {
-      name: 'Backup Sync',
-      importance: Notifications.AndroidImportance.DEFAULT,
-      vibrationPattern: [0, 0],
-      enableVibrate: false,
-      lightColor: '#6366F1',
-      showBadge: false,
-    });
+  if (!N) return false;
+  try {
+    if (Platform.OS === 'android') {
+      await N.setNotificationChannelAsync(SYNC_CHANNEL_ID, {
+        name: 'Backup Sync',
+        importance: N.AndroidImportance.DEFAULT,
+        vibrationPattern: [0, 0],
+        enableVibrate: false,
+        lightColor: '#6366F1',
+        showBadge: false,
+      });
+    }
+    const { status } = await N.requestPermissionsAsync();
+    return status === 'granted';
+  } catch (e) {
+    console.warn('[Notifications] setupNotifications failed:', e?.message);
+    return false;
   }
-  const { status } = await Notifications.requestPermissionsAsync();
-  return status === 'granted';
 }
 
 export async function showSyncProgressNotification(current, total) {
-  const body =
-    total > 0
-      ? `Uploading ${current} of ${total} files…`
-      : 'Scanning your folders…';
+  if (!N) return;
+  try {
+    const body =
+      total > 0
+        ? `Uploading ${current} of ${total} files…`
+        : 'Scanning your folders…';
 
-  await Notifications.scheduleNotificationAsync({
-    identifier: SYNC_NOTIFICATION_ID,
-    content: {
-      title: '☁️ Backing up',
-      body,
-      data: { type: 'sync_progress' },
-      sticky: true,
-      autoDismiss: false,
-      ...(Platform.OS === 'android' && {
-        channelId: SYNC_CHANNEL_ID,
-      }),
-    },
-    trigger: null,
-  });
+    await N.scheduleNotificationAsync({
+      identifier: SYNC_NOTIFICATION_ID,
+      content: {
+        title: '☁️ Backing up',
+        body,
+        data: { type: 'sync_progress' },
+        sticky: true,
+        autoDismiss: false,
+        ...(Platform.OS === 'android' && { channelId: SYNC_CHANNEL_ID }),
+      },
+      trigger: null,
+    });
+  } catch (e) {
+    console.warn('[Notifications] showSyncProgressNotification failed:', e?.message);
+  }
 }
 
 export async function showSyncCompleteNotification(uploaded, skipped) {
-  await Notifications.dismissNotificationAsync(SYNC_NOTIFICATION_ID).catch(() => {});
+  if (!N) return;
+  try {
+    await N.dismissNotificationAsync(SYNC_NOTIFICATION_ID).catch(() => {});
 
-  const allDone = uploaded === 0;
-  await Notifications.scheduleNotificationAsync({
-    content: {
-      title: allDone ? '✓ Already up to date' : '✅ Backup complete',
-      body: allDone
-        ? 'All files are already backed up'
-        : `${uploaded} file${uploaded !== 1 ? 's' : ''} backed up${skipped > 0 ? `, ${skipped} skipped` : ''}`,
-      data: { type: 'sync_complete' },
-      ...(Platform.OS === 'android' && { channelId: SYNC_CHANNEL_ID }),
-    },
-    trigger: null,
-  });
+    const allDone = uploaded === 0;
+    await N.scheduleNotificationAsync({
+      content: {
+        title: allDone ? '✓ Already up to date' : '✅ Backup complete',
+        body: allDone
+          ? 'All files are already backed up'
+          : `${uploaded} file${uploaded !== 1 ? 's' : ''} backed up${skipped > 0 ? `, ${skipped} skipped` : ''}`,
+        data: { type: 'sync_complete' },
+        ...(Platform.OS === 'android' && { channelId: SYNC_CHANNEL_ID }),
+      },
+      trigger: null,
+    });
+  } catch (e) {
+    console.warn('[Notifications] showSyncCompleteNotification failed:', e?.message);
+  }
 }
 
 export async function showSyncErrorNotification(message) {
-  await Notifications.dismissNotificationAsync(SYNC_NOTIFICATION_ID).catch(() => {});
+  if (!N) return;
+  try {
+    await N.dismissNotificationAsync(SYNC_NOTIFICATION_ID).catch(() => {});
 
-  await Notifications.scheduleNotificationAsync({
-    content: {
-      title: '❌ Backup failed',
-      body: message || 'An error occurred. Tap to retry.',
-      data: { type: 'sync_error' },
-      ...(Platform.OS === 'android' && { channelId: SYNC_CHANNEL_ID }),
-    },
-    trigger: null,
-  });
+    await N.scheduleNotificationAsync({
+      content: {
+        title: '❌ Backup failed',
+        body: message || 'An error occurred. Tap to retry.',
+        data: { type: 'sync_error' },
+        ...(Platform.OS === 'android' && { channelId: SYNC_CHANNEL_ID }),
+      },
+      trigger: null,
+    });
+  } catch (e) {
+    console.warn('[Notifications] showSyncErrorNotification failed:', e?.message);
+  }
 }
 
 export async function dismissSyncNotification() {
-  await Notifications.dismissNotificationAsync(SYNC_NOTIFICATION_ID).catch(() => {});
+  if (!N) return;
+  try {
+    await N.dismissNotificationAsync(SYNC_NOTIFICATION_ID).catch(() => {});
+  } catch (e) {
+    console.warn('[Notifications] dismissSyncNotification failed:', e?.message);
+  }
 }
