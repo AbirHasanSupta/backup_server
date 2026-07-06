@@ -19,11 +19,9 @@ import {
   setFileTypes,
   clearFolderUploads,
 } from '../../settings';
-import { Colors, Spacing, Radius, TextScale } from '@/constants/theme';
+import { Colors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
 import { FolderCard, Folder } from '@/components/FolderCard';
 import { FileTypeSelector } from '@/components/FileTypeSelector';
-
-const TAB_BAR_HEIGHT = 80;
 
 export default function FoldersScreen() {
   const insets = useSafeAreaInsets();
@@ -141,7 +139,7 @@ export default function FoldersScreen() {
         contentContainerStyle={[
           styles.listContent,
           folders.length === 0 && styles.listContentEmpty,
-          { paddingBottom: TAB_BAR_HEIGHT + insets.bottom + 16 },
+          { paddingBottom: BottomTabInset + insets.bottom + 16 },
         ]}
         ListEmptyComponent={renderEmpty}
         renderItem={({ item }) => (

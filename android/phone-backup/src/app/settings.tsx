@@ -28,10 +28,8 @@ import {
 } from '../../settings';
 import { registerBackgroundTask } from '../../backgroundTask';
 import { connectToServer } from '../../connectToServer';
-import { Colors, Spacing, Radius, TextScale } from '@/constants/theme';
+import { Colors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
-
-const TAB_BAR_HEIGHT = 80;
 
 const INTERVAL_PRESETS = [
   { label: '1 min', value: 1 },
@@ -205,7 +203,7 @@ export default function SettingsScreen() {
       <ScrollView
         contentContainerStyle={[
           styles.scrollContent,
-          { paddingBottom: TAB_BAR_HEIGHT + insets.bottom + 24 },
+          { paddingBottom: BottomTabInset + insets.bottom + 24 },
         ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"

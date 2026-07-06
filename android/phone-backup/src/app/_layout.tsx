@@ -1,24 +1,32 @@
 import { Tabs } from 'expo-router';
 import { useEffect } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { Platform, View, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SymbolView } from 'expo-symbols';
 import { registerBackgroundTask } from '../../backgroundTask';
 import { setupNotifications } from '../../notificationService';
-import { Colors, Radius, TextScale } from '@/constants/theme';
+import { Colors, TextScale } from '@/constants/theme';
 
 type TabIconProps = {
-  emoji: string;
-  label: string;
+  /** Material Symbol name for Android/web */
+  androidName: string;
+  /** SF Symbol name for iOS */
+  iosName: string;
   focused: boolean;
 };
 
-function TabIcon({ emoji, label, focused }: TabIconProps) {
+function TabIcon({ androidName, iosName, focused }: TabIconProps) {
+  const color = focused ? Colors.primary : Colors.textSecondary;
+  const size = 24;
+
   return (
-    <View style={[styles.tabItem, focused && styles.tabItemFocused]}>
-      <Text style={styles.tabEmoji}>{emoji}</Text>
-      <Text style={[styles.tabLabel, focused && styles.tabLabelFocused]}>
-        {label}
-      </Text>
+    <View style={styles.iconWrapper}>
+      <SymbolView
+        name={{ android: androidName as any, web: androidName as any, ios: iosName as any }}
+        size={size}
+        tintColor={color}
+        fallback={null}
+      />
     </View>
   );
 }
@@ -44,17 +52,27 @@ export default function RootLayout() {
       <Tabs
         screenOptions={{
           headerShown: false,
-          tabBarShowLabel: false,
+          // Use native labels rendered by the tab bar — avoids vertical clipping issues
+          tabBarShowLabel: true,
           tabBarStyle: styles.tabBar,
           tabBarBackground: () => <View style={styles.tabBarBg} />,
+          // Label typography
+          tabBarLabelStyle: styles.tabLabel,
+          // Active / inactive colours applied to both icon and label
+          tabBarActiveTintColor: Colors.primary,
+          tabBarInactiveTintColor: Colors.textSecondary,
+          // Keep the icon slot from growing too large
+          tabBarIconStyle: styles.tabIcon,
+          // Ensure item fills the full height so icon + label stack correctly
+          tabBarItemStyle: styles.tabItem,
         }}
       >
         <Tabs.Screen
           name="index"
           options={{
-            title: 'Home',
+            title: 'Backup',
             tabBarIcon: ({ focused }) => (
-              <TabIcon emoji="☁️" label="Backup" focused={focused} />
+              <TabIcon androidName="cloud" iosName="cloud" focused={focused} />
             ),
           }}
         />
@@ -63,7 +81,7 @@ export default function RootLayout() {
           options={{
             title: 'Folders',
             tabBarIcon: ({ focused }) => (
-              <TabIcon emoji="📁" label="Folders" focused={focused} />
+              <TabIcon androidName="folder" iosName="folder" focused={focused} />
             ),
           }}
         />
@@ -72,7 +90,7 @@ export default function RootLayout() {
           options={{
             title: 'Settings',
             tabBarIcon: ({ focused }) => (
-              <TabIcon emoji="⚙️" label="Settings" focused={focused} />
+              <TabIcon androidName="settings" iosName="gear" focused={focused} />
             ),
           }}
         />
@@ -83,13 +101,16 @@ export default function RootLayout() {
   );
 }
 
+// Bottom tab bar height: leave extra room for the Android nav bar on gesture-nav devices
+const TAB_BAR_HEIGHT = Platform.OS === 'android' ? 68 : 84;
+
 const styles = StyleSheet.create({
   tabBar: {
     position: 'absolute',
     bottom: 0,
     left: 0,
     right: 0,
-    height: 80,
+    height: TAB_BAR_HEIGHT,
     borderTopWidth: 1,
     borderTopColor: Colors.surfaceBorder,
     backgroundColor: Colors.surface,
@@ -100,28 +121,29 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: Colors.surface,
   },
+  /** Each tab item — full height so icon + label both have room */
   tabItem: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 3,
-    paddingTop: 8,
-    paddingHorizontal: 12,
-    borderRadius: Radius.lg,
-    opacity: 0.5,
+    paddingTop: 6,
+    paddingBottom: 6,
   },
-  tabItemFocused: {
-    opacity: 1,
+  /** Keep the icon container a fixed, predictable size */
+  tabIcon: {
+    width: 24,
+    height: 24,
+    marginBottom: 2,
   },
-  tabEmoji: {
-    fontSize: 22,
+  iconWrapper: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 24,
+    height: 24,
   },
   tabLabel: {
     fontSize: TextScale.xs,
     fontWeight: '500',
-    color: Colors.textSecondary,
-  },
-  tabLabelFocused: {
-    color: Colors.primary,
-    fontWeight: '700',
+    marginTop: 2,
   },
 });

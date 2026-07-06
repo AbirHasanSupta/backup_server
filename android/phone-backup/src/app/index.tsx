@@ -28,11 +28,9 @@ import {
   showSyncCompleteNotification,
   showSyncErrorNotification,
 } from '../../notificationService';
-import { Colors, Spacing, Radius, TextScale } from '@/constants/theme';
+import { Colors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
 import { SyncProgressRing } from '@/components/SyncProgressRing';
 import { StatCard } from '@/components/StatCard';
-
-const TAB_BAR_HEIGHT = 80;
 
 function formatRelativeTime(ts: number | null): string {
   if (!ts) return 'Never';
@@ -208,7 +206,7 @@ export default function HomeScreen() {
       <ScrollView
         contentContainerStyle={[
           styles.scrollContent,
-          { paddingBottom: TAB_BAR_HEIGHT + insets.bottom + 24 },
+          { paddingBottom: BottomTabInset + insets.bottom + 24 },
         ]}
         showsVerticalScrollIndicator={false}
       >
