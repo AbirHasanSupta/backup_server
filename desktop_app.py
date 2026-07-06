@@ -7,6 +7,7 @@ Run with:  python desktop_app.py
 
 from __future__ import annotations
 
+import io
 import os
 import socket
 import sys
@@ -15,6 +16,24 @@ import time
 from datetime import datetime
 from tkinter import filedialog, messagebox
 import tkinter as tk
+
+# ── Windowed-PyInstaller guard ─────────────────────────────────────────────────
+# When built with --windowed there is no console, so sys.stdout / sys.stderr are
+# None.  uvicorn's log formatter calls .isatty() on these streams before we can
+# intercept it, causing a hard crash.  Redirect to a silent in-memory sink.
+class _NullStream(io.RawIOBase):
+    """Silent stream — satisfies isatty(), write(), flush(), fileno()."""
+    def isatty(self)   -> bool: return False
+    def readable(self) -> bool: return False
+    def writable(self) -> bool: return True
+    def write(self, b):         return len(b) if isinstance(b, (bytes, bytearray)) else len(b.encode())
+    def flush(self):            pass
+    def fileno(self):           raise io.UnsupportedOperation("fileno")
+
+if sys.stdout is None:
+    sys.stdout = io.TextIOWrapper(_NullStream())
+if sys.stderr is None:
+    sys.stderr = io.TextIOWrapper(_NullStream())
 
 import customtkinter as ctk
 import uvicorn
@@ -1012,7 +1031,13 @@ class BackupServerApp(ctk.CTk):
         from server import app as fastapi_app
         from config import HOST, PORT
 
-        ucfg = uvicorn.Config(fastapi_app, host=HOST, port=PORT, log_level="warning")
+        ucfg = uvicorn.Config(
+            fastapi_app, host=HOST, port=PORT,
+            log_level="warning",
+            log_config=None,   # disable uvicorn's default logging — avoids
+                               # isatty() crash when stdout/stderr are None
+                               # (windowed PyInstaller build)
+        )
         self._uvicorn_server = uvicorn.Server(ucfg)
 
         def _run():
