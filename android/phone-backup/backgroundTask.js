@@ -34,28 +34,35 @@ export async function runSync(onProgress) {
 
   const total = pending.length;
   let uploaded = 0;
+  let errors = 0;
 
   onProgress && onProgress(0, total);
 
   for (let i = 0; i < pending.length; i++) {
     const file = pending[i];
     try {
-      const success = await uploadFile(file);
+      // Bug fix: pass a per-file progress callback so bytes are tracked
+      const success = await uploadFile(file, () => {});
       if (success) {
         await markUploaded(file.relativePath, file.modifiedTime);
         uploaded++;
+      } else {
+        // Server returned non-200 but didn't throw — count as skipped
+        errors++;
       }
     } catch (err) {
       console.warn('[BackupTask] Upload failed:', file.relativePath, err?.message);
+      errors++;
     }
+    // Report after every file so the progress ring updates smoothly
     onProgress && onProgress(i + 1, total);
   }
 
-  const skipped = total - uploaded;
-  return { uploaded, skipped, total };
+  const skipped = total - uploaded - errors;
+  return { uploaded, skipped: skipped < 0 ? 0 : skipped, total, errors };
 }
 
-// ─── Background task definition ───────────────────────────────────────────────
+// ─── Background task definition ────────────────────────────────────────────────
 
 TaskManager.defineTask(TASK_NAME, async () => {
   try {
@@ -93,21 +100,27 @@ TaskManager.defineTask(TASK_NAME, async () => {
 /**
  * Register (or re-register) the background sync task.
  * Unregisters the existing task first so the new interval takes effect.
- * @param {number} [intervalMinutes=15]
+ * @param {number} [intervalMinutes]
  */
 export async function registerBackgroundTask(intervalMinutes) {
-  const minutes = intervalMinutes ?? (await getSyncInterval());
+  try {
+    const minutes = intervalMinutes ?? (await getSyncInterval());
 
-  const isRegistered = await TaskManager.isTaskRegisteredAsync(TASK_NAME).catch(() => false);
-  if (isRegistered) {
-    await BackgroundFetch.unregisterTaskAsync(TASK_NAME).catch(() => {});
+    const isRegistered = await TaskManager.isTaskRegisteredAsync(TASK_NAME).catch(() => false);
+    if (isRegistered) {
+      await BackgroundFetch.unregisterTaskAsync(TASK_NAME).catch(() => {});
+    }
+
+    await BackgroundFetch.registerTaskAsync(TASK_NAME, {
+      minimumInterval: minutes * 60,
+      stopOnTerminate: false,
+      startOnBoot: true,
+    });
+  } catch (err) {
+    // Registration can fail on first launch before permissions are granted;
+    // the _layout.tsx will retry on next app open.
+    console.warn('[BackupTask] Registration failed (will retry):', err?.message);
   }
-
-  await BackgroundFetch.registerTaskAsync(TASK_NAME, {
-    minimumInterval: minutes * 60,
-    stopOnTerminate: false,
-    startOnBoot: true,
-  });
 }
 
 export async function unregisterBackgroundTask() {

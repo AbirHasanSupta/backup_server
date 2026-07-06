@@ -27,6 +27,7 @@ import {
   clearAllUploads,
 } from '../../settings';
 import { registerBackgroundTask } from '../../backgroundTask';
+import { connectToServer } from '../../connectToServer';
 import { Colors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
 
@@ -100,12 +101,25 @@ export default function SettingsScreen() {
     }
     setSavingServer(true);
     try {
+      const key = apiKey.trim() || 'YOUR_SECRET_KEY';
       await Promise.all([
         setServerIp(serverIp.trim()),
         setServerPort(portNum),
-        setApiKey(apiKey.trim() || 'YOUR_SECRET_KEY'),
+        setApiKey(key),
       ]);
-      Alert.alert('Saved', 'Server settings saved. Tap Sync Now on the Home tab to test the connection.');
+
+      // Confirm save immediately — connect happens in background
+      Alert.alert('Saved', 'Server settings saved.');
+
+      // Fire-and-forget connection request — server may show accept/reject dialog
+      connectToServer(serverIp.trim(), portNum, key).then((result) => {
+        if (result.status === 'accepted') {
+          Alert.alert('✅ Connected', 'This device has been accepted by the server and is ready to back up.');
+        } else if (result.status === 'rejected') {
+          Alert.alert('❌ Rejected', 'The server rejected this device. Ask the server owner to accept your connection request.');
+        }
+        // 'error' = server offline / wrong key — silently ignore
+      });
     } finally {
       setSavingServer(false);
     }
@@ -120,15 +134,27 @@ export default function SettingsScreen() {
   }) => {
     setServerIpState(server.ip);
     setServerPortState(String(server.port));
+    const key = apiKey.trim() || 'YOUR_SECRET_KEY';
     await Promise.all([
       setServerIp(server.ip),
       setServerPort(server.port),
       setServerName(server.name),
+      setApiKey(key),
     ]);
+
     Alert.alert(
-      'Server Connected',
-      `"${server.name}" (${server.ip}:${server.port}) has been set as your backup server.`
+      '🖥️ Server Found',
+      `"${server.name}" (${server.ip}:${server.port}) saved. Sending connection request…`
     );
+
+    // Register device with the newly discovered server
+    connectToServer(server.ip, server.port, key).then((result) => {
+      if (result.status === 'accepted') {
+        Alert.alert('✅ Connected', `"${server.name}" accepted this device. You are ready to back up!`);
+      } else if (result.status === 'rejected') {
+        Alert.alert('❌ Rejected', 'The server rejected this device. Check the API key or ask the server owner to accept.');
+      }
+    });
   };
 
   // ── Change sync interval ──────────────────────────────────────────────────

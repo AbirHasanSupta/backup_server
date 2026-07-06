@@ -1,6 +1,7 @@
 import { Tabs } from 'expo-router';
 import { useEffect } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as MediaLibrary from 'expo-media-library';
 import { registerBackgroundTask } from '../../backgroundTask';
 import { setupNotifications } from '../../notificationService';
@@ -26,51 +27,57 @@ function TabIcon({ emoji, label, focused }: TabIconProps) {
 export default function RootLayout() {
   useEffect(() => {
     (async () => {
-      await MediaLibrary.requestPermissionsAsync();
-      await setupNotifications();
+      // Request permissions — errors are non-fatal
+      await MediaLibrary.requestPermissionsAsync().catch(() => {});
+      // Set up notification channel — errors are non-fatal
+      await setupNotifications().catch(() => {});
+      // Register background fetch — may fail on first launch before permissions
+      // are granted; registerBackgroundTask has its own try/catch guard
       await registerBackgroundTask();
     })();
   }, []);
 
   return (
-    <Tabs
-      screenOptions={{
-        headerShown: false,
-        tabBarShowLabel: false,
-        tabBarStyle: styles.tabBar,
-        tabBarBackground: () => <View style={styles.tabBarBg} />,
-      }}
-    >
-      <Tabs.Screen
-        name="index"
-        options={{
-          title: 'Home',
-          tabBarIcon: ({ focused }) => (
-            <TabIcon emoji="☁️" label="Backup" focused={focused} />
-          ),
+    <SafeAreaProvider>
+      <Tabs
+        screenOptions={{
+          headerShown: false,
+          tabBarShowLabel: false,
+          tabBarStyle: styles.tabBar,
+          tabBarBackground: () => <View style={styles.tabBarBg} />,
         }}
-      />
-      <Tabs.Screen
-        name="folders"
-        options={{
-          title: 'Folders',
-          tabBarIcon: ({ focused }) => (
-            <TabIcon emoji="📁" label="Folders" focused={focused} />
-          ),
-        }}
-      />
-      <Tabs.Screen
-        name="settings"
-        options={{
-          title: 'Settings',
-          tabBarIcon: ({ focused }) => (
-            <TabIcon emoji="⚙️" label="Settings" focused={focused} />
-          ),
-        }}
-      />
-      {/* Hide legacy explore tab */}
-      <Tabs.Screen name="explore" options={{ href: null }} />
-    </Tabs>
+      >
+        <Tabs.Screen
+          name="index"
+          options={{
+            title: 'Home',
+            tabBarIcon: ({ focused }) => (
+              <TabIcon emoji="☁️" label="Backup" focused={focused} />
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="folders"
+          options={{
+            title: 'Folders',
+            tabBarIcon: ({ focused }) => (
+              <TabIcon emoji="📁" label="Folders" focused={focused} />
+            ),
+          }}
+        />
+        <Tabs.Screen
+          name="settings"
+          options={{
+            title: 'Settings',
+            tabBarIcon: ({ focused }) => (
+              <TabIcon emoji="⚙️" label="Settings" focused={focused} />
+            ),
+          }}
+        />
+        {/* Hide legacy explore tab */}
+        <Tabs.Screen name="explore" options={{ href: null }} />
+      </Tabs>
+    </SafeAreaProvider>
   );
 }
 

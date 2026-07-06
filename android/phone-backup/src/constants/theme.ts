@@ -1,4 +1,3 @@
-import '@/global.css';
 import { Platform } from 'react-native';
 
 // ─── Dark-first color palette ─────────────────────────────────────────────────

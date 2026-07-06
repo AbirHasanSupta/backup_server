@@ -1,8 +1,8 @@
 import * as Network from 'expo-network';
+import { getServerPort } from './settings';
 
-const SERVER_PORT = 8000;
-const TIMEOUT_MS = 1200;
-const BATCH_SIZE = 25;
+const TIMEOUT_MS  = 1200;
+const BATCH_SIZE  = 25;
 
 async function fetchWithTimeout(url, timeoutMs) {
   const controller = new AbortController();
@@ -10,9 +10,7 @@ async function fetchWithTimeout(url, timeoutMs) {
   try {
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timer);
-    if (res.ok) {
-      return await res.json();
-    }
+    if (res.ok) return await res.json();
     return null;
   } catch {
     clearTimeout(timer);
@@ -20,18 +18,10 @@ async function fetchWithTimeout(url, timeoutMs) {
   }
 }
 
-async function probeServer(ip) {
-  const data = await fetchWithTimeout(
-    `http://${ip}:${SERVER_PORT}/ping`,
-    TIMEOUT_MS
-  );
+async function probeServer(ip, port) {
+  const data = await fetchWithTimeout(`http://${ip}:${port}/ping`, TIMEOUT_MS);
   if (data && data.status === 'ok') {
-    return {
-      ip,
-      port: SERVER_PORT,
-      name: data.name || ip,
-      version: data.version || '?',
-    };
+    return { ip, port, name: data.name || ip, version: data.version || '?' };
   }
   return null;
 }
@@ -41,14 +31,14 @@ function buildSubnetIps(deviceIp) {
   if (parts.length !== 4) return [];
   const subnet = parts.slice(0, 3).join('.');
   const ips = [];
-  for (let i = 1; i <= 254; i++) {
-    ips.push(`${subnet}.${i}`);
-  }
+  for (let i = 1; i <= 254; i++) ips.push(`${subnet}.${i}`);
   return ips;
 }
 
 /**
  * Scans the current LAN subnet for backup servers.
+ * Uses the user-configured port (default 8000) so custom ports are found.
+ *
  * @param {(progress: number, found: Array) => void} onProgress
  * @returns {Promise<Array<{ip, port, name, version}>>}
  */
@@ -61,17 +51,18 @@ export async function discoverServers(onProgress) {
     throw new Error('Could not determine device IP address');
   }
 
-  const ips = buildSubnetIps(deviceIp);
-  const found = [];
-  let scanned = 0;
-  const total = ips.length;
+  // Use the configured port so non-default setups are discoverable
+  const port = await getServerPort();
+
+  const ips    = buildSubnetIps(deviceIp);
+  const found  = [];
+  let scanned  = 0;
+  const total  = ips.length;
 
   for (let i = 0; i < ips.length; i += BATCH_SIZE) {
-    const batch = ips.slice(i, i + BATCH_SIZE);
-    const results = await Promise.all(batch.map(probeServer));
-    results.forEach((r) => {
-      if (r) found.push(r);
-    });
+    const batch   = ips.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(batch.map((ip) => probeServer(ip, port)));
+    results.forEach((r) => { if (r) found.push(r); });
     scanned += batch.length;
     onProgress && onProgress(Math.round((scanned / total) * 100), [...found]);
   }
