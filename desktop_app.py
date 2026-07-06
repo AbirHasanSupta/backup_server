@@ -633,7 +633,7 @@ class BackupServerApp(ctk.CTk):
             self._refresh_devices()
         elif self._current_page == "logs":
             self._refresh_logs()
-        self.after(6000, self._auto_refresh)
+        self.after(2000, self._auto_refresh)
 
     # ─── Server control ───────────────────────────────────────────────────────
 
@@ -685,7 +685,7 @@ class BackupServerApp(ctk.CTk):
 
     def _restart_server(self):
         self._stop_server()
-        self.after(1800, self._start_server)
+        self.after(3500, self._start_server)  # give uvicorn time to release port
 
     def _toggle_server(self):
         if self._server_running:

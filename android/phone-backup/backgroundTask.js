@@ -120,6 +120,13 @@ export async function runSync(onProgress) {
   }
 
   const skipped = total - uploaded - errors;
+
+  // If EVERY file failed (likely a permission or SAF error), throw so the
+  // caller surfaces the ❌ error UI instead of misleading "up to date" message.
+  if (total > 0 && uploaded === 0 && errors > 0) {
+    throw new Error(`Upload failed for all ${errors} file(s). Check folder permissions and API key.`);
+  }
+
   return { uploaded, skipped: skipped < 0 ? 0 : skipped, total, errors };
 }
 

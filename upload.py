@@ -11,6 +11,7 @@ from database import (
     get_stats,
     get_devices,
     insert_file,
+    is_device_known,
     is_uploaded,
     remove_device,
     touch_device,
