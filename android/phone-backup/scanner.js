@@ -1,27 +1,30 @@
-import * as MediaLibrary from 'expo-media-library/legacy';
 import * as FileSystem from 'expo-file-system/legacy';
+import { getFolders } from './settings';
 
-const ALBUMS = ['Camera', 'Download', 'Screenshots'];
+async function walk(uri, base, result) {
+  let items;
+  try {
+    items = await FileSystem.StorageAccessFramework.readDirectoryAsync(uri);
+  } catch {
+    result.push({
+      uri,
+      relativePath: base,
+      modifiedTime: Math.floor(Date.now() / 1000),
+      size: 0
+    });
+    return;
+  }
+  for (const itemUri of items) {
+    const name = decodeURIComponent(itemUri.split('/').pop());
+    await walk(itemUri, `${base}/${name}`, result);
+  }
+}
 
 export async function scan() {
+  const folders = await getFolders();
   const result = [];
-
-  for (const albumName of ALBUMS) {
-    const album = await MediaLibrary.getAlbumAsync(albumName);
-    if (!album) continue;
-
-    const assets = await MediaLibrary.getAssetsAsync({ album, first: 1000 });
-
-    for (const asset of assets.assets) {
-      const info = await FileSystem.getInfoAsync(asset.uri);
-      result.push({
-        uri: asset.uri,
-        relativePath: `${albumName}/${asset.filename}`,
-        modifiedTime: Math.floor(asset.modificationTime),
-        size: info.size || 0
-      });
-    }
+  for (const folder of folders) {
+    await walk(folder.uri, folder.name, result);
   }
-
   return result;
 }

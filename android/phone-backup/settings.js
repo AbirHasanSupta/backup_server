@@ -12,3 +12,23 @@ export const isUploaded = async (relativePath, modifiedTime) => {
 
 export const markUploaded = (relativePath, modifiedTime) =>
   AsyncStorage.setItem(`uploaded_${relativePath}`, String(modifiedTime));
+
+export const getFolders = async () => {
+  const v = await AsyncStorage.getItem('folders');
+  return v ? JSON.parse(v) : [];
+};
+
+export const addFolder = async (uri, name) => {
+  const folders = await getFolders();
+  if (folders.find(f => f.uri === uri)) return folders;
+  const updated = [...folders, { uri, name }];
+  await AsyncStorage.setItem('folders', JSON.stringify(updated));
+  return updated;
+};
+
+export const removeFolder = async (uri) => {
+  const folders = await getFolders();
+  const updated = folders.filter(f => f.uri !== uri);
+  await AsyncStorage.setItem('folders', JSON.stringify(updated));
+  return updated;
+};

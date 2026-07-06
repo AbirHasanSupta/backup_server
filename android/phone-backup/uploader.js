@@ -6,7 +6,11 @@ export async function uploadFile(item) {
   const apiKey = await getApiKey();
   const url = `http://${serverIp}:8000/upload`;
 
-  const res = await FileSystem.uploadAsync(url, item.uri, {
+  const fileName = item.relativePath.split('/').pop();
+  const cacheUri = `${FileSystem.cacheDirectory}${Date.now()}_${fileName}`;
+  await FileSystem.StorageAccessFramework.copyAsync({ from: item.uri, to: cacheUri });
+
+  const res = await FileSystem.uploadAsync(url, cacheUri, {
     httpMethod: 'POST',
     uploadType: FileSystem.FileSystemUploadType.MULTIPART,
     fieldName: 'file',
@@ -17,6 +21,8 @@ export async function uploadFile(item) {
     },
     headers: { Authorization: `Bearer ${apiKey}` }
   });
+
+  await FileSystem.deleteAsync(cacheUri, { idempotent: true });
 
   return res.status === 200;
 }
