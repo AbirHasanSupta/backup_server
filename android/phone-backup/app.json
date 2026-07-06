@@ -1,13 +1,21 @@
 {
   "expo": {
-    "name": "phone-backup",
+    "name": "Phone Backup",
     "slug": "phone-backup",
     "scheme": "phonebackup",
     "plugins": [
       "expo-media-library",
       "expo-task-manager",
       "expo-background-fetch",
-      "expo-router"
+      "expo-router",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/notification-icon.png",
+          "color": "#6366F1",
+          "defaultChannel": "backup-sync"
+        }
+      ]
     ],
     "android": {
       "permissions": [
@@ -20,7 +28,11 @@
         "android.permission.READ_MEDIA_VIDEO",
         "android.permission.READ_MEDIA_AUDIO",
         "android.permission.RECEIVE_BOOT_COMPLETED",
-        "android.permission.WAKE_LOCK"
+        "android.permission.WAKE_LOCK",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_WIFI_STATE",
+        "android.permission.ACCESS_NETWORK_STATE"
       ],
       "package": "com.abirsupta.phonebackup"
     },

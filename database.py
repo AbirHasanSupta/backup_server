@@ -44,3 +44,16 @@ def insert_file(path, size, modified_time, uploaded_time):
     )
     conn.commit()
     conn.close()
+
+
+def get_stats():
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) as total_files, SUM(size) as total_size_bytes, MAX(uploaded_time) as last_backup_time FROM files"
+    ).fetchone()
+    conn.close()
+    return {
+        "total_files": row["total_files"] or 0,
+        "total_size_bytes": row["total_size_bytes"] or 0,
+        "last_backup_time": row["last_backup_time"],
+    }
