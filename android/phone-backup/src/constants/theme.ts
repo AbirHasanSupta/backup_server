@@ -111,5 +111,5 @@ export const TextScale = {
   hero: 42,
 } as const;
 
-export const BottomTabInset = Platform.select({ ios: 84, android: 68 }) ?? 0;
+export const BottomTabInset = Platform.select({ ios: 88, android: 80 }) ?? 0;
 export const MaxContentWidth = 800;

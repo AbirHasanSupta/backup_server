@@ -1,6 +1,43 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { getServerIp, getApiKey, getServerPort } from './settings';
 
+async function getServerConfig() {
+  const [serverIp, apiKey, serverPort] = await Promise.all([
+    getServerIp(),
+    getApiKey(),
+    getServerPort(),
+  ]);
+
+  if (!serverIp) throw new Error('No server IP configured');
+  return { serverIp, apiKey, serverPort };
+}
+
+export async function checkServerFiles(files) {
+  const { serverIp, apiKey, serverPort } = await getServerConfig();
+  const url = `http://${serverIp}:${serverPort}/files/check`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      files: files.map((file) => ({
+        relative_path: file.relativePath,
+        modified_time: file.modifiedTime,
+        size: file.size || 0,
+      })),
+    }),
+  });
+
+  if (res.status === 401) throw new Error('Invalid API key');
+  if (!res.ok) throw new Error(`Server check failed (${res.status})`);
+
+  const body = await res.json();
+  return Array.isArray(body.files) ? body.files : [];
+}
+
 /**
  * Uploads a single file to the backup server.
  *
@@ -9,17 +46,12 @@ import { getServerIp, getApiKey, getServerPort } from './settings';
  * @returns {Promise<boolean>} true if uploaded or already on server, false on failure
  */
 export async function uploadFile(item, onProgress) {
-  const [serverIp, apiKey, serverPort] = await Promise.all([
-    getServerIp(),
-    getApiKey(),
-    getServerPort(),
-  ]);
-
-  if (!serverIp) throw new Error('No server IP configured');
+  const { serverIp, apiKey, serverPort } = await getServerConfig();
 
   const url = `http://${serverIp}:${serverPort}/upload`;
   const safeName = (item.name || item.relativePath.split('/').pop() || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
-  const cacheUri = `${FileSystem.cacheDirectory}${Date.now()}_${safeName}`;
+  const uniqueId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const cacheUri = `${FileSystem.cacheDirectory}${uniqueId}_${safeName}`;
 
   // Copy SAF file to a local cache path that expo-file-system can upload
   await FileSystem.StorageAccessFramework.copyAsync({ from: item.uri, to: cacheUri });

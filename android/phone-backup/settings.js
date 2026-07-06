@@ -11,6 +11,9 @@ const KEYS = {
   SYNC_PAUSED:    'sync_paused',
   LAST_SYNC_TIME: 'last_sync_time',
   TOTAL_SYNCED:   'total_synced',
+  DEVICE_ID:      'device_id',
+  FORCE_REFRESH_ALL: 'force_refresh_all',
+  FORCE_REFRESH_FOLDERS: 'force_refresh_folders',
 };
 
 // ─── File-type labels (displayed in UI) ───────────────────────────────────────
@@ -46,6 +49,15 @@ export async function setServerName(name)  { await AsyncStorage.setItem(KEYS.SER
 export async function getApiKey()          { return (await AsyncStorage.getItem(KEYS.API_KEY)) || 'YOUR_SECRET_KEY'; }
 export async function setApiKey(key)       { await AsyncStorage.setItem(KEYS.API_KEY, key); }
 
+export async function getDeviceId() {
+  let id = await AsyncStorage.getItem(KEYS.DEVICE_ID);
+  if (!id) {
+    id = `android_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    await AsyncStorage.setItem(KEYS.DEVICE_ID, id);
+  }
+  return id;
+}
+
 // ─── Folders ──────────────────────────────────────────────────────────────────
 export async function getFolders() {
   const raw = await AsyncStorage.getItem(KEYS.FOLDERS);
@@ -62,11 +74,14 @@ export async function addFolder(uri, name) {
 
 export async function removeFolder(uri) {
   const folders = await getFolders();
+  const removed = folders.find((f) => f.uri === uri);
   const updated = folders.filter((f) => f.uri !== uri);
   await AsyncStorage.setItem(KEYS.FOLDERS, JSON.stringify(updated));
   // Also wipe that folder's upload cache so it re-syncs if re-added
   const keys = await AsyncStorage.getAllKeys();
-  const folderKeys = keys.filter((k) => k.startsWith(`uploaded_${uri}`));
+  const folderKeys = removed
+    ? keys.filter((k) => k.startsWith(`uploaded_${removed.name}/`) || k === `uploaded_${removed.name}`)
+    : [];
   if (folderKeys.length > 0) await AsyncStorage.multiRemove(folderKeys);
   return updated;
 }
@@ -92,6 +107,13 @@ export async function markUploaded(relativePath, modifiedTime) {
   await AsyncStorage.setItem(`uploaded_${relativePath}`, String(modifiedTime));
 }
 
+export async function markUploadedBatch(files) {
+  if (!files.length) return;
+  await AsyncStorage.multiSet(
+    files.map((file) => [`uploaded_${file.relativePath}`, String(file.modifiedTime)])
+  );
+}
+
 // ─── Sync schedule ────────────────────────────────────────────────────────────
 export async function getSyncInterval()        { return parseInt((await AsyncStorage.getItem(KEYS.SYNC_INTERVAL)) || '15'); }
 export async function setSyncInterval(minutes) { await AsyncStorage.setItem(KEYS.SYNC_INTERVAL, String(minutes)); }
@@ -111,9 +133,29 @@ export async function setLastSyncTime(ts) {
 export async function getTotalSynced() {
   return parseInt((await AsyncStorage.getItem(KEYS.TOTAL_SYNCED)) || '0');
 }
-export async function incrementTotalSynced(count) {
-  const current = await getTotalSynced();
-  await AsyncStorage.setItem(KEYS.TOTAL_SYNCED, String(current + count));
+export async function setTotalSynced(count) {
+  await AsyncStorage.setItem(KEYS.TOTAL_SYNCED, String(Math.max(0, count || 0)));
+}
+
+export async function getForceRefresh() {
+  const [all, foldersRaw] = await Promise.all([
+    AsyncStorage.getItem(KEYS.FORCE_REFRESH_ALL),
+    AsyncStorage.getItem(KEYS.FORCE_REFRESH_FOLDERS),
+  ]);
+  return {
+    all: all === 'true',
+    folders: foldersRaw ? JSON.parse(foldersRaw) : [],
+  };
+}
+
+export async function clearForceRefresh() {
+  await AsyncStorage.multiRemove([KEYS.FORCE_REFRESH_ALL, KEYS.FORCE_REFRESH_FOLDERS]);
+}
+
+async function addForceRefreshFolder(folderName) {
+  const current = await getForceRefresh();
+  const folders = Array.from(new Set([...current.folders, folderName]));
+  await AsyncStorage.setItem(KEYS.FORCE_REFRESH_FOLDERS, JSON.stringify(folders));
 }
 
 // ─── Cache management ─────────────────────────────────────────────────────────

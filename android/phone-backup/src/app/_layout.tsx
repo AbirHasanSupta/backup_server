@@ -102,7 +102,7 @@ export default function RootLayout() {
 }
 
 // Bottom tab bar height: leave extra room for the Android nav bar on gesture-nav devices
-const TAB_BAR_HEIGHT = Platform.OS === 'android' ? 68 : 84;
+const TAB_BAR_HEIGHT = Platform.OS === 'android' ? 80 : 88;
 
 const styles = StyleSheet.create({
   tabBar: {
@@ -126,8 +126,8 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingTop: 6,
-    paddingBottom: 6,
+    paddingTop: 8,
+    paddingBottom: Platform.OS === 'android' ? 14 : 10,
   },
   /** Keep the icon container a fixed, predictable size */
   tabIcon: {
@@ -144,6 +144,7 @@ const styles = StyleSheet.create({
   tabLabel: {
     fontSize: TextScale.xs,
     fontWeight: '500',
-    marginTop: 2,
+    marginTop: 3,
+    paddingBottom: 1,
   },
 });

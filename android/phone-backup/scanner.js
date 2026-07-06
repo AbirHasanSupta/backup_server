@@ -10,6 +10,8 @@ const ALL_KNOWN_EXTENSIONS = new Set(
   Object.values(FILE_TYPE_EXTENSIONS).flat()
 );
 
+const SCAN_BATCH_SIZE = 8;
+
 function shouldIncludeFile(name, selectedTypes) {
   if (selectedTypes.includes('all')) return true;
   const ext = getFileExtension(name);
@@ -28,7 +30,7 @@ function shouldIncludeFile(name, selectedTypes) {
   return false;
 }
 
-async function walk(uri, base, result, selectedTypes) {
+async function walk(uri, base, result, selectedTypes, onActivity, counters) {
   let items;
   try {
     items = await FileSystem.StorageAccessFramework.readDirectoryAsync(uri);
@@ -39,15 +41,17 @@ async function walk(uri, base, result, selectedTypes) {
       result.push({
         uri,
         relativePath: base,
-        modifiedTime: Math.floor(Date.now() / 1000),
+        modifiedTime: 0,
         size: 0,
         name,
       });
+      counters.files++;
+      onActivity && onActivity({ phase: 'scanning', files: counters.files, currentFile: base });
     }
     return;
   }
 
-  for (const itemUri of items) {
+  async function processItem(itemUri) {
     const name = decodeURIComponent(itemUri.split('/').pop() || '');
     const newBase = `${base}/${name}`;
 
@@ -61,32 +65,40 @@ async function walk(uri, base, result, selectedTypes) {
     }
 
     if (isDir) {
-      await walk(itemUri, newBase, result, selectedTypes);
+      await walk(itemUri, newBase, result, selectedTypes, onActivity, counters);
     } else if (shouldIncludeFile(name, selectedTypes)) {
-      let info = { size: 0, modificationTime: Date.now() / 1000 };
+      let info = { size: 0, modificationTime: 0 };
       try {
         info = await FileSystem.getInfoAsync(itemUri, { size: true }) || info;
       } catch {}
       result.push({
         uri: itemUri,
         relativePath: newBase,
-        modifiedTime: Math.floor(info.modificationTime || Date.now() / 1000),
+        modifiedTime: Math.floor(info.modificationTime || 0),
         size: info.size || 0,
         name,
       });
+      counters.files++;
+      onActivity && onActivity({ phase: 'scanning', files: counters.files, currentFile: newBase });
     }
+  }
+
+  for (let i = 0; i < items.length; i += SCAN_BATCH_SIZE) {
+    await Promise.all(items.slice(i, i + SCAN_BATCH_SIZE).map(processItem));
   }
 }
 
-export async function scan() {
+export async function scan(onActivity) {
   const [folders, selectedTypes] = await Promise.all([
     getFolders(),
     getFileTypes(),
   ]);
 
   const result = [];
+  const counters = { files: 0 };
   for (const folder of folders) {
-    await walk(folder.uri, folder.name, result, selectedTypes);
+    onActivity && onActivity({ phase: 'scanning', currentFile: folder.name, files: counters.files });
+    await walk(folder.uri, folder.name, result, selectedTypes, onActivity, counters);
   }
   return result;
 }

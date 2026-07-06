@@ -43,6 +43,15 @@ def init_db():
         """
     )
 
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_files_path_meta "
+        "ON files(path, size, modified_time)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_devices_status_seen "
+        "ON devices(status, last_seen)"
+    )
+
     conn.commit()
     conn.close()
 
@@ -55,6 +64,22 @@ def is_uploaded(path, size, modified_time):
         "SELECT 1 FROM files WHERE path=? AND size=? AND modified_time=?",
         (path, size, modified_time),
     ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def is_uploaded_compatible(path, size, modified_time):
+    conn = get_conn()
+    if modified_time:
+        row = conn.execute(
+            "SELECT 1 FROM files WHERE path=? AND size=? AND modified_time=?",
+            (path, size, modified_time),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT 1 FROM files WHERE path=? AND size=?",
+            (path, size),
+        ).fetchone()
     conn.close()
     return row is not None
 

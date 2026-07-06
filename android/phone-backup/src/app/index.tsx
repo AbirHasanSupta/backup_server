@@ -19,7 +19,7 @@ import {
   getLastSyncTime,
   getTotalSynced,
   setLastSyncTime,
-  incrementTotalSynced,
+  setTotalSynced,
   getSyncInterval,
   getSyncPaused,
 } from '../../settings';
@@ -130,10 +130,40 @@ export default function HomeScreen() {
     await showSyncProgressNotification(0, 0);
 
     try {
-      const result = await runSync(async (current: number, tot: number) => {
+      const result = await runSync(async (current: number, tot: number, detail?: any) => {
+        if (detail?.phase === 'scanning') {
+          setStatusMessage(
+            detail.files
+              ? `Scanning files... ${detail.files.toLocaleString()} found`
+              : 'Scanning your folders...'
+          );
+          setUploaded(0);
+          setTotal(0);
+          setProgress(0);
+          return;
+        }
+
+        if (detail?.phase === 'checking') {
+          const checked = detail.checked || 0;
+          const count = detail.total || 0;
+          setStatusMessage(
+            count > 0
+              ? `Checking server... ${checked.toLocaleString()} / ${count.toLocaleString()}`
+              : 'Checking server...'
+          );
+          setUploaded(0);
+          setTotal(0);
+          setProgress(0);
+          return;
+        }
+
         setUploaded(current);
         setTotal(tot);
         setProgress(tot > 0 ? Math.round((current / tot) * 100) : 0);
+        if (detail?.currentFile && current < tot) {
+          const name = detail.currentFile.split('/').pop() || detail.currentFile;
+          setStatusMessage(`Uploading ${name}`);
+        }
         await showSyncProgressNotification(current, tot);
       });
 
@@ -141,19 +171,26 @@ export default function HomeScreen() {
       await setLastSyncTime(now);
       setLastSyncTimeState(now);
 
-      if (result.uploaded > 0) {
-        await incrementTotalSynced(result.uploaded);
-        setTotalSyncedState((prev) => prev + result.uploaded);
-      }
+      const verifiedSynced = result.uploaded + result.skipped;
+      await setTotalSynced(verifiedSynced);
+      setTotalSyncedState(verifiedSynced);
 
       await showSyncCompleteNotification(result.uploaded, result.skipped);
 
       setProgress(result.total > 0 ? 100 : 0);
-      setStatusMessage(
+      if (result.errors > 0) {
+        setStatusMessage(
+          result.uploaded > 0
+            ? `${result.uploaded} backed up, ${result.errors} failed`
+            : `${result.errors} file${result.errors !== 1 ? 's' : ''} need attention; ${result.skipped} already backed up`
+        );
+      } else {
+        setStatusMessage(
         result.uploaded > 0
           ? `✅  ${result.uploaded} file${result.uploaded !== 1 ? 's' : ''} backed up`
           : '✓  Everything is already up to date'
-      );
+        );
+      }
     } catch (err: any) {
       await showSyncErrorNotification(err?.message);
       setStatusMessage(`❌  ${err?.message || 'Backup failed — check your connection'}`);

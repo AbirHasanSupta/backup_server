@@ -12,13 +12,13 @@ from database import (
     get_devices,
     insert_file,
     is_device_known,
-    is_uploaded,
+    is_uploaded_compatible,
     remove_device,
     touch_device,
     upsert_device,
 )
-from state import add_log, pending_connections
-from storage import save_file
+from state import add_log, pending_connections, set_current_activity
+from storage import file_exists, save_fileobj
 
 router = APIRouter()
 
@@ -59,6 +59,16 @@ async def ping():
 
 class ConnectRequest(BaseModel):
     device_name: str
+
+
+class FileCheckItem(BaseModel):
+    relative_path: str
+    modified_time: int
+    size: int = 0
+
+
+class FileCheckRequest(BaseModel):
+    files: list[FileCheckItem]
 
 
 @router.post("/connect")
@@ -165,6 +175,37 @@ async def status(authorization: str = Header(None)):
 # File upload
 # ──────────────────────────────────────────────────────────────────────────────
 
+@router.post("/files/check")
+async def check_files(body: FileCheckRequest, authorization: str = Header(None)):
+    """
+    Batch metadata check used before upload.
+    Files deleted from the PC are reported as missing even when an old DB row exists.
+    """
+    verify_auth(authorization)
+
+    checked = []
+    present = 0
+    for item in body.files:
+        exists = (
+            is_uploaded_compatible(item.relative_path, item.size, item.modified_time)
+            and file_exists(item.relative_path, item.size)
+        )
+        if exists:
+            present += 1
+        checked.append({
+            "relative_path": item.relative_path,
+            "modified_time": item.modified_time,
+            "size": item.size,
+            "status": "present" if exists else "missing",
+        })
+
+    return {
+        "files": checked,
+        "present": present,
+        "missing": len(checked) - present,
+    }
+
+
 @router.post("/upload")
 async def upload_file(
     request: Request,
@@ -178,11 +219,17 @@ async def upload_file(
 
     device_ip = request.client.host
 
-    if is_uploaded(relative_path, size, modified_time):
+    if is_uploaded_compatible(relative_path, size, modified_time) and file_exists(relative_path, size):
+        touch_device(device_ip, files_delta=0)
         return {"status": "skipped"}
 
-    content = await file.read()
-    save_file(relative_path, content)
+    set_current_activity(f"Uploading {relative_path}", device_ip)
+    add_log(f"Uploading: {relative_path} ({device_ip})")
+    try:
+        await file.seek(0)
+        await asyncio.to_thread(save_fileobj, relative_path, file.file)
+    finally:
+        set_current_activity(None)
     now = int(time.time())
     insert_file(relative_path, size, modified_time, now, device_ip)
 

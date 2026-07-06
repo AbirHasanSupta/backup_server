@@ -34,6 +34,7 @@ def resolve_connection(req_id: str, accepted: bool) -> None:
 # ─── Activity log ─────────────────────────────────────────────────────────────
 _LOG_LIMIT = 200
 _logs: list[dict] = []
+_current_activity: dict[str, Any] | None = None
 
 
 def add_log(message: str) -> None:
@@ -50,3 +51,19 @@ def get_logs() -> list[dict]:
 def clear_logs() -> None:
     global _logs
     _logs = []
+
+
+def set_current_activity(message: str | None, device_ip: str | None = None) -> None:
+    global _current_activity
+    if message:
+        _current_activity = {
+            "time": int(time.time()),
+            "message": message,
+            "device_ip": device_ip,
+        }
+    else:
+        _current_activity = None
+
+
+def get_current_activity() -> dict[str, Any] | None:
+    return dict(_current_activity) if _current_activity else None

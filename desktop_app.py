@@ -42,6 +42,7 @@ import uvicorn
 from state import (
     add_log,
     clear_logs,
+    get_current_activity,
     get_logs,
     pending_connections,
     resolve_connection,
@@ -415,6 +416,11 @@ class BackupServerApp(ctk.CTk):
         )
         self._status_lbl.pack(side="left")
 
+        self._activity_lbl = ctk.CTkLabel(
+            left, text="", font=FONT_SMALL, text_color=C_HIGHLIGHT,
+        )
+        self._activity_lbl.pack(side="left", padx=(12, 0))
+
         right = ctk.CTkFrame(bar, fg_color="transparent")
         right.pack(side="right", fill="y", padx=16)
 
@@ -440,6 +446,7 @@ class BackupServerApp(ctk.CTk):
             self._status_lbl.configure(text="Server Stopped", text_color=C_ERROR)
             self._addr_lbl.configure(text="")
             self._uptime_lbl.configure(text="")
+            self._activity_lbl.configure(text="")
 
     def _tick_uptime(self):
         if self._server_running and self._server_start_time:
@@ -447,6 +454,11 @@ class BackupServerApp(ctk.CTk):
             h = elapsed // 3600
             m = (elapsed % 3600) // 60
             s = elapsed % 60
+            activity = get_current_activity()
+            if activity:
+                self._activity_lbl.configure(text=activity["message"][:90])
+            else:
+                self._activity_lbl.configure(text="")
             self._uptime_lbl.configure(text=f"  ⏱ {h:02d}:{m:02d}:{s:02d}")
         self.after(1000, self._tick_uptime)
 

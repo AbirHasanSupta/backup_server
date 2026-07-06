@@ -1,12 +1,12 @@
 import { scan } from './scanner';
-import { uploadFile } from './uploader';
+import { checkServerFiles, uploadFile } from './uploader';
 import {
-  isUploaded,
   markUploaded,
+  markUploadedBatch,
   getSyncPaused,
   getSyncInterval,
   setLastSyncTime,
-  incrementTotalSynced,
+  setTotalSynced,
 } from './settings';
 import {
   showSyncProgressNotification,
@@ -15,6 +15,16 @@ import {
 } from './notificationService';
 
 const TASK_NAME = 'backup-task';
+const CHECK_BATCH_SIZE = 300;
+const UPLOAD_CONCURRENCY = 3;
+
+function chunk(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
 
 // ─── Lazy native module guard ──────────────────────────────────────────────────
 //
@@ -54,9 +64,7 @@ try {
 
       await setLastSyncTime(Date.now());
 
-      if (result.uploaded > 0) {
-        await incrementTotalSynced(result.uploaded);
-      }
+      await setTotalSynced(result.uploaded + result.skipped);
 
       await showSyncCompleteNotification(result.uploaded, result.skipped);
 
@@ -85,51 +93,6 @@ try {
  * @param {(current: number, total: number) => void} [onProgress]
  * @returns {Promise<{uploaded: number, skipped: number, total: number, errors: number}>}
  */
-export async function runSync(onProgress) {
-  const files = await scan();
-  const pending = [];
-
-  for (const file of files) {
-    const already = await isUploaded(file.relativePath, file.modifiedTime);
-    if (!already) pending.push(file);
-  }
-
-  const total = pending.length;
-  let uploaded = 0;
-  let errors = 0;
-
-  onProgress && onProgress(0, total);
-
-  for (let i = 0; i < pending.length; i++) {
-    const file = pending[i];
-    try {
-      const success = await uploadFile(file, () => {});
-      if (success) {
-        await markUploaded(file.relativePath, file.modifiedTime);
-        uploaded++;
-      } else {
-        // Server returned non-200 but didn't throw — count as skipped
-        errors++;
-      }
-    } catch (err) {
-      console.warn('[BackupTask] Upload failed:', file.relativePath, err?.message);
-      errors++;
-    }
-    // Report after every file so the progress ring updates smoothly
-    onProgress && onProgress(i + 1, total);
-  }
-
-  const skipped = total - uploaded - errors;
-
-  // If EVERY file failed (likely a permission or SAF error), throw so the
-  // caller surfaces the ❌ error UI instead of misleading "up to date" message.
-  if (total > 0 && uploaded === 0 && errors > 0) {
-    throw new Error(`Upload failed for all ${errors} file(s). Check folder permissions and API key.`);
-  }
-
-  return { uploaded, skipped: skipped < 0 ? 0 : skipped, total, errors };
-}
-
 // ─── Registration helpers ──────────────────────────────────────────────────────
 
 /**
@@ -138,6 +101,93 @@ export async function runSync(onProgress) {
  * No-ops silently if the native module is not available.
  * @param {number} [intervalMinutes]
  */
+export async function runSync(onProgress) {
+  onProgress && onProgress(0, 0, { phase: 'scanning' });
+  const files = await scan((detail) => {
+    onProgress && onProgress(0, 0, detail);
+  });
+
+  onProgress && onProgress(0, 0, { phase: 'checking', checked: 0, total: files.length });
+
+  const present = new Set();
+  const presentFiles = [];
+  let checked = 0;
+
+  for (const batch of chunk(files, CHECK_BATCH_SIZE)) {
+    const statuses = await checkServerFiles(batch);
+    const batchByKey = new Map(
+      batch.map((file) => [`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`, file])
+    );
+
+    for (const status of statuses) {
+      const key = `${status.relative_path}|${status.modified_time}|${status.size || 0}`;
+      if (status.status === 'present') {
+        present.add(key);
+        const file = batchByKey.get(key);
+        if (file) presentFiles.push(file);
+      }
+    }
+
+    checked += batch.length;
+    onProgress && onProgress(0, 0, { phase: 'checking', checked, total: files.length });
+  }
+
+  await markUploadedBatch(presentFiles);
+
+  const pending = files.filter((file) => (
+    !present.has(`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`)
+  ));
+
+  const totalUploads = pending.length;
+  let uploaded = 0;
+  let completed = 0;
+  let errors = 0;
+  let nextIndex = 0;
+
+  onProgress && onProgress(0, totalUploads, { phase: 'uploading', currentFile: '' });
+
+  async function worker() {
+    while (nextIndex < pending.length) {
+      const file = pending[nextIndex++];
+      onProgress && onProgress(completed, totalUploads, {
+        phase: 'uploading',
+        currentFile: file.relativePath,
+      });
+
+      try {
+        const success = await uploadFile(file, () => {});
+        if (success) {
+          await markUploaded(file.relativePath, file.modifiedTime);
+          uploaded++;
+        } else {
+          errors++;
+        }
+      } catch (err) {
+        console.warn('[BackupTask] Upload failed:', file.relativePath, err?.message);
+        errors++;
+      } finally {
+        completed++;
+        onProgress && onProgress(completed, totalUploads, {
+          phase: 'uploading',
+          currentFile: file.relativePath,
+        });
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(UPLOAD_CONCURRENCY, pending.length) }, () => worker())
+  );
+
+  const skipped = files.length - pending.length;
+
+  if (totalUploads > 0 && skipped === 0 && uploaded === 0 && errors === totalUploads) {
+    throw new Error(`Upload failed for all ${errors} file(s). Check folder permissions and API key.`);
+  }
+
+  return { uploaded, skipped, total: files.length, errors };
+}
+
 export async function registerBackgroundTask(intervalMinutes) {
   if (!TaskManager || !BackgroundFetch) {
     console.warn('[BackgroundTask] registerBackgroundTask skipped — native modules unavailable.');
