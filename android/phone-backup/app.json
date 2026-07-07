@@ -15,6 +15,14 @@
           "color": "#6366F1",
           "defaultChannel": "backup-sync"
         }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
       ]
     ],
     "android": {

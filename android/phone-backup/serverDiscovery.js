@@ -1,7 +1,7 @@
 import { getServerPort } from './settings';
 
-const TIMEOUT_MS = 1200;
-const BATCH_SIZE = 25;
+const TIMEOUT_MS = 2500;
+const BATCH_SIZE = 30;
 
 // ─── Lazy native module guard ──────────────────────────────────────────────────
 //

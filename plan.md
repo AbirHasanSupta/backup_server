@@ -16,3 +16,11 @@ Server:
 4. when a user connects to the server from the android application, the server will display a notification that a new device has connected and will show the device name and IP address.
 5. the server will have a simple UI to show the list of connected devices and their backup status, including the last backup time and the number of files backed up.
 6. the server can remove the device from the connected devices list.
+
+
+Android:
+1. when pressing start scan: even if a server running on the same network, it shows no backup servers found on this network
+2. if i manually enter the server ip address, it still in offline mode.
+3. even after offline mode, if i press sync now, it shows 'backup failed. fetch failed. java.net.UnknownServiceException:CLEARTEXT communication to 192.168.10.104 not permitted by network security policy'
+4. these are the issues of the preview build. but in development mode(build), scanning is not allowed. but saving a ip address sends a notification to the server and server can accept the request.
+5. in development mode, saving ip makes the application online mode and sync now also works. background sync is not allowed in development mode expo build.
