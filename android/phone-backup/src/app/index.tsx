@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   StatusBar,
   Alert,
+  DeviceEventEmitter,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
@@ -107,6 +108,15 @@ export default function HomeScreen() {
     }, [loadAll])
   );
 
+  // ── Listen for background sync completion ────────────────────────────────
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('sync-completed', (data) => {
+      if (data.lastSyncTime) setLastSyncTimeState(data.lastSyncTime);
+      if (data.totalSynced) setTotalSyncedState(data.totalSynced);
+    });
+    return () => sub.remove();
+  }, []);
+
   // ── Sync handler ─────────────────────────────────────────────────────────
   const handleSync = async () => {
     if (syncing) return;
@@ -140,6 +150,7 @@ export default function HomeScreen() {
           setUploaded(0);
           setTotal(0);
           setProgress(0);
+          await showSyncProgressNotification(0, 0, detail);
           return;
         }
 
@@ -154,6 +165,7 @@ export default function HomeScreen() {
           setUploaded(0);
           setTotal(0);
           setProgress(0);
+          await showSyncProgressNotification(0, 0, detail);
           return;
         }
 
@@ -164,16 +176,19 @@ export default function HomeScreen() {
           const name = detail.currentFile.split('/').pop() || detail.currentFile;
           setStatusMessage(`Uploading ${name}`);
         }
-        await showSyncProgressNotification(current, tot);
+        await showSyncProgressNotification(current, tot, detail);
       });
 
       const now = Date.now();
       await setLastSyncTime(now);
       setLastSyncTimeState(now);
 
-      const verifiedSynced = result.uploaded + result.skipped;
-      await setTotalSynced(verifiedSynced);
-      setTotalSyncedState(verifiedSynced);
+      // Use server-provided total if available
+      const verifiedSynced = result.deviceTotalFiles > 0 ? result.deviceTotalFiles : (result.uploaded + result.skipped);
+      if (verifiedSynced > 0) {
+        await setTotalSynced(verifiedSynced);
+        setTotalSyncedState(verifiedSynced);
+      }
 
       await showSyncCompleteNotification(result.uploaded, result.skipped);
 

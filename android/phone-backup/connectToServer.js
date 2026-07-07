@@ -1,3 +1,5 @@
+import { getDeviceId } from './settings';
+
 /**
  * connectToServer.js
  *
@@ -36,13 +38,17 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
   const timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS);
 
   try {
+    const deviceId = await getDeviceId();
     const res = await fetch(`http://${serverIp}:${serverPort}/connect`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ device_name: deviceName }),
+      body: JSON.stringify({ 
+        device_name: deviceName,
+        device_id: deviceId
+      }),
       signal: controller.signal,
     });
 

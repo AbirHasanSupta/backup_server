@@ -1,3 +1,5 @@
 .idea
 backup.db
 .venv
+backup.db
+server_config.json

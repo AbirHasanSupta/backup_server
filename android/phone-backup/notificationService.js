@@ -66,13 +66,35 @@ export async function setupNotifications() {
   }
 }
 
-export async function showSyncProgressNotification(current, total) {
+export async function showSyncProgressNotification(current, total, detail) {
   if (!N) return;
   try {
-    const body =
-      total > 0
-        ? `Uploading ${current} of ${total} files…`
-        : 'Scanning your folders…';
+    let body = '';
+
+    if (detail) {
+      if (detail.phase === 'scanning') {
+        body = detail.files
+          ? `Scanning: ${detail.files} files found…`
+          : 'Scanning your folders…';
+      } else if (detail.phase === 'checking') {
+        const checked = detail.checked || 0;
+        const subTotal = detail.total || 0;
+        body = `Checking ${checked} of ${subTotal}…`;
+      } else if (detail.phase === 'uploading') {
+        body = `Uploading ${current} of ${total}…`;
+        if (detail.currentFile) {
+          const filename = detail.currentFile.split('/').pop() || detail.currentFile;
+          body += `\n${filename}`;
+        }
+      } else {
+        body = `Syncing… (${detail.phase})`;
+      }
+    } else {
+      body =
+        total > 0
+          ? `Uploading ${current} of ${total} files…`
+          : 'Scanning your folders…';
+    }
 
     await N.scheduleNotificationAsync({
       identifier: SYNC_NOTIFICATION_ID,

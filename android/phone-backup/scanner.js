@@ -36,7 +36,8 @@ async function walk(uri, base, result, selectedTypes, onActivity, counters) {
     items = await FileSystem.StorageAccessFramework.readDirectoryAsync(uri);
   } catch {
     // If directory listing fails, treat the URI itself as a file
-    const name = decodeURIComponent(uri.split('/').pop() || '');
+    const decoded = decodeURIComponent(uri.split('/').pop() || '');
+    const name = decoded.substring(Math.max(decoded.lastIndexOf('/'), decoded.lastIndexOf(':')) + 1);
     if (shouldIncludeFile(name, selectedTypes)) {
       result.push({
         uri,
@@ -44,6 +45,7 @@ async function walk(uri, base, result, selectedTypes, onActivity, counters) {
         modifiedTime: 0,
         size: 0,
         name,
+        id: uri, // Use URI as a unique identifier for SAF items
       });
       counters.files++;
       onActivity && onActivity({ phase: 'scanning', files: counters.files, currentFile: base });
@@ -52,7 +54,8 @@ async function walk(uri, base, result, selectedTypes, onActivity, counters) {
   }
 
   async function processItem(itemUri) {
-    const name = decodeURIComponent(itemUri.split('/').pop() || '');
+    const decoded = decodeURIComponent(itemUri.split('/').pop() || '');
+    const name = decoded.substring(Math.max(decoded.lastIndexOf('/'), decoded.lastIndexOf(':')) + 1);
     const newBase = `${base}/${name}`;
 
     // Try to list as a directory
@@ -77,6 +80,7 @@ async function walk(uri, base, result, selectedTypes, onActivity, counters) {
         modifiedTime: Math.floor(info.modificationTime || 0),
         size: info.size || 0,
         name,
+        id: itemUri,
       });
       counters.files++;
       onActivity && onActivity({ phase: 'scanning', files: counters.files, currentFile: newBase });

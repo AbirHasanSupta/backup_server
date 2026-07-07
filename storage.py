@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import shutil
@@ -22,17 +23,39 @@ def sanitize_relative_path(relative_path: str) -> str:
     return os.path.join(*parts) if parts else "unnamed"
 
 
-def full_path_for(relative_path: str) -> str:
+def full_path_for(relative_path: str, device_id: str | None = None) -> str:
     root = os.path.abspath(_backup_root())
+    
+    # If device_id is provided, nest files under a device-specific folder
+    # This prevents different devices from overwriting each other's files.
+    if device_id:
+        # Sanitize device_id to prevent path traversal
+        safe_device_id = re.sub(r'[<>:"|?*]', "_", device_id).strip()
+        root = os.path.join(root, safe_device_id)
+
     full_path = os.path.abspath(os.path.join(root, sanitize_relative_path(relative_path)))
+    
+    # Ensure the final path is still within the expected device-specific root (or global root)
     if os.path.commonpath([root, full_path]) != root:
         raise ValueError("Invalid backup path")
     return full_path
 
 
-def file_exists(relative_path: str, size: int | None = None) -> bool:
+def calculate_sha256(relative_path: str, device_id: str | None = None) -> str:
     try:
-        full_path = full_path_for(relative_path)
+        full_path = full_path_for(relative_path, device_id=device_id)
+        sha256_hash = hashlib.sha256()
+        with open(full_path, "rb") as f:
+            for byte_block in iter(lambda: f.read(65536), b""):
+                sha256_hash.update(byte_block)
+        return sha256_hash.hexdigest()
+    except Exception:
+        return ""
+
+
+def file_exists(relative_path: str, size: int | None = None, device_id: str | None = None) -> bool:
+    try:
+        full_path = full_path_for(relative_path, device_id=device_id)
         if not os.path.isfile(full_path):
             return False
         if size is not None and size >= 0:
@@ -42,8 +65,8 @@ def file_exists(relative_path: str, size: int | None = None) -> bool:
         return False
 
 
-def save_file(relative_path: str, content: bytes) -> str:
-    full_path = full_path_for(relative_path)
+def save_file(relative_path: str, content: bytes, device_id: str | None = None) -> str:
+    full_path = full_path_for(relative_path, device_id=device_id)
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
     tmp_path = f"{full_path}.tmp-{os.getpid()}-{threading.get_ident()}"
     with open(tmp_path, "wb") as f:
@@ -52,8 +75,8 @@ def save_file(relative_path: str, content: bytes) -> str:
     return full_path
 
 
-def save_fileobj(relative_path: str, source, buffer_size: int = 1024 * 1024) -> str:
-    full_path = full_path_for(relative_path)
+def save_fileobj(relative_path: str, source, buffer_size: int = 1024 * 1024, device_id: str | None = None) -> str:
+    full_path = full_path_for(relative_path, device_id=device_id)
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
     tmp_path = f"{full_path}.tmp-{os.getpid()}-{threading.get_ident()}"
     try:

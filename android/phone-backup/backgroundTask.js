@@ -1,5 +1,7 @@
+import { DeviceEventEmitter } from 'react-native';
 import { scan } from './scanner';
 import { checkServerFiles, uploadFile } from './uploader';
+import { hashFile } from './crypto';
 import {
   markUploaded,
   markUploadedBatch,
@@ -56,24 +58,35 @@ try {
         return BackgroundFetch.BackgroundFetchResult.NoData;
       }
 
-      await showSyncProgressNotification(0, 0);
-
-      const result = await runSync(async (current, total) => {
-        await showSyncProgressNotification(current, total);
+      const result = await runSync(async (current, total, detail) => {
+        await showSyncProgressNotification(current, total, detail);
       });
 
-      await setLastSyncTime(Date.now());
-
-      await setTotalSynced(result.uploaded + result.skipped);
-
+      const now = Date.now();
+      await setLastSyncTime(now);
+      
+      // Use server-provided total if available, otherwise fallback to result.uploaded + result.skipped
+      const totalSynced = result.deviceTotalFiles > 0 ? result.deviceTotalFiles : (result.uploaded + result.skipped);
+      if (totalSynced > 0) {
+        await setTotalSynced(totalSynced);
+      }
+      
       await showSyncCompleteNotification(result.uploaded, result.skipped);
+
+      // Notify UI if it's open
+      DeviceEventEmitter.emit('sync-completed', { 
+        lastSyncTime: now, 
+        totalSynced: totalSynced > 0 ? totalSynced : undefined 
+      });
 
       return result.uploaded > 0
         ? BackgroundFetch.BackgroundFetchResult.NewData
         : BackgroundFetch.BackgroundFetchResult.NoData;
     } catch (err) {
       console.error('[BackupTask] Error:', err);
-      await showSyncErrorNotification(err?.message || 'Unknown error');
+      try {
+        await showSyncErrorNotification(err?.message || 'Unknown error');
+      } catch (e) {}
       return BackgroundFetch.BackgroundFetchResult.Failed;
     }
   });
@@ -102,19 +115,26 @@ try {
  * @param {number} [intervalMinutes]
  */
 export async function runSync(onProgress) {
-  onProgress && onProgress(0, 0, { phase: 'scanning' });
-  const files = await scan((detail) => {
-    onProgress && onProgress(0, 0, detail);
+  if (onProgress) await onProgress(0, 0, { phase: 'scanning' });
+  const files = await scan(async (detail) => {
+    if (onProgress) await onProgress(0, 0, detail);
   });
 
-  onProgress && onProgress(0, 0, { phase: 'checking', checked: 0, total: files.length });
+  if (onProgress) await onProgress(0, 0, { phase: 'checking', checked: 0, total: files.length });
 
   const present = new Set();
   const presentFiles = [];
   let checked = 0;
 
+  let serverDeviceTotalFiles = 0;
+  let serverDeviceTotalSize = 0;
+
   for (const batch of chunk(files, CHECK_BATCH_SIZE)) {
-    const statuses = await checkServerFiles(batch);
+    const res = await checkServerFiles(batch);
+    const statuses = res.files;
+    serverDeviceTotalFiles = res.deviceTotalFiles;
+    serverDeviceTotalSize = res.deviceTotalSize;
+
     const batchByKey = new Map(
       batch.map((file) => [`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`, file])
     );
@@ -129,7 +149,7 @@ export async function runSync(onProgress) {
     }
 
     checked += batch.length;
-    onProgress && onProgress(0, 0, { phase: 'checking', checked, total: files.length });
+    if (onProgress) await onProgress(0, 0, { phase: 'checking', checked, total: files.length });
   }
 
   await markUploadedBatch(presentFiles);
@@ -142,35 +162,53 @@ export async function runSync(onProgress) {
   let uploaded = 0;
   let completed = 0;
   let errors = 0;
+  let lastError = null;
   let nextIndex = 0;
 
-  onProgress && onProgress(0, totalUploads, { phase: 'uploading', currentFile: '' });
+  if (onProgress) await onProgress(0, totalUploads, { phase: 'uploading', currentFile: '' });
 
   async function worker() {
     while (nextIndex < pending.length) {
       const file = pending[nextIndex++];
-      onProgress && onProgress(completed, totalUploads, {
-        phase: 'uploading',
-        currentFile: file.relativePath,
-      });
+      if (!file) break;
+      if (onProgress) {
+        await onProgress(completed, totalUploads, {
+          phase: 'uploading',
+          currentFile: file.relativePath,
+        });
+      }
 
       try {
-        const success = await uploadFile(file, () => {});
-        if (success) {
+        // Optimization: only hash if the file is relatively small or during upload phase
+        // The server will store this hash for content identification
+        let sha256 = '';
+        if (file.size < 10 * 1024 * 1024) { // Only hash files < 10MB to save time/battery
+          sha256 = await hashFile(file.uri);
+        }
+        
+        const fileToUpload = { ...file, sha256 };
+        const res = await uploadFile(fileToUpload, () => {});
+        if (res.success) {
+          serverDeviceTotalFiles = res.deviceTotalFiles;
+          serverDeviceTotalSize = res.deviceTotalSize;
           await markUploaded(file.relativePath, file.modifiedTime);
           uploaded++;
         } else {
           errors++;
+          lastError = 'Server rejected the file. Check server logs.';
         }
       } catch (err) {
         console.warn('[BackupTask] Upload failed:', file.relativePath, err?.message);
         errors++;
+        lastError = err?.message || 'Unknown network error';
       } finally {
         completed++;
-        onProgress && onProgress(completed, totalUploads, {
-          phase: 'uploading',
-          currentFile: file.relativePath,
-        });
+        if (onProgress) {
+          await onProgress(completed, totalUploads, {
+            phase: 'uploading',
+            currentFile: file.relativePath,
+          });
+        }
       }
     }
   }
@@ -185,10 +223,18 @@ export async function runSync(onProgress) {
   // already present on the server — this indicates a real connectivity /
   // auth problem rather than a partial success.
   if (totalUploads > 0 && uploaded === 0 && errors === totalUploads && present.size === 0) {
-    throw new Error(`Upload failed for all ${errors} file(s). Check folder permissions and API key.`);
+    const msg = lastError ? `Last error: ${lastError}` : 'Check folder permissions and API key';
+    throw new Error(`Upload failed for all ${errors} file(s). ${msg}`);
   }
 
-  return { uploaded, skipped, total: files.length, errors };
+  return {
+    uploaded,
+    skipped,
+    total: files.length,
+    errors,
+    deviceTotalFiles: serverDeviceTotalFiles,
+    deviceTotalSize: serverDeviceTotalSize,
+  };
 }
 
 export async function registerBackgroundTask(intervalMinutes) {
@@ -198,17 +244,24 @@ export async function registerBackgroundTask(intervalMinutes) {
   }
   try {
     const minutes = intervalMinutes ?? (await getSyncInterval());
-
     const isRegistered = await TaskManager.isTaskRegisteredAsync(TASK_NAME).catch(() => false);
+
+    if (isRegistered && intervalMinutes === undefined) {
+      // If already registered and we're just doing the auto-registration on app start,
+      // skip it to avoid resetting the Android WorkManager timer.
+      return;
+    }
+
     if (isRegistered) {
       await BackgroundFetch.unregisterTaskAsync(TASK_NAME).catch(() => {});
     }
 
     await BackgroundFetch.registerTaskAsync(TASK_NAME, {
-      minimumInterval: minutes * 60,
+      minimumInterval: minutes * 60, // seconds
       stopOnTerminate: false,
       startOnBoot: true,
     });
+    console.log(`[BackgroundTask] Registered with interval: ${minutes} min`);
   } catch (err) {
     // Registration can fail on first launch before permissions are granted;
     // the _layout.tsx will retry on next app open.
