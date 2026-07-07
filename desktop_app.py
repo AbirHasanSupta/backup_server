@@ -138,7 +138,18 @@ def confirm_dialog(parent, title: str, message: str) -> bool:
     result: list[bool] = [False]
     dlg = ctk.CTkToplevel(parent)
     dlg.title(title)
-    dlg.geometry("400x200")
+
+    # Center on parent
+    dlg_w, dlg_h = 400, 200
+    parent.update_idletasks()
+    px = parent.winfo_x()
+    py = parent.winfo_y()
+    pw = parent.winfo_width()
+    ph = parent.winfo_height()
+    x = px + (pw // 2) - (dlg_w // 2)
+    y = py + (ph // 2) - (dlg_h // 2)
+    dlg.geometry(f"{dlg_w}x{dlg_h}+{x}+{y}")
+
     dlg.resizable(False, False)
     dlg.attributes("-topmost", True)
     dlg.grab_set()
@@ -285,6 +296,7 @@ class BackupServerApp(ctk.CTk):
         self._server_running  = False
         self._current_page:   str | None = None
         self._server_start_time: float | None = None
+        self._device_card_widgets: dict[str, dict] = {}
 
         # Build layout
         self._setup_grid()
@@ -548,7 +560,7 @@ class BackupServerApp(ctk.CTk):
 
     def _stat_card(self, parent, icon: str, label: str, value: str, accent: str) -> ctk.CTkLabel:
         # Outer glow border wrapper
-        outer = ctk.CTkFrame(parent, fg_color=accent, corner_radius=16)
+        outer = ctk.CTkFrame(parent, fg_color=C_BORDER, corner_radius=16)
         outer.pack(side="left", fill="both", expand=True, padx=7, pady=4)
 
         inner = ctk.CTkFrame(outer, fg_color=C_CARD, corner_radius=14)
@@ -563,31 +575,38 @@ class BackupServerApp(ctk.CTk):
         }
         badge = ctk.CTkFrame(
             inner,
-            width=48, height=48,
+            width=44, height=44,
             fg_color=_BADGE_TINTS.get(accent, C_ELEVATED),
-            corner_radius=12,
+            corner_radius=10,
         )
-        badge.pack(pady=(20, 4))
+        badge.pack(pady=(18, 2))
         badge.pack_propagate(False)
-        ctk.CTkLabel(badge, text=icon, font=ctk.CTkFont(size=24)).pack(expand=True)
+        ctk.CTkLabel(badge, text=icon, font=ctk.CTkFont(size=20)).pack(expand=True)
 
         val_lbl = ctk.CTkLabel(
             inner, text=value,
-            font=ctk.CTkFont(family="Segoe UI", size=26, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI", size=24, weight="bold"),
             text_color=accent,
         )
-        val_lbl.pack(pady=(4, 0))
+        val_lbl.pack(pady=(2, 0))
         ctk.CTkLabel(
             inner, text=label, font=FONT_SMALL, text_color=C_MUTED,
-        ).pack(pady=(2, 20))
+        ).pack(pady=(0, 18))
 
-        # Hover lift
+        # Hover effect
         def _enter(e):
-            outer.configure(fg_color=C_ACCENT2 if accent == C_ACCENT else accent)
-        def _leave(e):
             outer.configure(fg_color=accent)
-        outer.bind("<Enter>", _enter)
-        outer.bind("<Leave>", _leave)
+            inner.configure(fg_color=C_ELEVATED)
+        def _leave(e):
+            outer.configure(fg_color=C_BORDER)
+            inner.configure(fg_color=C_CARD)
+        
+        inner.bind("<Enter>", _enter)
+        inner.bind("<Leave>", _leave)
+        # Bind to children too so hover doesn't flicker
+        for child in inner.winfo_children():
+            child.bind("<Enter>", _enter)
+            child.bind("<Leave>", _leave)
 
         return val_lbl
 
@@ -636,11 +655,17 @@ class BackupServerApp(ctk.CTk):
             self._s_last.configure(text=fmt_rel(stats.get("last_backup_time")))
 
             logs = get_logs()[-20:]
-            self._dash_log.configure(state="normal")
-            self._dash_log.delete("1.0", "end")
-            self._dash_log.configure(state="disabled")
-            for entry in reversed(logs):
-                self._insert_log_line(self._dash_log, entry)
+            # Simple differential update for logs to reduce flicker
+            if not hasattr(self, "_last_dash_logs"):
+                self._last_dash_logs = []
+
+            if logs != self._last_dash_logs:
+                self._dash_log.configure(state="normal")
+                self._dash_log.delete("1.0", "end")
+                self._dash_log.configure(state="disabled")
+                for entry in reversed(logs):
+                    self._insert_log_line(self._dash_log, entry)
+                self._last_dash_logs = logs.copy()
         except Exception:
             pass
 
@@ -667,28 +692,37 @@ class BackupServerApp(ctk.CTk):
         return frame
 
     def _refresh_devices(self):
-        for w in self._devices_scroll.winfo_children():
-            w.destroy()
-
         devices = get_devices()
 
+        # Clear empty state if it was showing
+        if hasattr(self, "_devices_empty_widget") and self._devices_empty_widget:
+            if devices:
+                self._devices_empty_widget.destroy()
+                self._devices_empty_widget = None
+
         if not devices:
-            empty = ctk.CTkFrame(
+            if hasattr(self, "_devices_empty_widget") and self._devices_empty_widget:
+                return
+            for w in self._devices_scroll.winfo_children():
+                w.destroy()
+            self._device_card_widgets.clear()
+
+            self._devices_empty_widget = ctk.CTkFrame(
                 self._devices_scroll, fg_color=C_SURFACE,
                 corner_radius=20, border_width=1, border_color=C_BORDER,
             )
-            empty.pack(fill="x", padx=8, pady=30)
+            self._devices_empty_widget.pack(fill="x", padx=8, pady=30)
             ctk.CTkLabel(
-                empty, text="📱",
+                self._devices_empty_widget, text="📱",
                 font=ctk.CTkFont(size=52),
             ).pack(pady=(36, 4))
             ctk.CTkLabel(
-                empty, text="No devices connected yet",
+                self._devices_empty_widget, text="No devices connected yet",
                 font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
                 text_color=C_TEXT,
             ).pack()
             ctk.CTkLabel(
-                empty,
+                self._devices_empty_widget,
                 text=(
                     "Open Phone Backup on your Android device,\n"
                     "go to Settings → Server, and tap Discover\n"
@@ -698,10 +732,37 @@ class BackupServerApp(ctk.CTk):
             ).pack(pady=(8, 36))
             return
 
-        for dev in devices:
-            self._device_card(self._devices_scroll, dev)
+        current_ids = {str(dev["id"]) for dev in devices}
 
-    def _device_card(self, parent, dev: dict):
+        # Remove dead widgets
+        for did in list(self._device_card_widgets.keys()):
+            if did not in current_ids:
+                self._device_card_widgets[did]["outer"].destroy()
+                del self._device_card_widgets[did]
+
+        # Update or create
+        for dev in devices:
+            did = str(dev["id"])
+            if did in self._device_card_widgets:
+                self._update_device_card(did, dev)
+            else:
+                self._device_card_widgets[did] = self._device_card(self._devices_scroll, dev)
+
+    def _update_device_card(self, did: str, dev: dict):
+        widgets = self._device_card_widgets[did]
+        # Update last seen pill
+        last_seen_text = fmt_rel(dev["last_seen"])
+        pill_color = C_SUCCESS if dev.get("last_seen") and (int(time.time()) - dev["last_seen"]) < 300 else C_MUTED
+        _PILL_TINTS = {C_SUCCESS: "#0A2E20", C_MUTED: "#1A2535"}
+
+        widgets["pill"].configure(fg_color=_PILL_TINTS.get(pill_color, C_ELEVATED))
+        widgets["pill_lbl"].configure(text=f"  {last_seen_text}  ", text_color=pill_color)
+
+        # Update chips
+        widgets["chip_ip"].configure(text=f"  📍 {dev['device_ip']}  ")
+        widgets["chip_files"].configure(text=f"  📦 {dev['files_backed_up']:,} files  ")
+
+    def _device_card(self, parent, dev: dict) -> dict:
         # Outer accent border
         outer = ctk.CTkFrame(parent, fg_color=C_ACCENT, corner_radius=16)
         outer.pack(fill="x", padx=8, pady=6)
@@ -737,10 +798,11 @@ class BackupServerApp(ctk.CTk):
         _PILL_TINTS = {C_SUCCESS: "#0A2E20", C_MUTED: "#1A2535"}
         pill = ctk.CTkFrame(name_row, fg_color=_PILL_TINTS.get(pill_color, C_ELEVATED), corner_radius=8)
         pill.pack(side="left", padx=(10, 0))
-        ctk.CTkLabel(
+        pill_lbl = ctk.CTkLabel(
             pill, text=f"  {last_seen_text}  ",
             font=FONT_CAPTION, text_color=pill_color,
-        ).pack()
+        )
+        pill_lbl.pack()
 
         # ── Details row ───────────────────────────────────────────────────
         details_row = ctk.CTkFrame(card, fg_color="transparent")
@@ -751,17 +813,23 @@ class BackupServerApp(ctk.CTk):
             C_ACCENT: "#1A1B4B",
             C_MUTED:  "#1A2535",
         }
-        for chip_text, chip_color in [
-            (f"📍 {dev['device_ip']}", C_INFO),
-            (f"📦 {dev['files_backed_up']:,} files", C_ACCENT),
-            (f"📅 since {fmt_ts(dev['first_seen'])[:10]}", C_MUTED),
-        ]:
-            chip = ctk.CTkFrame(details_row, fg_color=_CHIP_TINTS.get(chip_color, C_ELEVATED), corner_radius=8)
-            chip.pack(side="left", padx=(0, 8))
-            ctk.CTkLabel(
-                chip, text=f"  {chip_text}  ",
-                font=FONT_CAPTION, text_color=chip_color,
-            ).pack()
+
+        # IP Chip
+        chip_ip_f = ctk.CTkFrame(details_row, fg_color=_CHIP_TINTS[C_INFO], corner_radius=8)
+        chip_ip_f.pack(side="left", padx=(0, 8))
+        chip_ip = ctk.CTkLabel(chip_ip_f, text=f"  📍 {dev['device_ip']}  ", font=FONT_CAPTION, text_color=C_INFO)
+        chip_ip.pack()
+
+        # Files Chip
+        chip_files_f = ctk.CTkFrame(details_row, fg_color=_CHIP_TINTS[C_ACCENT], corner_radius=8)
+        chip_files_f.pack(side="left", padx=(0, 8))
+        chip_files = ctk.CTkLabel(chip_files_f, text=f"  📦 {dev['files_backed_up']:,} files  ", font=FONT_CAPTION, text_color=C_ACCENT)
+        chip_files.pack()
+
+        # Date Chip
+        chip_date_f = ctk.CTkFrame(details_row, fg_color=_CHIP_TINTS[C_MUTED], corner_radius=8)
+        chip_date_f.pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(chip_date_f, text=f"  📅 since {fmt_ts(dev['first_seen'])[:10]}  ", font=FONT_CAPTION, text_color=C_MUTED).pack()
 
         # ── Remove button ─────────────────────────────────────────────────
         dev_id   = dev["id"]
@@ -784,6 +852,14 @@ class BackupServerApp(ctk.CTk):
             font=FONT_SMALL, corner_radius=8,
             command=do_remove,
         ).grid(row=0, column=2, rowspan=2, padx=16)
+
+        return {
+            "outer": outer,
+            "pill": pill,
+            "pill_lbl": pill_lbl,
+            "chip_ip": chip_ip,
+            "chip_files": chip_files
+        }
 
     # ─── Page: Settings ───────────────────────────────────────────────────────
 
@@ -970,11 +1046,20 @@ class BackupServerApp(ctk.CTk):
         if query:
             logs = [e for e in logs if query in e["message"].lower()]
 
-        self._log_box.configure(state="normal")
-        self._log_box.delete("1.0", "end")
-        self._log_box.configure(state="disabled")
-        for entry in reversed(logs):
-            self._insert_log_line(self._log_box, entry)
+        # Differential update for logs
+        if not hasattr(self, "_last_logs_cache"):
+            self._last_logs_cache = []
+        if not hasattr(self, "_last_logs_query"):
+            self._last_logs_query = ""
+
+        if logs != self._last_logs_cache or query != self._last_logs_query:
+            self._log_box.configure(state="normal")
+            self._log_box.delete("1.0", "end")
+            self._log_box.configure(state="disabled")
+            for entry in reversed(logs):
+                self._insert_log_line(self._log_box, entry)
+            self._last_logs_cache = logs.copy()
+            self._last_logs_query = query
 
     def _clear_logs(self):
         clear_logs()
@@ -986,10 +1071,10 @@ class BackupServerApp(ctk.CTk):
         for name, btn in self._nav_btns.items():
             accent = self._nav_accents[name]
             if name == page:
-                btn.configure(fg_color=C_ELEVATED, text_color=C_TEXT)
+                btn.configure(fg_color=C_ELEVATED, text_color=C_TEXT, font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"))
                 accent.configure(fg_color=C_ACCENT)
             else:
-                btn.configure(fg_color="transparent", text_color=C_MUTED)
+                btn.configure(fg_color="transparent", text_color=C_MUTED, font=ctk.CTkFont(family="Segoe UI", size=13))
                 accent.configure(fg_color="transparent")
 
         self._pages[page].tkraise()
@@ -1043,6 +1128,25 @@ class BackupServerApp(ctk.CTk):
         from server import app as fastapi_app
         from config import HOST, PORT
 
+        # Pre-flight check: is the port already in use?
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((HOST, PORT))
+            except socket.error:
+                messagebox.showerror(
+                    "Port Conflict",
+                    f"Port {PORT} is already in use by another application.\n\n"
+                    "Please choose a different port in Settings."
+                )
+                add_log(f"❌ Error: Port {PORT} is occupied.")
+                self._server_running = False
+                self.after(0, lambda: self._set_status(False))
+                self.after(0, lambda: self._toggle_btn.configure(
+                    text="▶  Start Server", fg_color="#14532D", hover_color="#166534",
+                ))
+                return
+
         ucfg = uvicorn.Config(
             fastapi_app, host=HOST, port=PORT,
             log_level="warning",
@@ -1053,7 +1157,10 @@ class BackupServerApp(ctk.CTk):
         self._uvicorn_server = uvicorn.Server(ucfg)
 
         def _run():
-            self._uvicorn_server.run()
+            try:
+                self._uvicorn_server.run()
+            except Exception as e:
+                add_log(f"❌ Server Runtime Error: {e}")
 
         self._server_thread = threading.Thread(target=_run, daemon=True)
         self._server_thread.start()
@@ -1105,7 +1212,14 @@ class BackupServerApp(ctk.CTk):
     def _show_approval_dialog(self, req_id: str, device_name: str, device_ip: str):
         dlg = ctk.CTkToplevel(self)
         dlg.title("New Connection Request")
-        dlg.geometry("480x400")
+
+        # Center on main window
+        dlg_w, dlg_h = 480, 420
+        self.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() // 2) - (dlg_w // 2)
+        y = self.winfo_y() + (self.winfo_height() // 2) - (dlg_h // 2)
+        dlg.geometry(f"{dlg_w}x{dlg_h}+{x}+{y}")
+
         dlg.resizable(False, False)
         dlg.attributes("-topmost", True)
         dlg.grab_set()

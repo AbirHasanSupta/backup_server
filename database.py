@@ -118,6 +118,7 @@ def init_db():
     # Ensure indexes exist
     conn.execute("CREATE INDEX IF NOT EXISTS idx_files_path_meta ON files(path, size, modified_time)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_files_device_path ON files(device_id, path)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_device_ip ON files(device_ip)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_status_seen ON devices(status, last_seen)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_device_id ON devices(device_id)")
 
@@ -311,10 +312,11 @@ def get_stats():
 def get_device_stats(device_ip: str, device_id: str | None = None) -> dict:
     conn = get_conn()
     if device_id:
+        # Match both current device_id and any legacy records for this IP
         row = conn.execute(
             "SELECT COUNT(*) as total_files, COALESCE(SUM(size), 0) as total_size"
-            " FROM files WHERE device_id = ?",
-            (device_id,)
+            " FROM files WHERE device_id = ? OR (device_id IS NULL AND device_ip = ?)",
+            (device_id, device_ip)
         ).fetchone()
     else:
         row = conn.execute(
@@ -362,6 +364,9 @@ def upsert_device(device_name: str, device_ip: str, device_id: str | None = None
             )
     conn.commit()
     conn.close()
+    
+    # Recalculate file count immediately
+    touch_device(device_ip, device_id)
 
 
 def touch_device(device_ip: str, device_id: str | None = None, files_delta: int = 1) -> None:
@@ -369,14 +374,21 @@ def touch_device(device_ip: str, device_id: str | None = None, files_delta: int 
     now = int(_time.time())
     conn = get_conn()
     
+    # If device_id is missing, try to resolve it from the devices table
+    if not device_id:
+        row = conn.execute("SELECT device_id FROM devices WHERE device_ip = ? AND device_id IS NOT NULL LIMIT 1", (device_ip,)).fetchone()
+        if row:
+            device_id = row["device_id"]
+    
     if device_id:
         conn.execute(
             "UPDATE devices SET last_seen = ?, device_ip = ? WHERE device_id = ?",
             (now, device_ip, device_id),
         )
+        # Count files matching this device_id OR matching the IP if device_id was missing in old records
         row = conn.execute(
-            "SELECT COUNT(*) as count FROM files WHERE device_id = ?",
-            (device_id,)
+            "SELECT COUNT(*) as count FROM files WHERE device_id = ? OR (device_id IS NULL AND device_ip = ?)",
+            (device_id, device_ip)
         ).fetchone()
         count = row["count"] or 0
         conn.execute(
