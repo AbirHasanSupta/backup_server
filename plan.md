@@ -71,3 +71,14 @@ This is essentially the same high-level approach used by backup systems like clo
 
 
 this is simple explanation of the algorithm. implement the fully production ready architecture. change/enhance the backend/android according too it
+
+
+
+Newest
+
+1. in desktop app device list, if i click on the device file count icon, it should redirect me to the devices folder in explorer. 
+2. in android app, background auto sync does not work even if i set it for 5 minutes. it should work but does not. dont need to be 5 minutes. the minimum time duration between syncs can be 15/30 minutes. but should be working properly. maybe now it is default as 15 minutes or works randomly 
+3. in android app, when i go out of the app, the sync gets slowed down or sometimes gets stopped (paused). it should not be like this. 
+4. the main thing is, the app should be able to run in background and sync automatically seamlessly. it should only stop working if i close the app from the task manager.
+5. each uploaded file should not be a separate notification for android. it should be a progress showing live notification
+6. when pressing the sync /refresh button in the folders list of android app, that also should have notification bar progress

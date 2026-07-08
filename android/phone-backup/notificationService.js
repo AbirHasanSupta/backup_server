@@ -1,4 +1,15 @@
-import { Platform } from 'react-native';
+import { Platform, NativeModules } from 'react-native';
+
+let BackgroundServiceModule = null;
+try {
+  BackgroundServiceModule = require('react-native-background-actions');
+} catch (e) {}
+const BackgroundService = BackgroundServiceModule ? (BackgroundServiceModule.default || BackgroundServiceModule) : null;
+const hasNativeBackgroundActions = !!(
+  NativeModules && 
+  (NativeModules.BackgroundActions || NativeModules.RNBackgroundActions)
+);
+
 
 const SYNC_CHANNEL_ID = 'backup-sync';
 const SYNC_NOTIFICATION_ID = 'backup-sync-progress';
@@ -51,7 +62,7 @@ export async function setupNotifications() {
     if (Platform.OS === 'android') {
       await N.setNotificationChannelAsync(SYNC_CHANNEL_ID, {
         name: 'Backup Sync',
-        importance: N.AndroidImportance.DEFAULT,
+        importance: N.AndroidImportance.LOW,
         vibrationPattern: [0, 0],
         enableVibrate: false,
         lightColor: '#6366F1',
@@ -68,6 +79,10 @@ export async function setupNotifications() {
 
 export async function showSyncProgressNotification(current, total, detail) {
   if (!N) return;
+  // If the native persistent sync service is running, do not show duplicate expo sticky notifications
+  if (Platform.OS === 'android' && BackgroundService && hasNativeBackgroundActions && BackgroundService.isRunning()) {
+    return;
+  }
   try {
     let body = '';
 

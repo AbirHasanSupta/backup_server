@@ -92,15 +92,19 @@ async function walk(uri, base, result, selectedTypes, onActivity, counters) {
   }
 }
 
-export async function scan(onActivity) {
+export async function scan(onActivity, targetFolderUri) {
   const [folders, selectedTypes] = await Promise.all([
     getFolders(),
     getFileTypes(),
   ]);
 
+  const foldersToScan = targetFolderUri
+    ? folders.filter((f) => f.uri === targetFolderUri)
+    : folders;
+
   const result = [];
   const counters = { files: 0 };
-  for (const folder of folders) {
+  for (const folder of foldersToScan) {
     onActivity && onActivity({ phase: 'scanning', currentFile: folder.name, files: counters.files });
     await walk(folder.uri, folder.name, result, selectedTypes, onActivity, counters);
   }

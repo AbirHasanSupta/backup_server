@@ -32,11 +32,10 @@ import { Colors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
 
 const INTERVAL_PRESETS = [
-  { label: '1 min', value: 1 },
-  { label: '5 min', value: 5 },
   { label: '15 min', value: 15 },
   { label: '30 min', value: 30 },
   { label: '1 hr', value: 60 },
+  { label: '2 hr', value: 120 },
   { label: '6 hr', value: 360 },
   { label: '12 hr', value: 720 },
   { label: '24 hr', value: 1440 },

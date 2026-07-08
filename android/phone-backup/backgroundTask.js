@@ -1,4 +1,4 @@
-import { DeviceEventEmitter } from 'react-native';
+import { DeviceEventEmitter, Platform, NativeModules } from 'react-native';
 import { scan } from './scanner';
 import { checkServerFiles, uploadFile } from './uploader';
 import { hashFile } from './crypto';
@@ -9,6 +9,9 @@ import {
   getSyncInterval,
   setLastSyncTime,
   setTotalSynced,
+  getServerIp,
+  getServerPort,
+  getLastSyncTime,
 } from './settings';
 import {
   showSyncProgressNotification,
@@ -16,9 +19,23 @@ import {
   showSyncErrorNotification,
 } from './notificationService';
 
+let BackgroundServiceModule = null;
+try {
+  BackgroundServiceModule = require('react-native-background-actions');
+} catch (e) {
+  console.warn('[BackgroundTask] react-native-background-actions not available.', e?.message);
+}
+const BackgroundService = BackgroundServiceModule ? (BackgroundServiceModule.default || BackgroundServiceModule) : null;
+const hasNativeBackgroundActions = !!(
+  NativeModules && 
+  (NativeModules.BackgroundActions || NativeModules.RNBackgroundActions)
+);
+
+
 const TASK_NAME = 'backup-task';
 const CHECK_BATCH_SIZE = 300;
 const UPLOAD_CONCURRENCY = 3;
+const SERVICE_LOOP_TICK_MS = 15000;
 
 function chunk(items, size) {
   const chunks = [];
@@ -28,104 +45,86 @@ function chunk(items, size) {
   return chunks;
 }
 
-// ─── Lazy native module guard ──────────────────────────────────────────────────
-//
-// `expo-task-manager` and `expo-background-fetch` both need native modules that
-// are only present in a compiled development/production build — not in Expo Go.
-// Using require() in try/catch prevents the crash at module initialization time
-// (same pattern as notificationService.js).
-//
-// • TaskManager: Needed for defineTask() — must be called at module-load time
-//   once the native module is available.
-// • BackgroundFetch: Needed for register/unregister helpers.
-
-/** @type {import('expo-task-manager') | null} */
 let TaskManager = null;
-
-/** @type {import('expo-background-fetch') | null} */
 let BackgroundFetch = null;
 
 try {
   TaskManager = require('expo-task-manager');
   BackgroundFetch = require('expo-background-fetch');
 
-  // defineTask MUST be called at module-load time (not inside a function),
-  // but only once the native module is confirmed to be present.
   TaskManager.defineTask(TASK_NAME, async () => {
     try {
-      const paused = await getSyncPaused();
-      if (paused) {
-        return BackgroundFetch.BackgroundFetchResult.NoData;
+      if (Platform.OS === 'android' && BackgroundService && !BackgroundService.isRunning()) {
+        await startPersistentSyncService();
+        if (!BackgroundService.isRunning()) {
+          console.log('[BackgroundTask] Safety-net: Foreground service start restricted in background, running headless sync.');
+          const result = await runSync(null, { isBackgroundFetch: true });
+          return result.uploaded > 0
+            ? BackgroundFetch.BackgroundFetchResult.NewData
+            : BackgroundFetch.BackgroundFetchResult.NoData;
+        }
       }
-
-      const result = await runSync(async (current, total, detail) => {
-        await showSyncProgressNotification(current, total, detail);
-      });
-
-      const now = Date.now();
-      await setLastSyncTime(now);
-      
-      // Use server-provided total if available, otherwise fallback to result.uploaded + result.skipped
-      const totalSynced = result.deviceTotalFiles > 0 ? result.deviceTotalFiles : (result.uploaded + result.skipped);
-      if (totalSynced > 0) {
-        await setTotalSynced(totalSynced);
-      }
-      
-      await showSyncCompleteNotification(result.uploaded, result.skipped);
-
-      // Notify UI if it's open
-      DeviceEventEmitter.emit('sync-completed', { 
-        lastSyncTime: now, 
-        totalSynced: totalSynced > 0 ? totalSynced : undefined 
-      });
-
-      return result.uploaded > 0
-        ? BackgroundFetch.BackgroundFetchResult.NewData
-        : BackgroundFetch.BackgroundFetchResult.NoData;
+      return BackgroundFetch.BackgroundFetchResult.NewData;
     } catch (err) {
-      console.error('[BackupTask] Error:', err);
-      try {
-        await showSyncErrorNotification(err?.message || 'Unknown error');
-      } catch (e) {}
+      console.warn('[BackgroundTask] Safety-net tick failed:', err?.message);
       return BackgroundFetch.BackgroundFetchResult.Failed;
     }
   });
 } catch (e) {
-  console.warn(
-    '[BackgroundTask] Native modules not available — background sync disabled. ' +
-    'Build a development client with: eas build --profile development --platform android\n' +
-    'Reason:', e?.message
-  );
+  console.warn('[BackgroundTask] Native modules not available.', e?.message);
 }
 
-// ─── Core sync logic ───────────────────────────────────────────────────────────
+async function reportProgress(current, total, detail) {
+  if (Platform.OS === 'android' && BackgroundService && BackgroundService.isRunning()) {
+    let desc = 'Preparing sync...';
+    let progressVal = 0;
+    let progressMax = 100;
+    let indeterminate = true;
 
-/**
- * Core sync logic — scans, filters already-uploaded files, uploads pending ones.
- * Can be called from the background task OR directly from the UI (Sync Now button).
- * @param {(current: number, total: number) => void} [onProgress]
- * @returns {Promise<{uploaded: number, skipped: number, total: number, errors: number}>}
- */
-// ─── Registration helpers ──────────────────────────────────────────────────────
+    if (detail) {
+      if (detail.phase === 'scanning') {
+        desc = detail.files ? `Scanning: ${detail.files} files found…` : 'Scanning your folders…';
+      } else if (detail.phase === 'checking') {
+        const checked = detail.checked || 0;
+        const subTotal = detail.total || 0;
+        desc = `Checking ${checked} of ${subTotal}…`;
+        progressVal = checked;
+        progressMax = subTotal || 100;
+        indeterminate = false;
+      } else if (detail.phase === 'uploading') {
+        desc = `Uploading ${current} of ${total}…`;
+        if (detail.currentFile) {
+          const filename = detail.currentFile.split('/').pop() || detail.currentFile;
+          desc += ` (${filename})`;
+        }
+        progressVal = current;
+        progressMax = total || 100;
+        indeterminate = false;
+      }
+    }
 
-/**
- * Register (or re-register) the background sync task.
- * Unregisters the existing task first so the new interval takes effect.
- * No-ops silently if the native module is not available.
- * @param {number} [intervalMinutes]
- */
-export async function runSync(onProgress) {
+    await BackgroundService.updateNotification({
+      taskDesc: desc,
+      taskProgressBarOptions: { max: progressMax, value: progressVal, indeterminate },
+    }).catch((err) => console.warn('[BackgroundService] updateNotification error:', err?.message));
+  } else {
+    await showSyncProgressNotification(current, total, detail);
+  }
+}
+
+export async function performActualSync(onProgress, runOptions = {}) {
+  const forceRefreshFolder = runOptions.forceRefreshFolder;
+  const targetFolderUri = runOptions.targetFolderUri;
   if (onProgress) await onProgress(0, 0, { phase: 'scanning' });
   const files = await scan(async (detail) => {
     if (onProgress) await onProgress(0, 0, detail);
-  });
+  }, targetFolderUri);
 
   if (onProgress) await onProgress(0, 0, { phase: 'checking', checked: 0, total: files.length });
 
   const present = new Set();
   const presentFiles = [];
   let checked = 0;
-
   let serverDeviceTotalFiles = 0;
   let serverDeviceTotalSize = 0;
 
@@ -141,7 +140,13 @@ export async function runSync(onProgress) {
 
     for (const status of statuses) {
       const key = `${status.relative_path}|${status.modified_time}|${status.size || 0}`;
-      if (status.status === 'present') {
+      
+      let isPresentStatus = status.status === 'present';
+      if (forceRefreshFolder && (status.relative_path.startsWith(`${forceRefreshFolder}/`) || status.relative_path === forceRefreshFolder)) {
+        isPresentStatus = false;
+      }
+
+      if (isPresentStatus) {
         present.add(key);
         const file = batchByKey.get(key);
         if (file) presentFiles.push(file);
@@ -172,20 +177,15 @@ export async function runSync(onProgress) {
       const file = pending[nextIndex++];
       if (!file) break;
       if (onProgress) {
-        await onProgress(completed, totalUploads, {
-          phase: 'uploading',
-          currentFile: file.relativePath,
-        });
+        await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
       }
 
       try {
-        // Optimization: only hash if the file is relatively small or during upload phase
-        // The server will store this hash for content identification
         let sha256 = '';
-        if (file.size < 10 * 1024 * 1024) { // Only hash files < 10MB to save time/battery
+        if (file.size < 10 * 1024 * 1024) {
           sha256 = await hashFile(file.uri);
         }
-        
+
         const fileToUpload = { ...file, sha256 };
         const res = await uploadFile(fileToUpload, () => {});
         if (res.success) {
@@ -204,10 +204,7 @@ export async function runSync(onProgress) {
       } finally {
         completed++;
         if (onProgress) {
-          await onProgress(completed, totalUploads, {
-            phase: 'uploading',
-            currentFile: file.relativePath,
-          });
+          await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
         }
       }
     }
@@ -219,9 +216,6 @@ export async function runSync(onProgress) {
 
   const skipped = files.length - pending.length;
 
-  // Only surface a hard error when every single file failed AND nothing was
-  // already present on the server — this indicates a real connectivity /
-  // auth problem rather than a partial success.
   if (totalUploads > 0 && uploaded === 0 && errors === totalUploads && present.size === 0) {
     const msg = lastError ? `Last error: ${lastError}` : 'Check folder permissions and API key';
     throw new Error(`Upload failed for all ${errors} file(s). ${msg}`);
@@ -237,18 +231,205 @@ export async function runSync(onProgress) {
   };
 }
 
+let isSyncInProgress = false;
+
+async function runOneOffForegroundSync(progressHandler, runOptions) {
+  let result = null;
+  let error = null;
+  let isSyncRunning = true;
+  const options = {
+    taskName: 'PhoneBackupSync',
+    taskTitle: '☁️ Backing up files',
+    taskDesc: 'Scanning folders...',
+    taskIcon: { name: 'ic_launcher', type: 'mipmap' },
+    color: '#6366F1',
+    parameters: {},
+    taskProgressBarOptions: { max: 100, value: 0, indeterminate: true },
+  };
+
+  try {
+    await BackgroundService.start(async () => {
+      try {
+        result = await performActualSync(progressHandler, runOptions);
+      } catch (err) {
+        error = err;
+      } finally {
+        isSyncRunning = false;
+      }
+    }, options);
+
+    while (isSyncRunning && result === null && error === null) {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+
+    if (error) throw error;
+    if (!result) throw new Error('Sync was cancelled or stopped prematurely');
+    return result;
+  } finally {
+    await BackgroundService.stop().catch(() => {});
+  }
+}
+
+export async function runSync(onProgress, runOptions = {}) {
+  const isBackgroundFetch = !!runOptions.isBackgroundFetch;
+  if (isSyncInProgress) {
+    console.log('[BackgroundTask] Sync already in progress, skipping.');
+    return { uploaded: 0, skipped: 0, total: 0, errors: 0, deviceTotalFiles: 0, deviceTotalSize: 0 };
+  }
+  isSyncInProgress = true;
+
+  const progressHandler = async (current, total, detail) => {
+    if (onProgress) await onProgress(current, total, detail);
+    await reportProgress(current, total, detail);
+  };
+
+  try {
+    if (isBackgroundFetch) {
+      const ip = await getServerIp();
+      const port = await getServerPort();
+      if (!ip) {
+        console.log('[BackgroundTask] Sync skipped: No server IP configured.');
+        return { uploaded: 0, skipped: 0, total: 0, errors: 0, deviceTotalFiles: 0, deviceTotalSize: 0 };
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      try {
+        const res = await fetch(`http://${ip}:${port}/ping`, {
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+        if (!res.ok) {
+          console.log('[BackgroundTask] Sync skipped: Server ping status not OK.');
+          return { uploaded: 0, skipped: 0, total: 0, errors: 0, deviceTotalFiles: 0, deviceTotalSize: 0 };
+        }
+      } catch (err) {
+        clearTimeout(timeout);
+        console.log('[BackgroundTask] Sync skipped: Server unreachable/offline.');
+        return { uploaded: 0, skipped: 0, total: 0, errors: 0, deviceTotalFiles: 0, deviceTotalSize: 0 };
+      }
+    }
+
+    let result;
+    if (Platform.OS !== 'android' || !BackgroundService || !hasNativeBackgroundActions) {
+      result = await performActualSync(progressHandler, runOptions);
+    } else if (BackgroundService.isRunning()) {
+      result = await performActualSync(progressHandler, runOptions);
+    } else if (isBackgroundFetch) {
+      result = await performActualSync(progressHandler, runOptions);
+    } else {
+      result = await runOneOffForegroundSync(progressHandler, runOptions);
+    }
+
+    const now = Date.now();
+    await setLastSyncTime(now);
+
+    const totalSynced = result.deviceTotalFiles > 0 ? result.deviceTotalFiles : (result.uploaded + result.skipped);
+    if (totalSynced > 0) await setTotalSynced(totalSynced);
+
+    await showSyncCompleteNotification(result.uploaded, result.skipped);
+
+    DeviceEventEmitter.emit('sync-completed', {
+      lastSyncTime: now,
+      totalSynced: totalSynced > 0 ? totalSynced : undefined,
+    });
+
+    return result;
+  } catch (err) {
+    if (!isBackgroundFetch) {
+      await showSyncErrorNotification(err?.message || 'Unknown error').catch(() => {});
+    }
+    throw err;
+  } finally {
+    isSyncInProgress = false;
+  }
+}
+
+
+async function persistentSyncLoop(taskDataArguments) {
+  const { delay } = taskDataArguments;
+  while (BackgroundService.isRunning()) {
+    try {
+      const paused = await getSyncPaused();
+      const intervalMinutes = await getSyncInterval();
+      const last = await getLastSyncTime();
+      const dueAt = (last || 0) + intervalMinutes * 60 * 1000;
+      const now = Date.now();
+
+      if (isSyncInProgress) {
+        // sync already running, wait for next tick
+      } else if (paused) {
+        await BackgroundService.updateNotification({
+          taskDesc: 'Auto sync paused',
+          taskProgressBarOptions: { max: 100, value: 0, indeterminate: false },
+        }).catch(() => {});
+      } else if (now >= dueAt) {
+        const ip = await getServerIp();
+        if (ip) {
+          await runSync(null, { isBackgroundFetch: true }).catch((err) => console.warn('[BackgroundTask] Auto sync failed:', err?.message));
+        } else {
+          await BackgroundService.updateNotification({
+            taskDesc: 'No server configured',
+            taskProgressBarOptions: { max: 100, value: 0, indeterminate: false },
+          }).catch(() => {});
+        }
+      } else {
+        const minsLeft = Math.ceil((dueAt - now) / 60000);
+        await BackgroundService.updateNotification({
+          taskDesc: `Next sync in ${minsLeft} min`,
+          taskProgressBarOptions: { max: 100, value: 0, indeterminate: false },
+        }).catch(() => {});
+      }
+    } catch (err) {
+      console.warn('[BackgroundTask] Persistent loop tick failed:', err?.message);
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+}
+
+let persistentServiceStarting = false;
+
+export async function startPersistentSyncService() {
+  if (Platform.OS !== 'android' || !BackgroundService || !hasNativeBackgroundActions) return;
+  if (BackgroundService.isRunning() || persistentServiceStarting) return;
+  persistentServiceStarting = true;
+  try {
+    const options = {
+      taskName: 'PhoneBackupAutoSync',
+      taskTitle: '☁️ Phone Backup running',
+      taskDesc: 'Watching for changes…',
+      taskIcon: { name: 'ic_launcher', type: 'mipmap' },
+      color: '#6366F1',
+      parameters: { delay: SERVICE_LOOP_TICK_MS },
+      taskProgressBarOptions: { max: 100, value: 0, indeterminate: true },
+    };
+    await BackgroundService.start(persistentSyncLoop, options);
+  } catch (err) {
+    console.warn('[BackgroundTask] Could not start persistent sync service:', err?.message);
+  } finally {
+    persistentServiceStarting = false;
+  }
+}
+
+export async function stopPersistentSyncService() {
+  if (!BackgroundService) return;
+  await BackgroundService.stop().catch(() => {});
+}
+
 export async function registerBackgroundTask(intervalMinutes) {
+  if (Platform.OS === 'android') {
+    await startPersistentSyncService();
+  }
+
   if (!TaskManager || !BackgroundFetch) {
-    console.warn('[BackgroundTask] registerBackgroundTask skipped — native modules unavailable.');
+    console.warn('[BackgroundTask] registerBackgroundTask: safety-net unavailable.');
     return;
   }
+
   try {
-    const minutes = intervalMinutes ?? (await getSyncInterval());
     const isRegistered = await TaskManager.isTaskRegisteredAsync(TASK_NAME).catch(() => false);
 
     if (isRegistered && intervalMinutes === undefined) {
-      // If already registered and we're just doing the auto-registration on app start,
-      // skip it to avoid resetting the Android WorkManager timer.
       return;
     }
 
@@ -257,15 +438,13 @@ export async function registerBackgroundTask(intervalMinutes) {
     }
 
     await BackgroundFetch.registerTaskAsync(TASK_NAME, {
-      minimumInterval: minutes * 60, // seconds
+      minimumInterval: 15 * 60,
       stopOnTerminate: false,
       startOnBoot: true,
     });
-    console.log(`[BackgroundTask] Registered with interval: ${minutes} min`);
+    console.log('[BackgroundTask] Safety-net registered');
   } catch (err) {
-    // Registration can fail on first launch before permissions are granted;
-    // the _layout.tsx will retry on next app open.
-    console.warn('[BackupTask] Registration failed (will retry):', err?.message);
+    console.warn('[BackupTask] Safety-net registration failed (will retry):', err?.message);
   }
 }
 

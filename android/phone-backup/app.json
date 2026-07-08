@@ -40,7 +40,11 @@
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.INTERNET",
         "android.permission.ACCESS_WIFI_STATE",
-        "android.permission.ACCESS_NETWORK_STATE"
+        "android.permission.ACCESS_NETWORK_STATE",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_DATA_SYNC",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
       ],
       "package": "com.abirsupta.phonebackup"
     },

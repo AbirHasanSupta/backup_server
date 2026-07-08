@@ -826,6 +826,30 @@ class BackupServerApp(ctk.CTk):
         chip_files = ctk.CTkLabel(chip_files_f, text=f"  📦 {dev['files_backed_up']:,} files  ", font=FONT_CAPTION, text_color=C_ACCENT)
         chip_files.pack()
 
+        def open_folder(event=None):
+            import re
+            from config import load_config
+            root = os.path.abspath(load_config()["BACKUP_ROOT"])
+            device_id = dev.get("device_id")
+            if device_id:
+                safe_device_id = re.sub(r'[<>:"|?*]', "_", device_id).strip()
+                device_folder = os.path.join(root, safe_device_id)
+            else:
+                device_folder = root
+            
+            try:
+                os.makedirs(device_folder, exist_ok=True)
+                os.startfile(device_folder)
+            except Exception:
+                if os.path.exists(root):
+                    os.startfile(root)
+
+        chip_files_f.bind("<Button-1>", open_folder)
+        chip_files.bind("<Button-1>", open_folder)
+        chip_files_f.configure(cursor="hand2")
+        chip_files.configure(cursor="hand2")
+
+
         # Date Chip
         chip_date_f = ctk.CTkFrame(details_row, fg_color=_CHIP_TINTS[C_MUTED], corner_radius=8)
         chip_date_f.pack(side="left", padx=(0, 8))

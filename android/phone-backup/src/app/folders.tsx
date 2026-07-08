@@ -18,7 +18,15 @@ import {
   getFileTypes,
   setFileTypes,
   clearFolderUploads,
+  setLastSyncTime,
+  setTotalSynced,
 } from '../../settings';
+import { runSync } from '../../backgroundTask';
+import {
+  showSyncProgressNotification,
+  showSyncCompleteNotification,
+  showSyncErrorNotification,
+} from '../../notificationService';
 import { Colors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
 import { FolderCard, Folder } from '@/components/FolderCard';
 import { FileTypeSelector } from '@/components/FileTypeSelector';
@@ -68,14 +76,34 @@ export default function FoldersScreen() {
     setRefreshing(folder.uri);
     try {
       const count = await clearFolderUploads(folder.name);
+      
+      // Start the sync and show progress notification
+      await showSyncProgressNotification(0, 0, { phase: 'scanning' });
+      
+      const result = await runSync(
+        async (current: number, tot: number, detail?: any) => {
+          await showSyncProgressNotification(current, tot, detail);
+        },
+        { forceRefreshFolder: folder.name, targetFolderUri: folder.uri }
+      );
+      
+      const now = Date.now();
+      await setLastSyncTime(now);
+      
+      const verifiedSynced = result.deviceTotalFiles > 0 ? result.deviceTotalFiles : (result.uploaded + result.skipped);
+      if (verifiedSynced > 0) {
+        await setTotalSynced(verifiedSynced);
+      }
+      
+      await showSyncCompleteNotification(result.uploaded, result.skipped);
+      
       Alert.alert(
-        'Refresh Scheduled',
-        count > 0
-          ? `Cleared ${count} cached entries. Files in "${folder.name}" will be re-uploaded on the next sync.`
-          : `"${folder.name}" will be fully re-scanned on the next sync.`
+        'Refresh Complete',
+        `Finished backing up "${folder.name}". ${result.uploaded} files uploaded.`
       );
     } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Could not clear cache');
+      await showSyncErrorNotification(err?.message);
+      Alert.alert('Error', err?.message || 'Could not refresh backup');
     } finally {
       setRefreshing(null);
     }

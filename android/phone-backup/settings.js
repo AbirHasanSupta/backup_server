@@ -115,7 +115,10 @@ export async function markUploadedBatch(files) {
 }
 
 // ─── Sync schedule ────────────────────────────────────────────────────────────
-export async function getSyncInterval()        { return parseInt((await AsyncStorage.getItem(KEYS.SYNC_INTERVAL)) || '15'); }
+export async function getSyncInterval() {
+  const val = parseInt((await AsyncStorage.getItem(KEYS.SYNC_INTERVAL)) || '15');
+  return isNaN(val) || val < 15 ? 15 : val;
+}
 export async function setSyncInterval(minutes) { await AsyncStorage.setItem(KEYS.SYNC_INTERVAL, String(minutes)); }
 
 export async function getSyncPaused()     { return (await AsyncStorage.getItem(KEYS.SYNC_PAUSED)) === 'true'; }
