@@ -21,6 +21,7 @@ import {
   getTotalSynced,
   getSyncInterval,
   getSyncPaused,
+  getFolders,
 } from '../../settings';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { SyncProgressRing, SyncPhase } from '@/components/SyncProgressRing';
@@ -257,6 +258,16 @@ export default function HomeScreen() {
       Alert.alert(
         'No server configured',
         'Open Settings to enter your server IP address, or use Discover to find it on your network.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    const folders = await getFolders();
+    if (folders.length === 0) {
+      Alert.alert(
+        'No folders selected',
+        'Open Folders and add at least one folder before starting a backup.',
         [{ text: 'OK' }]
       );
       return;
@@ -530,12 +541,12 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     backgroundColor: colors.warningSoft,
     borderRadius: Radius.lg,
     borderWidth: 1,
-    borderColor: '#F4D69D',
+    borderColor: colors.warningBorder,
     padding: Spacing.four,
   },
   errorCard: {
     backgroundColor: colors.errorSoft,
-    borderColor: '#F4B4B4',
+    borderColor: colors.errorBorder,
   },
   noticeIcon: {
     width: 38,

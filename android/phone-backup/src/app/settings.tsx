@@ -94,7 +94,7 @@ export default function SettingsScreen() {
       Alert.alert('Missing IP', 'Please enter the server IP address.');
       return;
     }
-    const portNum = parseInt(serverPort);
+    const portNum = Number.parseInt(serverPort, 10);
     if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
       Alert.alert('Invalid port', 'Port must be a number between 1 and 65535.');
       return;
@@ -368,7 +368,7 @@ export default function SettingsScreen() {
         <SettingsCard styles={styles}>
           <View style={styles.aboutRow}>
             <Text style={styles.aboutLabel}>App version</Text>
-            <Text style={styles.aboutValue}>1.0.0</Text>
+            <Text style={styles.aboutValue}>1.1.0</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.aboutRow}>
@@ -570,7 +570,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     backgroundColor: colors.errorSoft,
     borderRadius: Radius.lg,
     borderWidth: 1,
-    borderColor: '#F4B4B4',
+    borderColor: colors.errorBorder,
     paddingVertical: Spacing.three,
     alignItems: 'center',
     justifyContent: 'center',

@@ -26,9 +26,11 @@ const lightColors = {
   warning: '#D97706',
   warningSoft: '#FFF4DE',
   warningDim: '#FFF4DE',
+  warningBorder: '#F4D69D',
   error: '#DC2626',
   errorSoft: '#FDECEC',
   errorDim: '#FDECEC',
+  errorBorder: '#F4B4B4',
   info: '#0891B2',
   infoSoft: '#E2F6FA',
 
@@ -65,9 +67,11 @@ const darkColors: AppColors = {
   warning: '#FBBF24',
   warningSoft: '#433213',
   warningDim: '#433213',
+  warningBorder: '#7C5A1B',
   error: '#F87171',
   errorSoft: '#451C25',
   errorDim: '#451C25',
+  errorBorder: '#7F2A36',
   info: '#22D3EE',
   infoSoft: '#123746',
 

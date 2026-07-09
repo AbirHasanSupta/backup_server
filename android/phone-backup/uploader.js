@@ -1,6 +1,22 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { getServerIp, getApiKey, getServerPort, getDeviceId } from './settings';
 
+async function readJsonResponse(res, context) {
+  try {
+    return await res.json();
+  } catch {
+    throw new Error(`${context}: invalid server response`);
+  }
+}
+
+function parseUploadBody(body) {
+  try {
+    return body ? JSON.parse(body) : {};
+  } catch {
+    throw new Error('Upload succeeded but the server returned invalid JSON');
+  }
+}
+
 async function getServerConfig() {
   const [serverIp, apiKey, serverPort, deviceId] = await Promise.all([
     getServerIp(),
@@ -37,9 +53,12 @@ export async function checkServerFiles(files) {
   if (res.status === 401) throw new Error('Invalid API key');
   if (!res.ok) throw new Error(`Server check failed (${res.status})`);
 
-  const body = await res.json();
+  const body = await readJsonResponse(res, 'Server check failed');
+  if (!Array.isArray(body.files)) {
+    throw new Error('Server check failed: invalid file list response');
+  }
   return {
-    files: Array.isArray(body.files) ? body.files : [],
+    files: body.files,
     deviceTotalFiles: body.device_total_files || 0,
     deviceTotalSize: body.device_total_size || 0,
   };
@@ -83,7 +102,7 @@ export async function uploadFile(item, onProgress) {
 
     // Any 200 response means the server accepted the file successfully
     if (res.status === 200) {
-      const body = JSON.parse(res.body);
+      const body = parseUploadBody(res.body);
       return {
         success: true,
         deviceTotalFiles: body.device_total_files || 0,

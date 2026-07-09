@@ -17,6 +17,35 @@ const KEYS = {
   THEME_MODE:     'theme_mode',
 };
 
+function safeJsonParse(raw, fallback) {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    console.warn('[Settings] Ignoring invalid stored JSON:', e?.message);
+    return fallback;
+  }
+}
+
+function parseStoredInteger(raw, fallback) {
+  const parsed = Number.parseInt(raw || '', 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function getUniqueFolderName(folders, name) {
+  const baseName = name?.trim() || 'Folder';
+  const usedNames = new Set(folders.map((folder) => folder.name));
+  if (!usedNames.has(baseName)) return baseName;
+
+  let suffix = 2;
+  let candidate = `${baseName} (${suffix})`;
+  while (usedNames.has(candidate)) {
+    suffix += 1;
+    candidate = `${baseName} (${suffix})`;
+  }
+  return candidate;
+}
+
 // ─── File-type labels (displayed in UI) ───────────────────────────────────────
 export const FILE_TYPE_LABELS = {
   all:    'All Files',
@@ -41,7 +70,10 @@ export const FILE_TYPE_EXTENSIONS = {
 export async function getServerIp()   { return (await AsyncStorage.getItem(KEYS.SERVER_IP)) || ''; }
 export async function setServerIp(ip) { await AsyncStorage.setItem(KEYS.SERVER_IP, ip); }
 
-export async function getServerPort()      { return parseInt((await AsyncStorage.getItem(KEYS.SERVER_PORT)) || '8000'); }
+export async function getServerPort() {
+  const port = parseStoredInteger(await AsyncStorage.getItem(KEYS.SERVER_PORT), 8000);
+  return port >= 1 && port <= 65535 ? port : 8000;
+}
 export async function setServerPort(port)  { await AsyncStorage.setItem(KEYS.SERVER_PORT, String(port)); }
 
 export async function getServerName()      { return (await AsyncStorage.getItem(KEYS.SERVER_NAME)) || ''; }
@@ -62,13 +94,17 @@ export async function getDeviceId() {
 // ─── Folders ──────────────────────────────────────────────────────────────────
 export async function getFolders() {
   const raw = await AsyncStorage.getItem(KEYS.FOLDERS);
-  return raw ? JSON.parse(raw) : [];
+  const folders = safeJsonParse(raw, []);
+  return Array.isArray(folders)
+    ? folders.filter((folder) => folder?.uri && folder?.name)
+    : [];
 }
 
 export async function addFolder(uri, name) {
   const folders = await getFolders();
   if (folders.find((f) => f.uri === uri)) return folders;
-  const updated = [...folders, { uri, name, addedAt: Date.now() }];
+  const folderName = getUniqueFolderName(folders, name);
+  const updated = [...folders, { uri, name: folderName, addedAt: Date.now() }];
   await AsyncStorage.setItem(KEYS.FOLDERS, JSON.stringify(updated));
   return updated;
 }
@@ -90,10 +126,18 @@ export async function removeFolder(uri) {
 // ─── File types ───────────────────────────────────────────────────────────────
 export async function getFileTypes() {
   const raw = await AsyncStorage.getItem(KEYS.FILE_TYPES);
-  return raw ? JSON.parse(raw) : ['all'];
+  const types = safeJsonParse(raw, ['all']);
+  if (!Array.isArray(types)) return ['all'];
+  const valid = types.filter((type) =>
+    Object.prototype.hasOwnProperty.call(FILE_TYPE_LABELS, type)
+  );
+  return valid.length > 0 ? Array.from(new Set(valid)) : ['all'];
 }
 export async function setFileTypes(types) {
-  await AsyncStorage.setItem(KEYS.FILE_TYPES, JSON.stringify(types));
+  const valid = Array.isArray(types)
+    ? types.filter((type) => Object.prototype.hasOwnProperty.call(FILE_TYPE_LABELS, type))
+    : [];
+  await AsyncStorage.setItem(KEYS.FILE_TYPES, JSON.stringify(valid.length > 0 ? valid : ['all']));
 }
 
 // ─── Upload dedup cache ───────────────────────────────────────────────────────
@@ -117,7 +161,7 @@ export async function markUploadedBatch(files) {
 
 // ─── Sync schedule ────────────────────────────────────────────────────────────
 export async function getSyncInterval() {
-  const val = parseInt((await AsyncStorage.getItem(KEYS.SYNC_INTERVAL)) || '15');
+  const val = parseStoredInteger(await AsyncStorage.getItem(KEYS.SYNC_INTERVAL), 15);
   return isNaN(val) || val < 15 ? 15 : val;
 }
 export async function setSyncInterval(minutes) { await AsyncStorage.setItem(KEYS.SYNC_INTERVAL, String(minutes)); }
@@ -136,14 +180,16 @@ export async function setThemeMode(mode) {
 // ─── Sync stats ───────────────────────────────────────────────────────────────
 export async function getLastSyncTime() {
   const raw = await AsyncStorage.getItem(KEYS.LAST_SYNC_TIME);
-  return raw ? parseInt(raw) : null;
+  if (!raw) return null;
+  const ts = parseStoredInteger(raw, 0);
+  return ts > 0 ? ts : null;
 }
 export async function setLastSyncTime(ts) {
   await AsyncStorage.setItem(KEYS.LAST_SYNC_TIME, String(ts));
 }
 
 export async function getTotalSynced() {
-  return parseInt((await AsyncStorage.getItem(KEYS.TOTAL_SYNCED)) || '0');
+  return Math.max(0, parseStoredInteger(await AsyncStorage.getItem(KEYS.TOTAL_SYNCED), 0));
 }
 export async function setTotalSynced(count) {
   await AsyncStorage.setItem(KEYS.TOTAL_SYNCED, String(Math.max(0, count || 0)));
@@ -154,9 +200,10 @@ export async function getForceRefresh() {
     AsyncStorage.getItem(KEYS.FORCE_REFRESH_ALL),
     AsyncStorage.getItem(KEYS.FORCE_REFRESH_FOLDERS),
   ]);
+  const folders = safeJsonParse(foldersRaw, []);
   return {
     all: all === 'true',
-    folders: foldersRaw ? JSON.parse(foldersRaw) : [],
+    folders: Array.isArray(folders) ? folders : [],
   };
 }
 

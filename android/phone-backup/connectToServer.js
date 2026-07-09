@@ -21,6 +21,17 @@ try {
 
 const CONNECT_TIMEOUT_MS = 35_000; // slightly longer than server's 30s timeout
 
+async function readConnectionResponse(res) {
+  try {
+    const body = await res.json();
+    return body && typeof body.status === 'string'
+      ? body
+      : { status: 'error', reason: 'Server returned an invalid connection response.' };
+  } catch {
+    return { status: 'error', reason: 'Server returned an invalid connection response.' };
+  }
+}
+
 
 /**
  * @param {string} serverIp
@@ -58,7 +69,7 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
       return { status: 'error', reason: `HTTP ${res.status}` };
     }
 
-    return await res.json(); // { status: 'accepted' | 'rejected', reason?: ... }
+    return await readConnectionResponse(res); // { status: 'accepted' | 'rejected', reason?: ... }
   } catch (err) {
     clearTimeout(timer);
     if (err?.name === 'AbortError') {

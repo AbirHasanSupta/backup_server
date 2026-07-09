@@ -39,6 +39,7 @@ const TASK_NAME = 'backup-task';
 const CHECK_BATCH_SIZE = 300;
 const UPLOAD_CONCURRENCY = 3;
 const SERVICE_LOOP_TICK_MS = 15000;
+const APP_PRIMARY_COLOR = '#2563EB';
 
 function chunk(items, size) {
   const chunks = [];
@@ -274,7 +275,7 @@ async function runOneOffForegroundSync(progressHandler, runOptions) {
     taskTitle: '☁️ Backing up files',
     taskDesc: 'Scanning folders...',
     taskIcon: { name: 'ic_launcher', type: 'mipmap' },
-    color: '#6366F1',
+    color: APP_PRIMARY_COLOR,
     parameters: {},
     taskProgressBarOptions: { max: 100, value: 0, indeterminate: true },
   };
@@ -439,7 +440,7 @@ export async function startPersistentSyncService() {
       taskTitle: '☁️ Phone Backup',
       taskDesc: 'Auto backup enabled',
       taskIcon: { name: 'ic_launcher', type: 'mipmap' },
-      color: '#6366F1',
+      color: APP_PRIMARY_COLOR,
       parameters: { delay: SERVICE_LOOP_TICK_MS },
       taskProgressBarOptions: { max: 100, value: 0, indeterminate: false },
     };

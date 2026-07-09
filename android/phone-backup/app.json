@@ -3,6 +3,7 @@
     "name": "Phone Backup",
     "slug": "phone-backup",
     "scheme": "phonebackup",
+    "version": "1.1.0",
     "plugins": [
       "expo-media-library",
       "expo-task-manager",
@@ -12,7 +13,7 @@
         "expo-notifications",
         {
           "icon": "./assets/images/android-icon-monochrome.png",
-          "color": "#6366F1",
+          "color": "#2563EB",
           "defaultChannel": "backup-sync"
         }
       ],
@@ -46,7 +47,8 @@
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
       ],
-      "package": "com.abirsupta.phonebackup"
+      "package": "com.abirsupta.phonebackup",
+      "versionCode": 2
     },
     "extra": {
       "eas": {

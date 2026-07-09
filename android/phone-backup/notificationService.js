@@ -15,6 +15,11 @@ const BackgroundService = BackgroundServiceModule ? (BackgroundServiceModule.def
 
 const SYNC_CHANNEL_ID = 'backup-sync';
 const SYNC_NOTIFICATION_ID = 'backup-sync-progress';
+const APP_PRIMARY_COLOR = '#2563EB';
+
+function immediateNotificationTrigger() {
+  return Platform.OS === 'android' ? { channelId: SYNC_CHANNEL_ID } : null;
+}
 
 // ─── Lazy native module guard ──────────────────────────────────────────────────
 //
@@ -67,12 +72,21 @@ export async function setupNotifications() {
         importance: N.AndroidImportance.LOW,
         vibrationPattern: [0, 0],
         enableVibrate: false,
-        lightColor: '#6366F1',
+        lightColor: APP_PRIMARY_COLOR,
         showBadge: false,
       });
     }
-    const { status } = await N.requestPermissionsAsync();
-    return status === 'granted';
+    const current = await N.getPermissionsAsync();
+    if (current.granted || current.status === 'granted') return true;
+
+    const requested = await N.requestPermissionsAsync({
+      ios: {
+        allowAlert: true,
+        allowBadge: false,
+        allowSound: false,
+      },
+    });
+    return requested.granted || requested.status === 'granted';
   } catch (e) {
     console.warn('[Notifications] setupNotifications failed:', e?.message);
     return false;
@@ -128,9 +142,8 @@ export async function showSyncProgressNotification(current, total, detail) {
         data: { type: 'sync_progress' },
         sticky: true,
         autoDismiss: false,
-        ...(Platform.OS === 'android' && { channelId: SYNC_CHANNEL_ID }),
       },
-      trigger: null,
+      trigger: immediateNotificationTrigger(),
     });
   } catch (e) {
     console.warn('[Notifications] showSyncProgressNotification failed:', e?.message);
@@ -152,9 +165,8 @@ export async function showSyncCompleteNotification(uploaded, skipped) {
           ? 'All files are already backed up'
           : `${uploaded} file${uploaded !== 1 ? 's' : ''} backed up${skipped > 0 ? `, ${skipped} skipped` : ''}`,
         data: { type: 'sync_complete' },
-        ...(Platform.OS === 'android' && { channelId: SYNC_CHANNEL_ID }),
       },
-      trigger: null,
+      trigger: immediateNotificationTrigger(),
     });
   } catch (e) {
     console.warn('[Notifications] showSyncCompleteNotification failed:', e?.message);
@@ -171,9 +183,8 @@ export async function showSyncErrorNotification(message) {
         title: '❌ Backup failed',
         body: message || 'An error occurred. Tap to retry.',
         data: { type: 'sync_error' },
-        ...(Platform.OS === 'android' && { channelId: SYNC_CHANNEL_ID }),
       },
-      trigger: null,
+      trigger: immediateNotificationTrigger(),
     });
   } catch (e) {
     console.warn('[Notifications] showSyncErrorNotification failed:', e?.message);

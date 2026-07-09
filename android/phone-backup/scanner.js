@@ -12,6 +12,19 @@ const ALL_KNOWN_EXTENSIONS = new Set(
 
 const SCAN_BATCH_SIZE = 8;
 
+function safeDecodeUriPart(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function getSafName(itemUri) {
+  const decoded = safeDecodeUriPart(itemUri.split('/').pop() || '');
+  return decoded.substring(Math.max(decoded.lastIndexOf('/'), decoded.lastIndexOf(':')) + 1);
+}
+
 function shouldIncludeFile(name, selectedTypes) {
   if (selectedTypes.includes('all')) return true;
   const ext = getFileExtension(name);
@@ -36,8 +49,7 @@ async function walk(uri, base, result, selectedTypes, onActivity, counters) {
     items = await FileSystem.StorageAccessFramework.readDirectoryAsync(uri);
   } catch {
     // If directory listing fails, treat the URI itself as a file
-    const decoded = decodeURIComponent(uri.split('/').pop() || '');
-    const name = decoded.substring(Math.max(decoded.lastIndexOf('/'), decoded.lastIndexOf(':')) + 1);
+    const name = getSafName(uri);
     if (shouldIncludeFile(name, selectedTypes)) {
       result.push({
         uri,
@@ -54,8 +66,7 @@ async function walk(uri, base, result, selectedTypes, onActivity, counters) {
   }
 
   async function processItem(itemUri) {
-    const decoded = decodeURIComponent(itemUri.split('/').pop() || '');
-    const name = decoded.substring(Math.max(decoded.lastIndexOf('/'), decoded.lastIndexOf(':')) + 1);
+    const name = getSafName(itemUri);
     const newBase = `${base}/${name}`;
 
     // Try to list as a directory
