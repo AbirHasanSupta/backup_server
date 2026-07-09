@@ -39,6 +39,14 @@ def verify_auth(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+def verify_known_device(device_ip: str, device_id: str | None) -> None:
+    if not is_device_known(device_ip, device_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Device is not approved. Reconnect from the Android app settings.",
+        )
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Discovery / health-check
 # ──────────────────────────────────────────────────────────────────────────────
@@ -164,7 +172,7 @@ async def delete_device(device_id: int, authorization: str = Header(None)):
 # ──────────────────────────────────────────────────────────────────────────────
 
 @router.get("/status")
-async def status(authorization: str = Header(None)):
+async def status(request: Request, device_id: str | None = None, authorization: str = Header(None)):
     """
     Aggregate server stats.
     Intended for the future desktop UI or monitoring scripts.
@@ -172,10 +180,12 @@ async def status(authorization: str = Header(None)):
     verify_auth(authorization)
     stats = get_stats()
     devices = get_devices()
+    device_connected = is_device_known(request.client.host, device_id) if device_id else None
     return {
         **stats,
         "connected_devices": len(devices),
         "devices": devices,
+        "device_connected": device_connected,
         "server_version": APP_VERSION,
     }
 
@@ -192,9 +202,10 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
     """
     verify_auth(authorization)
     device_ip = request.client.host
+    device_id = body.device_id
+    verify_known_device(device_ip, device_id)
 
     # Convert body items to list of dicts for batch check
-    device_id = body.device_id
     items = []
     for item in body.files:
         items.append({
@@ -268,6 +279,7 @@ async def upload_file(
     verify_auth(authorization)
 
     device_ip = request.client.host
+    verify_known_device(device_ip, device_id)
 
     if is_uploaded_compatible(relative_path, size, modified_time, external_id, device_id=device_id) and file_exists(relative_path, size, device_id=device_id):
         touch_device(device_ip, device_id=device_id, files_delta=0)

@@ -29,6 +29,29 @@ async function getServerConfig() {
   return { serverIp, apiKey, serverPort, deviceId };
 }
 
+function removedDeviceError() {
+  return new Error('This phone was removed from the desktop app. Reconnect from Settings to resume backup.');
+}
+
+export async function checkDeviceConnection(options = {}) {
+  const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
+  const params = new URLSearchParams({ device_id: deviceId });
+  const res = await fetch(`http://${serverIp}:${serverPort}/status?${params.toString()}`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: options.signal,
+  });
+
+  if (res.status === 401) throw new Error('Invalid API key');
+  if (!res.ok) throw new Error(`Server status failed (${res.status})`);
+
+  const body = await readJsonResponse(res, 'Server status failed');
+  return {
+    connected: body.device_connected === true,
+    serverVersion: body.server_version || '',
+  };
+}
+
 export async function checkServerFiles(files) {
   const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
   const url = `http://${serverIp}:${serverPort}/files/check`;
@@ -51,6 +74,7 @@ export async function checkServerFiles(files) {
   });
 
   if (res.status === 401) throw new Error('Invalid API key');
+  if (res.status === 403) throw removedDeviceError();
   if (!res.ok) throw new Error(`Server check failed (${res.status})`);
 
   const body = await readJsonResponse(res, 'Server check failed');
@@ -112,6 +136,7 @@ export async function uploadFile(item, onProgress) {
 
     // 401 = wrong API key — throw so the caller can surface this prominently
     if (res.status === 401) throw new Error('Invalid API key');
+    if (res.status === 403) throw removedDeviceError();
 
     return { success: false };
   } finally {

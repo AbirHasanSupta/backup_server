@@ -13,9 +13,9 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { runSync } from '../../backgroundTask';
+import { checkDeviceConnection } from '../../uploader';
 import {
   getServerIp,
-  getServerPort,
   getServerName,
   getLastSyncTime,
   getTotalSynced,
@@ -98,7 +98,7 @@ function applyProgressUpdate(
   }
 }
 
-type ServerStatus = 'connected' | 'disconnected' | 'unknown' | 'checking';
+type ServerStatus = 'connected' | 'disconnected' | 'removed' | 'unknown' | 'checking';
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
@@ -124,14 +124,13 @@ export default function HomeScreen() {
   const [serverLabel, setServerLabel] = useState('No server');
 
   const loadAll = useCallback(async () => {
-    const [lt, ts, si, paused, ip, name, port] = await Promise.all([
+    const [lt, ts, si, paused, ip, name] = await Promise.all([
       getLastSyncTime(),
       getTotalSynced(),
       getSyncInterval(),
       getSyncPaused(),
       getServerIp(),
       getServerName(),
-      getServerPort(),
     ]);
 
     setLastSyncTimeState(lt);
@@ -149,11 +148,9 @@ export default function HomeScreen() {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
     try {
-      const res = await fetch(`http://${ip}:${port}/ping`, {
-        signal: controller.signal,
-      });
+      const result = await checkDeviceConnection({ signal: controller.signal });
       clearTimeout(timeout);
-      setServerStatus(res.ok ? 'connected' : 'disconnected');
+      setServerStatus(result.connected ? 'connected' : 'removed');
     } catch {
       clearTimeout(timeout);
       setServerStatus('disconnected');
@@ -170,6 +167,13 @@ export default function HomeScreen() {
     const id = setInterval(() => setRelativeTimeTick((t) => t + 1), 30000);
     return () => clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      loadAll();
+    }, 15000);
+    return () => clearInterval(id);
+  }, [loadAll]);
 
   useEffect(() => {
     const onStarted = () => {
@@ -263,6 +267,28 @@ export default function HomeScreen() {
       return;
     }
 
+    try {
+      const status = await checkDeviceConnection();
+      if (!status.connected) {
+        setServerStatus('removed');
+        Alert.alert(
+          'Device disconnected',
+          'This phone was removed from the desktop app. Open Settings to connect again.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+      setServerStatus('connected');
+    } catch {
+      setServerStatus('disconnected');
+      Alert.alert(
+        'Server unreachable',
+        'Make sure the desktop app is running and both devices are on the same Wi-Fi network.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
     const folders = await getFolders();
     if (folders.length === 0) {
       Alert.alert(
@@ -281,6 +307,7 @@ export default function HomeScreen() {
   const statusColors: Record<ServerStatus, string> = {
     connected: colors.success,
     disconnected: colors.error,
+    removed: colors.error,
     checking: colors.warning,
     unknown: colors.textMuted,
   };
@@ -288,6 +315,7 @@ export default function HomeScreen() {
   const statusLabels: Record<ServerStatus, string> = {
     connected: serverLabel,
     disconnected: 'Offline',
+    removed: 'Disconnected',
     checking: 'Checking',
     unknown: 'No server',
   };
@@ -416,6 +444,20 @@ export default function HomeScreen() {
               <Text style={[styles.noticeTitle, { color: colors.error }]}>Server unreachable</Text>
               <Text style={styles.noticeBody}>
                 Make sure the desktop app is running and both devices are on the same Wi-Fi network.
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {serverStatus === 'removed' && (
+          <View style={[styles.noticeCard, styles.errorCard]}>
+            <View style={[styles.noticeIcon, styles.errorIcon]}>
+              <AppIcon androidName="link_off" iosName="link.badge.minus" color={colors.error} size={20} fallback="!" />
+            </View>
+            <View style={styles.noticeCopy}>
+              <Text style={[styles.noticeTitle, { color: colors.error }]}>Device disconnected</Text>
+              <Text style={styles.noticeBody}>
+                This phone was removed from the desktop app. Open Settings to connect again.
               </Text>
             </View>
           </View>

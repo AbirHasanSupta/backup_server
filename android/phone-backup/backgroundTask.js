@@ -1,6 +1,6 @@
 import { DeviceEventEmitter, Platform, NativeModules } from 'react-native';
 import { scan } from './scanner';
-import { checkServerFiles, uploadFile } from './uploader';
+import { checkDeviceConnection, checkServerFiles, uploadFile } from './uploader';
 import { hashFile } from './crypto';
 import {
   markUploaded,
@@ -10,7 +10,6 @@ import {
   setLastSyncTime,
   setTotalSynced,
   getServerIp,
-  getServerPort,
   getLastSyncTime,
 } from './settings';
 import {
@@ -319,7 +318,6 @@ export async function runSync(onProgress, runOptions = {}) {
   try {
     if (isBackgroundFetch) {
       const ip = await getServerIp();
-      const port = await getServerPort();
       if (!ip) {
         console.log('[BackgroundTask] Sync skipped: No server IP configured.');
         return { uploaded: 0, skipped: 0, total: 0, errors: 0, deviceTotalFiles: 0, deviceTotalSize: 0 };
@@ -328,12 +326,10 @@ export async function runSync(onProgress, runOptions = {}) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 3000);
       try {
-        const res = await fetch(`http://${ip}:${port}/ping`, {
-          signal: controller.signal,
-        });
+        const status = await checkDeviceConnection({ signal: controller.signal });
         clearTimeout(timeout);
-        if (!res.ok) {
-          console.log('[BackgroundTask] Sync skipped: Server ping status not OK.');
+        if (!status.connected) {
+          console.log('[BackgroundTask] Sync skipped: Device is no longer approved by server.');
           return { uploaded: 0, skipped: 0, total: 0, errors: 0, deviceTotalFiles: 0, deviceTotalSize: 0 };
         }
       } catch (err) {

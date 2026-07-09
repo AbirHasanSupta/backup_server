@@ -1033,7 +1033,7 @@ class BackupServerApp(ctk.CTk):
                 self,
                 "Remove Device",
                 f"Remove '{dname}' from the device list?\n\n"
-                "The device can reconnect if it still has the correct API key.",
+                "Backups from this device will be rejected until it connects again.",
             ):
                 remove_device(did)
                 add_log(f"Removed device: {dname}")
