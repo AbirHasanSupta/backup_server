@@ -19,18 +19,11 @@ import {
   getServerName,
   getLastSyncTime,
   getTotalSynced,
-  setLastSyncTime,
-  setTotalSynced,
   getSyncInterval,
   getSyncPaused,
 } from '../../settings';
-import {
-  showSyncProgressNotification,
-  showSyncCompleteNotification,
-  showSyncErrorNotification,
-} from '../../notificationService';
 import { Colors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
-import { SyncProgressRing } from '@/components/SyncProgressRing';
+import { SyncProgressRing, SyncPhase } from '@/components/SyncProgressRing';
 import { StatCard } from '@/components/StatCard';
 
 function formatRelativeTime(ts: number | null): string {
@@ -45,26 +38,96 @@ function formatRelativeTime(ts: number | null): string {
   return `${days}d ago`;
 }
 
+function applyProgressUpdate(
+  current: number,
+  total: number,
+  detail: any,
+  setters: {
+    setPhase: (p: SyncPhase) => void;
+    setProgress: (n: number) => void;
+    setUploaded: (n: number) => void;
+    setTotal: (n: number) => void;
+    setChecked: (n: number) => void;
+    setCheckTotal: (n: number) => void;
+    setStatusMessage: (s: string) => void;
+  }
+) {
+  if (detail?.phase === 'scanning') {
+    setters.setPhase('scanning');
+    setters.setProgress(0);
+    setters.setUploaded(0);
+    setters.setTotal(0);
+    setters.setStatusMessage(
+      detail.files
+        ? `Scanning files… ${detail.files.toLocaleString()} found`
+        : 'Scanning your folders…'
+    );
+    return;
+  }
+
+  if (detail?.phase === 'checking') {
+    const checked = detail.checked || 0;
+    const count = detail.total || 0;
+    setters.setPhase('checking');
+    setters.setChecked(checked);
+    setters.setCheckTotal(count);
+    setters.setProgress(count > 0 ? Math.round((checked / count) * 100) : 0);
+    setters.setUploaded(0);
+    setters.setTotal(0);
+    setters.setStatusMessage(
+      count > 0
+        ? `Checking server… ${checked.toLocaleString()} / ${count.toLocaleString()}`
+        : 'Checking server…'
+    );
+    return;
+  }
+
+  setters.setPhase('uploading');
+  setters.setUploaded(current);
+  setters.setTotal(total);
+  setters.setProgress(total > 0 ? Math.round((current / total) * 100) : 0);
+  if (detail?.currentFile && current < total) {
+    const name = detail.currentFile.split('/').pop() || detail.currentFile;
+    setters.setStatusMessage(`Uploading ${name}`);
+  } else if (total > 0) {
+    const remaining = Math.max(total - current, 0);
+    setters.setStatusMessage(`${current}/${total} uploaded · ${remaining} remaining`);
+  }
+}
+
 type ServerStatus = 'connected' | 'disconnected' | 'unknown' | 'checking';
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
 
   const [syncing, setSyncing] = useState(false);
+  const [phase, setPhase] = useState<SyncPhase>('idle');
   const [progress, setProgress] = useState(0);
   const [uploaded, setUploaded] = useState(0);
   const [total, setTotal] = useState(0);
+  const [checked, setChecked] = useState(0);
+  const [checkTotal, setCheckTotal] = useState(0);
   const [statusMessage, setStatusMessage] = useState('');
 
   const [lastSyncTime, setLastSyncTimeState] = useState<number | null>(null);
   const [totalSynced, setTotalSyncedState] = useState(0);
   const [syncInterval, setSyncIntervalState] = useState(15);
   const [syncPaused, setSyncPausedState] = useState(false);
+  const [, setRelativeTimeTick] = useState(0);
 
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
   const [serverLabel, setServerLabel] = useState('No Server');
 
-  // ── Load stats & server status whenever tab comes into focus ─────────────
+  const progressSetters = {
+    setPhase,
+    setProgress,
+    setUploaded,
+    setTotal,
+    setChecked,
+    setCheckTotal,
+    setStatusMessage,
+  };
+
   const loadAll = useCallback(async () => {
     const [lt, ts, si, paused, ip, name, port] = await Promise.all([
       getLastSyncTime(),
@@ -108,16 +171,84 @@ export default function HomeScreen() {
     }, [loadAll])
   );
 
-  // ── Listen for background sync completion ────────────────────────────────
+  // Refresh relative "Last Sync" label every 30 seconds without leaving the tab.
   useEffect(() => {
-    const sub = DeviceEventEmitter.addListener('sync-completed', (data) => {
-      if (data.lastSyncTime) setLastSyncTimeState(data.lastSyncTime);
-      if (data.totalSynced) setTotalSyncedState(data.totalSynced);
-    });
-    return () => sub.remove();
+    const id = setInterval(() => setRelativeTimeTick((t) => t + 1), 30000);
+    return () => clearInterval(id);
   }, []);
 
-  // ── Sync handler ─────────────────────────────────────────────────────────
+  // Global sync state — covers Sync Now, auto sync, and folder resync.
+  useEffect(() => {
+    const onStarted = () => {
+      setSyncing(true);
+      setPhase('scanning');
+      setProgress(0);
+      setUploaded(0);
+      setTotal(0);
+      setChecked(0);
+      setCheckTotal(0);
+      setStatusMessage('Starting backup…');
+    };
+
+    const onProgress = ({
+      current,
+      total: tot,
+      detail,
+    }: {
+      current: number;
+      total: number;
+      detail?: any;
+    }) => {
+      applyProgressUpdate(current, tot, detail, progressSetters);
+    };
+
+    const onCompleted = (data: {
+      lastSyncTime?: number;
+      totalSynced?: number;
+      uploaded?: number;
+      skipped?: number;
+      errors?: number;
+    }) => {
+      setSyncing(false);
+      setPhase('idle');
+      if (data.lastSyncTime) setLastSyncTimeState(data.lastSyncTime);
+      if (data.totalSynced) setTotalSyncedState(data.totalSynced);
+
+      const uploadedCount = data.uploaded ?? 0;
+      const errorCount = data.errors ?? 0;
+      const skippedCount = data.skipped ?? 0;
+
+      if (errorCount > 0) {
+        setStatusMessage(
+          uploadedCount > 0
+            ? `${uploadedCount} backed up, ${errorCount} failed`
+            : `${errorCount} file${errorCount !== 1 ? 's' : ''} need attention; ${skippedCount} already backed up`
+        );
+      } else {
+        setStatusMessage(
+          uploadedCount > 0
+            ? `✅  ${uploadedCount} file${uploadedCount !== 1 ? 's' : ''} backed up`
+            : '✓  Everything is already up to date'
+        );
+      }
+    };
+
+    const onFailed = ({ message }: { message?: string }) => {
+      setSyncing(false);
+      setPhase('idle');
+      setStatusMessage(`❌  ${message || 'Backup failed — check your connection'}`);
+    };
+
+    const subs = [
+      DeviceEventEmitter.addListener('sync-started', onStarted),
+      DeviceEventEmitter.addListener('sync-progress', onProgress),
+      DeviceEventEmitter.addListener('sync-completed', onCompleted),
+      DeviceEventEmitter.addListener('sync-failed', onFailed),
+    ];
+
+    return () => subs.forEach((sub) => sub.remove());
+  }, []);
+
   const handleSync = async () => {
     if (syncing) return;
 
@@ -131,90 +262,13 @@ export default function HomeScreen() {
       return;
     }
 
-    setSyncing(true);
-    setProgress(0);
-    setUploaded(0);
-    setTotal(0);
-    setStatusMessage('Scanning your folders…');
-
-    await showSyncProgressNotification(0, 0);
-
     try {
-      const result = await runSync(async (current: number, tot: number, detail?: any) => {
-        if (detail?.phase === 'scanning') {
-          setStatusMessage(
-            detail.files
-              ? `Scanning files... ${detail.files.toLocaleString()} found`
-              : 'Scanning your folders...'
-          );
-          setUploaded(0);
-          setTotal(0);
-          setProgress(0);
-          await showSyncProgressNotification(0, 0, detail);
-          return;
-        }
-
-        if (detail?.phase === 'checking') {
-          const checked = detail.checked || 0;
-          const count = detail.total || 0;
-          setStatusMessage(
-            count > 0
-              ? `Checking server... ${checked.toLocaleString()} / ${count.toLocaleString()}`
-              : 'Checking server...'
-          );
-          setUploaded(0);
-          setTotal(0);
-          setProgress(0);
-          await showSyncProgressNotification(0, 0, detail);
-          return;
-        }
-
-        setUploaded(current);
-        setTotal(tot);
-        setProgress(tot > 0 ? Math.round((current / tot) * 100) : 0);
-        if (detail?.currentFile && current < tot) {
-          const name = detail.currentFile.split('/').pop() || detail.currentFile;
-          setStatusMessage(`Uploading ${name}`);
-        }
-        await showSyncProgressNotification(current, tot, detail);
-      });
-
-      const now = Date.now();
-      await setLastSyncTime(now);
-      setLastSyncTimeState(now);
-
-      // Use server-provided total if available
-      const verifiedSynced = result.deviceTotalFiles > 0 ? result.deviceTotalFiles : (result.uploaded + result.skipped);
-      if (verifiedSynced > 0) {
-        await setTotalSynced(verifiedSynced);
-        setTotalSyncedState(verifiedSynced);
-      }
-
-      await showSyncCompleteNotification(result.uploaded, result.skipped);
-
-      setProgress(result.total > 0 ? 100 : 0);
-      if (result.errors > 0) {
-        setStatusMessage(
-          result.uploaded > 0
-            ? `${result.uploaded} backed up, ${result.errors} failed`
-            : `${result.errors} file${result.errors !== 1 ? 's' : ''} need attention; ${result.skipped} already backed up`
-        );
-      } else {
-        setStatusMessage(
-        result.uploaded > 0
-          ? `✅  ${result.uploaded} file${result.uploaded !== 1 ? 's' : ''} backed up`
-          : '✓  Everything is already up to date'
-        );
-      }
-    } catch (err: any) {
-      await showSyncErrorNotification(err?.message);
-      setStatusMessage(`❌  ${err?.message || 'Backup failed — check your connection'}`);
-    } finally {
-      setSyncing(false);
+      await runSync();
+    } catch {
+      // runSync handles error notification and sync-failed event.
     }
   };
 
-  // ── Derived display values ───────────────────────────────────────────────
   const statusColors: Record<ServerStatus, string> = {
     connected: Colors.success,
     disconnected: Colors.error,
@@ -242,7 +296,6 @@ export default function HomeScreen() {
     <View style={[styles.screen, { paddingTop: insets.top }]}>
       <StatusBar barStyle="light-content" backgroundColor={Colors.bg} />
 
-      {/* ── Header ───────────────────────────────────────────────────────── */}
       <View style={styles.header}>
         <View>
           <Text style={styles.appTitle}>Phone Backup</Text>
@@ -262,13 +315,15 @@ export default function HomeScreen() {
         ]}
         showsVerticalScrollIndicator={false}
       >
-        {/* ── Sync Ring ────────────────────────────────────────────────── */}
         <View style={styles.ringSection}>
           <SyncProgressRing
             isActive={syncing}
             progress={progress}
             uploaded={uploaded}
             total={total}
+            phase={syncing ? phase : 'idle'}
+            checked={checked}
+            checkTotal={checkTotal}
           />
           {statusMessage ? (
             <Text style={styles.statusMsg}>{statusMessage}</Text>
@@ -280,7 +335,6 @@ export default function HomeScreen() {
           )}
         </View>
 
-        {/* ── Stat cards ───────────────────────────────────────────────── */}
         <View style={styles.statsRow}>
           <StatCard
             icon="📦"
@@ -305,7 +359,6 @@ export default function HomeScreen() {
           />
         </View>
 
-        {/* ── Sync Now button ──────────────────────────────────────────── */}
         <TouchableOpacity
           id="sync-now-button"
           style={[styles.syncBtn, syncing && styles.syncBtnBusy]}
@@ -324,7 +377,6 @@ export default function HomeScreen() {
           )}
         </TouchableOpacity>
 
-        {/* ── No-server warning card ───────────────────────────────────── */}
         {serverStatus === 'unknown' && (
           <View style={styles.warningCard}>
             <Text style={styles.warningTitle}>⚠️  No Server Connected</Text>

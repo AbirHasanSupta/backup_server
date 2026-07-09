@@ -77,39 +77,46 @@ export async function setupNotifications() {
   }
 }
 
+function buildSyncProgressText(current, total, detail) {
+  if (detail?.phase === 'scanning') {
+    return detail.files
+      ? `Scanning… ${detail.files.toLocaleString()} files found`
+      : 'Scanning your folders…';
+  }
+
+  if (detail?.phase === 'checking') {
+    const checked = detail.checked || 0;
+    const subTotal = detail.total || 0;
+    if (subTotal > 0) {
+      const pct = Math.round((checked / subTotal) * 100);
+      const remaining = subTotal - checked;
+      return `${pct}% · Checking ${checked}/${subTotal} · ${remaining} remaining`;
+    }
+    return 'Checking files on server…';
+  }
+
+  if (detail?.phase === 'uploading' || total > 0) {
+    const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+    const remaining = Math.max(total - current, 0);
+    let text = `${pct}% · ${current}/${total} uploaded · ${remaining} remaining`;
+    if (detail?.currentFile) {
+      const filename = detail.currentFile.split('/').pop() || detail.currentFile;
+      text += `\n${filename}`;
+    }
+    return text;
+  }
+
+  return 'Preparing backup…';
+}
+
 export async function showSyncProgressNotification(current, total, detail) {
   if (!N) return;
-  // If the native persistent sync service is running, do not show duplicate expo sticky notifications
+  // Foreground service owns the progress notification while it is running.
   if (Platform.OS === 'android' && BackgroundService && hasNativeBackgroundActions && BackgroundService.isRunning()) {
     return;
   }
   try {
-    let body = '';
-
-    if (detail) {
-      if (detail.phase === 'scanning') {
-        body = detail.files
-          ? `Scanning: ${detail.files} files found…`
-          : 'Scanning your folders…';
-      } else if (detail.phase === 'checking') {
-        const checked = detail.checked || 0;
-        const subTotal = detail.total || 0;
-        body = `Checking ${checked} of ${subTotal}…`;
-      } else if (detail.phase === 'uploading') {
-        body = `Uploading ${current} of ${total}…`;
-        if (detail.currentFile) {
-          const filename = detail.currentFile.split('/').pop() || detail.currentFile;
-          body += `\n${filename}`;
-        }
-      } else {
-        body = `Syncing… (${detail.phase})`;
-      }
-    } else {
-      body =
-        total > 0
-          ? `Uploading ${current} of ${total} files…`
-          : 'Scanning your folders…';
-    }
+    const body = buildSyncProgressText(current, total, detail);
 
     await N.scheduleNotificationAsync({
       identifier: SYNC_NOTIFICATION_ID,
@@ -127,6 +134,8 @@ export async function showSyncProgressNotification(current, total, detail) {
     console.warn('[Notifications] showSyncProgressNotification failed:', e?.message);
   }
 }
+
+export { buildSyncProgressText };
 
 export async function showSyncCompleteNotification(uploaded, skipped) {
   if (!N) return;

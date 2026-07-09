@@ -13,14 +13,27 @@ import { Colors, TextScale } from '@/constants/theme';
 const RING_SIZE = 220;
 const INNER_SIZE = 180;
 
+export type SyncPhase = 'scanning' | 'checking' | 'uploading' | 'idle';
+
 interface Props {
   isActive: boolean;
   progress: number; // 0–100
   uploaded: number;
   total: number;
+  phase?: SyncPhase;
+  checked?: number;
+  checkTotal?: number;
 }
 
-export function SyncProgressRing({ isActive, progress, uploaded, total }: Props) {
+export function SyncProgressRing({
+  isActive,
+  progress,
+  uploaded,
+  total,
+  phase = 'idle',
+  checked = 0,
+  checkTotal = 0,
+}: Props) {
   // Outer glow pulse
   const glowScale = useSharedValue(1);
   const glowOpacity = useSharedValue(0);
@@ -88,6 +101,21 @@ export function SyncProgressRing({ isActive, progress, uploaded, total }: Props)
 
   const progressPct = Math.round(progress);
 
+  const progressLabel = (() => {
+    if (phase === 'scanning') return 'Scanning…';
+    if (phase === 'checking') {
+      return checkTotal > 0
+        ? `${checked} / ${checkTotal} checked`
+        : 'Checking…';
+    }
+    if (phase === 'uploading' && total > 0) {
+      return `${uploaded} / ${total} files`;
+    }
+    return 'Preparing…';
+  })();
+
+  const showPercentage = phase === 'uploading' || phase === 'checking';
+
   return (
     <View style={styles.container}>
       {/* Outer glow ring */}
@@ -102,13 +130,15 @@ export function SyncProgressRing({ isActive, progress, uploaded, total }: Props)
         <View style={styles.inner}>
           {isActive ? (
             <View style={styles.centerContent}>
-              <Text style={styles.progressNumber}>{progressPct}</Text>
-              <Text style={styles.progressSymbol}>%</Text>
-              <Text style={styles.progressLabel}>
-                {total > 0
-                  ? `${uploaded} / ${total} files`
-                  : 'Scanning…'}
-              </Text>
+              {showPercentage ? (
+                <>
+                  <Text style={styles.progressNumber}>{progressPct}</Text>
+                  <Text style={styles.progressSymbol}>%</Text>
+                </>
+              ) : (
+                <Text style={styles.idleIcon}>⏳</Text>
+              )}
+              <Text style={styles.progressLabel}>{progressLabel}</Text>
             </View>
           ) : (
             <View style={styles.centerContent}>

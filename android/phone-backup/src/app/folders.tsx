@@ -18,15 +18,8 @@ import {
   getFileTypes,
   setFileTypes,
   clearFolderUploads,
-  setLastSyncTime,
-  setTotalSynced,
 } from '../../settings';
 import { runSync } from '../../backgroundTask';
-import {
-  showSyncProgressNotification,
-  showSyncCompleteNotification,
-  showSyncErrorNotification,
-} from '../../notificationService';
 import { Colors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
 import { FolderCard, Folder } from '@/components/FolderCard';
 import { FileTypeSelector } from '@/components/FileTypeSelector';
@@ -75,34 +68,18 @@ export default function FoldersScreen() {
   const handleRefresh = async (folder: Folder) => {
     setRefreshing(folder.uri);
     try {
-      const count = await clearFolderUploads(folder.name);
-      
-      // Start the sync and show progress notification
-      await showSyncProgressNotification(0, 0, { phase: 'scanning' });
-      
-      const result = await runSync(
-        async (current: number, tot: number, detail?: any) => {
-          await showSyncProgressNotification(current, tot, detail);
-        },
-        { forceRefreshFolder: folder.name, targetFolderUri: folder.uri }
-      );
-      
-      const now = Date.now();
-      await setLastSyncTime(now);
-      
-      const verifiedSynced = result.deviceTotalFiles > 0 ? result.deviceTotalFiles : (result.uploaded + result.skipped);
-      if (verifiedSynced > 0) {
-        await setTotalSynced(verifiedSynced);
-      }
-      
-      await showSyncCompleteNotification(result.uploaded, result.skipped);
-      
+      await clearFolderUploads(folder.name);
+
+      const result = await runSync(null, {
+        forceRefreshFolder: folder.name,
+        targetFolderUri: folder.uri,
+      });
+
       Alert.alert(
         'Refresh Complete',
         `Finished backing up "${folder.name}". ${result.uploaded} files uploaded.`
       );
     } catch (err: any) {
-      await showSyncErrorNotification(err?.message);
       Alert.alert('Error', err?.message || 'Could not refresh backup');
     } finally {
       setRefreshing(null);

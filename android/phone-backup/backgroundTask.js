@@ -17,6 +17,7 @@ import {
   showSyncProgressNotification,
   showSyncCompleteNotification,
   showSyncErrorNotification,
+  buildSyncProgressText,
 } from './notificationService';
 
 let BackgroundServiceModule = null;
@@ -74,36 +75,65 @@ try {
   console.warn('[BackgroundTask] Native modules not available.', e?.message);
 }
 
+let lastIdleDesc = null;
+
+function emitSyncStarted() {
+  DeviceEventEmitter.emit('sync-started', {});
+}
+
+function emitSyncProgress(current, total, detail) {
+  DeviceEventEmitter.emit('sync-progress', { current, total, detail });
+}
+
+function emitSyncCompleted(payload) {
+  DeviceEventEmitter.emit('sync-completed', payload);
+}
+
+function emitSyncFailed(message) {
+  DeviceEventEmitter.emit('sync-failed', { message });
+}
+
+async function updateIdleNotification(force = false) {
+  if (!BackgroundService?.isRunning()) return;
+
+  const paused = await getSyncPaused();
+  const ip = await getServerIp();
+  let desc = 'Auto backup enabled';
+  if (paused) desc = 'Auto sync paused';
+  else if (!ip) desc = 'No server configured';
+
+  if (!force && desc === lastIdleDesc) return;
+  lastIdleDesc = desc;
+
+  await BackgroundService.updateNotification({
+    taskTitle: '☁️ Phone Backup',
+    taskDesc: desc,
+    taskProgressBarOptions: { max: 100, value: 0, indeterminate: false },
+  }).catch(() => {});
+}
+
 async function reportProgress(current, total, detail) {
+  emitSyncProgress(current, total, detail);
+
   if (Platform.OS === 'android' && BackgroundService && BackgroundService.isRunning()) {
-    let desc = 'Preparing sync...';
+    const desc = buildSyncProgressText(current, total, detail);
     let progressVal = 0;
     let progressMax = 100;
     let indeterminate = true;
 
-    if (detail) {
-      if (detail.phase === 'scanning') {
-        desc = detail.files ? `Scanning: ${detail.files} files found…` : 'Scanning your folders…';
-      } else if (detail.phase === 'checking') {
-        const checked = detail.checked || 0;
-        const subTotal = detail.total || 0;
-        desc = `Checking ${checked} of ${subTotal}…`;
-        progressVal = checked;
-        progressMax = subTotal || 100;
-        indeterminate = false;
-      } else if (detail.phase === 'uploading') {
-        desc = `Uploading ${current} of ${total}…`;
-        if (detail.currentFile) {
-          const filename = detail.currentFile.split('/').pop() || detail.currentFile;
-          desc += ` (${filename})`;
-        }
-        progressVal = current;
-        progressMax = total || 100;
-        indeterminate = false;
-      }
+    if (detail?.phase === 'checking') {
+      progressVal = detail.checked || 0;
+      progressMax = detail.total || 100;
+      indeterminate = false;
+    } else if (detail?.phase === 'uploading' || total > 0) {
+      progressVal = current;
+      progressMax = total || 100;
+      indeterminate = false;
     }
 
+    lastIdleDesc = null;
     await BackgroundService.updateNotification({
+      taskTitle: '☁️ Backing up',
       taskDesc: desc,
       taskProgressBarOptions: { max: progressMax, value: progressVal, indeterminate },
     }).catch((err) => console.warn('[BackgroundService] updateNotification error:', err?.message));
@@ -310,6 +340,8 @@ export async function runSync(onProgress, runOptions = {}) {
       }
     }
 
+    emitSyncStarted();
+
     let result;
     if (Platform.OS !== 'android' || !BackgroundService || !hasNativeBackgroundActions) {
       result = await performActualSync(progressHandler, runOptions);
@@ -327,18 +359,28 @@ export async function runSync(onProgress, runOptions = {}) {
     const totalSynced = result.deviceTotalFiles > 0 ? result.deviceTotalFiles : (result.uploaded + result.skipped);
     if (totalSynced > 0) await setTotalSynced(totalSynced);
 
-    await showSyncCompleteNotification(result.uploaded, result.skipped);
+    if (!isBackgroundFetch || result.uploaded > 0) {
+      await showSyncCompleteNotification(result.uploaded, result.skipped);
+    }
 
-    DeviceEventEmitter.emit('sync-completed', {
+    emitSyncCompleted({
       lastSyncTime: now,
       totalSynced: totalSynced > 0 ? totalSynced : undefined,
+      uploaded: result.uploaded,
+      skipped: result.skipped,
+      errors: result.errors,
+      total: result.total,
     });
+
+    await updateIdleNotification(true);
 
     return result;
   } catch (err) {
     if (!isBackgroundFetch) {
       await showSyncErrorNotification(err?.message || 'Unknown error').catch(() => {});
+      emitSyncFailed(err?.message || 'Unknown error');
     }
+    await updateIdleNotification(true);
     throw err;
   } finally {
     isSyncInProgress = false;
@@ -348,37 +390,33 @@ export async function runSync(onProgress, runOptions = {}) {
 
 async function persistentSyncLoop(taskDataArguments) {
   const { delay } = taskDataArguments;
+  await updateIdleNotification(true);
+
   while (BackgroundService.isRunning()) {
     try {
-      const paused = await getSyncPaused();
-      const intervalMinutes = await getSyncInterval();
-      const last = await getLastSyncTime();
-      const dueAt = (last || 0) + intervalMinutes * 60 * 1000;
-      const now = Date.now();
-
       if (isSyncInProgress) {
-        // sync already running, wait for next tick
-      } else if (paused) {
-        await BackgroundService.updateNotification({
-          taskDesc: 'Auto sync paused',
-          taskProgressBarOptions: { max: 100, value: 0, indeterminate: false },
-        }).catch(() => {});
-      } else if (now >= dueAt) {
-        const ip = await getServerIp();
-        if (ip) {
-          await runSync(null, { isBackgroundFetch: true }).catch((err) => console.warn('[BackgroundTask] Auto sync failed:', err?.message));
-        } else {
-          await BackgroundService.updateNotification({
-            taskDesc: 'No server configured',
-            taskProgressBarOptions: { max: 100, value: 0, indeterminate: false },
-          }).catch(() => {});
-        }
+        // Progress notification is updated by reportProgress during sync.
       } else {
-        const minsLeft = Math.ceil((dueAt - now) / 60000);
-        await BackgroundService.updateNotification({
-          taskDesc: `Next sync in ${minsLeft} min`,
-          taskProgressBarOptions: { max: 100, value: 0, indeterminate: false },
-        }).catch(() => {});
+        const paused = await getSyncPaused();
+        const intervalMinutes = await getSyncInterval();
+        const last = await getLastSyncTime();
+        const dueAt = (last || 0) + intervalMinutes * 60 * 1000;
+        const now = Date.now();
+
+        if (paused) {
+          await updateIdleNotification();
+        } else if (now >= dueAt) {
+          const ip = await getServerIp();
+          if (ip) {
+            await runSync(null, { isBackgroundFetch: true }).catch((err) =>
+              console.warn('[BackgroundTask] Auto sync failed:', err?.message)
+            );
+          } else {
+            await updateIdleNotification();
+          }
+        } else {
+          await updateIdleNotification();
+        }
       }
     } catch (err) {
       console.warn('[BackgroundTask] Persistent loop tick failed:', err?.message);
@@ -396,12 +434,12 @@ export async function startPersistentSyncService() {
   try {
     const options = {
       taskName: 'PhoneBackupAutoSync',
-      taskTitle: '☁️ Phone Backup running',
-      taskDesc: 'Watching for changes…',
+      taskTitle: '☁️ Phone Backup',
+      taskDesc: 'Auto backup enabled',
       taskIcon: { name: 'ic_launcher', type: 'mipmap' },
       color: '#6366F1',
       parameters: { delay: SERVICE_LOOP_TICK_MS },
-      taskProgressBarOptions: { max: 100, value: 0, indeterminate: true },
+      taskProgressBarOptions: { max: 100, value: 0, indeterminate: false },
     };
     await BackgroundService.start(persistentSyncLoop, options);
   } catch (err) {
