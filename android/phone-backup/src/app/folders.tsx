@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { View, Text, TouchableOpacity, FlatList, StyleSheet, StatusBar, Alert } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -12,13 +12,16 @@ import {
   clearFolderUploads,
 } from '../../settings';
 import { runSync } from '../../backgroundTask';
-import { Colors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
+import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { FolderCard, Folder } from '@/components/FolderCard';
 import { FileTypeSelector } from '@/components/FileTypeSelector';
 import { AppIcon } from '@/components/AppIcon';
+import { useAppTheme } from '@/hooks/use-app-theme';
 
 export default function FoldersScreen() {
   const insets = useSafeAreaInsets();
+  const { colors, isDark } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
 
   const [folders, setFolders] = useState<Folder[]>([]);
   const [selectedTypes, setSelectedTypes] = useState<string[]>(['all']);
@@ -83,14 +86,14 @@ export default function FoldersScreen() {
   const renderEmpty = () => (
     <View style={styles.emptyState}>
       <View style={styles.emptyIcon}>
-        <AppIcon androidName="folder_open" iosName="folder" color={Colors.primary} size={34} fallback="F" />
+        <AppIcon androidName="folder_open" iosName="folder" color={colors.primary} size={34} fallback="F" />
       </View>
       <Text style={styles.emptyTitle}>Choose what gets backed up</Text>
       <Text style={styles.emptyBody}>
         Add a folder once and Phone Backup will keep it protected automatically.
       </Text>
       <TouchableOpacity style={styles.emptyButton} onPress={handleAddFolder} accessibilityRole="button">
-        <AppIcon androidName="add" iosName="plus" color={Colors.white} size={18} fallback="+" />
+        <AppIcon androidName="add" iosName="plus" color={colors.white} size={18} fallback="+" />
         <Text style={styles.emptyButtonText}>Add folder</Text>
       </TouchableOpacity>
     </View>
@@ -98,7 +101,7 @@ export default function FoldersScreen() {
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
-      <StatusBar barStyle="dark-content" backgroundColor={Colors.bg} />
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
       <View style={styles.header}>
         <View style={styles.titleBlock}>
@@ -117,7 +120,7 @@ export default function FoldersScreen() {
           accessibilityLabel="Add folder"
           accessibilityRole="button"
         >
-          <AppIcon androidName="add" iosName="plus" color={Colors.white} size={18} fallback="+" />
+          <AppIcon androidName="add" iosName="plus" color={colors.white} size={18} fallback="+" />
           <Text style={styles.addBtnText}>Add</Text>
         </TouchableOpacity>
       </View>
@@ -146,10 +149,10 @@ export default function FoldersScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: Colors.bg,
+    backgroundColor: colors.bg,
   },
   header: {
     flexDirection: 'row',
@@ -165,7 +168,7 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
   },
   kicker: {
-    color: Colors.primary,
+    color: colors.primary,
     fontSize: TextScale.xs,
     fontWeight: '800',
     letterSpacing: 0.8,
@@ -174,11 +177,11 @@ const styles = StyleSheet.create({
   title: {
     fontSize: TextScale.xl,
     fontWeight: '900',
-    color: Colors.text,
+    color: colors.text,
   },
   subtitle: {
     fontSize: TextScale.sm,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     fontWeight: '600',
   },
   addBtn: {
@@ -186,7 +189,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
-    backgroundColor: Colors.primary,
+    backgroundColor: colors.primary,
     borderRadius: Radius.full,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
@@ -195,15 +198,15 @@ const styles = StyleSheet.create({
   addBtnText: {
     fontSize: TextScale.sm,
     fontWeight: '900',
-    color: Colors.white,
+    color: colors.white,
   },
   filterSection: {
     marginHorizontal: Spacing.six,
     padding: Spacing.four,
     borderRadius: Radius.lg,
-    backgroundColor: Colors.surfaceSoft,
+    backgroundColor: colors.surfaceSoft,
     borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
+    borderColor: colors.surfaceBorder,
   },
   listContent: {
     paddingHorizontal: Spacing.six,
@@ -224,7 +227,7 @@ const styles = StyleSheet.create({
     width: 76,
     height: 76,
     borderRadius: Radius.full,
-    backgroundColor: Colors.primarySoft,
+    backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: Spacing.one,
@@ -232,12 +235,12 @@ const styles = StyleSheet.create({
   emptyTitle: {
     fontSize: TextScale.lg,
     fontWeight: '900',
-    color: Colors.text,
+    color: colors.text,
     textAlign: 'center',
   },
   emptyBody: {
     fontSize: TextScale.base,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     textAlign: 'center',
     lineHeight: 22,
     fontWeight: '600',
@@ -250,10 +253,10 @@ const styles = StyleSheet.create({
     minHeight: 48,
     paddingHorizontal: Spacing.five,
     borderRadius: Radius.full,
-    backgroundColor: Colors.primary,
+    backgroundColor: colors.primary,
   },
   emptyButtonText: {
-    color: Colors.white,
+    color: colors.white,
     fontSize: TextScale.base,
     fontWeight: '900',
   },

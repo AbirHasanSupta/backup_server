@@ -39,6 +39,7 @@ _DEFAULTS = {
     "PORT": 8000,
     "DB_PATH": DB_PATH,
     "REQUIRE_APPROVAL": True,
+    "THEME_MODE": "light",
 }
 
 

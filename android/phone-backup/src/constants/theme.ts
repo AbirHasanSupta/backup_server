@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 
-export const Colors = {
+const lightColors = {
   bg: '#F5F7FB',
   bgWarm: '#EFF6F4',
   surface: '#FFFFFF',
@@ -35,20 +35,69 @@ export const Colors = {
   white: '#FFFFFF',
   black: '#000000',
   transparent: 'transparent',
+} as const;
 
+export type AppColors = Record<keyof typeof lightColors, string>;
+
+const darkColors: AppColors = {
+  bg: '#0B1220',
+  bgWarm: '#101827',
+  surface: '#121C2E',
+  surfaceSoft: '#172338',
+  surfaceElevated: '#1B2940',
+  surfaceBorder: '#2A3B55',
+
+  ink: '#F4F7FB',
+  text: '#F4F7FB',
+  textSecondary: '#A9B7C8',
+  textMuted: '#71839A',
+
+  primary: '#60A5FA',
+  primaryDark: '#3B82F6',
+  primaryLight: '#93C5FD',
+  primarySoft: '#1C355A',
+  primaryDim: '#152844',
+  primaryGlow: 'rgba(96, 165, 250, 0.18)',
+
+  success: '#34D399',
+  successSoft: '#123A2B',
+  successDim: '#123A2B',
+  warning: '#FBBF24',
+  warningSoft: '#433213',
+  warningDim: '#433213',
+  error: '#F87171',
+  errorSoft: '#451C25',
+  errorDim: '#451C25',
+  info: '#22D3EE',
+  infoSoft: '#123746',
+
+  white: '#FFFFFF',
+  black: '#000000',
+  transparent: 'transparent',
+} as const;
+
+export type ThemeMode = 'light' | 'dark';
+
+export const ColorSchemes = {
+  light: lightColors,
+  dark: darkColors,
+} as const;
+
+export const Colors = {
+  ...lightColors,
   light: {
-    text: '#102033',
-    background: '#F5F7FB',
-    backgroundElement: '#FFFFFF',
-    backgroundSelected: '#E8F0FF',
-    textSecondary: '#637487',
+    text: lightColors.text,
+    background: lightColors.bg,
+    backgroundElement: lightColors.surface,
+    backgroundSelected: lightColors.primarySoft,
+    textSecondary: lightColors.textSecondary,
   },
   dark: {
-    text: '#F4F7FB',
-    background: '#0B1220',
-    backgroundElement: '#121C2E',
-    backgroundSelected: '#1C2B45',
-    textSecondary: '#9AA8B8',
+    text: darkColors.text,
+    background: darkColors.bg,
+    backgroundElement: darkColors.surface,
+    backgroundSelected: darkColors.primarySoft,
+    textSecondary: darkColors.textSecondary,
   },
 } as const;
 

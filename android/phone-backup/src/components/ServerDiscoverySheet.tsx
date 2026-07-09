@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   Modal,
   View,
@@ -9,9 +9,10 @@ import {
   ActivityIndicator,
   Pressable,
 } from 'react-native';
-import { Colors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
+import { AppColors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
 import { discoverServers } from '../../serverDiscovery';
 import { AppIcon } from '@/components/AppIcon';
+import { useAppTheme } from '@/hooks/use-app-theme';
 
 interface Server {
   ip: string;
@@ -27,6 +28,8 @@ interface Props {
 }
 
 export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [servers, setServers] = useState<Server[]>([]);
@@ -72,7 +75,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
             <Text style={styles.subtitle}>Scan your local network for Phone Backup Server.</Text>
           </View>
           <TouchableOpacity onPress={onClose} style={styles.closeBtn} accessibilityLabel="Close discovery">
-            <AppIcon androidName="close" iosName="xmark" color={Colors.textSecondary} size={18} fallback="X" />
+            <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={18} fallback="X" />
           </TouchableOpacity>
         </View>
 
@@ -90,10 +93,10 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
           accessibilityRole="button"
         >
           {scanning ? (
-            <ActivityIndicator color={Colors.white} size="small" />
+            <ActivityIndicator color={colors.white} size="small" />
           ) : (
             <>
-              <AppIcon androidName="search" iosName="magnifyingglass" color={Colors.white} size={18} fallback="S" />
+              <AppIcon androidName="search" iosName="magnifyingglass" color={colors.white} size={18} fallback="S" />
               <Text style={styles.scanBtnText}>{servers.length > 0 ? 'Scan again' : 'Start scan'}</Text>
             </>
           )}
@@ -117,7 +120,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
                 accessibilityLabel={`Connect to ${item.name} at ${item.ip}`}
               >
                 <View style={styles.serverIcon}>
-                  <AppIcon androidName="desktop_windows" iosName="desktopcomputer" color={Colors.primary} size={24} fallback="PC" />
+                  <AppIcon androidName="desktop_windows" iosName="desktopcomputer" color={colors.primary} size={24} fallback="PC" />
                 </View>
                 <View style={styles.serverInfo}>
                   <Text style={styles.serverName}>{item.name}</Text>
@@ -125,7 +128,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
                     {item.ip}:{item.port} - v{item.version}
                   </Text>
                 </View>
-                <AppIcon androidName="arrow_forward" iosName="arrow.right" color={Colors.primary} size={20} fallback=">" />
+                <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.primary} size={20} fallback=">" />
               </TouchableOpacity>
             )}
           />
@@ -137,13 +140,13 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   backdrop: {
     flex: 1,
     backgroundColor: 'rgba(16, 32, 51, 0.42)',
   },
   sheet: {
-    backgroundColor: Colors.surface,
+    backgroundColor: colors.surface,
     borderTopLeftRadius: Radius.xxl,
     borderTopRightRadius: Radius.xxl,
     padding: Spacing.six,
@@ -151,13 +154,13 @@ const styles = StyleSheet.create({
     minHeight: 390,
     maxHeight: '82%',
     borderTopWidth: 1,
-    borderColor: Colors.surfaceBorder,
+    borderColor: colors.surfaceBorder,
   },
   handle: {
     width: 42,
     height: 5,
     borderRadius: Radius.full,
-    backgroundColor: Colors.surfaceBorder,
+    backgroundColor: colors.surfaceBorder,
     alignSelf: 'center',
     marginBottom: Spacing.five,
   },
@@ -171,11 +174,11 @@ const styles = StyleSheet.create({
   title: {
     fontSize: TextScale.lg,
     fontWeight: '800',
-    color: Colors.text,
+    color: colors.text,
   },
   subtitle: {
     fontSize: TextScale.sm,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     marginTop: Spacing.one,
     lineHeight: 19,
   },
@@ -183,25 +186,25 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: Radius.full,
-    backgroundColor: Colors.surfaceSoft,
+    backgroundColor: colors.surfaceSoft,
     alignItems: 'center',
     justifyContent: 'center',
   },
   progressTrack: {
     height: 5,
     borderRadius: Radius.full,
-    backgroundColor: Colors.surfaceBorder,
+    backgroundColor: colors.surfaceBorder,
     marginBottom: Spacing.four,
     overflow: 'hidden',
   },
   progressFill: {
     height: '100%',
     borderRadius: Radius.full,
-    backgroundColor: Colors.primary,
+    backgroundColor: colors.primary,
   },
   scanBtn: {
     minHeight: 48,
-    backgroundColor: Colors.primary,
+    backgroundColor: colors.primary,
     borderRadius: Radius.lg,
     paddingVertical: Spacing.three,
     alignItems: 'center',
@@ -215,18 +218,18 @@ const styles = StyleSheet.create({
     opacity: 0.72,
   },
   scanBtnText: {
-    color: Colors.white,
+    color: colors.white,
     fontSize: TextScale.base,
     fontWeight: '800',
   },
   errorBox: {
-    backgroundColor: Colors.errorSoft,
+    backgroundColor: colors.errorSoft,
     borderRadius: Radius.md,
     padding: Spacing.three,
     marginBottom: Spacing.four,
   },
   errorText: {
-    color: Colors.error,
+    color: colors.error,
     fontSize: TextScale.sm,
     fontWeight: '600',
   },
@@ -237,10 +240,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.three,
-    backgroundColor: Colors.surface,
+    backgroundColor: colors.surface,
     borderRadius: Radius.lg,
     borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
+    borderColor: colors.surfaceBorder,
     padding: Spacing.four,
     marginBottom: Spacing.two,
     ...Shadows.card,
@@ -249,7 +252,7 @@ const styles = StyleSheet.create({
     width: 46,
     height: 46,
     borderRadius: Radius.md,
-    backgroundColor: Colors.primarySoft,
+    backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -260,16 +263,16 @@ const styles = StyleSheet.create({
   serverName: {
     fontSize: TextScale.base,
     fontWeight: '800',
-    color: Colors.text,
+    color: colors.text,
   },
   serverMeta: {
     fontSize: TextScale.xs,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     fontWeight: '600',
   },
   hint: {
     fontSize: TextScale.xs,
-    color: Colors.textMuted,
+    color: colors.textMuted,
     textAlign: 'center',
     marginTop: Spacing.four,
     lineHeight: 17,

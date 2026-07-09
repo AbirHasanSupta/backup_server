@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -28,9 +28,10 @@ import {
 } from '../../settings';
 import { registerBackgroundTask } from '../../backgroundTask';
 import { connectToServer } from '../../connectToServer';
-import { Colors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
+import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
 import { AppIcon } from '@/components/AppIcon';
+import { useAppTheme } from '@/hooks/use-app-theme';
 
 const INTERVAL_PRESETS = [
   { label: '15 min', value: 15 },
@@ -42,20 +43,22 @@ const INTERVAL_PRESETS = [
   { label: '24 hr', value: 1440 },
 ];
 
-function SectionHeader({ title }: { title: string }) {
+function SectionHeader({ title, styles }: { title: string; styles: ReturnType<typeof createStyles> }) {
   return <Text style={styles.sectionHeader}>{title}</Text>;
 }
 
-function SettingsCard({ children }: { children: React.ReactNode }) {
+function SettingsCard({ children, styles }: { children: React.ReactNode; styles: ReturnType<typeof createStyles> }) {
   return <View style={styles.settingsCard}>{children}</View>;
 }
 
-function FieldLabel({ text }: { text: string }) {
+function FieldLabel({ text, styles }: { text: string; styles: ReturnType<typeof createStyles> }) {
   return <Text style={styles.fieldLabel}>{text}</Text>;
 }
 
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
+  const { colors, isDark, mode, setMode } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
 
   const [serverIp, setServerIpState] = useState('');
   const [serverPort, setServerPortState] = useState('8000');
@@ -176,7 +179,7 @@ export default function SettingsScreen() {
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
-      <StatusBar barStyle="dark-content" backgroundColor={Colors.bg} />
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
       <View style={styles.header}>
         <Text style={styles.kicker}>Preferences</Text>
@@ -192,42 +195,42 @@ export default function SettingsScreen() {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        <SectionHeader title="Server connection" />
-        <SettingsCard>
-          <FieldLabel text="Server IP address" />
+        <SectionHeader title="Server connection" styles={styles} />
+        <SettingsCard styles={styles}>
+          <FieldLabel text="Server IP address" styles={styles} />
           <TextInput
             id="server-ip-input"
             style={styles.textInput}
             value={serverIp}
             onChangeText={setServerIpState}
             placeholder="192.168.1.100"
-            placeholderTextColor={Colors.textMuted}
+            placeholderTextColor={colors.textMuted}
             keyboardType="numeric"
             autoCapitalize="none"
             autoCorrect={false}
             returnKeyType="next"
           />
 
-          <FieldLabel text="Port" />
+          <FieldLabel text="Port" styles={styles} />
           <TextInput
             id="server-port-input"
             style={styles.textInput}
             value={serverPort}
             onChangeText={setServerPortState}
             placeholder="8000"
-            placeholderTextColor={Colors.textMuted}
+            placeholderTextColor={colors.textMuted}
             keyboardType="numeric"
             returnKeyType="next"
           />
 
-          <FieldLabel text="API key" />
+          <FieldLabel text="API key" styles={styles} />
           <TextInput
             id="api-key-input"
             style={styles.textInput}
             value={apiKey}
             onChangeText={setApiKeyState}
             placeholder="Your secret key"
-            placeholderTextColor={Colors.textMuted}
+            placeholderTextColor={colors.textMuted}
             secureTextEntry
             autoCapitalize="none"
             autoCorrect={false}
@@ -242,7 +245,7 @@ export default function SettingsScreen() {
               accessibilityLabel="Discover servers on network"
               accessibilityRole="button"
             >
-              <AppIcon androidName="search" iosName="magnifyingglass" color={Colors.primary} size={18} fallback="S" />
+              <AppIcon androidName="search" iosName="magnifyingglass" color={colors.primary} size={18} fallback="S" />
               <Text style={styles.outlineBtnText}>Discover</Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -253,20 +256,48 @@ export default function SettingsScreen() {
               accessibilityLabel="Save server settings"
               accessibilityRole="button"
             >
-              <AppIcon androidName="check" iosName="checkmark" color={Colors.white} size={18} fallback="OK" />
+              <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={18} fallback="OK" />
               <Text style={styles.primaryBtnText}>{savingServer ? 'Saving' : 'Save'}</Text>
             </TouchableOpacity>
           </View>
         </SettingsCard>
 
-        <SectionHeader title="Sync schedule" />
-        <SettingsCard>
+        <SectionHeader title="Appearance" styles={styles} />
+        <SettingsCard styles={styles}>
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleIcon}>
+              <AppIcon
+                androidName={isDark ? 'dark_mode' : 'light_mode'}
+                iosName={isDark ? 'moon.fill' : 'sun.max.fill'}
+                color={isDark ? colors.primaryLight : colors.warning}
+                size={20}
+                fallback={isDark ? 'D' : 'L'}
+              />
+            </View>
+            <View style={styles.toggleInfo}>
+              <Text style={styles.toggleLabel}>Dark mode</Text>
+              <Text style={styles.toggleSub}>
+                {isDark ? 'Using the darker app theme.' : 'Using the light app theme.'}
+              </Text>
+            </View>
+            <Switch
+              value={mode === 'dark'}
+              onValueChange={(val) => setMode(val ? 'dark' : 'light')}
+              trackColor={{ false: colors.surfaceBorder, true: colors.primarySoft }}
+              thumbColor={isDark ? colors.primary : colors.textMuted}
+              accessibilityLabel="Toggle dark mode"
+            />
+          </View>
+        </SettingsCard>
+
+        <SectionHeader title="Sync schedule" styles={styles} />
+        <SettingsCard styles={styles}>
           <View style={styles.toggleRow}>
             <View style={styles.toggleIcon}>
               <AppIcon
                 androidName={syncPaused ? 'pause' : 'sync'}
                 iosName={syncPaused ? 'pause.fill' : 'arrow.triangle.2.circlepath'}
-                color={syncPaused ? Colors.warning : Colors.primary}
+                color={syncPaused ? colors.warning : colors.primary}
                 size={20}
                 fallback={syncPaused ? 'P' : 'S'}
               />
@@ -280,8 +311,8 @@ export default function SettingsScreen() {
             <Switch
               value={!syncPaused}
               onValueChange={(val) => handlePauseToggle(!val)}
-              trackColor={{ false: Colors.surfaceBorder, true: Colors.primarySoft }}
-              thumbColor={!syncPaused ? Colors.primary : Colors.textMuted}
+              trackColor={{ false: colors.surfaceBorder, true: colors.primarySoft }}
+              thumbColor={!syncPaused ? colors.primary : colors.textMuted}
               accessibilityLabel="Toggle auto sync"
             />
           </View>
@@ -289,7 +320,7 @@ export default function SettingsScreen() {
           {!syncPaused && (
             <>
               <View style={styles.divider} />
-              <FieldLabel text="Sync every" />
+              <FieldLabel text="Sync every" styles={styles} />
               <View style={styles.presetGrid}>
                 {INTERVAL_PRESETS.map((p) => {
                   const active = syncInterval === p.value;
@@ -316,8 +347,8 @@ export default function SettingsScreen() {
           )}
         </SettingsCard>
 
-        <SectionHeader title="Data management" />
-        <SettingsCard>
+        <SectionHeader title="Data management" styles={styles} />
+        <SettingsCard styles={styles}>
           <TouchableOpacity
             id="refresh-all-button"
             style={styles.dangerBtn}
@@ -325,7 +356,7 @@ export default function SettingsScreen() {
             accessibilityLabel="Refresh all backups"
             accessibilityRole="button"
           >
-            <AppIcon androidName="restart_alt" iosName="arrow.clockwise" color={Colors.error} size={18} fallback="R" />
+            <AppIcon androidName="restart_alt" iosName="arrow.clockwise" color={colors.error} size={18} fallback="R" />
             <Text style={styles.dangerBtnText}>Refresh all backups</Text>
           </TouchableOpacity>
           <Text style={styles.hintText}>
@@ -333,8 +364,8 @@ export default function SettingsScreen() {
           </Text>
         </SettingsCard>
 
-        <SectionHeader title="About" />
-        <SettingsCard>
+        <SectionHeader title="About" styles={styles} />
+        <SettingsCard styles={styles}>
           <View style={styles.aboutRow}>
             <Text style={styles.aboutLabel}>App version</Text>
             <Text style={styles.aboutValue}>1.0.0</Text>
@@ -361,10 +392,10 @@ export default function SettingsScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: Colors.bg,
+    backgroundColor: colors.bg,
   },
   header: {
     paddingHorizontal: Spacing.six,
@@ -373,7 +404,7 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
   },
   kicker: {
-    color: Colors.primary,
+    color: colors.primary,
     fontSize: TextScale.xs,
     fontWeight: '800',
     letterSpacing: 0.8,
@@ -382,11 +413,11 @@ const styles = StyleSheet.create({
   title: {
     fontSize: TextScale.xl,
     fontWeight: '900',
-    color: Colors.text,
+    color: colors.text,
   },
   subtitle: {
     fontSize: TextScale.sm,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     fontWeight: '600',
   },
   scrollContent: {
@@ -396,17 +427,17 @@ const styles = StyleSheet.create({
   sectionHeader: {
     fontSize: TextScale.xs,
     fontWeight: '900',
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     letterSpacing: 0.8,
     textTransform: 'uppercase',
     paddingTop: Spacing.three,
     paddingBottom: Spacing.two,
   },
   settingsCard: {
-    backgroundColor: Colors.surface,
+    backgroundColor: colors.surface,
     borderRadius: Radius.lg,
     borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
+    borderColor: colors.surfaceBorder,
     padding: Spacing.four,
     gap: Spacing.three,
     ...Shadows.card,
@@ -414,19 +445,19 @@ const styles = StyleSheet.create({
   fieldLabel: {
     fontSize: TextScale.xs,
     fontWeight: '800',
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     marginBottom: -Spacing.two,
   },
   textInput: {
     minHeight: 46,
-    backgroundColor: Colors.surfaceSoft,
+    backgroundColor: colors.surfaceSoft,
     borderRadius: Radius.md,
     borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
+    borderColor: colors.surfaceBorder,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.three,
     fontSize: TextScale.base,
-    color: Colors.text,
+    color: colors.text,
     fontWeight: '600',
   },
   buttonRow: {
@@ -438,24 +469,24 @@ const styles = StyleSheet.create({
     flex: 1,
     minHeight: 46,
     borderWidth: 1,
-    borderColor: Colors.primary,
+    borderColor: colors.primary,
     borderRadius: Radius.lg,
     paddingVertical: Spacing.three,
     alignItems: 'center',
     justifyContent: 'center',
     flexDirection: 'row',
     gap: Spacing.two,
-    backgroundColor: Colors.primarySoft,
+    backgroundColor: colors.primarySoft,
   },
   outlineBtnText: {
     fontSize: TextScale.sm,
     fontWeight: '900',
-    color: Colors.primary,
+    color: colors.primary,
   },
   primaryBtn: {
     flex: 1,
     minHeight: 46,
-    backgroundColor: Colors.primary,
+    backgroundColor: colors.primary,
     borderRadius: Radius.lg,
     paddingVertical: Spacing.three,
     alignItems: 'center',
@@ -466,7 +497,7 @@ const styles = StyleSheet.create({
   primaryBtnText: {
     fontSize: TextScale.sm,
     fontWeight: '900',
-    color: Colors.white,
+    color: colors.white,
   },
   toggleRow: {
     flexDirection: 'row',
@@ -477,7 +508,7 @@ const styles = StyleSheet.create({
     width: 42,
     height: 42,
     borderRadius: Radius.md,
-    backgroundColor: Colors.primarySoft,
+    backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -488,16 +519,16 @@ const styles = StyleSheet.create({
   toggleLabel: {
     fontSize: TextScale.base,
     fontWeight: '900',
-    color: Colors.text,
+    color: colors.text,
   },
   toggleSub: {
     fontSize: TextScale.xs,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     fontWeight: '600',
   },
   divider: {
     height: 1,
-    backgroundColor: Colors.surfaceBorder,
+    backgroundColor: colors.surfaceBorder,
     marginVertical: Spacing.one,
   },
   presetGrid: {
@@ -511,32 +542,32 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.two,
     borderRadius: Radius.full,
     borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
-    backgroundColor: Colors.surfaceSoft,
+    borderColor: colors.surfaceBorder,
+    backgroundColor: colors.surfaceSoft,
     justifyContent: 'center',
   },
   presetChipActive: {
-    borderColor: Colors.primary,
-    backgroundColor: Colors.primarySoft,
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
   },
   presetText: {
     fontSize: TextScale.sm,
     fontWeight: '700',
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
   },
   presetTextActive: {
-    color: Colors.primary,
+    color: colors.primary,
     fontWeight: '900',
   },
   hintText: {
     fontSize: TextScale.xs,
-    color: Colors.textMuted,
+    color: colors.textMuted,
     lineHeight: 17,
     fontWeight: '600',
   },
   dangerBtn: {
     minHeight: 46,
-    backgroundColor: Colors.errorSoft,
+    backgroundColor: colors.errorSoft,
     borderRadius: Radius.lg,
     borderWidth: 1,
     borderColor: '#F4B4B4',
@@ -549,7 +580,7 @@ const styles = StyleSheet.create({
   dangerBtnText: {
     fontSize: TextScale.base,
     fontWeight: '900',
-    color: Colors.error,
+    color: colors.error,
   },
   aboutRow: {
     flexDirection: 'row',
@@ -560,12 +591,12 @@ const styles = StyleSheet.create({
   },
   aboutLabel: {
     fontSize: TextScale.sm,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     fontWeight: '700',
   },
   aboutValue: {
     fontSize: TextScale.sm,
-    color: Colors.text,
+    color: colors.text,
     fontWeight: '800',
     textAlign: 'right',
   },

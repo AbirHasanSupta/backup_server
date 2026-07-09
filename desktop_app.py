@@ -51,7 +51,6 @@ from config import load_config, save_config
 from database import get_devices, get_stats, init_db, remove_device
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
-ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
 
 # ── Palette ────────────────────────────────────────────────────────────────────
@@ -73,6 +72,92 @@ C_SOFT_BLUE = "#E8F0FF"
 C_SOFT_GREEN = "#E4F8EF"
 C_SOFT_RED = "#FDECEC"
 C_SOFT_AMBER = "#FFF4DE"
+C_SOFT_INFO = "#E2F6FA"
+C_SOFT_BLUE_HOVER = "#DCEBFF"
+C_SOFT_GREEN_HOVER = "#CEF1E0"
+C_SOFT_RED_HOVER = "#F8D7D7"
+C_SUCCESS_HOVER = "#047857"
+C_SUCCESS_BORDER = "#A7E6C5"
+C_ERROR_BORDER = "#F4B4B4"
+C_WARNING_BORDER = "#F4D69D"
+C_LOG_TS = "#3A5070"
+
+_LIGHT_PALETTE = {
+    "C_BG": "#F5F7FB",
+    "C_SURFACE": "#FFFFFF",
+    "C_ELEVATED": "#F9FBFD",
+    "C_CARD": "#FFFFFF",
+    "C_BORDER": "#DCE5EE",
+    "C_ACCENT": "#2563EB",
+    "C_ACCENT2": "#1D4ED8",
+    "C_SUCCESS": "#059669",
+    "C_ERROR": "#DC2626",
+    "C_WARNING": "#D97706",
+    "C_INFO": "#0891B2",
+    "C_TEXT": "#102033",
+    "C_MUTED": "#637487",
+    "C_HIGHLIGHT": "#2563EB",
+    "C_SOFT_BLUE": "#E8F0FF",
+    "C_SOFT_GREEN": "#E4F8EF",
+    "C_SOFT_RED": "#FDECEC",
+    "C_SOFT_AMBER": "#FFF4DE",
+    "C_SOFT_INFO": "#E2F6FA",
+    "C_SOFT_BLUE_HOVER": "#DCEBFF",
+    "C_SOFT_GREEN_HOVER": "#CEF1E0",
+    "C_SOFT_RED_HOVER": "#F8D7D7",
+    "C_SUCCESS_HOVER": "#047857",
+    "C_SUCCESS_BORDER": "#A7E6C5",
+    "C_ERROR_BORDER": "#F4B4B4",
+    "C_WARNING_BORDER": "#F4D69D",
+    "C_LOG_TS": "#3A5070",
+}
+
+_DARK_PALETTE = {
+    "C_BG": "#0B1220",
+    "C_SURFACE": "#121C2E",
+    "C_ELEVATED": "#172338",
+    "C_CARD": "#121C2E",
+    "C_BORDER": "#2A3B55",
+    "C_ACCENT": "#60A5FA",
+    "C_ACCENT2": "#3B82F6",
+    "C_SUCCESS": "#34D399",
+    "C_ERROR": "#F87171",
+    "C_WARNING": "#FBBF24",
+    "C_INFO": "#22D3EE",
+    "C_TEXT": "#F4F7FB",
+    "C_MUTED": "#A9B7C8",
+    "C_HIGHLIGHT": "#93C5FD",
+    "C_SOFT_BLUE": "#1C355A",
+    "C_SOFT_GREEN": "#123A2B",
+    "C_SOFT_RED": "#451C25",
+    "C_SOFT_AMBER": "#433213",
+    "C_SOFT_INFO": "#123746",
+    "C_SOFT_BLUE_HOVER": "#244672",
+    "C_SOFT_GREEN_HOVER": "#164833",
+    "C_SOFT_RED_HOVER": "#57212C",
+    "C_SUCCESS_HOVER": "#10B981",
+    "C_SUCCESS_BORDER": "#1D6B4B",
+    "C_ERROR_BORDER": "#7F2A38",
+    "C_WARNING_BORDER": "#725018",
+    "C_LOG_TS": "#7890AE",
+}
+
+CURRENT_THEME = "light"
+
+
+def _normalize_theme_mode(mode: str | None) -> str:
+    return "dark" if str(mode).lower() == "dark" else "light"
+
+
+def apply_theme(mode: str | None) -> str:
+    global CURRENT_THEME
+    CURRENT_THEME = _normalize_theme_mode(mode)
+    globals().update(_DARK_PALETTE if CURRENT_THEME == "dark" else _LIGHT_PALETTE)
+    ctk.set_appearance_mode(CURRENT_THEME)
+    return CURRENT_THEME
+
+
+apply_theme(load_config().get("THEME_MODE", "light"))
 
 # Module-level font references (populated after root window exists)
 FONT_TITLE:   ctk.CTkFont
@@ -180,8 +265,8 @@ def confirm_dialog(parent, title: str, message: str) -> bool:
         font=FONT_BODY, command=_no,
     ).pack(side="left")
     ctk.CTkButton(
-        bf, text="Confirm", fg_color=C_SOFT_RED, hover_color="#F8D7D7",
-        text_color=C_ERROR, border_width=1, border_color="#F4B4B4",
+        bf, text="Confirm", fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
+        text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
         width=130, height=38, font=FONT_BODY, command=_yes,
     ).pack(side="right")
 
@@ -209,6 +294,7 @@ class BreathingDot(ctk.CTkCanvas):
         self._color_off = C_SOFT_GREEN
         self._step = 0
         self._running = True
+        self._after_id: str | None = None
         self._oval = self.create_oval(1, 1, size - 1, size - 1, fill=self._color_on, outline="")
         self._animate()
 
@@ -230,17 +316,27 @@ class BreathingDot(ctk.CTkCanvas):
         return f"#{r:02x}{g:02x}{b:02x}"
 
     def _animate(self):
-        if not self._running:
+        if not self._running or not self.winfo_exists():
             return
         import math
         t = (math.sin(self._step * math.pi / (self._PERIOD / 50)) + 1) / 2
         color = self._lerp_color(t)
         self.itemconfig(self._oval, fill=color)
         self._step += 1
-        self.after(50, self._animate)
+        self._after_id = self.after(50, self._animate)
 
     def stop(self):
         self._running = False
+        if self._after_id:
+            try:
+                self.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def destroy(self):
+        self.stop()
+        super().destroy()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -299,8 +395,10 @@ class BackupServerApp(ctk.CTk):
         self._server_thread:  threading.Thread | None = None
         self._server_running  = False
         self._current_page:   str | None = None
+        self._current_addr:   str = ""
         self._server_start_time: float | None = None
         self._device_card_widgets: dict[str, dict] = {}
+        self._theme_rebuild_after_id: str | None = None
 
         # Build layout
         self._setup_grid()
@@ -404,16 +502,17 @@ class BackupServerApp(ctk.CTk):
             sb,
             text="Stop Server",
             fg_color=C_SOFT_RED,
-            hover_color="#F8D7D7",
+            hover_color=C_SOFT_RED_HOVER,
             text_color=C_ERROR,
             border_width=1,
-            border_color="#F4B4B4",
+            border_color=C_ERROR_BORDER,
             height=44,
             corner_radius=14,
             font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
             command=self._toggle_server,
         )
         self._toggle_btn.pack(fill="x", padx=14, pady=(0, 18), side="bottom")
+        self._configure_server_button()
 
     # ─── Status bar ──────────────────────────────────────────────────────────
 
@@ -458,6 +557,7 @@ class BackupServerApp(ctk.CTk):
         ctk.CTkFrame(bar, width=1, fg_color=C_BORDER).pack(side="right", fill="y", pady=8)
 
     def _set_status(self, running: bool, addr: str = ""):
+        self._current_addr = addr if running else ""
         self._dot.set_running(running)
         if running:
             self._status_lbl.configure(text="Server Running", text_color=C_SUCCESS)
@@ -467,6 +567,35 @@ class BackupServerApp(ctk.CTk):
             self._addr_lbl.configure(text="")
             self._uptime_lbl.configure(text="")
             self._activity_lbl.configure(text="")
+
+    def _configure_server_button(self):
+        if self._server_running:
+            self._toggle_btn.configure(
+                text="Stop Server", fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
+                text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
+            )
+        else:
+            self._toggle_btn.configure(
+                text="Start Server", fg_color=C_SOFT_GREEN, hover_color=C_SOFT_GREEN_HOVER,
+                text_color=C_SUCCESS, border_width=1, border_color=C_SUCCESS_BORDER,
+            )
+
+    def _rebuild_shell(self):
+        page = self._current_page or "dashboard"
+        for widget in self.grid_slaves():
+            widget.destroy()
+        self._device_card_widgets = {}
+        self._last_dash_logs = []
+        self._last_logs_cache = []
+        self._last_logs_query = ""
+        self.configure(fg_color=C_BG)
+        self._setup_grid()
+        self._build_sidebar()
+        self._build_statusbar()
+        self._build_content_area()
+        self._show_page(page if page in self.PAGES else "dashboard")
+        self._set_status(self._server_running, self._current_addr)
+        self._configure_server_button()
 
     def _tick_uptime(self):
         if self._server_running and self._server_start_time:
@@ -538,13 +667,13 @@ class BackupServerApp(ctk.CTk):
         cards_row.pack(fill="x", padx=25, pady=(20, 0))
 
         card_defs = [
-            ("F", "Total Files",   C_ACCENT,   "_s_files"),
-            ("P", "Devices",       C_INFO,     "_s_devices"),
-            ("S", "Total Size",    C_WARNING,  "_s_size"),
-            ("T", "Last Backup",   C_SUCCESS,  "_s_last"),
+            ("F", "Total Files",   C_ACCENT,   "_s_files",   self._open_backup_root),
+            ("P", "Devices",       C_INFO,     "_s_devices", lambda: self._show_page("devices")),
+            ("S", "Total Size",    C_WARNING,  "_s_size",    None),
+            ("T", "Last Backup",   C_SUCCESS,  "_s_last",    None),
         ]
-        for icon, label, color, attr in card_defs:
-            lbl = self._stat_card(cards_row, icon, label, "-", color)
+        for icon, label, color, attr, command in card_defs:
+            lbl = self._stat_card(cards_row, icon, label, "-", color, command)
             setattr(self, attr, lbl)
 
         # ── Recent activity ───────────────────────────────────────────────
@@ -566,18 +695,21 @@ class BackupServerApp(ctk.CTk):
 
         return frame
 
-    def _stat_card(self, parent, icon: str, label: str, value: str, accent: str) -> ctk.CTkLabel:
-        outer = ctk.CTkFrame(parent, fg_color=C_BORDER, corner_radius=18)
-        outer.pack(side="left", fill="both", expand=True, padx=7, pady=4)
-
-        inner = ctk.CTkFrame(outer, fg_color=C_CARD, corner_radius=17)
-        inner.pack(fill="both", expand=True, padx=1, pady=1)
+    def _stat_card(self, parent, icon: str, label: str, value: str, accent: str, command=None) -> ctk.CTkLabel:
+        inner = ctk.CTkFrame(
+            parent,
+            fg_color=C_CARD,
+            corner_radius=18,
+            border_width=1,
+            border_color=C_BORDER,
+        )
+        inner.pack(side="left", fill="both", expand=True, padx=7, pady=4)
 
         # Icon badge uses soft tints so the cards match the Android app.
         _BADGE_TINTS = {
             C_ACCENT:  C_SOFT_BLUE,
             C_ACCENT2: C_SOFT_BLUE,
-            C_INFO:    "#E2F6FA",
+            C_INFO:    C_SOFT_INFO,
             C_WARNING: C_SOFT_AMBER,
             C_SUCCESS: C_SOFT_GREEN,
         }
@@ -603,11 +735,9 @@ class BackupServerApp(ctk.CTk):
 
         # Hover effect
         def _enter(e):
-            outer.configure(fg_color=accent)
-            inner.configure(fg_color=C_ELEVATED)
+            inner.configure(fg_color=C_ELEVATED, border_color=accent)
         def _leave(e):
-            outer.configure(fg_color=C_BORDER)
-            inner.configure(fg_color=C_CARD)
+            inner.configure(fg_color=C_CARD, border_color=C_BORDER)
         
         inner.bind("<Enter>", _enter)
         inner.bind("<Leave>", _leave)
@@ -615,8 +745,33 @@ class BackupServerApp(ctk.CTk):
         for child in inner.winfo_children():
             child.bind("<Enter>", _enter)
             child.bind("<Leave>", _leave)
+        if command:
+            self._bind_click_tree(inner, command)
 
         return val_lbl
+
+    def _bind_click_tree(self, widget, command):
+        try:
+            widget.configure(cursor="hand2")
+        except Exception:
+            pass
+        widget.bind("<Button-1>", lambda _event: command(), add="+")
+        for child in widget.winfo_children():
+            self._bind_click_tree(child, command)
+
+    def _open_backup_root(self):
+        root = str(load_config().get("BACKUP_ROOT", "")).strip()
+        if not root:
+            messagebox.showwarning("Backup Folder", "Choose a backup root folder in Settings first.")
+            self._show_page("settings")
+            return
+
+        root = os.path.abspath(os.path.expanduser(os.path.expandvars(root)))
+        try:
+            os.makedirs(root, exist_ok=True)
+            os.startfile(root)  # type: ignore[attr-defined]
+        except Exception as exc:
+            messagebox.showerror("Backup Folder", f"Could not open backup folder:\n{exc}")
 
     def _setup_log_tags(self, box: ctk.CTkTextbox):
         """Configure colour tags on a CTkTextbox's internal tk.Text widget."""
@@ -626,7 +781,7 @@ class BackupServerApp(ctk.CTk):
         txt.tag_config("warning", foreground=C_WARNING)
         txt.tag_config("info",    foreground=C_INFO)
         txt.tag_config("muted",   foreground=C_MUTED)
-        txt.tag_config("ts",      foreground="#3A5070")
+        txt.tag_config("ts",      foreground=C_LOG_TS)
 
     def _insert_log_line(self, box: ctk.CTkTextbox, entry: dict):
         """Insert one log entry with coloured tags into box."""
@@ -685,7 +840,7 @@ class BackupServerApp(ctk.CTk):
         hdr = self._page_header(frame, "Connected Devices")
         ctk.CTkButton(
             hdr, text="Refresh", width=110, height=36,
-            fg_color=C_SOFT_BLUE, hover_color="#DCEBFF",
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
             text_color=C_ACCENT,
             border_width=1, border_color=C_BORDER,
             corner_radius=12,
@@ -774,12 +929,14 @@ class BackupServerApp(ctk.CTk):
         widgets["chip_files"].configure(text=f"  {dev['files_backed_up']:,} files  ")
 
     def _device_card(self, parent, dev: dict) -> dict:
-        # Outer accent border
-        outer = ctk.CTkFrame(parent, fg_color=C_BORDER, corner_radius=18)
-        outer.pack(fill="x", padx=8, pady=6)
-
-        card = ctk.CTkFrame(outer, fg_color=C_SURFACE, corner_radius=17)
-        card.pack(fill="x", padx=1, pady=1)
+        card = ctk.CTkFrame(
+            parent,
+            fg_color=C_SURFACE,
+            corner_radius=18,
+            border_width=1,
+            border_color=C_BORDER,
+        )
+        card.pack(fill="x", padx=8, pady=6)
         card.grid_columnconfigure(1, weight=1)
 
         # ── Phone icon with badge ──────────────────────────────────────────
@@ -821,7 +978,7 @@ class BackupServerApp(ctk.CTk):
         details_row.grid(row=1, column=1, sticky="nw", padx=4, pady=(0, 18))
 
         _CHIP_TINTS = {
-            C_INFO:   "#E2F6FA",
+            C_INFO:   C_SOFT_INFO,
             C_ACCENT: C_SOFT_BLUE,
             C_MUTED:  C_ELEVATED,
         }
@@ -884,14 +1041,14 @@ class BackupServerApp(ctk.CTk):
 
         ctk.CTkButton(
             card, text="Remove", width=90, height=34,
-            fg_color=C_SOFT_RED, hover_color="#F8D7D7",
-            text_color=C_ERROR, border_width=1, border_color="#F4B4B4",
+            fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
+            text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
             font=FONT_SMALL, corner_radius=8,
             command=do_remove,
         ).grid(row=0, column=2, rowspan=2, padx=16)
 
         return {
-            "outer": outer,
+            "outer": card,
             "pill": pill,
             "pill_lbl": pill_lbl,
             "chip_ip": chip_ip,
@@ -938,6 +1095,31 @@ class BackupServerApp(ctk.CTk):
             return e
 
         # ── SERVER ────────────────────────────────────────────────────────
+        app_card = settings_card("Appearance")
+        theme_row = ctk.CTkFrame(app_card, fg_color="transparent")
+        theme_row.pack(fill="x", padx=18, pady=18)
+
+        self._sw_dark_mode = ctk.CTkSwitch(
+            theme_row, text="", width=52, height=26,
+            button_color=C_ACCENT, progress_color=C_ACCENT,
+            command=lambda: self.after(0, self._apply_theme_from_settings),
+        )
+        self._sw_dark_mode.pack(side="left")
+        if _normalize_theme_mode(cfg.get("THEME_MODE")) == "dark":
+            self._sw_dark_mode.select()
+
+        theme_copy = ctk.CTkFrame(theme_row, fg_color="transparent")
+        theme_copy.pack(side="left", fill="x", expand=True, padx=12)
+        ctk.CTkLabel(
+            theme_copy, text="Dark mode",
+            font=FONT_BODY, text_color=C_TEXT,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            theme_copy,
+            text="Changes the desktop console appearance immediately.",
+            font=FONT_SMALL, text_color=C_MUTED,
+        ).pack(anchor="w", pady=(2, 0))
+
         srv_card = settings_card("Server")
         self._e_host = labeled_entry(srv_card, "Listen IP  (0.0.0.0 = all interfaces)",
                                      cfg.get("HOST", "0.0.0.0"), "0.0.0.0")
@@ -953,7 +1135,7 @@ class BackupServerApp(ctk.CTk):
         browse_row.pack(fill="x", padx=18, pady=(0, 14))
         ctk.CTkButton(
             browse_row, text="Browse", width=140, height=38,
-            fg_color=C_SOFT_BLUE, hover_color="#DCEBFF",
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
             text_color=C_ACCENT,
             border_width=1, border_color=C_BORDER,
             corner_radius=12, font=FONT_BODY,
@@ -1018,10 +1200,29 @@ class BackupServerApp(ctk.CTk):
             "BACKUP_ROOT":      self._e_root.get().strip(),
             "API_KEY":          self._e_key.get().strip() or "YOUR_SECRET_KEY",
             "REQUIRE_APPROVAL": bool(self._sw_approval.get()),
+            "THEME_MODE":       "dark" if bool(self._sw_dark_mode.get()) else "light",
         }
         save_config(cfg)
         add_log("Settings saved - restarting server")
         self._restart_server()
+
+    def _apply_theme_from_settings(self):
+        mode = "dark" if bool(self._sw_dark_mode.get()) else "light"
+        cfg = load_config()
+        cfg["THEME_MODE"] = mode
+        save_config(cfg)
+        apply_theme(mode)
+        add_log(f"Theme changed to {mode}")
+        if self._theme_rebuild_after_id:
+            try:
+                self.after_cancel(self._theme_rebuild_after_id)
+            except Exception:
+                pass
+        self._theme_rebuild_after_id = self.after(150, self._finish_theme_rebuild)
+
+    def _finish_theme_rebuild(self):
+        self._theme_rebuild_after_id = None
+        self._rebuild_shell()
 
     # ─── Page: Logs ───────────────────────────────────────────────────────────
 
@@ -1045,7 +1246,7 @@ class BackupServerApp(ctk.CTk):
 
         ctk.CTkButton(
             ctrl, text="Refresh", width=100, height=36,
-            fg_color=C_SOFT_BLUE, hover_color="#DCEBFF",
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
             text_color=C_ACCENT,
             border_width=1, border_color=C_BORDER,
             corner_radius=12,
@@ -1054,9 +1255,9 @@ class BackupServerApp(ctk.CTk):
 
         ctk.CTkButton(
             ctrl, text="Clear", width=90, height=36,
-            fg_color=C_SOFT_RED, hover_color="#F8D7D7",
+            fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
             text_color=C_ERROR,
-            border_width=1, border_color="#F4B4B4",
+            border_width=1, border_color=C_ERROR_BORDER,
             corner_radius=12,
             command=self._clear_logs,
         ).pack(side="left")
@@ -1148,6 +1349,10 @@ class BackupServerApp(ctk.CTk):
             self._sw_approval.select()
         else:
             self._sw_approval.deselect()
+        if _normalize_theme_mode(cfg.get("THEME_MODE")) == "dark":
+            self._sw_dark_mode.select()
+        else:
+            self._sw_dark_mode.deselect()
 
     def _auto_refresh(self):
         if self._current_page == "dashboard":
@@ -1185,10 +1390,7 @@ class BackupServerApp(ctk.CTk):
                 add_log(f"Error: Port {PORT} is occupied.")
                 self._server_running = False
                 self.after(0, lambda: self._set_status(False))
-                self.after(0, lambda: self._toggle_btn.configure(
-                    text="Start Server", fg_color=C_SOFT_GREEN, hover_color="#CEF1E0",
-                    text_color=C_SUCCESS, border_width=1, border_color="#A7E6C5",
-                ))
+                self.after(0, self._configure_server_button)
                 return
 
         ucfg = uvicorn.Config(
@@ -1214,10 +1416,7 @@ class BackupServerApp(ctk.CTk):
         local_ip = get_local_ip()
         addr = f"http://{local_ip}:{PORT}"
         self.after(0, lambda: self._set_status(True, addr))
-        self.after(0, lambda: self._toggle_btn.configure(
-            text="Stop Server", fg_color=C_SOFT_RED, hover_color="#F8D7D7",
-            text_color=C_ERROR, border_width=1, border_color="#F4B4B4",
-        ))
+        self.after(0, self._configure_server_button)
         add_log(f"Server started - {addr}")
 
     def _stop_server(self):
@@ -1226,10 +1425,7 @@ class BackupServerApp(ctk.CTk):
         self._server_running    = False
         self._server_start_time = None
         self.after(0, lambda: self._set_status(False))
-        self.after(0, lambda: self._toggle_btn.configure(
-            text="Start Server", fg_color=C_SOFT_GREEN, hover_color="#CEF1E0",
-            text_color=C_SUCCESS, border_width=1, border_color="#A7E6C5",
-        ))
+        self.after(0, self._configure_server_button)
         add_log("Server stopped")
 
     def _restart_server(self):
@@ -1371,15 +1567,15 @@ class BackupServerApp(ctk.CTk):
 
         ctk.CTkButton(
             btns, text="Reject",
-            fg_color=C_SOFT_RED, hover_color="#F8D7D7",
-            text_color=C_ERROR, border_width=1, border_color="#F4B4B4",
+            fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
+            text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
             height=48, font=ctk.CTkFont(size=14, weight="bold"),
             corner_radius=12, command=_reject,
         ).pack(side="left", expand=True, padx=(0, 8))
 
         ctk.CTkButton(
             btns, text="Accept",
-            fg_color=C_SUCCESS, hover_color="#047857",
+            fg_color=C_SUCCESS, hover_color=C_SUCCESS_HOVER,
             text_color="#FFFFFF",
             height=48, font=ctk.CTkFont(size=14, weight="bold"),
             corner_radius=12, command=_accept,

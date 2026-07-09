@@ -1,27 +1,30 @@
 import { Tabs } from 'expo-router';
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Platform, View, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import * as MediaLibrary from 'expo-media-library';
 import { registerBackgroundTask } from '../../backgroundTask';
 import { setupNotifications } from '../../notificationService';
-import { Colors, Radius, Shadows, TextScale } from '@/constants/theme';
+import { AppColors, Radius, Shadows, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
+import { AppThemeProvider, useAppTheme } from '@/hooks/use-app-theme';
 
 type TabIconProps = {
   androidName: string;
   iosName: string;
   focused: boolean;
+  colors: AppColors;
+  styles: ReturnType<typeof createStyles>;
 };
 
-function TabIcon({ androidName, iosName, focused }: TabIconProps) {
+function TabIcon({ androidName, iosName, focused, colors, styles }: TabIconProps) {
   return (
     <View style={[styles.iconWrapper, focused && styles.iconWrapperFocused]}>
       <AppIcon
         androidName={androidName}
         iosName={iosName}
         size={22}
-        color={focused ? Colors.primary : Colors.textSecondary}
+        color={focused ? colors.primary : colors.textSecondary}
         fallback="*"
       />
     </View>
@@ -29,6 +32,17 @@ function TabIcon({ androidName, iosName, focused }: TabIconProps) {
 }
 
 export default function RootLayout() {
+  return (
+    <AppThemeProvider>
+      <RootLayoutContent />
+    </AppThemeProvider>
+  );
+}
+
+function RootLayoutContent() {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   useEffect(() => {
     (async () => {
       try {
@@ -48,8 +62,8 @@ export default function RootLayout() {
           tabBarStyle: styles.tabBar,
           tabBarBackground: () => <View style={styles.tabBarBg} />,
           tabBarLabelStyle: styles.tabLabel,
-          tabBarActiveTintColor: Colors.primary,
-          tabBarInactiveTintColor: Colors.textSecondary,
+          tabBarActiveTintColor: colors.primary,
+          tabBarInactiveTintColor: colors.textSecondary,
           tabBarIconStyle: styles.tabIcon,
           tabBarItemStyle: styles.tabItem,
         }}
@@ -59,7 +73,7 @@ export default function RootLayout() {
           options={{
             title: 'Backup',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="cloud_upload" iosName="icloud.and.arrow.up" focused={focused} />
+              <TabIcon androidName="cloud_upload" iosName="icloud.and.arrow.up" focused={focused} colors={colors} styles={styles} />
             ),
           }}
         />
@@ -68,7 +82,7 @@ export default function RootLayout() {
           options={{
             title: 'Folders',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="folder" iosName="folder" focused={focused} />
+              <TabIcon androidName="folder" iosName="folder" focused={focused} colors={colors} styles={styles} />
             ),
           }}
         />
@@ -77,7 +91,7 @@ export default function RootLayout() {
           options={{
             title: 'Settings',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="settings" iosName="gearshape" focused={focused} />
+              <TabIcon androidName="settings" iosName="gearshape" focused={focused} colors={colors} styles={styles} />
             ),
           }}
         />
@@ -89,7 +103,7 @@ export default function RootLayout() {
 
 const TAB_BAR_HEIGHT = Platform.OS === 'android' ? 82 : 88;
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   tabBar: {
     position: 'absolute',
     bottom: 10,
@@ -98,15 +112,15 @@ const styles = StyleSheet.create({
     height: TAB_BAR_HEIGHT,
     borderTopWidth: 0,
     borderRadius: Radius.xxl,
-    backgroundColor: Colors.surface,
+    backgroundColor: colors.surface,
     ...Shadows.card,
   },
   tabBarBg: {
     flex: 1,
     borderRadius: Radius.xxl,
-    backgroundColor: Colors.surface,
+    backgroundColor: colors.surface,
     borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
+    borderColor: colors.surfaceBorder,
   },
   tabItem: {
     flex: 1,
@@ -128,7 +142,7 @@ const styles = StyleSheet.create({
     borderRadius: Radius.full,
   },
   iconWrapperFocused: {
-    backgroundColor: Colors.primarySoft,
+    backgroundColor: colors.primarySoft,
   },
   tabLabel: {
     fontSize: TextScale.xs,

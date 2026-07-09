@@ -14,6 +14,7 @@ const KEYS = {
   DEVICE_ID:      'device_id',
   FORCE_REFRESH_ALL: 'force_refresh_all',
   FORCE_REFRESH_FOLDERS: 'force_refresh_folders',
+  THEME_MODE:     'theme_mode',
 };
 
 // ─── File-type labels (displayed in UI) ───────────────────────────────────────
@@ -123,6 +124,14 @@ export async function setSyncInterval(minutes) { await AsyncStorage.setItem(KEYS
 
 export async function getSyncPaused()     { return (await AsyncStorage.getItem(KEYS.SYNC_PAUSED)) === 'true'; }
 export async function setSyncPaused(val)  { await AsyncStorage.setItem(KEYS.SYNC_PAUSED, val ? 'true' : 'false'); }
+
+export async function getThemeMode() {
+  const mode = await AsyncStorage.getItem(KEYS.THEME_MODE);
+  return mode === 'dark' ? 'dark' : 'light';
+}
+export async function setThemeMode(mode) {
+  await AsyncStorage.setItem(KEYS.THEME_MODE, mode === 'dark' ? 'dark' : 'light');
+}
 
 // ─── Sync stats ───────────────────────────────────────────────────────────────
 export async function getLastSyncTime() {

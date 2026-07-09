@@ -1,8 +1,9 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { View, Text, TouchableOpacity, ScrollView, StyleSheet } from 'react-native';
-import { Colors, Radius, Spacing, TextScale } from '@/constants/theme';
+import { AppColors, Radius, Spacing, TextScale } from '@/constants/theme';
 import { FILE_TYPE_LABELS } from '../../settings';
 import { AppIcon } from '@/components/AppIcon';
+import { useAppTheme } from '@/hooks/use-app-theme';
 
 const FILE_TYPE_ICONS: Record<string, { android: string; ios: string; fallback: string }> = {
   all: { android: 'select_all', ios: 'square.grid.2x2', fallback: 'A' },
@@ -22,6 +23,8 @@ interface Props {
 }
 
 export function FileTypeSelector({ selected, onChange }: Props) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const isAll = selected.includes('all');
 
   const toggle = (type: FileType) => {
@@ -69,7 +72,7 @@ export function FileTypeSelector({ selected, onChange }: Props) {
               <AppIcon
                 androidName={icon.android}
                 iosName={icon.ios}
-                color={active ? Colors.primary : Colors.textSecondary}
+                color={active ? colors.primary : colors.textSecondary}
                 size={16}
                 fallback={icon.fallback}
               />
@@ -84,7 +87,7 @@ export function FileTypeSelector({ selected, onChange }: Props) {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   headingRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -94,13 +97,13 @@ const styles = StyleSheet.create({
   label: {
     fontSize: TextScale.xs,
     fontWeight: '800',
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     letterSpacing: 0.7,
     textTransform: 'uppercase',
   },
   selection: {
     fontSize: TextScale.xs,
-    color: Colors.textMuted,
+    color: colors.textMuted,
     fontWeight: '600',
   },
   row: {
@@ -116,19 +119,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     borderRadius: Radius.full,
     borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
-    backgroundColor: Colors.surface,
+    borderColor: colors.surfaceBorder,
+    backgroundColor: colors.surface,
   },
   pillActive: {
-    borderColor: Colors.primary,
-    backgroundColor: Colors.primarySoft,
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
   },
   pillText: {
     fontSize: TextScale.sm,
     fontWeight: '700',
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
   },
   pillTextActive: {
-    color: Colors.primary,
+    color: colors.primary,
   },
 });

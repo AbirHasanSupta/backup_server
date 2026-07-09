@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import Animated, {
   Easing,
@@ -8,8 +8,9 @@ import Animated, {
   withSequence,
   withTiming,
 } from 'react-native-reanimated';
-import { Colors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
+import { AppColors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
+import { useAppTheme } from '@/hooks/use-app-theme';
 
 const RING_SIZE = 226;
 const INNER_SIZE = 176;
@@ -35,6 +36,8 @@ export function SyncProgressRing({
   checked = 0,
   checkTotal = 0,
 }: Props) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
   const pulse = useSharedValue(1);
   const sweep = useSharedValue(0);
 
@@ -88,7 +91,7 @@ export function SyncProgressRing({
             <AppIcon
               androidName={isActive ? 'sync' : 'cloud_done'}
               iosName={isActive ? 'arrow.triangle.2.circlepath' : 'checkmark.icloud'}
-              color={isActive ? Colors.primary : Colors.success}
+              color={isActive ? colors.primary : colors.success}
               size={30}
               fallback={isActive ? 'S' : 'OK'}
             />
@@ -110,7 +113,7 @@ export function SyncProgressRing({
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   container: {
     width: RING_SIZE,
     height: RING_SIZE,
@@ -122,7 +125,7 @@ const styles = StyleSheet.create({
     width: RING_SIZE,
     height: RING_SIZE,
     borderRadius: RING_SIZE / 2,
-    backgroundColor: Colors.primaryGlow,
+    backgroundColor: colors.primaryGlow,
   },
   sweep: {
     position: 'absolute',
@@ -130,26 +133,26 @@ const styles = StyleSheet.create({
     height: RING_SIZE - 10,
     borderRadius: (RING_SIZE - 10) / 2,
     borderWidth: 3,
-    borderColor: Colors.transparent,
-    borderTopColor: Colors.primary,
-    borderRightColor: Colors.primaryLight,
+    borderColor: colors.transparent,
+    borderTopColor: colors.primary,
+    borderRightColor: colors.primaryLight,
   },
   ring: {
     width: RING_SIZE - 16,
     height: RING_SIZE - 16,
     borderRadius: (RING_SIZE - 16) / 2,
     borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
+    borderColor: colors.surfaceBorder,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: Colors.surface,
+    backgroundColor: colors.surface,
     ...Shadows.soft,
   },
   inner: {
     width: INNER_SIZE,
     height: INNER_SIZE,
     borderRadius: INNER_SIZE / 2,
-    backgroundColor: Colors.surfaceSoft,
+    backgroundColor: colors.surfaceSoft,
     alignItems: 'center',
     justifyContent: 'center',
     padding: Spacing.five,
@@ -158,7 +161,7 @@ const styles = StyleSheet.create({
     width: 54,
     height: 54,
     borderRadius: Radius.full,
-    backgroundColor: Colors.primarySoft,
+    backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: Spacing.three,
@@ -170,23 +173,23 @@ const styles = StyleSheet.create({
   progressNumber: {
     fontSize: TextScale.xxl,
     fontWeight: '800',
-    color: Colors.text,
+    color: colors.text,
     lineHeight: 38,
   },
   progressSymbol: {
     fontSize: TextScale.sm,
     fontWeight: '800',
-    color: Colors.primary,
+    color: colors.primary,
     marginTop: 4,
   },
   readyText: {
     fontSize: TextScale.lg,
     fontWeight: '800',
-    color: Colors.text,
+    color: colors.text,
   },
   progressLabel: {
     fontSize: TextScale.sm,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     marginTop: Spacing.two,
     textAlign: 'center',
     fontWeight: '600',

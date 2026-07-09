@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Alert } from 'react-native';
-import { Colors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
+import { AppColors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
+import { useAppTheme } from '@/hooks/use-app-theme';
 
 export interface Folder {
   uri: string;
@@ -16,6 +17,9 @@ interface Props {
 }
 
 export function FolderCard({ folder, onRemove, onRefresh }: Props) {
+  const { colors } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+
   const handleRemove = () => {
     Alert.alert(
       'Remove folder',
@@ -41,7 +45,7 @@ export function FolderCard({ folder, onRemove, onRefresh }: Props) {
   return (
     <View style={styles.card}>
       <View style={styles.iconContainer}>
-        <AppIcon androidName="folder" iosName="folder" color={Colors.primary} size={24} fallback="F" />
+        <AppIcon androidName="folder" iosName="folder" color={colors.primary} size={24} fallback="F" />
       </View>
 
       <View style={styles.info}>
@@ -62,7 +66,7 @@ export function FolderCard({ folder, onRemove, onRefresh }: Props) {
           accessibilityLabel={`Refresh backup for ${folder.name}`}
           accessibilityRole="button"
         >
-          <AppIcon androidName="sync" iosName="arrow.triangle.2.circlepath" color={Colors.primary} size={18} fallback="R" />
+          <AppIcon androidName="sync" iosName="arrow.triangle.2.circlepath" color={colors.primary} size={18} fallback="R" />
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.actionBtn, styles.removeBtn]}
@@ -70,21 +74,21 @@ export function FolderCard({ folder, onRemove, onRefresh }: Props) {
           accessibilityLabel={`Remove ${folder.name}`}
           accessibilityRole="button"
         >
-          <AppIcon androidName="close" iosName="xmark" color={Colors.error} size={18} fallback="X" />
+          <AppIcon androidName="close" iosName="xmark" color={colors.error} size={18} fallback="X" />
         </TouchableOpacity>
       </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   card: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: Colors.surface,
+    backgroundColor: colors.surface,
     borderRadius: Radius.lg,
     borderWidth: 1,
-    borderColor: Colors.surfaceBorder,
+    borderColor: colors.surfaceBorder,
     padding: Spacing.four,
     marginBottom: Spacing.three,
     gap: Spacing.three,
@@ -94,7 +98,7 @@ const styles = StyleSheet.create({
     width: 48,
     height: 48,
     borderRadius: Radius.md,
-    backgroundColor: Colors.primarySoft,
+    backgroundColor: colors.primarySoft,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -105,11 +109,11 @@ const styles = StyleSheet.create({
   name: {
     fontSize: TextScale.base,
     fontWeight: '800',
-    color: Colors.text,
+    color: colors.text,
   },
   meta: {
     fontSize: TextScale.xs,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     fontWeight: '500',
   },
   actions: {
@@ -124,9 +128,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   refreshBtn: {
-    backgroundColor: Colors.primarySoft,
+    backgroundColor: colors.primarySoft,
   },
   removeBtn: {
-    backgroundColor: Colors.errorSoft,
+    backgroundColor: colors.errorSoft,
   },
 });

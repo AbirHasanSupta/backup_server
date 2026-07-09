@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -22,10 +22,11 @@ import {
   getSyncInterval,
   getSyncPaused,
 } from '../../settings';
-import { Colors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
+import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { SyncProgressRing, SyncPhase } from '@/components/SyncProgressRing';
 import { StatCard } from '@/components/StatCard';
 import { AppIcon } from '@/components/AppIcon';
+import { useAppTheme } from '@/hooks/use-app-theme';
 
 function formatRelativeTime(ts: number | null): string {
   if (!ts) return 'Never';
@@ -100,6 +101,8 @@ type ServerStatus = 'connected' | 'disconnected' | 'unknown' | 'checking';
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
+  const { colors, isDark } = useAppTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
 
   const [syncing, setSyncing] = useState(false);
   const [phase, setPhase] = useState<SyncPhase>('idle');
@@ -265,10 +268,10 @@ export default function HomeScreen() {
   };
 
   const statusColors: Record<ServerStatus, string> = {
-    connected: Colors.success,
-    disconnected: Colors.error,
-    checking: Colors.warning,
-    unknown: Colors.textMuted,
+    connected: colors.success,
+    disconnected: colors.error,
+    checking: colors.warning,
+    unknown: colors.textMuted,
   };
 
   const statusLabels: Record<ServerStatus, string> = {
@@ -289,7 +292,7 @@ export default function HomeScreen() {
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
-      <StatusBar barStyle="dark-content" backgroundColor={Colors.bg} />
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
       <View style={styles.header}>
         <View style={styles.titleBlock}>
@@ -325,7 +328,7 @@ export default function HomeScreen() {
           {statusMessage ? <Text style={styles.statusMsg}>{statusMessage}</Text> : null}
           {syncPaused && !syncing && (
             <View style={styles.pausedBadge}>
-              <AppIcon androidName="pause" iosName="pause.fill" color={Colors.warning} size={14} fallback="P" />
+              <AppIcon androidName="pause" iosName="pause.fill" color={colors.warning} size={14} fallback="P" />
               <Text style={styles.pausedText}>Auto sync paused</Text>
             </View>
           )}
@@ -337,24 +340,24 @@ export default function HomeScreen() {
             iosIcon="archivebox"
             label="Files synced"
             value={totalSynced > 0 ? totalSynced.toLocaleString() : '-'}
-            tint={Colors.primary}
-            dimColor={Colors.primarySoft}
+            tint={colors.primary}
+            dimColor={colors.primarySoft}
           />
           <StatCard
             icon="history"
             iosIcon="clock.arrow.circlepath"
             label="Last sync"
             value={formatRelativeTime(lastSyncTime)}
-            tint={Colors.success}
-            dimColor={Colors.successSoft}
+            tint={colors.success}
+            dimColor={colors.successSoft}
           />
           <StatCard
             icon="schedule"
             iosIcon="timer"
             label="Interval"
             value={syncPaused ? 'Paused' : intervalLabel}
-            tint={syncPaused ? Colors.textMuted : Colors.warning}
-            dimColor={Colors.warningSoft}
+            tint={syncPaused ? colors.textMuted : colors.warning}
+            dimColor={colors.warningSoft}
           />
         </View>
 
@@ -368,12 +371,12 @@ export default function HomeScreen() {
         >
           {syncing ? (
             <View style={styles.syncBtnInner}>
-              <ActivityIndicator color={Colors.white} size="small" />
+              <ActivityIndicator color={colors.white} size="small" />
               <Text style={styles.syncBtnText}>Syncing</Text>
             </View>
           ) : (
             <View style={styles.syncBtnInner}>
-              <AppIcon androidName="cloud_upload" iosName="icloud.and.arrow.up" color={Colors.white} size={20} fallback="UP" />
+              <AppIcon androidName="cloud_upload" iosName="icloud.and.arrow.up" color={colors.white} size={20} fallback="UP" />
               <Text style={styles.syncBtnText}>Sync now</Text>
             </View>
           )}
@@ -382,7 +385,7 @@ export default function HomeScreen() {
         {serverStatus === 'unknown' && (
           <View style={styles.noticeCard}>
             <View style={styles.noticeIcon}>
-              <AppIcon androidName="wifi_off" iosName="wifi.slash" color={Colors.warning} size={20} fallback="!" />
+              <AppIcon androidName="wifi_off" iosName="wifi.slash" color={colors.warning} size={20} fallback="!" />
             </View>
             <View style={styles.noticeCopy}>
               <Text style={styles.noticeTitle}>Connect a server</Text>
@@ -396,10 +399,10 @@ export default function HomeScreen() {
         {serverStatus === 'disconnected' && (
           <View style={[styles.noticeCard, styles.errorCard]}>
             <View style={[styles.noticeIcon, styles.errorIcon]}>
-              <AppIcon androidName="error" iosName="exclamationmark.triangle" color={Colors.error} size={20} fallback="!" />
+              <AppIcon androidName="error" iosName="exclamationmark.triangle" color={colors.error} size={20} fallback="!" />
             </View>
             <View style={styles.noticeCopy}>
-              <Text style={[styles.noticeTitle, { color: Colors.error }]}>Server unreachable</Text>
+              <Text style={[styles.noticeTitle, { color: colors.error }]}>Server unreachable</Text>
               <Text style={styles.noticeBody}>
                 Make sure the desktop app is running and both devices are on the same Wi-Fi network.
               </Text>
@@ -411,10 +414,10 @@ export default function HomeScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: AppColors) => StyleSheet.create({
   screen: {
     flex: 1,
-    backgroundColor: Colors.bg,
+    backgroundColor: colors.bg,
   },
   header: {
     paddingHorizontal: Spacing.six,
@@ -426,7 +429,7 @@ const styles = StyleSheet.create({
     gap: Spacing.one,
   },
   kicker: {
-    color: Colors.primary,
+    color: colors.primary,
     fontSize: TextScale.xs,
     fontWeight: '800',
     letterSpacing: 0.8,
@@ -435,11 +438,11 @@ const styles = StyleSheet.create({
   appTitle: {
     fontSize: TextScale.xl,
     fontWeight: '900',
-    color: Colors.text,
+    color: colors.text,
   },
   appSubtitle: {
     fontSize: TextScale.sm,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     fontWeight: '600',
   },
   serverPill: {
@@ -450,7 +453,7 @@ const styles = StyleSheet.create({
     borderRadius: Radius.full,
     paddingHorizontal: 12,
     paddingVertical: 7,
-    backgroundColor: Colors.surface,
+    backgroundColor: colors.surface,
     maxWidth: '100%',
     gap: 7,
   },
@@ -472,11 +475,11 @@ const styles = StyleSheet.create({
     gap: Spacing.four,
     paddingVertical: Spacing.six,
     borderRadius: Radius.xxl,
-    backgroundColor: Colors.surfaceSoft,
+    backgroundColor: colors.surfaceSoft,
   },
   statusMsg: {
     fontSize: TextScale.base,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     textAlign: 'center',
     fontWeight: '700',
     paddingHorizontal: Spacing.five,
@@ -485,14 +488,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
-    backgroundColor: Colors.warningSoft,
+    backgroundColor: colors.warningSoft,
     borderRadius: Radius.full,
     paddingHorizontal: Spacing.four,
     paddingVertical: 7,
   },
   pausedText: {
     fontSize: TextScale.xs,
-    color: Colors.warning,
+    color: colors.warning,
     fontWeight: '800',
   },
   statsRow: {
@@ -501,7 +504,7 @@ const styles = StyleSheet.create({
   },
   syncBtn: {
     minHeight: 56,
-    backgroundColor: Colors.primary,
+    backgroundColor: colors.primary,
     borderRadius: Radius.lg,
     paddingVertical: Spacing.four,
     alignItems: 'center',
@@ -519,31 +522,31 @@ const styles = StyleSheet.create({
   syncBtnText: {
     fontSize: TextScale.md,
     fontWeight: '900',
-    color: Colors.white,
+    color: colors.white,
   },
   noticeCard: {
     flexDirection: 'row',
     gap: Spacing.three,
-    backgroundColor: Colors.warningSoft,
+    backgroundColor: colors.warningSoft,
     borderRadius: Radius.lg,
     borderWidth: 1,
     borderColor: '#F4D69D',
     padding: Spacing.four,
   },
   errorCard: {
-    backgroundColor: Colors.errorSoft,
+    backgroundColor: colors.errorSoft,
     borderColor: '#F4B4B4',
   },
   noticeIcon: {
     width: 38,
     height: 38,
     borderRadius: Radius.full,
-    backgroundColor: Colors.surface,
+    backgroundColor: colors.surface,
     alignItems: 'center',
     justifyContent: 'center',
   },
   errorIcon: {
-    backgroundColor: Colors.surface,
+    backgroundColor: colors.surface,
   },
   noticeCopy: {
     flex: 1,
@@ -552,11 +555,11 @@ const styles = StyleSheet.create({
   noticeTitle: {
     fontSize: TextScale.base,
     fontWeight: '900',
-    color: Colors.warning,
+    color: colors.warning,
   },
   noticeBody: {
     fontSize: TextScale.sm,
-    color: Colors.textSecondary,
+    color: colors.textSecondary,
     lineHeight: 20,
     fontWeight: '600',
   },
