@@ -20,17 +20,19 @@ import {
   buildSyncProgressText,
 } from './notificationService';
 
+const hasNativeBackgroundActions = !!(
+  NativeModules &&
+  NativeModules.RNBackgroundActions
+);
 let BackgroundServiceModule = null;
-try {
-  BackgroundServiceModule = require('react-native-background-actions');
-} catch (e) {
-  console.warn('[BackgroundTask] react-native-background-actions not available.', e?.message);
+if (hasNativeBackgroundActions) {
+  try {
+    BackgroundServiceModule = require('react-native-background-actions');
+  } catch (e) {
+    console.warn('[BackgroundTask] react-native-background-actions not available.', e?.message);
+  }
 }
 const BackgroundService = BackgroundServiceModule ? (BackgroundServiceModule.default || BackgroundServiceModule) : null;
-const hasNativeBackgroundActions = !!(
-  NativeModules && 
-  (NativeModules.BackgroundActions || NativeModules.RNBackgroundActions)
-);
 
 
 const TASK_NAME = 'backup-task';

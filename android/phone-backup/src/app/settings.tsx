@@ -28,8 +28,9 @@ import {
 } from '../../settings';
 import { registerBackgroundTask } from '../../backgroundTask';
 import { connectToServer } from '../../connectToServer';
-import { Colors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
+import { Colors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
+import { AppIcon } from '@/components/AppIcon';
 
 const INTERVAL_PRESETS = [
   { label: '15 min', value: 15 },
@@ -45,7 +46,7 @@ function SectionHeader({ title }: { title: string }) {
   return <Text style={styles.sectionHeader}>{title}</Text>;
 }
 
-function SettingsRow({ children }: { children: React.ReactNode }) {
+function SettingsCard({ children }: { children: React.ReactNode }) {
   return <View style={styles.settingsCard}>{children}</View>;
 }
 
@@ -85,7 +86,6 @@ export default function SettingsScreen() {
     }, [loadSettings])
   );
 
-  // ── Save server settings ──────────────────────────────────────────────────
   const handleSaveServer = async () => {
     if (!serverIp.trim()) {
       Alert.alert('Missing IP', 'Please enter the server IP address.');
@@ -93,36 +93,28 @@ export default function SettingsScreen() {
     }
     const portNum = parseInt(serverPort);
     if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
-      Alert.alert('Invalid Port', 'Port must be a number between 1 and 65535.');
+      Alert.alert('Invalid port', 'Port must be a number between 1 and 65535.');
       return;
     }
     setSavingServer(true);
     try {
       const key = apiKey.trim() || 'YOUR_SECRET_KEY';
-      await Promise.all([
-        setServerIp(serverIp.trim()),
-        setServerPort(portNum),
-        setApiKey(key),
-      ]);
+      await Promise.all([setServerIp(serverIp.trim()), setServerPort(portNum), setApiKey(key)]);
 
-      // Confirm save immediately — connect happens in background
       Alert.alert('Saved', 'Server settings saved.');
 
-      // Fire-and-forget connection request — server may show accept/reject dialog
       connectToServer(serverIp.trim(), portNum, key).then((result) => {
         if (result.status === 'accepted') {
-          Alert.alert('✅ Connected', 'This device has been accepted by the server and is ready to back up.');
+          Alert.alert('Connected', 'This device was accepted by the server and is ready to back up.');
         } else if (result.status === 'rejected') {
-          Alert.alert('❌ Rejected', 'The server rejected this device. Ask the server owner to accept your connection request.');
+          Alert.alert('Rejected', 'The server rejected this device. Ask the server owner to approve it.');
         }
-        // 'error' = server offline / wrong key — silently ignore
       });
     } finally {
       setSavingServer(false);
     }
   };
 
-  // ── Handle server discovered from sheet ───────────────────────────────────
   const handleServerSelected = async (server: {
     ip: string;
     port: number;
@@ -140,49 +132,42 @@ export default function SettingsScreen() {
     ]);
 
     Alert.alert(
-      '🖥️ Server Found',
-      `"${server.name}" (${server.ip}:${server.port}) saved. Sending connection request…`
+      'Server found',
+      `"${server.name}" (${server.ip}:${server.port}) was saved. Sending connection request.`
     );
 
-    // Register device with the newly discovered server
     connectToServer(server.ip, server.port, key).then((result) => {
       if (result.status === 'accepted') {
-        Alert.alert('✅ Connected', `"${server.name}" accepted this device. You are ready to back up!`);
+        Alert.alert('Connected', `"${server.name}" accepted this device. You are ready to back up.`);
       } else if (result.status === 'rejected') {
-        Alert.alert('❌ Rejected', 'The server rejected this device. Check the API key or ask the server owner to accept.');
+        Alert.alert('Rejected', 'The server rejected this device. Check the API key or ask for approval.');
       }
     });
   };
 
-  // ── Change sync interval ──────────────────────────────────────────────────
   const handleIntervalChange = async (minutes: number) => {
     setSyncIntervalState(minutes);
     await setSyncInterval(minutes);
     await registerBackgroundTask(minutes);
   };
 
-  // ── Toggle pause ──────────────────────────────────────────────────────────
   const handlePauseToggle = async (val: boolean) => {
     setSyncPausedState(val);
     await setSyncPaused(val);
   };
 
-  // ── Refresh all backups ───────────────────────────────────────────────────
   const handleRefreshAll = () => {
     Alert.alert(
-      'Refresh All Backups',
-      'This will clear the sync cache and re-upload every file on the next sync. Are you sure?',
+      'Refresh all backups',
+      'This clears the sync cache and re-uploads every file on the next sync. Continue?',
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Refresh All',
+          text: 'Refresh all',
           style: 'destructive',
           onPress: async () => {
             const count = await clearAllUploads();
-            Alert.alert(
-              'Done',
-              `Cleared ${count} cached entries. All files will be re-uploaded on the next sync.`
-            );
+            Alert.alert('Done', `Cleared ${count} cached entries. Files will re-upload on the next sync.`);
           },
         },
       ]
@@ -191,32 +176,31 @@ export default function SettingsScreen() {
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
-      <StatusBar barStyle="light-content" backgroundColor={Colors.bg} />
+      <StatusBar barStyle="dark-content" backgroundColor={Colors.bg} />
 
-      {/* ── Header ───────────────────────────────────────────────────────── */}
       <View style={styles.header}>
+        <Text style={styles.kicker}>Preferences</Text>
         <Text style={styles.title}>Settings</Text>
-        <Text style={styles.subtitle}>Configure your backup preferences</Text>
+        <Text style={styles.subtitle}>Connect the desktop server and tune backup behavior.</Text>
       </View>
 
       <ScrollView
         contentContainerStyle={[
           styles.scrollContent,
-          { paddingBottom: BottomTabInset + insets.bottom + 24 },
+          { paddingBottom: BottomTabInset + insets.bottom + 34 },
         ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        {/* ── Server Configuration ─────────────────────────────────────── */}
-        <SectionHeader title="Server Connection" />
-        <SettingsRow>
-          <FieldLabel text="Server IP Address" />
+        <SectionHeader title="Server connection" />
+        <SettingsCard>
+          <FieldLabel text="Server IP address" />
           <TextInput
             id="server-ip-input"
             style={styles.textInput}
             value={serverIp}
             onChangeText={setServerIpState}
-            placeholder="e.g. 192.168.1.100"
+            placeholder="192.168.1.100"
             placeholderTextColor={Colors.textMuted}
             keyboardType="numeric"
             autoCapitalize="none"
@@ -236,7 +220,7 @@ export default function SettingsScreen() {
             returnKeyType="next"
           />
 
-          <FieldLabel text="API Key" />
+          <FieldLabel text="API key" />
           <TextInput
             id="api-key-input"
             style={styles.textInput}
@@ -250,57 +234,62 @@ export default function SettingsScreen() {
             returnKeyType="done"
           />
 
-          {/* Discover / Save buttons */}
           <View style={styles.buttonRow}>
             <TouchableOpacity
               id="discover-servers-button"
               style={styles.outlineBtn}
               onPress={() => setDiscoveryVisible(true)}
               accessibilityLabel="Discover servers on network"
+              accessibilityRole="button"
             >
-              <Text style={styles.outlineBtnText}>🔍  Discover</Text>
+              <AppIcon androidName="search" iosName="magnifyingglass" color={Colors.primary} size={18} fallback="S" />
+              <Text style={styles.outlineBtnText}>Discover</Text>
             </TouchableOpacity>
             <TouchableOpacity
               id="save-server-button"
-              style={[styles.primaryBtn, savingServer && { opacity: 0.6 }]}
+              style={[styles.primaryBtn, savingServer && { opacity: 0.65 }]}
               onPress={handleSaveServer}
               disabled={savingServer}
               accessibilityLabel="Save server settings"
+              accessibilityRole="button"
             >
-              <Text style={styles.primaryBtnText}>
-                {savingServer ? 'Saving…' : '✓  Save'}
-              </Text>
+              <AppIcon androidName="check" iosName="checkmark" color={Colors.white} size={18} fallback="OK" />
+              <Text style={styles.primaryBtnText}>{savingServer ? 'Saving' : 'Save'}</Text>
             </TouchableOpacity>
           </View>
-        </SettingsRow>
+        </SettingsCard>
 
-        {/* ── Sync Schedule ────────────────────────────────────────────── */}
-        <SectionHeader title="Sync Schedule" />
-        <SettingsRow>
-          {/* Pause toggle */}
+        <SectionHeader title="Sync schedule" />
+        <SettingsCard>
           <View style={styles.toggleRow}>
+            <View style={styles.toggleIcon}>
+              <AppIcon
+                androidName={syncPaused ? 'pause' : 'sync'}
+                iosName={syncPaused ? 'pause.fill' : 'arrow.triangle.2.circlepath'}
+                color={syncPaused ? Colors.warning : Colors.primary}
+                size={20}
+                fallback={syncPaused ? 'P' : 'S'}
+              />
+            </View>
             <View style={styles.toggleInfo}>
-              <Text style={styles.toggleLabel}>Auto Sync</Text>
+              <Text style={styles.toggleLabel}>Auto sync</Text>
               <Text style={styles.toggleSub}>
-                {syncPaused
-                  ? 'Paused — only Sync Now works'
-                  : 'Running automatically in background'}
+                {syncPaused ? 'Paused. Manual Sync Now still works.' : 'Runs automatically in the background.'}
               </Text>
             </View>
             <Switch
               value={!syncPaused}
               onValueChange={(val) => handlePauseToggle(!val)}
-              trackColor={{ false: Colors.surfaceBorder, true: Colors.primaryDim }}
+              trackColor={{ false: Colors.surfaceBorder, true: Colors.primarySoft }}
               thumbColor={!syncPaused ? Colors.primary : Colors.textMuted}
               accessibilityLabel="Toggle auto sync"
             />
           </View>
 
-          {/* Interval presets */}
           {!syncPaused && (
             <>
               <View style={styles.divider} />
-              <FieldLabel text="Sync Every" />
+              <FieldLabel text="Sync every" />
               <View style={styles.presetGrid}>
                 {INTERVAL_PRESETS.map((p) => {
                   const active = syncInterval === p.value;
@@ -313,9 +302,7 @@ export default function SettingsScreen() {
                       accessibilityRole="radio"
                       accessibilityState={{ checked: active }}
                     >
-                      <Text
-                        style={[styles.presetText, active && styles.presetTextActive]}
-                      >
+                      <Text style={[styles.presetText, active && styles.presetTextActive]}>
                         {p.label}
                       </Text>
                     </TouchableOpacity>
@@ -323,50 +310,48 @@ export default function SettingsScreen() {
                 })}
               </View>
               <Text style={styles.hintText}>
-                Actual frequency may vary — Android may delay background tasks to preserve battery.
+                Android may delay background work to preserve battery, especially when the phone is idle.
               </Text>
             </>
           )}
-        </SettingsRow>
+        </SettingsCard>
 
-        {/* ── Data Management ──────────────────────────────────────────── */}
-        <SectionHeader title="Data Management" />
-        <SettingsRow>
+        <SectionHeader title="Data management" />
+        <SettingsCard>
           <TouchableOpacity
             id="refresh-all-button"
             style={styles.dangerBtn}
             onPress={handleRefreshAll}
             accessibilityLabel="Refresh all backups"
+            accessibilityRole="button"
           >
-            <Text style={styles.dangerBtnText}>↺  Refresh All Backups</Text>
+            <AppIcon androidName="restart_alt" iosName="arrow.clockwise" color={Colors.error} size={18} fallback="R" />
+            <Text style={styles.dangerBtnText}>Refresh all backups</Text>
           </TouchableOpacity>
           <Text style={styles.hintText}>
-            Clears the sync cache so every file is re-uploaded on the next sync.
-            Use if files are missing on the server.
+            Use this when files are missing on the server. Existing cache entries are cleared, then files upload again.
           </Text>
-        </SettingsRow>
+        </SettingsCard>
 
-        {/* ── About ────────────────────────────────────────────────────── */}
         <SectionHeader title="About" />
-        <SettingsRow>
+        <SettingsCard>
           <View style={styles.aboutRow}>
-            <Text style={styles.aboutLabel}>App Version</Text>
+            <Text style={styles.aboutLabel}>App version</Text>
             <Text style={styles.aboutValue}>1.0.0</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.aboutRow}>
-            <Text style={styles.aboutLabel}>Server Stack</Text>
-            <Text style={styles.aboutValue}>Python · FastAPI</Text>
+            <Text style={styles.aboutLabel}>Server stack</Text>
+            <Text style={styles.aboutValue}>Python + FastAPI</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.aboutRow}>
             <Text style={styles.aboutLabel}>Framework</Text>
-            <Text style={styles.aboutValue}>Expo SDK 57 · React Native</Text>
+            <Text style={styles.aboutValue}>Expo SDK 57</Text>
           </View>
-        </SettingsRow>
+        </SettingsCard>
       </ScrollView>
 
-      {/* Server discovery bottom sheet */}
       <ServerDiscoverySheet
         visible={discoveryVisible}
         onSelect={handleServerSelected}
@@ -385,17 +370,24 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.six,
     paddingTop: Spacing.four,
     paddingBottom: Spacing.four,
+    gap: Spacing.one,
+  },
+  kicker: {
+    color: Colors.primary,
+    fontSize: TextScale.xs,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
   },
   title: {
     fontSize: TextScale.xl,
-    fontWeight: '700',
+    fontWeight: '900',
     color: Colors.text,
-    letterSpacing: -0.5,
   },
   subtitle: {
-    fontSize: TextScale.xs,
+    fontSize: TextScale.sm,
     color: Colors.textSecondary,
-    marginTop: 3,
+    fontWeight: '600',
   },
   scrollContent: {
     paddingHorizontal: Spacing.six,
@@ -403,29 +395,31 @@ const styles = StyleSheet.create({
   },
   sectionHeader: {
     fontSize: TextScale.xs,
-    fontWeight: '700',
+    fontWeight: '900',
     color: Colors.textSecondary,
-    letterSpacing: 1,
+    letterSpacing: 0.8,
     textTransform: 'uppercase',
     paddingTop: Spacing.three,
     paddingBottom: Spacing.two,
   },
   settingsCard: {
-    backgroundColor: Colors.surfaceElevated,
+    backgroundColor: Colors.surface,
     borderRadius: Radius.lg,
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
     padding: Spacing.four,
     gap: Spacing.three,
+    ...Shadows.card,
   },
   fieldLabel: {
     fontSize: TextScale.xs,
-    fontWeight: '600',
+    fontWeight: '800',
     color: Colors.textSecondary,
     marginBottom: -Spacing.two,
   },
   textInput: {
-    backgroundColor: Colors.surface,
+    minHeight: 46,
+    backgroundColor: Colors.surfaceSoft,
     borderRadius: Radius.md,
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
@@ -433,6 +427,7 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.three,
     fontSize: TextScale.base,
     color: Colors.text,
+    fontWeight: '600',
   },
   buttonRow: {
     flexDirection: 'row',
@@ -441,27 +436,36 @@ const styles = StyleSheet.create({
   },
   outlineBtn: {
     flex: 1,
+    minHeight: 46,
     borderWidth: 1,
     borderColor: Colors.primary,
     borderRadius: Radius.lg,
     paddingVertical: Spacing.three,
     alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: Spacing.two,
+    backgroundColor: Colors.primarySoft,
   },
   outlineBtnText: {
     fontSize: TextScale.sm,
-    fontWeight: '600',
-    color: Colors.primaryLight,
+    fontWeight: '900',
+    color: Colors.primary,
   },
   primaryBtn: {
     flex: 1,
+    minHeight: 46,
     backgroundColor: Colors.primary,
     borderRadius: Radius.lg,
     paddingVertical: Spacing.three,
     alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: Spacing.two,
   },
   primaryBtnText: {
     fontSize: TextScale.sm,
-    fontWeight: '700',
+    fontWeight: '900',
     color: Colors.white,
   },
   toggleRow: {
@@ -469,18 +473,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: Spacing.three,
   },
+  toggleIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: Radius.md,
+    backgroundColor: Colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   toggleInfo: {
     flex: 1,
     gap: 3,
   },
   toggleLabel: {
     fontSize: TextScale.base,
-    fontWeight: '600',
+    fontWeight: '900',
     color: Colors.text,
   },
   toggleSub: {
     fontSize: TextScale.xs,
     color: Colors.textSecondary,
+    fontWeight: '600',
   },
   divider: {
     height: 1,
@@ -493,57 +506,67 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   presetChip: {
+    minHeight: 36,
     paddingHorizontal: Spacing.four,
     paddingVertical: Spacing.two,
     borderRadius: Radius.full,
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
-    backgroundColor: Colors.surface,
+    backgroundColor: Colors.surfaceSoft,
+    justifyContent: 'center',
   },
   presetChipActive: {
     borderColor: Colors.primary,
-    backgroundColor: Colors.primaryDim,
+    backgroundColor: Colors.primarySoft,
   },
   presetText: {
     fontSize: TextScale.sm,
-    fontWeight: '500',
+    fontWeight: '700',
     color: Colors.textSecondary,
   },
   presetTextActive: {
-    color: Colors.primaryLight,
-    fontWeight: '700',
+    color: Colors.primary,
+    fontWeight: '900',
   },
   hintText: {
     fontSize: TextScale.xs,
     color: Colors.textMuted,
     lineHeight: 17,
+    fontWeight: '600',
   },
   dangerBtn: {
-    backgroundColor: Colors.errorDim,
+    minHeight: 46,
+    backgroundColor: Colors.errorSoft,
     borderRadius: Radius.lg,
     borderWidth: 1,
-    borderColor: Colors.error,
+    borderColor: '#F4B4B4',
     paddingVertical: Spacing.three,
     alignItems: 'center',
+    justifyContent: 'center',
+    flexDirection: 'row',
+    gap: Spacing.two,
   },
   dangerBtnText: {
     fontSize: TextScale.base,
-    fontWeight: '700',
+    fontWeight: '900',
     color: Colors.error,
   },
   aboutRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: Spacing.three,
     paddingVertical: Spacing.one,
   },
   aboutLabel: {
     fontSize: TextScale.sm,
     color: Colors.textSecondary,
+    fontWeight: '700',
   },
   aboutValue: {
     fontSize: TextScale.sm,
     color: Colors.text,
-    fontWeight: '500',
+    fontWeight: '800',
+    textAlign: 'right',
   },
 });

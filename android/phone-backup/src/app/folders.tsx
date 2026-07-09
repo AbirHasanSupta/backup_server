@@ -1,13 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  FlatList,
-  StyleSheet,
-  StatusBar,
-  Alert,
-} from 'react-native';
+import { View, Text, TouchableOpacity, FlatList, StyleSheet, StatusBar, Alert } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
@@ -20,16 +12,17 @@ import {
   clearFolderUploads,
 } from '../../settings';
 import { runSync } from '../../backgroundTask';
-import { Colors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
+import { Colors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { FolderCard, Folder } from '@/components/FolderCard';
 import { FileTypeSelector } from '@/components/FileTypeSelector';
+import { AppIcon } from '@/components/AppIcon';
 
 export default function FoldersScreen() {
   const insets = useSafeAreaInsets();
 
   const [folders, setFolders] = useState<Folder[]>([]);
   const [selectedTypes, setSelectedTypes] = useState<string[]>(['all']);
-  const [refreshing, setRefreshing] = useState<string | null>(null); // folder uri being refreshed
+  const [refreshing, setRefreshing] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     const [f, t] = await Promise.all([getFolders(), getFileTypes()]);
@@ -43,11 +36,9 @@ export default function FoldersScreen() {
     }, [loadData])
   );
 
-  // ── Add folder via SAF picker ─────────────────────────────────────────────
   const handleAddFolder = async () => {
     try {
-      const perm =
-        await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+      const perm = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
       if (!perm.granted) return;
       const raw = perm.directoryUri.split('/').pop() as string;
       const name = decodeURIComponent(raw);
@@ -58,13 +49,11 @@ export default function FoldersScreen() {
     }
   };
 
-  // ── Remove folder ─────────────────────────────────────────────────────────
   const handleRemove = async (uri: string) => {
     const updated = await removeFolder(uri);
     setFolders(updated);
   };
 
-  // ── Refresh folder (force re-backup) ─────────────────────────────────────
   const handleRefresh = async (folder: Folder) => {
     setRefreshing(folder.uri);
     try {
@@ -76,7 +65,7 @@ export default function FoldersScreen() {
       });
 
       Alert.alert(
-        'Refresh Complete',
+        'Refresh complete',
         `Finished backing up "${folder.name}". ${result.uploaded} files uploaded.`
       );
     } catch (err: any) {
@@ -86,39 +75,39 @@ export default function FoldersScreen() {
     }
   };
 
-  // ── File type change ──────────────────────────────────────────────────────
   const handleTypeChange = async (types: string[]) => {
     setSelectedTypes(types);
     await setFileTypes(types);
   };
 
-  // ── Empty state ───────────────────────────────────────────────────────────
   const renderEmpty = () => (
     <View style={styles.emptyState}>
-      <Text style={styles.emptyIcon}>📂</Text>
-      <Text style={styles.emptyTitle}>No folders added yet</Text>
+      <View style={styles.emptyIcon}>
+        <AppIcon androidName="folder_open" iosName="folder" color={Colors.primary} size={34} fallback="F" />
+      </View>
+      <Text style={styles.emptyTitle}>Choose what gets backed up</Text>
       <Text style={styles.emptyBody}>
-        Tap{' '}
-        <Text style={{ color: Colors.primaryLight, fontWeight: '600' }}>
-          + Add Folder
-        </Text>{' '}
-        to choose which folders on your phone should be backed up automatically.
+        Add a folder once and Phone Backup will keep it protected automatically.
       </Text>
+      <TouchableOpacity style={styles.emptyButton} onPress={handleAddFolder} accessibilityRole="button">
+        <AppIcon androidName="add" iosName="plus" color={Colors.white} size={18} fallback="+" />
+        <Text style={styles.emptyButtonText}>Add folder</Text>
+      </TouchableOpacity>
     </View>
   );
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
-      <StatusBar barStyle="light-content" backgroundColor={Colors.bg} />
+      <StatusBar barStyle="dark-content" backgroundColor={Colors.bg} />
 
-      {/* ── Header ───────────────────────────────────────────────────────── */}
       <View style={styles.header}>
-        <View>
+        <View style={styles.titleBlock}>
+          <Text style={styles.kicker}>Backup sources</Text>
           <Text style={styles.title}>Folders</Text>
           <Text style={styles.subtitle}>
             {folders.length > 0
               ? `${folders.length} folder${folders.length !== 1 ? 's' : ''} selected`
-              : 'Choose folders to back up'}
+              : 'Pick folders to protect'}
           </Text>
         </View>
         <TouchableOpacity
@@ -128,32 +117,27 @@ export default function FoldersScreen() {
           accessibilityLabel="Add folder"
           accessibilityRole="button"
         >
-          <Text style={styles.addBtnText}>+ Add</Text>
+          <AppIcon androidName="add" iosName="plus" color={Colors.white} size={18} fallback="+" />
+          <Text style={styles.addBtnText}>Add</Text>
         </TouchableOpacity>
       </View>
 
-      {/* ── File type filter ─────────────────────────────────────────────── */}
       <View style={styles.filterSection}>
         <FileTypeSelector selected={selectedTypes} onChange={handleTypeChange} />
       </View>
 
-      {/* ── Folder list ──────────────────────────────────────────────────── */}
       <FlatList
         data={folders}
         keyExtractor={(item) => item.uri}
         contentContainerStyle={[
           styles.listContent,
           folders.length === 0 && styles.listContentEmpty,
-          { paddingBottom: BottomTabInset + insets.bottom + 16 },
+          { paddingBottom: BottomTabInset + insets.bottom + 24 },
         ]}
         ListEmptyComponent={renderEmpty}
         renderItem={({ item }) => (
           <View style={item.uri === refreshing ? styles.refreshing : undefined}>
-            <FolderCard
-              folder={item}
-              onRemove={handleRemove}
-              onRefresh={handleRefresh}
-            />
+            <FolderCard folder={item} onRemove={handleRemove} onRefresh={handleRefresh} />
           </View>
         )}
         showsVerticalScrollIndicator={false}
@@ -171,37 +155,55 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
+    gap: Spacing.four,
     paddingHorizontal: Spacing.six,
     paddingTop: Spacing.four,
     paddingBottom: Spacing.four,
   },
+  titleBlock: {
+    flex: 1,
+    gap: Spacing.one,
+  },
+  kicker: {
+    color: Colors.primary,
+    fontSize: TextScale.xs,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
+  },
   title: {
     fontSize: TextScale.xl,
-    fontWeight: '700',
+    fontWeight: '900',
     color: Colors.text,
-    letterSpacing: -0.5,
   },
   subtitle: {
-    fontSize: TextScale.xs,
+    fontSize: TextScale.sm,
     color: Colors.textSecondary,
-    marginTop: 3,
+    fontWeight: '600',
   },
   addBtn: {
+    minHeight: 42,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
     backgroundColor: Colors.primary,
-    borderRadius: Radius.lg,
+    borderRadius: Radius.full,
     paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.two + 2,
+    paddingVertical: Spacing.two,
+    ...Shadows.soft,
   },
   addBtnText: {
     fontSize: TextScale.sm,
-    fontWeight: '700',
+    fontWeight: '900',
     color: Colors.white,
   },
   filterSection: {
-    paddingHorizontal: Spacing.six,
-    paddingBottom: Spacing.four,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.surfaceBorder,
+    marginHorizontal: Spacing.six,
+    padding: Spacing.four,
+    borderRadius: Radius.lg,
+    backgroundColor: Colors.surfaceSoft,
+    borderWidth: 1,
+    borderColor: Colors.surfaceBorder,
   },
   listContent: {
     paddingHorizontal: Spacing.six,
@@ -215,15 +217,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: Spacing.seven,
-    paddingTop: Spacing.nine,
+    paddingTop: Spacing.eight,
     gap: Spacing.three,
   },
   emptyIcon: {
-    fontSize: 64,
+    width: 76,
+    height: 76,
+    borderRadius: Radius.full,
+    backgroundColor: Colors.primarySoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Spacing.one,
   },
   emptyTitle: {
     fontSize: TextScale.lg,
-    fontWeight: '700',
+    fontWeight: '900',
     color: Colors.text,
     textAlign: 'center',
   },
@@ -232,8 +240,24 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     textAlign: 'center',
     lineHeight: 22,
+    fontWeight: '600',
+  },
+  emptyButton: {
+    marginTop: Spacing.two,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    minHeight: 48,
+    paddingHorizontal: Spacing.five,
+    borderRadius: Radius.full,
+    backgroundColor: Colors.primary,
+  },
+  emptyButtonText: {
+    color: Colors.white,
+    fontSize: TextScale.base,
+    fontWeight: '900',
   },
   refreshing: {
-    opacity: 0.4,
+    opacity: 0.45,
   },
 });

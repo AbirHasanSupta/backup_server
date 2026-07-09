@@ -2,30 +2,27 @@ import { Tabs } from 'expo-router';
 import { useEffect } from 'react';
 import { Platform, View, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { SymbolView } from 'expo-symbols';
+import * as MediaLibrary from 'expo-media-library';
 import { registerBackgroundTask } from '../../backgroundTask';
 import { setupNotifications } from '../../notificationService';
-import { Colors, TextScale } from '@/constants/theme';
+import { Colors, Radius, Shadows, TextScale } from '@/constants/theme';
+import { AppIcon } from '@/components/AppIcon';
 
 type TabIconProps = {
-  /** Material Symbol name for Android/web */
   androidName: string;
-  /** SF Symbol name for iOS */
   iosName: string;
   focused: boolean;
 };
 
 function TabIcon({ androidName, iosName, focused }: TabIconProps) {
-  const color = focused ? Colors.primary : Colors.textSecondary;
-  const size = 24;
-
   return (
-    <View style={styles.iconWrapper}>
-      <SymbolView
-        name={{ android: androidName as any, web: androidName as any, ios: iosName as any }}
-        size={size}
-        tintColor={color}
-        fallback={null}
+    <View style={[styles.iconWrapper, focused && styles.iconWrapperFocused]}>
+      <AppIcon
+        androidName={androidName}
+        iosName={iosName}
+        size={22}
+        color={focused ? Colors.primary : Colors.textSecondary}
+        fallback="*"
       />
     </View>
   );
@@ -34,15 +31,10 @@ function TabIcon({ androidName, iosName, focused }: TabIconProps) {
 export default function RootLayout() {
   useEffect(() => {
     (async () => {
-      // Request permissions — errors are non-fatal
       try {
-        const MediaLibrary = require('expo-media-library');
         await MediaLibrary.requestPermissionsAsync().catch(() => {});
       } catch {}
-      // Set up notification channel — errors are non-fatal
       await setupNotifications().catch(() => {});
-      // Register background fetch — may fail on first launch before permissions
-      // are granted; registerBackgroundTask has its own try/catch guard
       await registerBackgroundTask();
     })();
   }, []);
@@ -52,18 +44,13 @@ export default function RootLayout() {
       <Tabs
         screenOptions={{
           headerShown: false,
-          // Use native labels rendered by the tab bar — avoids vertical clipping issues
           tabBarShowLabel: true,
           tabBarStyle: styles.tabBar,
           tabBarBackground: () => <View style={styles.tabBarBg} />,
-          // Label typography
           tabBarLabelStyle: styles.tabLabel,
-          // Active / inactive colours applied to both icon and label
           tabBarActiveTintColor: Colors.primary,
           tabBarInactiveTintColor: Colors.textSecondary,
-          // Keep the icon slot from growing too large
           tabBarIconStyle: styles.tabIcon,
-          // Ensure item fills the full height so icon + label stack correctly
           tabBarItemStyle: styles.tabItem,
         }}
       >
@@ -72,7 +59,7 @@ export default function RootLayout() {
           options={{
             title: 'Backup',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="cloud" iosName="cloud" focused={focused} />
+              <TabIcon androidName="cloud_upload" iosName="icloud.and.arrow.up" focused={focused} />
             ),
           }}
         />
@@ -90,38 +77,37 @@ export default function RootLayout() {
           options={{
             title: 'Settings',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="settings" iosName="gear" focused={focused} />
+              <TabIcon androidName="settings" iosName="gearshape" focused={focused} />
             ),
           }}
         />
-        {/* Hide legacy explore tab */}
         <Tabs.Screen name="explore" options={{ href: null }} />
       </Tabs>
     </SafeAreaProvider>
   );
 }
 
-// Bottom tab bar height: leave extra room for the Android nav bar on gesture-nav devices
-const TAB_BAR_HEIGHT = Platform.OS === 'android' ? 80 : 88;
+const TAB_BAR_HEIGHT = Platform.OS === 'android' ? 82 : 88;
 
 const styles = StyleSheet.create({
   tabBar: {
     position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
+    bottom: 10,
+    left: 18,
+    right: 18,
     height: TAB_BAR_HEIGHT,
-    borderTopWidth: 1,
-    borderTopColor: Colors.surfaceBorder,
+    borderTopWidth: 0,
+    borderRadius: Radius.xxl,
     backgroundColor: Colors.surface,
-    elevation: 0,
-    shadowOpacity: 0,
+    ...Shadows.card,
   },
   tabBarBg: {
     flex: 1,
+    borderRadius: Radius.xxl,
     backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.surfaceBorder,
   },
-  /** Each tab item — full height so icon + label both have room */
   tabItem: {
     flex: 1,
     alignItems: 'center',
@@ -129,22 +115,25 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     paddingBottom: Platform.OS === 'android' ? 14 : 10,
   },
-  /** Keep the icon container a fixed, predictable size */
   tabIcon: {
-    width: 24,
-    height: 24,
-    marginBottom: 2,
+    width: 44,
+    height: 34,
+    marginBottom: 0,
   },
   iconWrapper: {
     alignItems: 'center',
     justifyContent: 'center',
-    width: 24,
-    height: 24,
+    width: 42,
+    height: 32,
+    borderRadius: Radius.full,
+  },
+  iconWrapperFocused: {
+    backgroundColor: Colors.primarySoft,
   },
   tabLabel: {
     fontSize: TextScale.xs,
-    fontWeight: '500',
-    marginTop: 3,
+    fontWeight: '700',
+    marginTop: 1,
     paddingBottom: 1,
   },
 });

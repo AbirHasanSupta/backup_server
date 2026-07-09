@@ -1,28 +1,32 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { Colors, Spacing, Radius, TextScale } from '@/constants/theme';
+import { Colors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
+import { AppIcon } from '@/components/AppIcon';
 
 interface Props {
   icon: string;
+  iosIcon?: string;
   label: string;
   value: string;
   tint?: string;
   dimColor?: string;
 }
 
-export function StatCard({ icon, label, value, tint, dimColor }: Props) {
+export function StatCard({ icon, iosIcon, label, value, tint, dimColor }: Props) {
   const accentColor = tint || Colors.primary;
-  const bgColor = dimColor || Colors.primaryDim;
+  const bgColor = dimColor || Colors.primarySoft;
 
   return (
     <View style={styles.card}>
       <View style={[styles.iconWrap, { backgroundColor: bgColor }]}>
-        <Text style={styles.icon}>{icon}</Text>
+        <AppIcon androidName={icon} iosName={iosIcon} color={accentColor} size={21} fallback="*" />
       </View>
-      <Text style={[styles.value, { color: accentColor }]} numberOfLines={1}>
+      <Text style={[styles.value, { color: Colors.text }]} numberOfLines={1} adjustsFontSizeToFit>
         {value}
       </Text>
-      <Text style={styles.label}>{label}</Text>
+      <Text style={styles.label} numberOfLines={1}>
+        {label}
+      </Text>
     </View>
   );
 }
@@ -30,13 +34,15 @@ export function StatCard({ icon, label, value, tint, dimColor }: Props) {
 const styles = StyleSheet.create({
   card: {
     flex: 1,
-    backgroundColor: Colors.surfaceElevated,
+    minHeight: 126,
+    backgroundColor: Colors.surface,
     borderRadius: Radius.lg,
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
     padding: Spacing.four,
-    alignItems: 'center',
-    gap: Spacing.two,
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    ...Shadows.card,
   },
   iconWrap: {
     width: 40,
@@ -45,18 +51,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  icon: {
-    fontSize: 20,
-  },
   value: {
     fontSize: TextScale.lg,
-    fontWeight: '700',
-    textAlign: 'center',
+    fontWeight: '800',
+    marginTop: Spacing.three,
   },
   label: {
     fontSize: TextScale.xs,
     color: Colors.textSecondary,
-    textAlign: 'center',
-    fontWeight: '500',
+    fontWeight: '600',
   },
 });

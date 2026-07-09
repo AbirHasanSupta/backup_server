@@ -51,5 +51,14 @@
     "web": "expo start --web",
     "lint": "expo lint"
   },
+  "expo": {
+    "doctor": {
+      "reactNativeDirectoryCheck": {
+        "exclude": [
+          "react-native-background-actions"
+        ]
+      }
+    }
+  },
   "private": true
 }

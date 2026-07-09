@@ -22,9 +22,10 @@ import {
   getSyncInterval,
   getSyncPaused,
 } from '../../settings';
-import { Colors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
+import { Colors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { SyncProgressRing, SyncPhase } from '@/components/SyncProgressRing';
 import { StatCard } from '@/components/StatCard';
+import { AppIcon } from '@/components/AppIcon';
 
 function formatRelativeTime(ts: number | null): string {
   if (!ts) return 'Never';
@@ -59,8 +60,8 @@ function applyProgressUpdate(
     setters.setTotal(0);
     setters.setStatusMessage(
       detail.files
-        ? `Scanning files… ${detail.files.toLocaleString()} found`
-        : 'Scanning your folders…'
+        ? `Scanning files: ${detail.files.toLocaleString()} found`
+        : 'Scanning your selected folders'
     );
     return;
   }
@@ -76,8 +77,8 @@ function applyProgressUpdate(
     setters.setTotal(0);
     setters.setStatusMessage(
       count > 0
-        ? `Checking server… ${checked.toLocaleString()} / ${count.toLocaleString()}`
-        : 'Checking server…'
+        ? `Checking server: ${checked.toLocaleString()} / ${count.toLocaleString()}`
+        : 'Checking server'
     );
     return;
   }
@@ -91,7 +92,7 @@ function applyProgressUpdate(
     setters.setStatusMessage(`Uploading ${name}`);
   } else if (total > 0) {
     const remaining = Math.max(total - current, 0);
-    setters.setStatusMessage(`${current}/${total} uploaded · ${remaining} remaining`);
+    setters.setStatusMessage(`${current}/${total} uploaded - ${remaining} remaining`);
   }
 }
 
@@ -116,17 +117,7 @@ export default function HomeScreen() {
   const [, setRelativeTimeTick] = useState(0);
 
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
-  const [serverLabel, setServerLabel] = useState('No Server');
-
-  const progressSetters = {
-    setPhase,
-    setProgress,
-    setUploaded,
-    setTotal,
-    setChecked,
-    setCheckTotal,
-    setStatusMessage,
-  };
+  const [serverLabel, setServerLabel] = useState('No server');
 
   const loadAll = useCallback(async () => {
     const [lt, ts, si, paused, ip, name, port] = await Promise.all([
@@ -143,7 +134,7 @@ export default function HomeScreen() {
     setTotalSyncedState(ts);
     setSyncIntervalState(si);
     setSyncPausedState(paused);
-    setServerLabel(name || ip || 'No Server');
+    setServerLabel(name || ip || 'No server');
 
     if (!ip) {
       setServerStatus('unknown');
@@ -171,13 +162,11 @@ export default function HomeScreen() {
     }, [loadAll])
   );
 
-  // Refresh relative "Last Sync" label every 30 seconds without leaving the tab.
   useEffect(() => {
     const id = setInterval(() => setRelativeTimeTick((t) => t + 1), 30000);
     return () => clearInterval(id);
   }, []);
 
-  // Global sync state — covers Sync Now, auto sync, and folder resync.
   useEffect(() => {
     const onStarted = () => {
       setSyncing(true);
@@ -187,7 +176,7 @@ export default function HomeScreen() {
       setTotal(0);
       setChecked(0);
       setCheckTotal(0);
-      setStatusMessage('Starting backup…');
+      setStatusMessage('Starting backup');
     };
 
     const onProgress = ({
@@ -199,7 +188,15 @@ export default function HomeScreen() {
       total: number;
       detail?: any;
     }) => {
-      applyProgressUpdate(current, tot, detail, progressSetters);
+      applyProgressUpdate(current, tot, detail, {
+        setPhase,
+        setProgress,
+        setUploaded,
+        setTotal,
+        setChecked,
+        setCheckTotal,
+        setStatusMessage,
+      });
     };
 
     const onCompleted = (data: {
@@ -227,8 +224,8 @@ export default function HomeScreen() {
       } else {
         setStatusMessage(
           uploadedCount > 0
-            ? `✅  ${uploadedCount} file${uploadedCount !== 1 ? 's' : ''} backed up`
-            : '✓  Everything is already up to date'
+            ? `${uploadedCount} file${uploadedCount !== 1 ? 's' : ''} backed up`
+            : 'Everything is already up to date'
         );
       }
     };
@@ -236,7 +233,7 @@ export default function HomeScreen() {
     const onFailed = ({ message }: { message?: string }) => {
       setSyncing(false);
       setPhase('idle');
-      setStatusMessage(`❌  ${message || 'Backup failed — check your connection'}`);
+      setStatusMessage(message || 'Backup failed. Check your connection.');
     };
 
     const subs = [
@@ -255,8 +252,8 @@ export default function HomeScreen() {
     const ip = await getServerIp();
     if (!ip) {
       Alert.alert(
-        'No Server Configured',
-        'Go to Settings to enter your server IP address, or tap Discover to find it on your network.',
+        'No server configured',
+        'Open Settings to enter your server IP address, or use Discover to find it on your network.',
         [{ text: 'OK' }]
       );
       return;
@@ -264,9 +261,7 @@ export default function HomeScreen() {
 
     try {
       await runSync();
-    } catch {
-      // runSync handles error notification and sync-failed event.
-    }
+    } catch {}
   };
 
   const statusColors: Record<ServerStatus, string> = {
@@ -277,10 +272,10 @@ export default function HomeScreen() {
   };
 
   const statusLabels: Record<ServerStatus, string> = {
-    connected: `● ${serverLabel}`,
-    disconnected: '● Offline',
-    checking: '● Checking…',
-    unknown: '● No Server',
+    connected: serverLabel,
+    disconnected: 'Offline',
+    checking: 'Checking',
+    unknown: 'No server',
   };
 
   const intervalLabel =
@@ -294,15 +289,17 @@ export default function HomeScreen() {
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
-      <StatusBar barStyle="light-content" backgroundColor={Colors.bg} />
+      <StatusBar barStyle="dark-content" backgroundColor={Colors.bg} />
 
       <View style={styles.header}>
-        <View>
-          <Text style={styles.appTitle}>Phone Backup</Text>
-          <Text style={styles.appSubtitle}>Automatic · Secure · Private</Text>
+        <View style={styles.titleBlock}>
+          <Text style={styles.kicker}>Private phone backup</Text>
+          <Text style={styles.appTitle}>Everything safe, quietly.</Text>
+          <Text style={styles.appSubtitle}>Your folders sync to your own computer.</Text>
         </View>
         <View style={[styles.serverPill, { borderColor: serverColor }]}>
-          <Text style={[styles.serverPillText, { color: serverColor }]}>
+          <View style={[styles.statusDot, { backgroundColor: serverColor }]} />
+          <Text style={[styles.serverPillText, { color: serverColor }]} numberOfLines={1}>
             {statusLabels[serverStatus]}
           </Text>
         </View>
@@ -311,11 +308,11 @@ export default function HomeScreen() {
       <ScrollView
         contentContainerStyle={[
           styles.scrollContent,
-          { paddingBottom: BottomTabInset + insets.bottom + 24 },
+          { paddingBottom: BottomTabInset + insets.bottom + 34 },
         ]}
         showsVerticalScrollIndicator={false}
       >
-        <View style={styles.ringSection}>
+        <View style={styles.heroPanel}>
           <SyncProgressRing
             isActive={syncing}
             progress={progress}
@@ -325,37 +322,39 @@ export default function HomeScreen() {
             checked={checked}
             checkTotal={checkTotal}
           />
-          {statusMessage ? (
-            <Text style={styles.statusMsg}>{statusMessage}</Text>
-          ) : null}
+          {statusMessage ? <Text style={styles.statusMsg}>{statusMessage}</Text> : null}
           {syncPaused && !syncing && (
             <View style={styles.pausedBadge}>
-              <Text style={styles.pausedText}>⏸  Auto Sync Paused</Text>
+              <AppIcon androidName="pause" iosName="pause.fill" color={Colors.warning} size={14} fallback="P" />
+              <Text style={styles.pausedText}>Auto sync paused</Text>
             </View>
           )}
         </View>
 
         <View style={styles.statsRow}>
           <StatCard
-            icon="📦"
-            label="Files Synced"
-            value={totalSynced > 0 ? totalSynced.toLocaleString() : '—'}
+            icon="inventory_2"
+            iosIcon="archivebox"
+            label="Files synced"
+            value={totalSynced > 0 ? totalSynced.toLocaleString() : '-'}
             tint={Colors.primary}
-            dimColor={Colors.primaryDim}
+            dimColor={Colors.primarySoft}
           />
           <StatCard
-            icon="🕐"
-            label="Last Sync"
+            icon="history"
+            iosIcon="clock.arrow.circlepath"
+            label="Last sync"
             value={formatRelativeTime(lastSyncTime)}
             tint={Colors.success}
-            dimColor={Colors.successDim}
+            dimColor={Colors.successSoft}
           />
           <StatCard
-            icon="⏱️"
+            icon="schedule"
+            iosIcon="timer"
             label="Interval"
             value={syncPaused ? 'Paused' : intervalLabel}
             tint={syncPaused ? Colors.textMuted : Colors.warning}
-            dimColor={Colors.warningDim}
+            dimColor={Colors.warningSoft}
           />
         </View>
 
@@ -370,39 +369,41 @@ export default function HomeScreen() {
           {syncing ? (
             <View style={styles.syncBtnInner}>
               <ActivityIndicator color={Colors.white} size="small" />
-              <Text style={styles.syncBtnText}>Syncing…</Text>
+              <Text style={styles.syncBtnText}>Syncing</Text>
             </View>
           ) : (
-            <Text style={styles.syncBtnText}>↑  Sync Now</Text>
+            <View style={styles.syncBtnInner}>
+              <AppIcon androidName="cloud_upload" iosName="icloud.and.arrow.up" color={Colors.white} size={20} fallback="UP" />
+              <Text style={styles.syncBtnText}>Sync now</Text>
+            </View>
           )}
         </TouchableOpacity>
 
         {serverStatus === 'unknown' && (
-          <View style={styles.warningCard}>
-            <Text style={styles.warningTitle}>⚠️  No Server Connected</Text>
-            <Text style={styles.warningBody}>
-              Open{' '}
-              <Text style={{ color: Colors.primaryLight, fontWeight: '600' }}>
-                Settings
-              </Text>{' '}
-              to enter your backup server IP, or tap{' '}
-              <Text style={{ color: Colors.primaryLight, fontWeight: '600' }}>
-                Discover
-              </Text>{' '}
-              to find it automatically on your local network.
-            </Text>
+          <View style={styles.noticeCard}>
+            <View style={styles.noticeIcon}>
+              <AppIcon androidName="wifi_off" iosName="wifi.slash" color={Colors.warning} size={20} fallback="!" />
+            </View>
+            <View style={styles.noticeCopy}>
+              <Text style={styles.noticeTitle}>Connect a server</Text>
+              <Text style={styles.noticeBody}>
+                Open Settings to enter your server IP, or use Discover to find it automatically.
+              </Text>
+            </View>
           </View>
         )}
 
         {serverStatus === 'disconnected' && (
-          <View style={[styles.warningCard, styles.errorCard]}>
-            <Text style={[styles.warningTitle, { color: Colors.error }]}>
-              ❌  Server Unreachable
-            </Text>
-            <Text style={styles.warningBody}>
-              Make sure the backup server is running on your PC and that both
-              devices are on the same Wi-Fi network.
-            </Text>
+          <View style={[styles.noticeCard, styles.errorCard]}>
+            <View style={[styles.noticeIcon, styles.errorIcon]}>
+              <AppIcon androidName="error" iosName="exclamationmark.triangle" color={Colors.error} size={20} fallback="!" />
+            </View>
+            <View style={styles.noticeCopy}>
+              <Text style={[styles.noticeTitle, { color: Colors.error }]}>Server unreachable</Text>
+              <Text style={styles.noticeBody}>
+                Make sure the desktop app is running and both devices are on the same Wi-Fi network.
+              </Text>
+            </View>
           </View>
         )}
       </ScrollView>
@@ -416,114 +417,147 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.bg,
   },
   header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
     paddingHorizontal: Spacing.six,
     paddingTop: Spacing.four,
     paddingBottom: Spacing.five,
+    gap: Spacing.four,
+  },
+  titleBlock: {
+    gap: Spacing.one,
+  },
+  kicker: {
+    color: Colors.primary,
+    fontSize: TextScale.xs,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+    textTransform: 'uppercase',
   },
   appTitle: {
     fontSize: TextScale.xl,
-    fontWeight: '700',
+    fontWeight: '900',
     color: Colors.text,
-    letterSpacing: -0.5,
   },
   appSubtitle: {
-    fontSize: TextScale.xs,
+    fontSize: TextScale.sm,
     color: Colors.textSecondary,
-    marginTop: 3,
+    fontWeight: '600',
   },
   serverPill: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
     borderWidth: 1,
     borderRadius: Radius.full,
     paddingHorizontal: 12,
-    paddingVertical: 5,
+    paddingVertical: 7,
     backgroundColor: Colors.surface,
-    maxWidth: 160,
+    maxWidth: '100%',
+    gap: 7,
+  },
+  statusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: Radius.full,
   },
   serverPillText: {
-    fontSize: 11,
-    fontWeight: '600',
+    fontSize: TextScale.xs,
+    fontWeight: '800',
   },
   scrollContent: {
     paddingHorizontal: Spacing.six,
     gap: Spacing.six,
   },
-  ringSection: {
+  heroPanel: {
     alignItems: 'center',
     gap: Spacing.four,
-    paddingVertical: Spacing.four,
+    paddingVertical: Spacing.six,
+    borderRadius: Radius.xxl,
+    backgroundColor: Colors.surfaceSoft,
   },
   statusMsg: {
     fontSize: TextScale.base,
     color: Colors.textSecondary,
     textAlign: 'center',
-    fontWeight: '500',
+    fontWeight: '700',
+    paddingHorizontal: Spacing.five,
   },
   pausedBadge: {
-    backgroundColor: Colors.warningDim,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    backgroundColor: Colors.warningSoft,
     borderRadius: Radius.full,
     paddingHorizontal: Spacing.four,
-    paddingVertical: 5,
+    paddingVertical: 7,
   },
   pausedText: {
     fontSize: TextScale.xs,
     color: Colors.warning,
-    fontWeight: '600',
+    fontWeight: '800',
   },
   statsRow: {
     flexDirection: 'row',
     gap: Spacing.three,
   },
   syncBtn: {
+    minHeight: 56,
     backgroundColor: Colors.primary,
-    borderRadius: Radius.xl,
-    paddingVertical: Spacing.five,
+    borderRadius: Radius.lg,
+    paddingVertical: Spacing.four,
     alignItems: 'center',
     justifyContent: 'center',
-    elevation: 8,
-    shadowColor: Colors.primary,
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.45,
-    shadowRadius: 14,
+    ...Shadows.soft,
   },
   syncBtnBusy: {
-    opacity: 0.75,
-    elevation: 2,
-    shadowOpacity: 0.1,
+    opacity: 0.72,
   },
   syncBtnInner: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: Spacing.two,
   },
   syncBtnText: {
     fontSize: TextScale.md,
-    fontWeight: '700',
+    fontWeight: '900',
     color: Colors.white,
-    letterSpacing: 0.4,
   },
-  warningCard: {
-    backgroundColor: Colors.warningDim,
+  noticeCard: {
+    flexDirection: 'row',
+    gap: Spacing.three,
+    backgroundColor: Colors.warningSoft,
     borderRadius: Radius.lg,
     borderWidth: 1,
-    borderColor: Colors.warning,
-    padding: Spacing.five,
-    gap: Spacing.two,
+    borderColor: '#F4D69D',
+    padding: Spacing.four,
   },
   errorCard: {
-    backgroundColor: Colors.errorDim,
-    borderColor: Colors.error,
+    backgroundColor: Colors.errorSoft,
+    borderColor: '#F4B4B4',
   },
-  warningTitle: {
+  noticeIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: Radius.full,
+    backgroundColor: Colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  errorIcon: {
+    backgroundColor: Colors.surface,
+  },
+  noticeCopy: {
+    flex: 1,
+    gap: Spacing.one,
+  },
+  noticeTitle: {
     fontSize: TextScale.base,
-    fontWeight: '700',
+    fontWeight: '900',
     color: Colors.warning,
   },
-  warningBody: {
+  noticeBody: {
     fontSize: TextScale.sm,
     color: Colors.textSecondary,
     lineHeight: 20,
+    fontWeight: '600',
   },
 });

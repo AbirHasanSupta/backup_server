@@ -1,14 +1,16 @@
 import { Platform, NativeModules } from 'react-native';
 
-let BackgroundServiceModule = null;
-try {
-  BackgroundServiceModule = require('react-native-background-actions');
-} catch (e) {}
-const BackgroundService = BackgroundServiceModule ? (BackgroundServiceModule.default || BackgroundServiceModule) : null;
 const hasNativeBackgroundActions = !!(
-  NativeModules && 
-  (NativeModules.BackgroundActions || NativeModules.RNBackgroundActions)
+  NativeModules &&
+  NativeModules.RNBackgroundActions
 );
+let BackgroundServiceModule = null;
+if (hasNativeBackgroundActions) {
+  try {
+    BackgroundServiceModule = require('react-native-background-actions');
+  } catch (e) {}
+}
+const BackgroundService = BackgroundServiceModule ? (BackgroundServiceModule.default || BackgroundServiceModule) : null;
 
 
 const SYNC_CHANNEL_ID = 'backup-sync';

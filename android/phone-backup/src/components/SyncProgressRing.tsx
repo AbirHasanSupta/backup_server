@@ -1,23 +1,24 @@
 import React, { useEffect } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import Animated, {
-  useSharedValue,
+  Easing,
   useAnimatedStyle,
+  useSharedValue,
   withRepeat,
   withSequence,
   withTiming,
-  Easing,
 } from 'react-native-reanimated';
-import { Colors, TextScale } from '@/constants/theme';
+import { Colors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
+import { AppIcon } from '@/components/AppIcon';
 
-const RING_SIZE = 220;
-const INNER_SIZE = 180;
+const RING_SIZE = 226;
+const INNER_SIZE = 176;
 
 export type SyncPhase = 'scanning' | 'checking' | 'uploading' | 'idle';
 
 interface Props {
   isActive: boolean;
-  progress: number; // 0–100
+  progress: number;
   uploaded: number;
   total: number;
   phase?: SyncPhase;
@@ -34,120 +35,77 @@ export function SyncProgressRing({
   checked = 0,
   checkTotal = 0,
 }: Props) {
-  // Outer glow pulse
-  const glowScale = useSharedValue(1);
-  const glowOpacity = useSharedValue(0);
-
-  // Spinner rotation
-  const spinnerRotation = useSharedValue(0);
-  const spinnerOpacity = useSharedValue(0);
-
-  // Inner ring scale pulse
-  const ringScale = useSharedValue(1);
+  const pulse = useSharedValue(1);
+  const sweep = useSharedValue(0);
 
   useEffect(() => {
     if (isActive) {
-      glowScale.value = withRepeat(
+      pulse.value = withRepeat(
         withSequence(
-          withTiming(1.18, { duration: 1100, easing: Easing.inOut(Easing.ease) }),
-          withTiming(1.0, { duration: 1100, easing: Easing.inOut(Easing.ease) })
+          withTiming(1.04, { duration: 950, easing: Easing.inOut(Easing.ease) }),
+          withTiming(1, { duration: 950, easing: Easing.inOut(Easing.ease) })
         ),
         -1,
         true
       );
-      glowOpacity.value = withRepeat(
-        withSequence(
-          withTiming(0.7, { duration: 900 }),
-          withTiming(0.25, { duration: 900 })
-        ),
-        -1,
-        true
-      );
-      spinnerRotation.value = withRepeat(
-        withTiming(360, { duration: 1400, easing: Easing.linear }),
+      sweep.value = withRepeat(
+        withTiming(360, { duration: 1600, easing: Easing.linear }),
         -1,
         false
       );
-      spinnerOpacity.value = withTiming(1, { duration: 300 });
-      ringScale.value = withRepeat(
-        withSequence(
-          withTiming(1.03, { duration: 1000 }),
-          withTiming(1.0, { duration: 1000 })
-        ),
-        -1,
-        true
-      );
     } else {
-      glowScale.value = withTiming(1, { duration: 500 });
-      glowOpacity.value = withTiming(0, { duration: 500 });
-      spinnerOpacity.value = withTiming(0, { duration: 300 });
-      ringScale.value = withTiming(1, { duration: 400 });
+      pulse.value = withTiming(1, { duration: 300 });
+      sweep.value = withTiming(0, { duration: 300 });
     }
-  }, [isActive]);
+  }, [isActive, pulse, sweep]);
 
-  const glowStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: glowScale.value }],
-    opacity: glowOpacity.value,
+  const pulseStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: pulse.value }],
   }));
 
-  const spinnerStyle = useAnimatedStyle(() => ({
-    transform: [{ rotate: `${spinnerRotation.value}deg` }],
-    opacity: spinnerOpacity.value,
+  const sweepStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${sweep.value}deg` }],
+    opacity: isActive ? 1 : 0,
   }));
 
-  const ringStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: ringScale.value }],
-  }));
+  const progressPct = Math.max(0, Math.min(100, Math.round(progress)));
 
-  const progressPct = Math.round(progress);
-
-  const progressLabel = (() => {
-    if (phase === 'scanning') return 'Scanning…';
-    if (phase === 'checking') {
-      return checkTotal > 0
-        ? `${checked} / ${checkTotal} checked`
-        : 'Checking…';
-    }
-    if (phase === 'uploading' && total > 0) {
-      return `${uploaded} / ${total} files`;
-    }
-    return 'Preparing…';
+  const label = (() => {
+    if (!isActive) return 'Ready to back up';
+    if (phase === 'scanning') return 'Scanning folders';
+    if (phase === 'checking') return checkTotal > 0 ? `${checked} of ${checkTotal} checked` : 'Checking server';
+    if (phase === 'uploading' && total > 0) return `${uploaded} of ${total} files`;
+    return 'Preparing backup';
   })();
-
-  const showPercentage = phase === 'uploading' || phase === 'checking';
 
   return (
     <View style={styles.container}>
-      {/* Outer glow ring */}
-      <Animated.View style={[styles.glow, glowStyle]} />
-
-      {/* Spinner arc (rotating) */}
-      <Animated.View style={[styles.spinner, spinnerStyle]} />
-
-      {/* Main ring */}
-      <Animated.View style={[styles.ring, isActive && styles.ringActive, ringStyle]}>
-        {/* Inner solid circle */}
+      <Animated.View style={[styles.halo, pulseStyle]} />
+      <Animated.View style={[styles.sweep, sweepStyle]} />
+      <View style={styles.ring}>
         <View style={styles.inner}>
-          {isActive ? (
-            <View style={styles.centerContent}>
-              {showPercentage ? (
-                <>
-                  <Text style={styles.progressNumber}>{progressPct}</Text>
-                  <Text style={styles.progressSymbol}>%</Text>
-                </>
-              ) : (
-                <Text style={styles.idleIcon}>⏳</Text>
-              )}
-              <Text style={styles.progressLabel}>{progressLabel}</Text>
+          <View style={styles.iconWrap}>
+            <AppIcon
+              androidName={isActive ? 'sync' : 'cloud_done'}
+              iosName={isActive ? 'arrow.triangle.2.circlepath' : 'checkmark.icloud'}
+              color={isActive ? Colors.primary : Colors.success}
+              size={30}
+              fallback={isActive ? 'S' : 'OK'}
+            />
+          </View>
+          {isActive && (phase === 'checking' || phase === 'uploading') ? (
+            <View style={styles.percentRow}>
+              <Text style={styles.progressNumber}>{progressPct}</Text>
+              <Text style={styles.progressSymbol}>%</Text>
             </View>
           ) : (
-            <View style={styles.centerContent}>
-              <Text style={styles.idleIcon}>☁️</Text>
-              <Text style={styles.idleLabel}>Ready</Text>
-            </View>
+            <Text style={styles.readyText}>{isActive ? 'Working' : 'All set'}</Text>
           )}
+          <Text style={styles.progressLabel} numberOfLines={2}>
+            {label}
+          </Text>
         </View>
-      </Animated.View>
+      </View>
     </View>
   );
 }
@@ -159,72 +117,78 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  glow: {
+  halo: {
     position: 'absolute',
     width: RING_SIZE,
     height: RING_SIZE,
     borderRadius: RING_SIZE / 2,
     backgroundColor: Colors.primaryGlow,
   },
-  spinner: {
+  sweep: {
     position: 'absolute',
-    width: RING_SIZE,
-    height: RING_SIZE,
-    borderRadius: RING_SIZE / 2,
+    width: RING_SIZE - 10,
+    height: RING_SIZE - 10,
+    borderRadius: (RING_SIZE - 10) / 2,
     borderWidth: 3,
     borderColor: Colors.transparent,
-    borderTopColor: Colors.primaryLight,
+    borderTopColor: Colors.primary,
     borderRightColor: Colors.primaryLight,
   },
   ring: {
-    width: RING_SIZE - 8,
-    height: RING_SIZE - 8,
-    borderRadius: (RING_SIZE - 8) / 2,
-    borderWidth: 2,
+    width: RING_SIZE - 16,
+    height: RING_SIZE - 16,
+    borderRadius: (RING_SIZE - 16) / 2,
+    borderWidth: 1,
     borderColor: Colors.surfaceBorder,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: Colors.surface,
-  },
-  ringActive: {
-    borderColor: Colors.primary,
+    ...Shadows.soft,
   },
   inner: {
     width: INNER_SIZE,
     height: INNER_SIZE,
     borderRadius: INNER_SIZE / 2,
-    backgroundColor: Colors.surfaceElevated,
+    backgroundColor: Colors.surfaceSoft,
     alignItems: 'center',
     justifyContent: 'center',
+    padding: Spacing.five,
   },
-  centerContent: {
+  iconWrap: {
+    width: 54,
+    height: 54,
+    borderRadius: Radius.full,
+    backgroundColor: Colors.primarySoft,
     alignItems: 'center',
-    gap: 2,
+    justifyContent: 'center',
+    marginBottom: Spacing.three,
+  },
+  percentRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
   },
   progressNumber: {
     fontSize: TextScale.xxl,
-    fontWeight: '700',
+    fontWeight: '800',
     color: Colors.text,
-    lineHeight: 36,
+    lineHeight: 38,
   },
   progressSymbol: {
     fontSize: TextScale.sm,
-    fontWeight: '600',
-    color: Colors.primaryLight,
-    marginTop: -4,
-  },
-  progressLabel: {
-    fontSize: TextScale.xs,
-    color: Colors.textSecondary,
+    fontWeight: '800',
+    color: Colors.primary,
     marginTop: 4,
   },
-  idleIcon: {
-    fontSize: 40,
+  readyText: {
+    fontSize: TextScale.lg,
+    fontWeight: '800',
+    color: Colors.text,
   },
-  idleLabel: {
+  progressLabel: {
     fontSize: TextScale.sm,
     color: Colors.textSecondary,
-    marginTop: 6,
-    fontWeight: '500',
+    marginTop: Spacing.two,
+    textAlign: 'center',
+    fontWeight: '600',
   },
 });

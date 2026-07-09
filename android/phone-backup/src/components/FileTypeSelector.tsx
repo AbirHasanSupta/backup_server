@@ -1,21 +1,16 @@
 import React from 'react';
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  ScrollView,
-  StyleSheet,
-} from 'react-native';
-import { Colors, Spacing, Radius, TextScale } from '@/constants/theme';
+import { View, Text, TouchableOpacity, ScrollView, StyleSheet } from 'react-native';
+import { Colors, Radius, Spacing, TextScale } from '@/constants/theme';
 import { FILE_TYPE_LABELS } from '../../settings';
+import { AppIcon } from '@/components/AppIcon';
 
-const FILE_TYPE_ICONS: Record<string, string> = {
-  all: '🗂️',
-  photos: '📷',
-  videos: '🎬',
-  pdfs: '📄',
-  docs: '📝',
-  others: '📦',
+const FILE_TYPE_ICONS: Record<string, { android: string; ios: string; fallback: string }> = {
+  all: { android: 'select_all', ios: 'square.grid.2x2', fallback: 'A' },
+  photos: { android: 'photo_camera', ios: 'photo', fallback: 'P' },
+  videos: { android: 'movie', ios: 'play.rectangle', fallback: 'V' },
+  pdfs: { android: 'picture_as_pdf', ios: 'doc.richtext', fallback: 'PDF' },
+  docs: { android: 'description', ios: 'doc.text', fallback: 'D' },
+  others: { android: 'inventory_2', ios: 'archivebox', fallback: 'O' },
 };
 
 const ALL_TYPES = ['all', 'photos', 'videos', 'pdfs', 'docs', 'others'] as const;
@@ -35,34 +30,33 @@ export function FileTypeSelector({ selected, onChange }: Props) {
       return;
     }
 
-    // Remove 'all' from selection when a specific type is tapped
-    const without = selected.filter((t) => t !== 'all');
+    const withoutAll = selected.filter((t) => t !== 'all');
 
-    if (without.includes(type)) {
-      const next = without.filter((t) => t !== type);
+    if (withoutAll.includes(type)) {
+      const next = withoutAll.filter((t) => t !== type);
       onChange(next.length === 0 ? ['all'] : next);
-    } else {
-      const next = [...without, type];
-      // If all specific types are selected, switch to 'all'
-      const specificTypes = ALL_TYPES.filter((t) => t !== 'all');
-      if (specificTypes.every((t) => next.includes(t))) {
-        onChange(['all']);
-      } else {
-        onChange(next);
-      }
+      return;
     }
+
+    const next = [...withoutAll, type];
+    const specificTypes = ALL_TYPES.filter((t) => t !== 'all');
+    onChange(specificTypes.every((t) => next.includes(t)) ? ['all'] : next);
   };
 
   return (
     <View>
-      <Text style={styles.label}>File Types</Text>
+      <View style={styles.headingRow}>
+        <Text style={styles.label}>File types</Text>
+        <Text style={styles.selection}>{isAll ? 'Everything' : `${selected.length} selected`}</Text>
+      </View>
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.row}
       >
         {ALL_TYPES.map((type) => {
-          const active = type === 'all' ? isAll : (!isAll && selected.includes(type));
+          const active = type === 'all' ? isAll : !isAll && selected.includes(type);
+          const icon = FILE_TYPE_ICONS[type];
           return (
             <TouchableOpacity
               key={type}
@@ -72,7 +66,13 @@ export function FileTypeSelector({ selected, onChange }: Props) {
               accessibilityState={{ checked: active }}
               accessibilityLabel={FILE_TYPE_LABELS[type]}
             >
-              <Text style={styles.pillIcon}>{FILE_TYPE_ICONS[type]}</Text>
+              <AppIcon
+                androidName={icon.android}
+                iosName={icon.ios}
+                color={active ? Colors.primary : Colors.textSecondary}
+                size={16}
+                fallback={icon.fallback}
+              />
               <Text style={[styles.pillText, active && styles.pillTextActive]}>
                 {FILE_TYPE_LABELS[type]}
               </Text>
@@ -85,13 +85,23 @@ export function FileTypeSelector({ selected, onChange }: Props) {
 }
 
 const styles = StyleSheet.create({
+  headingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.two,
+  },
   label: {
     fontSize: TextScale.xs,
-    fontWeight: '600',
+    fontWeight: '800',
     color: Colors.textSecondary,
-    letterSpacing: 0.8,
+    letterSpacing: 0.7,
     textTransform: 'uppercase',
-    marginBottom: Spacing.two,
+  },
+  selection: {
+    fontSize: TextScale.xs,
+    color: Colors.textMuted,
+    fontWeight: '600',
   },
   row: {
     flexDirection: 'row',
@@ -101,28 +111,24 @@ const styles = StyleSheet.create({
   pill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: 7,
+    minHeight: 38,
     paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
     borderRadius: Radius.full,
     borderWidth: 1,
     borderColor: Colors.surfaceBorder,
-    backgroundColor: Colors.surfaceElevated,
+    backgroundColor: Colors.surface,
   },
   pillActive: {
     borderColor: Colors.primary,
-    backgroundColor: Colors.primaryDim,
-  },
-  pillIcon: {
-    fontSize: 14,
+    backgroundColor: Colors.primarySoft,
   },
   pillText: {
     fontSize: TextScale.sm,
-    fontWeight: '500',
+    fontWeight: '700',
     color: Colors.textSecondary,
   },
   pillTextActive: {
-    color: Colors.primaryLight,
-    fontWeight: '600',
+    color: Colors.primary,
   },
 });
