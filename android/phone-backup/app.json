@@ -8,6 +8,7 @@
       "expo-media-library",
       "expo-task-manager",
       "expo-background-fetch",
+      "./plugins/withBackgroundActionsDataSync",
       "expo-router",
       [
         "expo-notifications",
@@ -28,8 +29,6 @@
     ],
     "android": {
       "permissions": [
-        "READ_EXTERNAL_STORAGE",
-        "READ_MEDIA_IMAGES",
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
@@ -42,8 +41,6 @@
         "android.permission.INTERNET",
         "android.permission.ACCESS_WIFI_STATE",
         "android.permission.ACCESS_NETWORK_STATE",
-        "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_DATA_SYNC",
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
       ],

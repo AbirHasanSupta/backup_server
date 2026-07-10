@@ -2,6 +2,7 @@ import { DeviceEventEmitter, Platform, NativeModules } from 'react-native';
 import { scan } from './scanner';
 import { checkDeviceConnection, checkServerFiles, uploadFile } from './uploader';
 import { hashFile } from './crypto';
+import { acquireSyncWakeLock, releaseSyncWakeLock } from './wakeLock';
 import {
   markUploaded,
   markUploadedBatch,
@@ -39,6 +40,14 @@ const CHECK_BATCH_SIZE = 300;
 const UPLOAD_CONCURRENCY = 3;
 const SERVICE_LOOP_TICK_MS = 15000;
 const APP_PRIMARY_COLOR = '#2563EB';
+const BACKUP_FOREGROUND_SERVICE_TYPE = ['dataSync'];
+
+function withBackupForegroundServiceType(options) {
+  return {
+    ...options,
+    foregroundServiceType: BACKUP_FOREGROUND_SERVICE_TYPE,
+  };
+}
 
 function chunk(items, size) {
   const chunks = [];
@@ -57,17 +66,10 @@ try {
 
   TaskManager.defineTask(TASK_NAME, async () => {
     try {
-      if (Platform.OS === 'android' && BackgroundService && !BackgroundService.isRunning()) {
-        await startPersistentSyncService();
-        if (!BackgroundService.isRunning()) {
-          console.log('[BackgroundTask] Safety-net: Foreground service start restricted in background, running headless sync.');
-          const result = await runSync(null, { isBackgroundFetch: true });
-          return result.uploaded > 0
-            ? BackgroundFetch.BackgroundFetchResult.NewData
-            : BackgroundFetch.BackgroundFetchResult.NoData;
-        }
-      }
-      return BackgroundFetch.BackgroundFetchResult.NewData;
+      const result = await runSync(null, { isBackgroundFetch: true });
+      return result.uploaded > 0
+        ? BackgroundFetch.BackgroundFetchResult.NewData
+        : BackgroundFetch.BackgroundFetchResult.NoData;
     } catch (err) {
       console.warn('[BackgroundTask] Safety-net tick failed:', err?.message);
       return BackgroundFetch.BackgroundFetchResult.Failed;
@@ -269,7 +271,7 @@ async function runOneOffForegroundSync(progressHandler, runOptions) {
   let result = null;
   let error = null;
   let isSyncRunning = true;
-  const options = {
+  const options = withBackupForegroundServiceType({
     taskName: 'PhoneBackupSync',
     taskTitle: '☁️ Backing up files',
     taskDesc: 'Scanning folders...',
@@ -277,7 +279,7 @@ async function runOneOffForegroundSync(progressHandler, runOptions) {
     color: APP_PRIMARY_COLOR,
     parameters: {},
     taskProgressBarOptions: { max: 100, value: 0, indeterminate: true },
-  };
+  });
 
   try {
     await BackgroundService.start(async () => {
@@ -315,6 +317,8 @@ export async function runSync(onProgress, runOptions = {}) {
     await reportProgress(current, total, detail);
   };
 
+  let wakeLockAcquired = false;
+
   try {
     if (isBackgroundFetch) {
       const ip = await getServerIp();
@@ -339,6 +343,7 @@ export async function runSync(onProgress, runOptions = {}) {
       }
     }
 
+    wakeLockAcquired = await acquireSyncWakeLock();
     emitSyncStarted();
 
     let result;
@@ -382,6 +387,7 @@ export async function runSync(onProgress, runOptions = {}) {
     await updateIdleNotification(true);
     throw err;
   } finally {
+    await releaseSyncWakeLock(wakeLockAcquired);
     isSyncInProgress = false;
   }
 }
@@ -431,7 +437,7 @@ export async function startPersistentSyncService() {
   if (BackgroundService.isRunning() || persistentServiceStarting) return;
   persistentServiceStarting = true;
   try {
-    const options = {
+    const options = withBackupForegroundServiceType({
       taskName: 'PhoneBackupAutoSync',
       taskTitle: '☁️ Phone Backup',
       taskDesc: 'Auto backup enabled',
@@ -439,7 +445,7 @@ export async function startPersistentSyncService() {
       color: APP_PRIMARY_COLOR,
       parameters: { delay: SERVICE_LOOP_TICK_MS },
       taskProgressBarOptions: { max: 100, value: 0, indeterminate: false },
-    };
+    });
     await BackgroundService.start(persistentSyncLoop, options);
   } catch (err) {
     console.warn('[BackgroundTask] Could not start persistent sync service:', err?.message);
