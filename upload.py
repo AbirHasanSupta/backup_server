@@ -229,8 +229,8 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
         key = f"{item.relative_path}|{item.modified_time}|{item.size}"
         db_exists = key in present_in_db
         
-        # Check if file actually exists on disk
-        on_disk = file_exists(item.relative_path, item.size, device_id=device_id)
+        # Check disk only for DB matches; missing DB rows are already known missing.
+        on_disk = db_exists and file_exists(item.relative_path, item.size, device_id=device_id)
         
         if db_exists and not on_disk:
             # File is in DB but missing from disk. 

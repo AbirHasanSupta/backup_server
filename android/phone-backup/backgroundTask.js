@@ -1,5 +1,5 @@
 import { DeviceEventEmitter, Platform, NativeModules } from 'react-native';
-import { scan } from './scanner';
+import { enrichFileMetadata, scan } from './scanner';
 import { checkDeviceConnection, checkServerFiles, uploadFile } from './uploader';
 import { hashFile } from './crypto';
 import { acquireSyncWakeLock, releaseSyncWakeLock } from './wakeLock';
@@ -46,6 +46,37 @@ function withBackupForegroundServiceType(options) {
   return {
     ...options,
     foregroundServiceType: BACKUP_FOREGROUND_SERVICE_TYPE,
+  };
+}
+
+function emptySyncResult(skippedReason = '') {
+  return {
+    uploaded: 0,
+    skipped: 0,
+    total: 0,
+    errors: 0,
+    deviceTotalFiles: 0,
+    deviceTotalSize: 0,
+    skippedReason,
+  };
+}
+
+async function getScheduledSyncState() {
+  const [paused, intervalMinutes, lastSyncTime] = await Promise.all([
+    getSyncPaused(),
+    getSyncInterval(),
+    getLastSyncTime(),
+  ]);
+  const now = Date.now();
+  const dueAt = (lastSyncTime || 0) + intervalMinutes * 60 * 1000;
+
+  return {
+    paused,
+    intervalMinutes,
+    lastSyncTime,
+    dueAt,
+    now,
+    due: !paused && now >= dueAt,
   };
 }
 
@@ -208,13 +239,14 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
   async function worker() {
     while (nextIndex < pending.length) {
-      const file = pending[nextIndex++];
+      let file = pending[nextIndex++];
       if (!file) break;
       if (onProgress) {
         await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
       }
 
       try {
+        file = await enrichFileMetadata(file);
         let sha256 = '';
         if (file.size < 10 * 1024 * 1024) {
           sha256 = await hashFile(file.uri);
@@ -306,9 +338,23 @@ async function runOneOffForegroundSync(progressHandler, runOptions) {
 
 export async function runSync(onProgress, runOptions = {}) {
   const isBackgroundFetch = !!runOptions.isBackgroundFetch;
+  if (isBackgroundFetch && !runOptions.ignoreSchedule) {
+    const schedule = await getScheduledSyncState();
+    if (schedule.paused) {
+      console.log('[BackgroundTask] Auto sync skipped: paused.');
+      return emptySyncResult('paused');
+    }
+    if (!schedule.due) {
+      console.log(
+        `[BackgroundTask] Auto sync skipped: next run due at ${new Date(schedule.dueAt).toISOString()}.`
+      );
+      return emptySyncResult('not_due');
+    }
+  }
+
   if (isSyncInProgress) {
     console.log('[BackgroundTask] Sync already in progress, skipping.');
-    return { uploaded: 0, skipped: 0, total: 0, errors: 0, deviceTotalFiles: 0, deviceTotalSize: 0 };
+    return emptySyncResult('already_running');
   }
   isSyncInProgress = true;
 
@@ -324,7 +370,7 @@ export async function runSync(onProgress, runOptions = {}) {
       const ip = await getServerIp();
       if (!ip) {
         console.log('[BackgroundTask] Sync skipped: No server IP configured.');
-        return { uploaded: 0, skipped: 0, total: 0, errors: 0, deviceTotalFiles: 0, deviceTotalSize: 0 };
+        return emptySyncResult('no_server');
       }
 
       const controller = new AbortController();
@@ -334,12 +380,12 @@ export async function runSync(onProgress, runOptions = {}) {
         clearTimeout(timeout);
         if (!status.connected) {
           console.log('[BackgroundTask] Sync skipped: Device is no longer approved by server.');
-          return { uploaded: 0, skipped: 0, total: 0, errors: 0, deviceTotalFiles: 0, deviceTotalSize: 0 };
+          return emptySyncResult('device_removed');
         }
       } catch (err) {
         clearTimeout(timeout);
         console.log('[BackgroundTask] Sync skipped: Server unreachable/offline.');
-        return { uploaded: 0, skipped: 0, total: 0, errors: 0, deviceTotalFiles: 0, deviceTotalSize: 0 };
+        return emptySyncResult('server_unreachable');
       }
     }
 
@@ -402,15 +448,11 @@ async function persistentSyncLoop(taskDataArguments) {
       if (isSyncInProgress) {
         // Progress notification is updated by reportProgress during sync.
       } else {
-        const paused = await getSyncPaused();
-        const intervalMinutes = await getSyncInterval();
-        const last = await getLastSyncTime();
-        const dueAt = (last || 0) + intervalMinutes * 60 * 1000;
-        const now = Date.now();
+        const schedule = await getScheduledSyncState();
 
-        if (paused) {
+        if (schedule.paused) {
           await updateIdleNotification();
-        } else if (now >= dueAt) {
+        } else if (schedule.due) {
           const ip = await getServerIp();
           if (ip) {
             await runSync(null, { isBackgroundFetch: true }).catch((err) =>

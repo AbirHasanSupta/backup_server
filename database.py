@@ -138,6 +138,19 @@ def is_uploaded(path, size, modified_time):
     return row is not None
 
 
+def _metadata_matches(row, size, modified_time):
+    """True when a DB file row represents the same file version."""
+    row_size = row["size"]
+    row_mtime = row["modified_time"]
+
+    if row_size != size:
+        return False
+
+    # Some legacy/SAF entries can have no reliable mtime. In that case, size is
+    # the best metadata match available; otherwise, require exact mtime.
+    return not modified_time or not row_mtime or row_mtime == modified_time
+
+
 def is_uploaded_compatible(path, size, modified_time, external_id=None, device_id=None):
     conn = get_conn()
     path = (path or "").replace("\\", "/")
@@ -145,39 +158,33 @@ def is_uploaded_compatible(path, size, modified_time, external_id=None, device_i
     # Try by external_id first if available
     if external_id:
         if device_id:
-            row = conn.execute(
-                "SELECT 1 FROM files WHERE device_id=? AND external_id=?",
+            rows = conn.execute(
+                "SELECT size, modified_time FROM files WHERE device_id=? AND external_id=?",
                 (device_id, external_id),
-            ).fetchone()
+            ).fetchall()
         else:
-            row = conn.execute(
-                "SELECT 1 FROM files WHERE external_id=?",
+            rows = conn.execute(
+                "SELECT size, modified_time FROM files WHERE external_id=?",
                 (external_id,),
-            ).fetchone()
+            ).fetchall()
         
-        if row:
+        if any(_metadata_matches(row, size, modified_time) for row in rows):
             conn.close()
             return True
 
     # Then try by path/device_id
     if device_id:
-        row = conn.execute(
-            "SELECT 1 FROM files WHERE (device_id=? OR device_id IS NULL) AND path=? AND size=? AND (modified_time=? OR ?=0)",
-            (device_id, path, size, modified_time, modified_time),
-        ).fetchone()
+        rows = conn.execute(
+            "SELECT size, modified_time FROM files WHERE (device_id=? OR device_id IS NULL) AND path=?",
+            (device_id, path),
+        ).fetchall()
     else:
-        if modified_time:
-            row = conn.execute(
-                "SELECT 1 FROM files WHERE device_id IS NULL AND path=? AND size=? AND modified_time=?",
-                (path, size, modified_time),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT 1 FROM files WHERE device_id IS NULL AND path=? AND size=?",
-                (path, size),
-            ).fetchone()
+        rows = conn.execute(
+            "SELECT size, modified_time FROM files WHERE device_id IS NULL AND path=?",
+            (path,),
+        ).fetchall()
     conn.close()
-    return row is not None
+    return any(_metadata_matches(row, size, modified_time) for row in rows)
 
 
 def batch_check_files(items: list[dict]):
@@ -217,26 +224,26 @@ def batch_check_files(items: list[dict]):
             
         # Match rows back to items
         row_map = {} # path -> list of rows
-        eid_map = set() # external_id
+        eid_map = {} # external_id -> list of rows
         for r in rows:
             p = (r["path"] or "").replace("\\", "/")
             if p not in row_map: row_map[p] = []
             row_map[p].append(r)
-            if r["external_id"]: eid_map.add(r["external_id"])
+            if r["external_id"]:
+                if r["external_id"] not in eid_map: eid_map[r["external_id"]] = []
+                eid_map[r["external_id"]].append(r)
             
         for item in group:
             p = (item["path"] or "").replace("\\", "/")
             s, m, eid = item["size"], item["modified_time"], item.get("external_id")
             found = False
             if eid and eid in eid_map:
-                found = True
+                found = any(_metadata_matches(r, s, m) for r in eid_map[eid])
             elif p in row_map:
                 for r in row_map[p]:
-                    # Size must match. Mtime matches if both are present and equal, or if one is missing.
-                    if r["size"] == s:
-                        if not m or not r["modified_time"] or r["modified_time"] == m:
-                            found = True
-                            break
+                    if _metadata_matches(r, s, m):
+                        found = True
+                        break
             
             if found:
                 # We use the ORIGINAL item["path"] for the key to match what upload.py expects,
