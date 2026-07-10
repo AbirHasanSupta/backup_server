@@ -157,6 +157,7 @@ export async function uploadFile(item, onProgress) {
       const body = parseUploadBody(res.body);
       return {
         success: true,
+        status: body.status || 'uploaded',
         deviceTotalFiles: body.device_total_files || 0,
         deviceTotalSize: body.device_total_size || 0,
       };

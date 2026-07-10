@@ -67,6 +67,54 @@ function createScanReporter(onActivity) {
   };
 }
 
+function createMetadataScheduler(reportActivity) {
+  const queue = [];
+  let active = 0;
+  let completed = 0;
+  let total = 0;
+  let drainResolve = null;
+
+  function pump() {
+    while (active < METADATA_BATCH_SIZE && queue.length > 0) {
+      const task = queue.shift();
+      active++;
+      task().finally(() => {
+        active--;
+        completed++;
+        pump();
+        if (active === 0 && queue.length === 0 && drainResolve) {
+          drainResolve();
+          drainResolve = null;
+        }
+      });
+    }
+  }
+
+  return {
+    add(file) {
+      total++;
+      queue.push(async () => {
+        const enriched = await enrichFileMetadata(file);
+        Object.assign(file, enriched);
+        reportActivity({
+          phase: 'scanning',
+          files: total,
+          metadata: completed + 1,
+          totalMetadata: total,
+          currentFile: file.relativePath,
+        });
+      });
+      pump();
+    },
+    async drain() {
+      if (active === 0 && queue.length === 0) return;
+      await new Promise((resolve) => {
+        drainResolve = resolve;
+      });
+    },
+  };
+}
+
 export async function enrichFileMetadata(file) {
   if (file.metadataLoaded) return file;
 
@@ -83,10 +131,10 @@ export async function enrichFileMetadata(file) {
   };
 }
 
-function addFile(uri, relativePath, name, result, shouldInclude, reportActivity, counters) {
+function addFile(uri, relativePath, name, result, shouldInclude, reportActivity, counters, metadataScheduler) {
   if (!shouldInclude(name)) return;
 
-  result.push({
+  const file = {
     uri,
     relativePath,
     modifiedTime: 0,
@@ -94,12 +142,14 @@ function addFile(uri, relativePath, name, result, shouldInclude, reportActivity,
     name,
     id: uri,
     metadataLoaded: false,
-  });
+  };
+  result.push(file);
   counters.files++;
+  metadataScheduler.add(file);
   reportActivity({ phase: 'scanning', files: counters.files, currentFile: relativePath });
 }
 
-async function walk(uri, base, result, shouldInclude, reportActivity, counters, knownItems = null) {
+async function walk(uri, base, result, shouldInclude, reportActivity, counters, metadataScheduler, knownItems = null) {
   let items = knownItems;
   try {
     if (!items) {
@@ -107,7 +157,7 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
     }
   } catch {
     const name = getSafName(uri);
-    addFile(uri, base, name, result, shouldInclude, reportActivity, counters);
+    addFile(uri, base, name, result, shouldInclude, reportActivity, counters, metadataScheduler);
     return;
   }
 
@@ -123,40 +173,14 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
     }
 
     if (childItems) {
-      await walk(itemUri, newBase, result, shouldInclude, reportActivity, counters, childItems);
+      await walk(itemUri, newBase, result, shouldInclude, reportActivity, counters, metadataScheduler, childItems);
     } else {
-      addFile(itemUri, newBase, name, result, shouldInclude, reportActivity, counters);
+      addFile(itemUri, newBase, name, result, shouldInclude, reportActivity, counters, metadataScheduler);
     }
   }
 
   for (let i = 0; i < items.length; i += SCAN_BATCH_SIZE) {
     await Promise.all(items.slice(i, i + SCAN_BATCH_SIZE).map(processItem));
-  }
-}
-
-async function enrichScannedFiles(files, reportActivity) {
-  let completed = 0;
-
-  for (let i = 0; i < files.length; i += METADATA_BATCH_SIZE) {
-    const batch = files.slice(i, i + METADATA_BATCH_SIZE);
-    const enriched = await Promise.all(
-      batch.map(async (file) => {
-        const next = await enrichFileMetadata(file);
-        completed++;
-        reportActivity({
-          phase: 'scanning',
-          files: files.length,
-          metadata: completed,
-          totalMetadata: files.length,
-          currentFile: next.relativePath,
-        });
-        return next;
-      })
-    );
-
-    for (let offset = 0; offset < enriched.length; offset++) {
-      files[i + offset] = enriched[offset];
-    }
   }
 }
 
@@ -174,11 +198,12 @@ export async function scan(onActivity, targetFolderUri) {
 
   const result = [];
   const counters = { files: 0 };
+  const metadataScheduler = createMetadataScheduler(reportActivity);
   for (const folder of foldersToScan) {
     reportActivity({ phase: 'scanning', currentFile: folder.name, files: counters.files }, true);
-    await walk(folder.uri, folder.name, result, shouldInclude, reportActivity, counters);
+    await walk(folder.uri, folder.name, result, shouldInclude, reportActivity, counters, metadataScheduler);
   }
-  await enrichScannedFiles(result, reportActivity);
+  await metadataScheduler.drain();
   reportActivity({ phase: 'scanning', currentFile: '', files: counters.files }, true);
   return result;
 }

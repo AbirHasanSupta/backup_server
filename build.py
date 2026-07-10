@@ -93,13 +93,10 @@ def main() -> None:
         "uvicorn.protocols",
         "uvicorn.protocols.http",
         "uvicorn.protocols.http.auto",
-        "uvicorn.protocols.websockets",
-        "uvicorn.protocols.websockets.auto",
         "uvicorn.lifespan",
         "uvicorn.lifespan.on",
         "fastapi",
         "multipart",
-        "aiofiles",
         "anyio",
         "anyio._backends._asyncio",
         "starlette",
@@ -107,9 +104,6 @@ def main() -> None:
         "starlette.middleware",
         "starlette.responses",
         "starlette.requests",
-        "httptools",
-        "watchfiles",
-        "websockets",
     ]
 
     add_data_files = [

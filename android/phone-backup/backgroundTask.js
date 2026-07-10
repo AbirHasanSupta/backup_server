@@ -253,6 +253,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
   const totalUploads = pending.length;
   let uploaded = 0;
+  let skipped = files.length - pending.length;
   let completed = 0;
   let errors = 0;
   let lastError = null;
@@ -276,7 +277,11 @@ export async function performActualSync(onProgress, runOptions = {}) {
           serverDeviceTotalFiles = res.deviceTotalFiles;
           serverDeviceTotalSize = res.deviceTotalSize;
           uploadedFiles.push(file);
-          uploaded++;
+          if (res.status === 'skipped') {
+            skipped++;
+          } else {
+            uploaded++;
+          }
         } else {
           errors++;
           lastError = 'Server rejected the file. Check server logs.';
@@ -297,8 +302,6 @@ export async function performActualSync(onProgress, runOptions = {}) {
   const uploadConcurrency = getUploadConcurrency(pending);
   await Promise.all(Array.from({ length: uploadConcurrency }, () => worker()));
   await markUploadedBatch(uploadedFiles);
-
-  const skipped = files.length - pending.length;
 
   if (totalUploads > 0 && uploaded === 0 && errors === totalUploads && present.size === 0) {
     const msg = lastError ? `Last error: ${lastError}` : 'Check folder permissions and API key';
