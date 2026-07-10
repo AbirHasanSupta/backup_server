@@ -1,7 +1,6 @@
 import hashlib
 import os
 import re
-import shutil
 import threading
 
 from config import load_config
@@ -75,13 +74,28 @@ def save_file(relative_path: str, content: bytes, device_id: str | None = None) 
     return full_path
 
 
-def save_fileobj(relative_path: str, source, buffer_size: int = 1024 * 1024, device_id: str | None = None) -> str:
+def save_fileobj(
+    relative_path: str,
+    source,
+    buffer_size: int = 4 * 1024 * 1024,
+    device_id: str | None = None,
+    compute_sha256: bool = False,
+    expected_size: int | None = None,
+) -> tuple[str, str]:
     full_path = full_path_for(relative_path, device_id=device_id)
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
     tmp_path = f"{full_path}.tmp-{os.getpid()}-{threading.get_ident()}"
+    sha256_hash = hashlib.sha256() if compute_sha256 else None
+    bytes_written = 0
     try:
-        with open(tmp_path, "wb") as out:
-            shutil.copyfileobj(source, out, length=buffer_size)
+        with open(tmp_path, "wb", buffering=buffer_size) as out:
+            for chunk in iter(lambda: source.read(buffer_size), b""):
+                out.write(chunk)
+                bytes_written += len(chunk)
+                if sha256_hash:
+                    sha256_hash.update(chunk)
+        if expected_size is not None and expected_size >= 0 and bytes_written != expected_size:
+            raise ValueError(f"Uploaded file size mismatch: expected {expected_size}, wrote {bytes_written}")
         os.replace(tmp_path, full_path)
     except Exception:
         try:
@@ -89,4 +103,38 @@ def save_fileobj(relative_path: str, source, buffer_size: int = 1024 * 1024, dev
         except OSError:
             pass
         raise
-    return full_path
+    return full_path, sha256_hash.hexdigest() if sha256_hash else ""
+
+
+async def save_upload_stream(
+    relative_path: str,
+    chunks,
+    buffer_size: int = 4 * 1024 * 1024,
+    device_id: str | None = None,
+    compute_sha256: bool = False,
+    expected_size: int | None = None,
+) -> tuple[str, str]:
+    full_path = full_path_for(relative_path, device_id=device_id)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    tmp_path = f"{full_path}.tmp-{os.getpid()}-{threading.get_ident()}"
+    sha256_hash = hashlib.sha256() if compute_sha256 else None
+    bytes_written = 0
+    try:
+        with open(tmp_path, "wb", buffering=buffer_size) as out:
+            async for chunk in chunks:
+                if not chunk:
+                    continue
+                out.write(chunk)
+                bytes_written += len(chunk)
+                if sha256_hash:
+                    sha256_hash.update(chunk)
+        if expected_size is not None and expected_size >= 0 and bytes_written != expected_size:
+            raise ValueError(f"Uploaded file size mismatch: expected {expected_size}, wrote {bytes_written}")
+        os.replace(tmp_path, full_path)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+    return full_path, sha256_hash.hexdigest() if sha256_hash else ""

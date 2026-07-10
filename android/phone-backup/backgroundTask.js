@@ -1,10 +1,8 @@
 import { DeviceEventEmitter, Platform, NativeModules } from 'react-native';
 import { enrichFileMetadata, scan } from './scanner';
 import { checkDeviceConnection, checkServerFiles, uploadFile } from './uploader';
-import { hashFile } from './crypto';
 import { acquireSyncWakeLock, releaseSyncWakeLock } from './wakeLock';
 import {
-  markUploaded,
   markUploadedBatch,
   getSyncPaused,
   getSyncInterval,
@@ -37,7 +35,11 @@ const BackgroundService = BackgroundServiceModule ? (BackgroundServiceModule.def
 
 const TASK_NAME = 'backup-task';
 const CHECK_BATCH_SIZE = 300;
-const UPLOAD_CONCURRENCY = 3;
+const DEFAULT_UPLOAD_CONCURRENCY = 4;
+const SMALL_FILE_UPLOAD_CONCURRENCY = 6;
+const LARGE_FILE_UPLOAD_CONCURRENCY = 2;
+const SMALL_FILE_THRESHOLD = 25 * 1024 * 1024;
+const LARGE_FILE_THRESHOLD = 150 * 1024 * 1024;
 const SERVICE_LOOP_TICK_MS = 15000;
 const APP_PRIMARY_COLOR = '#2563EB';
 const BACKUP_FOREGROUND_SERVICE_TYPE = ['dataSync'];
@@ -86,6 +88,27 @@ function chunk(items, size) {
     chunks.push(items.slice(i, i + size));
   }
   return chunks;
+}
+
+function getUploadConcurrency(files) {
+  if (!files.length) return 0;
+
+  let totalSize = 0;
+  let largestSize = 0;
+  for (const file of files) {
+    const size = file.size || 0;
+    totalSize += size;
+    if (size > largestSize) largestSize = size;
+  }
+
+  const averageSize = totalSize / files.length;
+  if (largestSize >= LARGE_FILE_THRESHOLD || averageSize >= LARGE_FILE_THRESHOLD) {
+    return LARGE_FILE_UPLOAD_CONCURRENCY;
+  }
+  if (largestSize <= LARGE_FILE_THRESHOLD && averageSize <= SMALL_FILE_THRESHOLD) {
+    return SMALL_FILE_UPLOAD_CONCURRENCY;
+  }
+  return DEFAULT_UPLOAD_CONCURRENCY;
 }
 
 let TaskManager = null;
@@ -234,6 +257,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   let errors = 0;
   let lastError = null;
   let nextIndex = 0;
+  const uploadedFiles = [];
 
   if (onProgress) await onProgress(0, totalUploads, { phase: 'uploading', currentFile: '' });
 
@@ -247,17 +271,11 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
       try {
         file = await enrichFileMetadata(file);
-        let sha256 = '';
-        if (file.size < 10 * 1024 * 1024) {
-          sha256 = await hashFile(file.uri);
-        }
-
-        const fileToUpload = { ...file, sha256 };
-        const res = await uploadFile(fileToUpload, () => {});
+        const res = await uploadFile(file, () => {});
         if (res.success) {
           serverDeviceTotalFiles = res.deviceTotalFiles;
           serverDeviceTotalSize = res.deviceTotalSize;
-          await markUploaded(file.relativePath, file.modifiedTime);
+          uploadedFiles.push(file);
           uploaded++;
         } else {
           errors++;
@@ -276,9 +294,9 @@ export async function performActualSync(onProgress, runOptions = {}) {
     }
   }
 
-  await Promise.all(
-    Array.from({ length: Math.min(UPLOAD_CONCURRENCY, pending.length) }, () => worker())
-  );
+  const uploadConcurrency = getUploadConcurrency(pending);
+  await Promise.all(Array.from({ length: uploadConcurrency }, () => worker()));
+  await markUploadedBatch(uploadedFiles);
 
   const skipped = files.length - pending.length;
 

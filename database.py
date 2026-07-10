@@ -159,13 +159,13 @@ def is_uploaded_compatible(path, size, modified_time, external_id=None, device_i
     if external_id:
         if device_id:
             rows = conn.execute(
-                "SELECT size, modified_time FROM files WHERE device_id=? AND external_id=?",
-                (device_id, external_id),
+                "SELECT size, modified_time FROM files WHERE device_id=? AND path=? AND external_id=?",
+                (device_id, path, external_id),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT size, modified_time FROM files WHERE external_id=?",
-                (external_id,),
+                "SELECT size, modified_time FROM files WHERE device_id IS NULL AND path=? AND external_id=?",
+                (path, external_id),
             ).fetchall()
         
         if any(_metadata_matches(row, size, modified_time) for row in rows):
@@ -238,7 +238,10 @@ def batch_check_files(items: list[dict]):
             s, m, eid = item["size"], item["modified_time"], item.get("external_id")
             found = False
             if eid and eid in eid_map:
-                found = any(_metadata_matches(r, s, m) for r in eid_map[eid])
+                found = any(
+                    (r["path"] or "").replace("\\", "/") == p and _metadata_matches(r, s, m)
+                    for r in eid_map[eid]
+                )
             elif p in row_map:
                 for r in row_map[p]:
                     if _metadata_matches(r, s, m):

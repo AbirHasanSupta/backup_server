@@ -21,7 +21,7 @@ from database import (
     upsert_device,
 )
 from state import add_log, pending_connections, set_current_activity
-from storage import calculate_sha256, file_exists, save_fileobj
+from storage import file_exists, save_fileobj, save_upload_stream
 
 router = APIRouter()
 
@@ -264,6 +264,84 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
     }
 
 
+def finish_upload_record(
+    relative_path: str,
+    size: int,
+    modified_time: int,
+    device_ip: str,
+    external_id: str | None,
+    sha256: str | None,
+    device_id: str | None,
+):
+    now = int(time.time())
+    try:
+        insert_file(relative_path, size, modified_time, now, device_ip, external_id, sha256, device_id=device_id)
+    except Exception as e:
+        add_log(f"Error updating DB for {relative_path}: {str(e)}")
+        raise
+
+    touch_device(device_ip, device_id=device_id)
+    device_stats = get_device_stats(device_ip, device_id=device_id)
+    add_log(f"Uploaded: {relative_path} ({device_id or device_ip})")
+
+    return {
+        "status": "uploaded",
+        "device_total_files": device_stats["total_files"],
+        "device_total_size": device_stats["total_size"],
+    }
+
+
+def skipped_upload_response(device_ip: str, device_id: str | None):
+    touch_device(device_ip, device_id=device_id, files_delta=0)
+    device_stats = get_device_stats(device_ip, device_id=device_id)
+    return {
+        "status": "skipped",
+        "device_total_files": device_stats["total_files"],
+        "device_total_size": device_stats["total_size"],
+    }
+
+
+@router.post("/upload/raw")
+async def upload_file_raw(
+    request: Request,
+    relative_path: str,
+    modified_time: int,
+    size: int,
+    external_id: str = None,
+    sha256: str = None,
+    device_id: str = None,
+    authorization: str = Header(None),
+):
+    verify_auth(authorization)
+
+    device_ip = request.client.host
+    verify_known_device(device_ip, device_id)
+
+    if is_uploaded_compatible(relative_path, size, modified_time, external_id, device_id=device_id) and file_exists(relative_path, size, device_id=device_id):
+        return skipped_upload_response(device_ip, device_id)
+
+    set_current_activity(f"Uploading {relative_path}", device_ip)
+    add_log(f"Uploading: {relative_path} ({device_id or device_ip})")
+    try:
+        _, saved_sha256 = await save_upload_stream(
+            relative_path,
+            request.stream(),
+            device_id=device_id,
+            compute_sha256=not bool(sha256),
+            expected_size=size,
+        )
+    except Exception as e:
+        add_log(f"Error saving {relative_path}: {str(e)}")
+        raise
+    finally:
+        set_current_activity(None)
+
+    if not sha256:
+        sha256 = saved_sha256
+
+    return finish_upload_record(relative_path, size, modified_time, device_ip, external_id, sha256, device_id)
+
+
 @router.post("/upload")
 async def upload_file(
     request: Request,
@@ -282,40 +360,27 @@ async def upload_file(
     verify_known_device(device_ip, device_id)
 
     if is_uploaded_compatible(relative_path, size, modified_time, external_id, device_id=device_id) and file_exists(relative_path, size, device_id=device_id):
-        touch_device(device_ip, device_id=device_id, files_delta=0)
-        return {"status": "skipped"}
+        return skipped_upload_response(device_ip, device_id)
 
     set_current_activity(f"Uploading {relative_path}", device_ip)
     add_log(f"Uploading: {relative_path} ({device_id or device_ip})")
     try:
         await file.seek(0)
-        await asyncio.to_thread(save_fileobj, relative_path, file.file, device_id=device_id)
+        _, saved_sha256 = await asyncio.to_thread(
+            save_fileobj,
+            relative_path,
+            file.file,
+            device_id=device_id,
+            compute_sha256=not bool(sha256),
+            expected_size=size,
+        )
     except Exception as e:
         add_log(f"❌ Error saving {relative_path}: {str(e)}")
         raise
     finally:
         set_current_activity(None)
     
-    # If phone didn't send sha256, calculate it on server
     if not sha256:
-        sha256 = await asyncio.to_thread(calculate_sha256, relative_path, device_id=device_id)
-        
-    now = int(time.time())
-    try:
-        insert_file(relative_path, size, modified_time, now, device_ip, external_id, sha256, device_id=device_id)
-    except Exception as e:
-        add_log(f"❌ Error updating DB for {relative_path}: {str(e)}")
-        raise
+        sha256 = saved_sha256
 
-    # Update device stats (last_seen + files counter)
-    touch_device(device_ip, device_id=device_id)
-
-    device_stats = get_device_stats(device_ip, device_id=device_id)
-
-    add_log(f"⬆️  {relative_path}  ({device_id or device_ip})")
-
-    return {
-        "status": "uploaded",
-        "device_total_files": device_stats["total_files"],
-        "device_total_size": device_stats["total_size"],
-    }
+    return finish_upload_record(relative_path, size, modified_time, device_ip, external_id, sha256, device_id)

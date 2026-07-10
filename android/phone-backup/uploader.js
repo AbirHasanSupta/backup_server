@@ -96,9 +96,18 @@ export async function checkServerFiles(files) {
  * @returns {Promise<boolean>} true if uploaded or already on server, false on failure
  */
 export async function uploadFile(item, onProgress) {
-  const { serverIp, apiKey, serverPort } = await getServerConfig();
+  const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
 
-  const url = `http://${serverIp}:${serverPort}/upload`;
+  const params = new URLSearchParams({
+    relative_path: item.relativePath,
+    modified_time: String(item.modifiedTime),
+    size: String(item.size || 0),
+    external_id: item.id || '',
+    sha256: item.sha256 || '',
+    device_id: deviceId,
+  });
+  const rawUrl = `http://${serverIp}:${serverPort}/upload/raw?${params.toString()}`;
+  const multipartUrl = `http://${serverIp}:${serverPort}/upload`;
   const safeName = (item.name || item.relativePath.split('/').pop() || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
   const uniqueId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const cacheUri = `${FileSystem.cacheDirectory}${uniqueId}_${safeName}`;
@@ -107,7 +116,16 @@ export async function uploadFile(item, onProgress) {
   await FileSystem.StorageAccessFramework.copyAsync({ from: item.uri, to: cacheUri });
 
   try {
-    const res = await FileSystem.uploadAsync(url, cacheUri, {
+    const uploadRaw = () => FileSystem.uploadAsync(rawUrl, cacheUri, {
+      httpMethod: 'POST',
+      uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/octet-stream',
+      },
+    });
+
+    const uploadMultipart = () => FileSystem.uploadAsync(multipartUrl, cacheUri, {
       httpMethod: 'POST',
       uploadType: FileSystem.FileSystemUploadType.MULTIPART,
       fieldName: 'file',
@@ -117,10 +135,20 @@ export async function uploadFile(item, onProgress) {
         size: String(item.size || 0),
         external_id: item.id || '',
         sha256: item.sha256 || '',
-        device_id: await getDeviceId(),
+        device_id: deviceId,
       },
       headers: { Authorization: `Bearer ${apiKey}` },
     });
+
+    let res;
+    if (FileSystem.FileSystemUploadType.BINARY_CONTENT) {
+      res = await uploadRaw();
+      if ([404, 405, 414, 422].includes(res.status)) {
+        res = await uploadMultipart();
+      }
+    } else {
+      res = await uploadMultipart();
+    }
 
     onProgress && onProgress(item.size || 0);
 
