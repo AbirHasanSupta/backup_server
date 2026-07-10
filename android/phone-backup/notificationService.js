@@ -94,6 +94,14 @@ export async function setupNotifications() {
 }
 
 function buildSyncProgressText(current, total, detail) {
+  if (detail?.paused) {
+    if (detail?.currentFile) {
+      const filename = detail.currentFile.split('/').pop() || detail.currentFile;
+      return `Paused\n${filename}`;
+    }
+    return 'Backup paused';
+  }
+
   if (detail?.phase === 'scanning') {
     return detail.files
       ? `Scanning… ${detail.files.toLocaleString()} files found`

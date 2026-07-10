@@ -5,14 +5,18 @@ import {
   TouchableOpacity,
   ScrollView,
   StyleSheet,
-  ActivityIndicator,
   StatusBar,
   Alert,
   DeviceEventEmitter,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
-import { runSync } from '../../backgroundTask';
+import {
+  getCurrentSyncState,
+  pauseCurrentSync,
+  resumeCurrentSync,
+  runSync,
+} from '../../backgroundTask';
 import { checkDeviceConnection } from '../../uploader';
 import {
   getServerIp,
@@ -55,6 +59,16 @@ function applyProgressUpdate(
     setStatusMessage: (s: string) => void;
   }
 ) {
+  if (detail?.paused) {
+    setters.setPhase('paused');
+    setters.setUploaded(current || 0);
+    setters.setTotal(total || 0);
+    setters.setProgress(total > 0 ? Math.round((current / total) * 100) : 0);
+    const fileName = detail?.currentFile ? (detail.currentFile.split('/').pop() || detail.currentFile) : '';
+    setters.setStatusMessage(fileName ? `Paused on ${fileName}` : 'Backup paused');
+    return;
+  }
+
   if (detail?.phase === 'scanning') {
     setters.setPhase('scanning');
     setters.setProgress(0);
@@ -118,6 +132,7 @@ export default function HomeScreen() {
   const [totalSynced, setTotalSyncedState] = useState(0);
   const [syncInterval, setSyncIntervalState] = useState(15);
   const [syncPaused, setSyncPausedState] = useState(false);
+  const [syncControlPaused, setSyncControlPaused] = useState(false);
   const [, setRelativeTimeTick] = useState(0);
 
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
@@ -157,10 +172,39 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const applySyncSnapshot = useCallback((snapshot: any) => {
+    if (!snapshot?.active) {
+      setSyncing(false);
+      setSyncControlPaused(false);
+      setPhase('idle');
+      return;
+    }
+
+    setSyncing(true);
+    setSyncControlPaused(!!snapshot.paused);
+
+    const detail = {
+      ...(snapshot.detail || {}),
+      phase: snapshot.phase || snapshot.detail?.phase || 'uploading',
+      paused: !!snapshot.paused,
+    };
+
+    applyProgressUpdate(snapshot.current || 0, snapshot.total || 0, detail, {
+      setPhase,
+      setProgress,
+      setUploaded,
+      setTotal,
+      setChecked,
+      setCheckTotal,
+      setStatusMessage,
+    });
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       loadAll();
-    }, [loadAll])
+      getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
+    }, [applySyncSnapshot, loadAll])
   );
 
   useEffect(() => {
@@ -176,8 +220,16 @@ export default function HomeScreen() {
   }, [loadAll]);
 
   useEffect(() => {
+    const id = setInterval(() => {
+      getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
+    }, syncing ? 1000 : 2500);
+    return () => clearInterval(id);
+  }, [applySyncSnapshot, syncing]);
+
+  useEffect(() => {
     const onStarted = () => {
       setSyncing(true);
+      setSyncControlPaused(false);
       setPhase('scanning');
       setProgress(0);
       setUploaded(0);
@@ -196,6 +248,8 @@ export default function HomeScreen() {
       total: number;
       detail?: any;
     }) => {
+      setSyncing(true);
+      setSyncControlPaused(!!detail?.paused);
       applyProgressUpdate(current, tot, detail, {
         setPhase,
         setProgress,
@@ -215,6 +269,7 @@ export default function HomeScreen() {
       errors?: number;
     }) => {
       setSyncing(false);
+      setSyncControlPaused(false);
       setPhase('idle');
       if (data.lastSyncTime) setLastSyncTimeState(data.lastSyncTime);
       if (data.totalSynced) setTotalSyncedState(data.totalSynced);
@@ -240,6 +295,7 @@ export default function HomeScreen() {
 
     const onFailed = ({ message }: { message?: string }) => {
       setSyncing(false);
+      setSyncControlPaused(false);
       setPhase('idle');
       setStatusMessage(message || 'Backup failed. Check your connection.');
     };
@@ -247,15 +303,32 @@ export default function HomeScreen() {
     const subs = [
       DeviceEventEmitter.addListener('sync-started', onStarted),
       DeviceEventEmitter.addListener('sync-progress', onProgress),
+      DeviceEventEmitter.addListener('sync-state', applySyncSnapshot),
       DeviceEventEmitter.addListener('sync-completed', onCompleted),
       DeviceEventEmitter.addListener('sync-failed', onFailed),
     ];
 
     return () => subs.forEach((sub) => sub.remove());
-  }, []);
+  }, [applySyncSnapshot]);
 
   const handleSync = async () => {
-    if (syncing) return;
+    const snapshot = await getCurrentSyncState().catch(() => null);
+    if (syncing || snapshot?.active) {
+      if (snapshot?.active) applySyncSnapshot(snapshot);
+      const shouldResume = syncControlPaused || snapshot?.paused;
+      const changed = shouldResume ? await resumeCurrentSync() : await pauseCurrentSync();
+      if (changed) {
+        setSyncControlPaused(!shouldResume);
+        if (shouldResume) {
+          setPhase('uploading');
+          setStatusMessage('Resuming backup');
+        } else {
+          setPhase('paused');
+          setStatusMessage('Backup paused');
+        }
+      }
+      return;
+    }
 
     const ip = await getServerIp();
     if (!ip) {
@@ -402,16 +475,26 @@ export default function HomeScreen() {
 
         <TouchableOpacity
           id="sync-now-button"
-          style={[styles.syncBtn, syncing && styles.syncBtnBusy]}
+          style={[
+            styles.syncBtn,
+            syncing && styles.syncBtnBusy,
+            syncing && !syncControlPaused && styles.syncBtnPause,
+            syncing && syncControlPaused && styles.syncBtnResume,
+          ]}
           onPress={handleSync}
-          disabled={syncing}
-          accessibilityLabel="Sync now"
+          accessibilityLabel={syncing ? (syncControlPaused ? 'Resume sync' : 'Pause sync') : 'Sync now'}
           accessibilityRole="button"
         >
           {syncing ? (
             <View style={styles.syncBtnInner}>
-              <ActivityIndicator color={colors.white} size="small" />
-              <Text style={styles.syncBtnText}>Syncing</Text>
+              <AppIcon
+                androidName={syncControlPaused ? 'play_arrow' : 'pause'}
+                iosName={syncControlPaused ? 'play.fill' : 'pause.fill'}
+                color={colors.white}
+                size={20}
+                fallback={syncControlPaused ? 'R' : 'P'}
+              />
+              <Text style={styles.syncBtnText}>{syncControlPaused ? 'Resume sync' : 'Pause sync'}</Text>
             </View>
           ) : (
             <View style={styles.syncBtnInner}>
@@ -565,7 +648,13 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     ...Shadows.soft,
   },
   syncBtnBusy: {
-    opacity: 0.72,
+    opacity: 0.92,
+  },
+  syncBtnPause: {
+    backgroundColor: colors.warning,
+  },
+  syncBtnResume: {
+    backgroundColor: colors.success,
   },
   syncBtnInner: {
     flexDirection: 'row',

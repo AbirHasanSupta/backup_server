@@ -20,7 +20,7 @@ from database import (
     touch_device,
     upsert_device,
 )
-from state import add_log, pending_connections, set_current_activity
+from state import add_log, get_current_activity, pending_connections, set_current_activity
 from storage import file_exists, save_fileobj, save_upload_stream
 
 router = APIRouter()
@@ -187,7 +187,22 @@ async def status(request: Request, device_id: str | None = None, authorization: 
         "devices": devices,
         "device_connected": device_connected,
         "server_version": APP_VERSION,
+        "current_activity": get_current_activity(),
     }
+
+
+class ActivityReport(BaseModel):
+    message: str | None = None
+    device_id: str | None = None
+
+
+@router.post("/status/activity")
+async def report_activity(body: ActivityReport, request: Request, authorization: str = Header(None)):
+    verify_auth(authorization)
+    if body.device_id:
+        verify_known_device(request.client.host, body.device_id)
+    set_current_activity(body.message, request.client.host)
+    return {"status": "ok"}
 
 
 # ──────────────────────────────────────────────────────────────────────────────

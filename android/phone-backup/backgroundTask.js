@@ -4,12 +4,20 @@ import { checkDeviceConnection, checkServerFiles, uploadFile } from './uploader'
 import { acquireSyncWakeLock, releaseSyncWakeLock } from './wakeLock';
 import {
   markUploadedBatch,
+  clearSyncRuntimeState,
+  getSyncControlPaused,
   getSyncPaused,
   getSyncInterval,
+  getSyncRuntimeState,
   setLastSyncTime,
+  setSyncControlPaused,
+  setSyncRuntimeState,
   setTotalSynced,
   getServerIp,
   getLastSyncTime,
+  getApiKey,
+  getServerPort,
+  getDeviceId,
 } from './settings';
 import {
   showSyncProgressNotification,
@@ -134,6 +142,13 @@ try {
 }
 
 let lastIdleDesc = null;
+let currentSyncState = { active: false, paused: false, phase: 'idle' };
+let pauseWaiters = [];
+let isSyncInProgress = false;
+
+function emitSyncState(state) {
+  DeviceEventEmitter.emit('sync-state', state);
+}
 
 function emitSyncStarted() {
   DeviceEventEmitter.emit('sync-started', {});
@@ -149,6 +164,167 @@ function emitSyncCompleted(payload) {
 
 function emitSyncFailed(message) {
   DeviceEventEmitter.emit('sync-failed', { message });
+}
+
+async function writeSyncState(patch = {}) {
+  currentSyncState = {
+    ...currentSyncState,
+    ...patch,
+    updatedAt: Date.now(),
+  };
+  await setSyncRuntimeState(currentSyncState).catch(() => {});
+  emitSyncState(currentSyncState);
+  return currentSyncState;
+}
+
+function buildStateFromProgress(current, total, detail = {}) {
+  return {
+    active: true,
+    paused: !!currentSyncState.paused || !!detail.paused,
+    phase: detail.phase || currentSyncState.phase || 'uploading',
+    current,
+    total,
+    detail,
+  };
+}
+
+async function reportServerActivity(message) {
+  try {
+    const [serverIp, apiKey, serverPort, deviceId] = await Promise.all([
+      getServerIp(),
+      getApiKey(),
+      getServerPort(),
+      getDeviceId(),
+    ]);
+    if (!serverIp || !apiKey) return;
+
+    await fetch(`http://${serverIp}:${serverPort}/status/activity`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        message,
+        device_id: deviceId,
+      }),
+    }).catch(() => {});
+  } catch (e) {
+    // Ignore errors
+  }
+}
+
+export async function getCurrentSyncState() {
+  const stored = await getSyncRuntimeState().catch(() => null);
+  if (currentSyncState.active) return currentSyncState;
+
+  const isActuallyRunning = (
+    Platform.OS !== 'android' ||
+    !BackgroundService ||
+    BackgroundService.isRunning() ||
+    isSyncInProgress
+  );
+
+  if (stored?.active) {
+    if (!isActuallyRunning) {
+      await clearSyncRuntimeState().catch(() => {});
+      currentSyncState = { active: false, paused: false, phase: 'idle' };
+      return currentSyncState;
+    }
+    currentSyncState = {
+      active: true,
+      paused: !!stored.paused,
+      phase: stored.phase || 'idle',
+      ...stored,
+    };
+    return currentSyncState;
+  }
+  return { active: false, paused: false, phase: 'idle' };
+}
+
+async function setCurrentSyncPaused(paused) {
+  if (!currentSyncState.active) return false;
+
+  await setSyncControlPaused(paused).catch(() => {});
+  await writeSyncState({ paused });
+
+  if (paused) {
+    await reportServerActivity('Backup paused');
+  } else {
+    const phase = currentSyncState.phase || 'uploading';
+    const msg = phase === 'scanning' ? 'Scanning folders' : (phase === 'checking' ? 'Checking server files' : 'Uploading files');
+    await reportServerActivity(msg);
+  }
+
+  if (!paused) {
+    const waiters = pauseWaiters;
+    pauseWaiters = [];
+    waiters.forEach((resolve) => resolve());
+  }
+
+  if (Platform.OS === 'android' && BackgroundService && BackgroundService.isRunning()) {
+    const detail = currentSyncState.detail || {};
+    const desc = paused
+      ? buildSyncProgressText(currentSyncState.current || 0, currentSyncState.total || 0, {
+          ...detail,
+          paused: true,
+        })
+      : buildSyncProgressText(currentSyncState.current || 0, currentSyncState.total || 0, detail);
+
+    await BackgroundService.updateNotification({
+      taskTitle: paused ? 'Backup paused' : 'â˜ï¸ Backing up',
+      taskDesc: desc,
+      taskProgressBarOptions: {
+        max: currentSyncState.total || 100,
+        value: currentSyncState.current || 0,
+        indeterminate: !currentSyncState.total,
+      },
+    }).catch(() => {});
+  }
+
+  return true;
+}
+
+export async function pauseCurrentSync() {
+  return setCurrentSyncPaused(true);
+}
+
+export async function resumeCurrentSync() {
+  return setCurrentSyncPaused(false);
+}
+
+async function waitForResume(onProgress) {
+  let announced = false;
+
+  while (currentSyncState.active) {
+    const paused = currentSyncState.paused || await getSyncControlPaused().catch(() => false);
+    if (!paused) {
+      if (announced) {
+        await writeSyncState({ paused: false });
+        const phase = currentSyncState.phase || 'uploading';
+        const msg = phase === 'scanning' ? 'Scanning folders' : (phase === 'checking' ? 'Checking server files' : 'Uploading files');
+        await reportServerActivity(msg);
+      }
+      return;
+    }
+
+    if (!currentSyncState.paused || !announced) {
+      const detail = { ...(currentSyncState.detail || {}), paused: true };
+      await writeSyncState({ paused: true, detail });
+      await reportServerActivity('Backup paused');
+      if (onProgress) {
+        await onProgress(currentSyncState.current || 0, currentSyncState.total || 0, detail);
+      } else {
+        await reportProgress(currentSyncState.current || 0, currentSyncState.total || 0, detail);
+      }
+      announced = true;
+    }
+
+    await new Promise((resolve) => {
+      pauseWaiters.push(resolve);
+      setTimeout(resolve, 1000);
+    });
+  }
 }
 
 async function updateIdleNotification(force = false) {
@@ -171,6 +347,7 @@ async function updateIdleNotification(force = false) {
 }
 
 async function reportProgress(current, total, detail) {
+  await writeSyncState(buildStateFromProgress(current, total, detail));
   emitSyncProgress(current, total, detail);
 
   if (Platform.OS === 'android' && BackgroundService && BackgroundService.isRunning()) {
@@ -203,12 +380,17 @@ async function reportProgress(current, total, detail) {
 export async function performActualSync(onProgress, runOptions = {}) {
   const forceRefreshFolder = runOptions.forceRefreshFolder;
   const targetFolderUri = runOptions.targetFolderUri;
+  await waitForResume(onProgress);
   if (onProgress) await onProgress(0, 0, { phase: 'scanning' });
+  await reportServerActivity('Scanning folders');
   const files = await scan(async (detail) => {
+    await waitForResume(onProgress);
     if (onProgress) await onProgress(0, 0, detail);
   }, targetFolderUri);
 
+  await waitForResume(onProgress);
   if (onProgress) await onProgress(0, 0, { phase: 'checking', checked: 0, total: files.length });
+  await reportServerActivity('Checking server files');
 
   const present = new Set();
   const presentFiles = [];
@@ -217,6 +399,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   let serverDeviceTotalSize = 0;
 
   for (const batch of chunk(files, CHECK_BATCH_SIZE)) {
+    await waitForResume(onProgress);
     const res = await checkServerFiles(batch);
     const statuses = res.files;
     serverDeviceTotalFiles = res.deviceTotalFiles;
@@ -261,9 +444,11 @@ export async function performActualSync(onProgress, runOptions = {}) {
   const uploadedFiles = [];
 
   if (onProgress) await onProgress(0, totalUploads, { phase: 'uploading', currentFile: '' });
+  await reportServerActivity('Uploading files');
 
   async function worker() {
     while (nextIndex < pending.length) {
+      await waitForResume(onProgress);
       let file = pending[nextIndex++];
       if (!file) break;
       if (onProgress) {
@@ -318,7 +503,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   };
 }
 
-let isSyncInProgress = false;
+
 
 async function runOneOffForegroundSync(progressHandler, runOptions) {
   let result = null;
@@ -410,6 +595,18 @@ export async function runSync(onProgress, runOptions = {}) {
       }
     }
 
+    await setSyncControlPaused(false).catch(() => {});
+    await writeSyncState({
+      active: true,
+      paused: false,
+      phase: 'scanning',
+      current: 0,
+      total: 0,
+      detail: { phase: 'scanning' },
+      startedAt: Date.now(),
+    });
+    await reportServerActivity('Scanning folders');
+
     wakeLockAcquired = await acquireSyncWakeLock();
     emitSyncStarted();
 
@@ -443,6 +640,10 @@ export async function runSync(onProgress, runOptions = {}) {
       total: result.total,
     });
 
+    await clearSyncRuntimeState().catch(() => {});
+    currentSyncState = { active: false, paused: false, phase: 'idle' };
+    emitSyncState(currentSyncState);
+    await reportServerActivity(null);
     await updateIdleNotification(true);
 
     return result;
@@ -451,6 +652,10 @@ export async function runSync(onProgress, runOptions = {}) {
       await showSyncErrorNotification(err?.message || 'Unknown error').catch(() => {});
       emitSyncFailed(err?.message || 'Unknown error');
     }
+    await clearSyncRuntimeState().catch(() => {});
+    currentSyncState = { active: false, paused: false, phase: 'idle' };
+    emitSyncState(currentSyncState);
+    await reportServerActivity(null);
     await updateIdleNotification(true);
     throw err;
   } finally {

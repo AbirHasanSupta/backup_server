@@ -11,6 +11,8 @@ const KEYS = {
   SYNC_PAUSED:    'sync_paused',
   LAST_SYNC_TIME: 'last_sync_time',
   TOTAL_SYNCED:   'total_synced',
+  SYNC_RUNTIME_STATE: 'sync_runtime_state',
+  SYNC_CONTROL_PAUSED: 'sync_control_paused',
   DEVICE_ID:      'device_id',
   FORCE_REFRESH_ALL: 'force_refresh_all',
   FORCE_REFRESH_FOLDERS: 'force_refresh_folders',
@@ -168,6 +170,27 @@ export async function setSyncInterval(minutes) { await AsyncStorage.setItem(KEYS
 
 export async function getSyncPaused()     { return (await AsyncStorage.getItem(KEYS.SYNC_PAUSED)) === 'true'; }
 export async function setSyncPaused(val)  { await AsyncStorage.setItem(KEYS.SYNC_PAUSED, val ? 'true' : 'false'); }
+
+export async function getSyncControlPaused() {
+  return (await AsyncStorage.getItem(KEYS.SYNC_CONTROL_PAUSED)) === 'true';
+}
+export async function setSyncControlPaused(val) {
+  await AsyncStorage.setItem(KEYS.SYNC_CONTROL_PAUSED, val ? 'true' : 'false');
+}
+
+export async function getSyncRuntimeState() {
+  const state = safeJsonParse(await AsyncStorage.getItem(KEYS.SYNC_RUNTIME_STATE), null);
+  return state && typeof state === 'object' ? state : { active: false, paused: false, phase: 'idle' };
+}
+export async function setSyncRuntimeState(state) {
+  await AsyncStorage.setItem(KEYS.SYNC_RUNTIME_STATE, JSON.stringify({
+    ...state,
+    updatedAt: Date.now(),
+  }));
+}
+export async function clearSyncRuntimeState() {
+  await AsyncStorage.multiRemove([KEYS.SYNC_RUNTIME_STATE, KEYS.SYNC_CONTROL_PAUSED]);
+}
 
 export async function getThemeMode() {
   const mode = await AsyncStorage.getItem(KEYS.THEME_MODE);

@@ -21,15 +21,14 @@ Two components live in this repo:
 ```
 .
 ├── server.py           FastAPI app entrypoint (uvicorn)
-├── desktop_app.py       CustomTkinter GUI wrapping the server (dashboard, devices, settings, logs)
-├── upload.py            API routes: /ping, /connect, /devices, /status, /files/check, /upload
-├── database.py          SQLite schema, migrations, file/device queries
-├── storage.py           Disk I/O — file existence checks, SHA-256, saving uploads per device
-├── state.py             In-memory shared state — logs, current activity, pending connection approvals
-├── config.py            server_config.json load/save (API key, backup root, host/port, approval mode)
+├── desktop_app.py      CustomTkinter GUI wrapping the server (dashboard, devices, settings, logs)
+├── upload.py           API routes: /ping, /connect, /devices, /status, /files/check, /upload
+├── database.py         SQLite schema, migrations, file/device queries
+├── storage.py          Disk I/O — file existence checks, SHA-256, saving uploads per device
+├── state.py            In-memory shared state — logs, current activity, pending connection approvals
+├── config.py           server_config.json load/save (API key, backup root, host/port, approval mode)
 ├── build.py / build.bat PyInstaller packaging into a single .exe
-├── requirements.txt      fastapi, uvicorn, python-multipart, customtkinter, pyinstaller, pillow
-├── plan.md              Design notes for the sync algorithm
+├── requirements.txt     fastapi, uvicorn, python-multipart, customtkinter, pyinstaller, pillow
 └── android/phone-backup Expo Android app (see below)
 ```
 
@@ -48,6 +47,8 @@ backgroundTask.js   Foreground service loop (react-native-background-actions) �
 notificationService.js  Live progress notification (single, updating) instead of per-file spam
 crypto.js           SHA-256 hashing for file integrity
 settings.js         Persisted app settings (server IP/port, sync interval, folders, file types)
+wakeLock.js         Helper module to acquire/release Android CPU WakeLock during background sync
+plugins/            Config plugin (`withBackgroundActionsDataSync`) for native Android integration
 ```
 
 ## Requirements
