@@ -13,8 +13,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import {
   getCurrentSyncState,
-  pauseCurrentSync,
-  resumeCurrentSync,
+  stopCurrentSync,
+  forceStopCurrentSync,
   runSync,
 } from '../../backgroundTask';
 import { checkDeviceConnection } from '../../uploader';
@@ -59,13 +59,13 @@ function applyProgressUpdate(
     setStatusMessage: (s: string) => void;
   }
 ) {
-  if (detail?.paused) {
-    setters.setPhase('paused');
+  if (detail?.stopping) {
+    setters.setPhase('stopping');
     setters.setUploaded(current || 0);
     setters.setTotal(total || 0);
     setters.setProgress(total > 0 ? Math.round((current / total) * 100) : 0);
     const fileName = detail?.currentFile ? (detail.currentFile.split('/').pop() || detail.currentFile) : '';
-    setters.setStatusMessage(fileName ? `Paused on ${fileName}` : 'Backup paused');
+    setters.setStatusMessage(fileName ? `Finishing ${fileName}` : 'Stopping backup');
     return;
   }
 
@@ -132,8 +132,13 @@ export default function HomeScreen() {
   const [totalSynced, setTotalSyncedState] = useState(0);
   const [syncInterval, setSyncIntervalState] = useState(15);
   const [syncPaused, setSyncPausedState] = useState(false);
-  const [syncControlPaused, setSyncControlPaused] = useState(false);
+  const [stopRequested, setStopRequested] = useState(false);
+  // Tracks when the user first tapped the "Stopping" button for double-tap detection.
+  const [forceStopPressedAt, setForceStopPressedAt] = useState<number | null>(null);
   const [, setRelativeTimeTick] = useState(0);
+
+  // How fast the user must double-tap "Stopping" to trigger a force-stop.
+  const DOUBLE_TAP_WINDOW_MS = 1200;
 
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
   const [serverLabel, setServerLabel] = useState('No server');
@@ -175,18 +180,24 @@ export default function HomeScreen() {
   const applySyncSnapshot = useCallback((snapshot: any) => {
     if (!snapshot?.active) {
       setSyncing(false);
-      setSyncControlPaused(false);
+      setStopRequested(false);
+      setForceStopPressedAt(null);
       setPhase('idle');
       return;
     }
 
     setSyncing(true);
-    setSyncControlPaused(!!snapshot.paused);
+    // Functional update: once stopping is true it must never flicker back to
+    // false because of a stale snapshot arriving slightly after the user pressed
+    // Stop. Only onCompleted / onFailed are authoritative resets.
+    setStopRequested((prev) => prev || !!snapshot.stopping);
+    // Don't reset forceStopPressedAt here — we want to preserve the double-tap
+    // window even if a state snapshot comes in between two taps.
 
     const detail = {
       ...(snapshot.detail || {}),
       phase: snapshot.phase || snapshot.detail?.phase || 'uploading',
-      paused: !!snapshot.paused,
+      stopping: !!snapshot.stopping,
     };
 
     applyProgressUpdate(snapshot.current || 0, snapshot.total || 0, detail, {
@@ -229,7 +240,8 @@ export default function HomeScreen() {
   useEffect(() => {
     const onStarted = () => {
       setSyncing(true);
-      setSyncControlPaused(false);
+      setStopRequested(false);
+      setForceStopPressedAt(null);
       setPhase('scanning');
       setProgress(0);
       setUploaded(0);
@@ -249,7 +261,10 @@ export default function HomeScreen() {
       detail?: any;
     }) => {
       setSyncing(true);
-      setSyncControlPaused(!!detail?.paused);
+      // Functional update: once the user has pressed Stop, no in-flight progress
+      // event is allowed to flip stopRequested back to false. Only sync completion
+      // events (onCompleted / onFailed) are authoritative resets.
+      if (detail?.stopping) setStopRequested(true);
       applyProgressUpdate(current, tot, detail, {
         setPhase,
         setProgress,
@@ -267,9 +282,11 @@ export default function HomeScreen() {
       uploaded?: number;
       skipped?: number;
       errors?: number;
+      stopped?: boolean;
     }) => {
       setSyncing(false);
-      setSyncControlPaused(false);
+      setStopRequested(false);
+      setForceStopPressedAt(null);
       setPhase('idle');
       if (data.lastSyncTime) setLastSyncTimeState(data.lastSyncTime);
       if (data.totalSynced) setTotalSyncedState(data.totalSynced);
@@ -278,7 +295,9 @@ export default function HomeScreen() {
       const errorCount = data.errors ?? 0;
       const skippedCount = data.skipped ?? 0;
 
-      if (errorCount > 0) {
+      if (data.stopped) {
+        setStatusMessage(`Stopped - ${uploadedCount} file${uploadedCount !== 1 ? 's' : ''} backed up`);
+      } else if (errorCount > 0) {
         setStatusMessage(
           uploadedCount > 0
             ? `${uploadedCount} backed up, ${errorCount} failed`
@@ -295,7 +314,8 @@ export default function HomeScreen() {
 
     const onFailed = ({ message }: { message?: string }) => {
       setSyncing(false);
-      setSyncControlPaused(false);
+      setStopRequested(false);
+      setForceStopPressedAt(null);
       setPhase('idle');
       setStatusMessage(message || 'Backup failed. Check your connection.');
     };
@@ -313,23 +333,44 @@ export default function HomeScreen() {
 
   const handleSync = async () => {
     const snapshot = await getCurrentSyncState().catch(() => null);
+
+    // ── Case 1: A sync is currently active (syncing or stopping) ─────────────
     if (syncing || snapshot?.active) {
       if (snapshot?.active) applySyncSnapshot(snapshot);
-      const shouldResume = syncControlPaused || snapshot?.paused;
-      const changed = shouldResume ? await resumeCurrentSync() : await pauseCurrentSync();
-      if (changed) {
-        setSyncControlPaused(!shouldResume);
-        if (shouldResume) {
-          setPhase('uploading');
-          setStatusMessage('Resuming backup');
+
+      // Sub-case A: Already in graceful-stop state → handle double-tap for force-stop
+      if (stopRequested || snapshot?.stopping) {
+        const now = Date.now();
+        const isDoubleTap = forceStopPressedAt !== null && (now - forceStopPressedAt) < DOUBLE_TAP_WINDOW_MS;
+
+        if (isDoubleTap) {
+          // ── Double-tap confirmed: force-stop ────────────────────────────────
+          setForceStopPressedAt(null);
+          setStopRequested(false);
+          setSyncing(false);
+          setPhase('idle');
+          setStatusMessage('Backup force-stopped');
+          await forceStopCurrentSync();
         } else {
-          setPhase('paused');
-          setStatusMessage('Backup paused');
+          // ── First tap on "Stopping" button: record time, show hint ──────────
+          setForceStopPressedAt(now);
+          // The hint is shown in the button label below
         }
+        return;
+      }
+
+      // Sub-case B: Actively syncing — request graceful stop
+      const changed = await stopCurrentSync();
+      if (changed) {
+        setStopRequested(true);
+        setForceStopPressedAt(null);
+        setPhase('stopping');
+        setStatusMessage('Finishing current file, then stopping…');
       }
       return;
     }
 
+    // ── Case 2: Not syncing — start a new sync ────────────────────────────────
     const ip = await getServerIp();
     if (!ip) {
       Alert.alert(
@@ -477,29 +518,57 @@ export default function HomeScreen() {
           id="sync-now-button"
           style={[
             styles.syncBtn,
-            syncing && styles.syncBtnBusy,
-            syncing && !syncControlPaused && styles.syncBtnPause,
-            syncing && syncControlPaused && styles.syncBtnResume,
+            syncing && !stopRequested && styles.syncBtnStop,
+            stopRequested && !forceStopPressedAt && styles.syncBtnStopping,
+            stopRequested && !!forceStopPressedAt && styles.syncBtnForceHint,
           ]}
           onPress={handleSync}
-          accessibilityLabel={syncing ? (syncControlPaused ? 'Resume sync' : 'Pause sync') : 'Sync now'}
+          accessibilityLabel={
+            syncing
+              ? stopRequested
+                ? forceStopPressedAt
+                  ? 'Tap again to force stop'
+                  : 'Stopping sync — tap again to force stop'
+                : 'Stop sync'
+              : 'Sync now'
+          }
           accessibilityRole="button"
         >
           {syncing ? (
-            <View style={styles.syncBtnInner}>
-              <AppIcon
-                androidName={syncControlPaused ? 'play_arrow' : 'pause'}
-                iosName={syncControlPaused ? 'play.fill' : 'pause.fill'}
-                color={colors.white}
-                size={20}
-                fallback={syncControlPaused ? 'R' : 'P'}
-              />
-              <Text style={styles.syncBtnText}>{syncControlPaused ? 'Resume sync' : 'Pause sync'}</Text>
-            </View>
+            stopRequested ? (
+              <View style={styles.syncBtnInner}>
+                <AppIcon
+                  androidName={forceStopPressedAt ? 'warning' : 'hourglass_top'}
+                  iosName={forceStopPressedAt ? 'exclamationmark.triangle.fill' : 'hourglass'}
+                  color={colors.white}
+                  size={20}
+                  fallback="!"
+                />
+                <View>
+                  <Text style={styles.syncBtnText}>
+                    {forceStopPressedAt ? 'Tap again to force stop' : 'Stopping…'}
+                  </Text>
+                  {!forceStopPressedAt && (
+                    <Text style={styles.syncBtnHint}>Double-tap to force stop</Text>
+                  )}
+                </View>
+              </View>
+            ) : (
+              <View style={styles.syncBtnInner}>
+                <AppIcon
+                  androidName="stop"
+                  iosName="stop.fill"
+                  color={colors.white}
+                  size={20}
+                  fallback="S"
+                />
+                <Text style={styles.syncBtnText}>Stop Sync</Text>
+              </View>
+            )
           ) : (
             <View style={styles.syncBtnInner}>
               <AppIcon androidName="cloud_upload" iosName="icloud.and.arrow.up" color={colors.white} size={20} fallback="UP" />
-              <Text style={styles.syncBtnText}>Sync now</Text>
+              <Text style={styles.syncBtnText}>Sync Now</Text>
             </View>
           )}
         </TouchableOpacity>
@@ -650,11 +719,18 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   syncBtnBusy: {
     opacity: 0.92,
   },
-  syncBtnPause: {
-    backgroundColor: colors.warning,
+  syncBtnStop: {
+    backgroundColor: colors.error,
   },
-  syncBtnResume: {
-    backgroundColor: colors.success,
+  // Graceful-stop state: amber/warning background
+  syncBtnStopping: {
+    backgroundColor: colors.warning,
+    opacity: 1,
+  },
+  // First tap registered — highlight to signal "ready for second tap"
+  syncBtnForceHint: {
+    backgroundColor: '#C2410C', // deep orange — distinct from warning amber
+    opacity: 1,
   },
   syncBtnInner: {
     flexDirection: 'row',
@@ -665,6 +741,13 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     fontSize: TextScale.md,
     fontWeight: '900',
     color: colors.white,
+  },
+  syncBtnHint: {
+    fontSize: TextScale.xs,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.75)',
+    textAlign: 'center',
+    marginTop: 2,
   },
   noticeCard: {
     flexDirection: 'row',

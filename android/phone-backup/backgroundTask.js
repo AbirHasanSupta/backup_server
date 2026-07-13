@@ -5,12 +5,10 @@ import { acquireSyncWakeLock, releaseSyncWakeLock } from './wakeLock';
 import {
   markUploadedBatch,
   clearSyncRuntimeState,
-  getSyncControlPaused,
   getSyncPaused,
   getSyncInterval,
   getSyncRuntimeState,
   setLastSyncTime,
-  setSyncControlPaused,
   setSyncRuntimeState,
   setTotalSynced,
   getServerIp,
@@ -142,9 +140,11 @@ try {
 }
 
 let lastIdleDesc = null;
-let currentSyncState = { active: false, paused: false, phase: 'idle' };
-let pauseWaiters = [];
+let currentSyncState = { active: false, phase: 'idle', stopRequested: false, stopping: false, forceStop: false };
 let isSyncInProgress = false;
+// Per-sync AbortController — aborted immediately on force-stop so the worker
+// can abandon an in-flight upload without waiting for the native HTTP call.
+let syncAbortController = null;
 
 function emitSyncState(state) {
   DeviceEventEmitter.emit('sync-state', state);
@@ -180,7 +180,7 @@ async function writeSyncState(patch = {}) {
 function buildStateFromProgress(current, total, detail = {}) {
   return {
     active: true,
-    paused: !!currentSyncState.paused || !!detail.paused,
+    stopping: !!currentSyncState.stopping || !!detail.stopping,
     phase: detail.phase || currentSyncState.phase || 'uploading',
     current,
     total,
@@ -209,7 +209,7 @@ async function reportServerActivity(message) {
         device_id: deviceId,
       }),
     }).catch(() => {});
-  } catch (e) {
+  } catch (_e) {
     // Ignore errors
   }
 }
@@ -228,51 +228,33 @@ export async function getCurrentSyncState() {
   if (stored?.active) {
     if (!isActuallyRunning) {
       await clearSyncRuntimeState().catch(() => {});
-      currentSyncState = { active: false, paused: false, phase: 'idle' };
+      currentSyncState = { active: false, phase: 'idle', stopRequested: false, stopping: false };
       return currentSyncState;
     }
     currentSyncState = {
       active: true,
-      paused: !!stored.paused,
+      stopping: !!stored.stopping,
       phase: stored.phase || 'idle',
       ...stored,
     };
     return currentSyncState;
   }
-  return { active: false, paused: false, phase: 'idle' };
+  return { active: false, phase: 'idle', stopRequested: false, stopping: false };
 }
 
-async function setCurrentSyncPaused(paused) {
-  if (!currentSyncState.active) return false;
-
-  await setSyncControlPaused(paused).catch(() => {});
-  await writeSyncState({ paused });
-
-  if (paused) {
-    await reportServerActivity('Backup paused');
-  } else {
-    const phase = currentSyncState.phase || 'uploading';
-    const msg = phase === 'scanning' ? 'Scanning folders' : (phase === 'checking' ? 'Checking server files' : 'Uploading files');
-    await reportServerActivity(msg);
-  }
-
-  if (!paused) {
-    const waiters = pauseWaiters;
-    pauseWaiters = [];
-    waiters.forEach((resolve) => resolve());
-  }
+export async function stopCurrentSync() {
+  if (!currentSyncState.active || currentSyncState.stopRequested) return false;
+  currentSyncState.stopRequested = true;
+  currentSyncState.forceStop = false;
+  await writeSyncState({ stopping: true, forceStop: false });
+  await reportServerActivity('Stopping backup');
 
   if (Platform.OS === 'android' && BackgroundService && BackgroundService.isRunning()) {
-    const detail = currentSyncState.detail || {};
-    const desc = paused
-      ? buildSyncProgressText(currentSyncState.current || 0, currentSyncState.total || 0, {
-          ...detail,
-          paused: true,
-        })
-      : buildSyncProgressText(currentSyncState.current || 0, currentSyncState.total || 0, detail);
+    const detail = { ...(currentSyncState.detail || {}), stopping: true };
+    const desc = buildSyncProgressText(currentSyncState.current || 0, currentSyncState.total || 0, detail);
 
     await BackgroundService.updateNotification({
-      taskTitle: paused ? 'Backup paused' : 'â˜ï¸ Backing up',
+      taskTitle: 'Stopping backup',
       taskDesc: desc,
       taskProgressBarOptions: {
         max: currentSyncState.total || 100,
@@ -285,47 +267,77 @@ async function setCurrentSyncPaused(paused) {
   return true;
 }
 
-export async function pauseCurrentSync() {
-  return setCurrentSyncPaused(true);
-}
+/**
+ * Force-stops the current sync immediately — does not wait for the current
+ * file to finish. Only valid while a graceful stop is already in progress
+ * (i.e. stopRequested === true). Safe to call even if no sync is running.
+ */
+export async function forceStopCurrentSync() {
+  if (!currentSyncState.active && !isSyncInProgress) return false;
+  currentSyncState.stopRequested = true;
+  currentSyncState.forceStop = true;
+  isSyncInProgress = false;
 
-export async function resumeCurrentSync() {
-  return setCurrentSyncPaused(false);
-}
+  // Abort the per-sync AbortController so any raceWithAbort() call resolves
+  // immediately, dropping the in-flight upload promise from the JS side.
+  // The native HTTP request may still complete, but JS moves on instantly.
+  syncAbortController?.abort();
 
-async function waitForResume(onProgress) {
-  let announced = false;
+  await writeSyncState({ stopping: true, forceStop: true });
+  await reportServerActivity('Force-stopping backup');
 
-  while (currentSyncState.active) {
-    const paused = currentSyncState.paused || await getSyncControlPaused().catch(() => false);
-    if (!paused) {
-      if (announced) {
-        await writeSyncState({ paused: false });
-        const phase = currentSyncState.phase || 'uploading';
-        const msg = phase === 'scanning' ? 'Scanning folders' : (phase === 'checking' ? 'Checking server files' : 'Uploading files');
-        await reportServerActivity(msg);
-      }
-      return;
-    }
-
-    if (!currentSyncState.paused || !announced) {
-      const detail = { ...(currentSyncState.detail || {}), paused: true };
-      await writeSyncState({ paused: true, detail });
-      await reportServerActivity('Backup paused');
-      if (onProgress) {
-        await onProgress(currentSyncState.current || 0, currentSyncState.total || 0, detail);
-      } else {
-        await reportProgress(currentSyncState.current || 0, currentSyncState.total || 0, detail);
-      }
-      announced = true;
-    }
-
-    await new Promise((resolve) => {
-      pauseWaiters.push(resolve);
-      setTimeout(resolve, 1000);
-    });
+  // Immediately tear down the foreground service so the OS kills the upload.
+  if (Platform.OS === 'android' && BackgroundService) {
+    await BackgroundService.stop().catch(() => {});
   }
+
+  // Reset to idle immediately so UI reflects the stopped state.
+  await clearSyncRuntimeState().catch(() => {});
+  currentSyncState = { active: false, phase: 'idle', stopRequested: false, stopping: false, forceStop: false };
+  emitSyncState(currentSyncState);
+  await reportServerActivity(null);
+  await updateIdleNotification(true);
+
+  return true;
 }
+
+function isStopRequested() {
+  return !!currentSyncState.stopRequested;
+}
+
+function isForceStop() {
+  return !!currentSyncState.forceStop;
+}
+
+function isAborted() {
+  return !!syncAbortController?.signal.aborted;
+}
+
+/**
+ * Races a promise against the per-sync AbortController.
+ * If force-stop fires while `promise` is pending, the returned promise rejects
+ * immediately with an 'aborted' error — the native upload continues in the
+ * background but JS abandons it, giving a truly instant force-stop.
+ */
+function raceWithAbort(promise) {
+  if (!syncAbortController) return promise;
+  const { signal } = syncAbortController;
+  if (signal.aborted) return Promise.reject(new Error('aborted'));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      reject(new Error('aborted'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (val) => { settled = true; signal.removeEventListener('abort', onAbort); resolve(val); },
+      (err) => { settled = true; signal.removeEventListener('abort', onAbort); reject(err); }
+    );
+  });
+}
+
 
 async function updateIdleNotification(force = false) {
   if (!BackgroundService?.isRunning()) return;
@@ -347,20 +359,26 @@ async function updateIdleNotification(force = false) {
 }
 
 async function reportProgress(current, total, detail) {
-  await writeSyncState(buildStateFromProgress(current, total, detail));
-  emitSyncProgress(current, total, detail);
+  // Always propagate the stopping flag so the UI never flickers back to the
+  // active-syncing state after the user pressed Stop.
+  const enrichedDetail = currentSyncState.stopping
+    ? { ...detail, stopping: true }
+    : detail;
+
+  await writeSyncState(buildStateFromProgress(current, total, enrichedDetail));
+  emitSyncProgress(current, total, enrichedDetail);
 
   if (Platform.OS === 'android' && BackgroundService && BackgroundService.isRunning()) {
-    const desc = buildSyncProgressText(current, total, detail);
+    const desc = buildSyncProgressText(current, total, enrichedDetail);
     let progressVal = 0;
     let progressMax = 100;
     let indeterminate = true;
 
-    if (detail?.phase === 'checking') {
-      progressVal = detail.checked || 0;
-      progressMax = detail.total || 100;
+    if (enrichedDetail?.phase === 'checking') {
+      progressVal = enrichedDetail.checked || 0;
+      progressMax = enrichedDetail.total || 100;
       indeterminate = false;
-    } else if (detail?.phase === 'uploading' || total > 0) {
+    } else if (enrichedDetail?.phase === 'uploading' || total > 0) {
       progressVal = current;
       progressMax = total || 100;
       indeterminate = false;
@@ -368,27 +386,29 @@ async function reportProgress(current, total, detail) {
 
     lastIdleDesc = null;
     await BackgroundService.updateNotification({
-      taskTitle: '☁️ Backing up',
+      taskTitle: currentSyncState.stopping ? 'Stopping backup' : '☁️ Backing up',
       taskDesc: desc,
       taskProgressBarOptions: { max: progressMax, value: progressVal, indeterminate },
     }).catch((err) => console.warn('[BackgroundService] updateNotification error:', err?.message));
   } else {
-    await showSyncProgressNotification(current, total, detail);
+    await showSyncProgressNotification(current, total, enrichedDetail);
   }
 }
 
 export async function performActualSync(onProgress, runOptions = {}) {
   const forceRefreshFolder = runOptions.forceRefreshFolder;
   const targetFolderUri = runOptions.targetFolderUri;
-  await waitForResume(onProgress);
+
+  if (isStopRequested()) return { ...emptySyncResult('stopped'), stopped: true };
+
   if (onProgress) await onProgress(0, 0, { phase: 'scanning' });
   await reportServerActivity('Scanning folders');
   const files = await scan(async (detail) => {
-    await waitForResume(onProgress);
     if (onProgress) await onProgress(0, 0, detail);
   }, targetFolderUri);
 
-  await waitForResume(onProgress);
+  if (isStopRequested()) return { ...emptySyncResult('stopped'), stopped: true };
+
   if (onProgress) await onProgress(0, 0, { phase: 'checking', checked: 0, total: files.length });
   await reportServerActivity('Checking server files');
 
@@ -397,9 +417,10 @@ export async function performActualSync(onProgress, runOptions = {}) {
   let checked = 0;
   let serverDeviceTotalFiles = 0;
   let serverDeviceTotalSize = 0;
+  let stoppedDuringCheck = false;
 
   for (const batch of chunk(files, CHECK_BATCH_SIZE)) {
-    await waitForResume(onProgress);
+    if (isStopRequested()) { stoppedDuringCheck = true; break; }
     const res = await checkServerFiles(batch);
     const statuses = res.files;
     serverDeviceTotalFiles = res.deviceTotalFiles;
@@ -430,6 +451,18 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
   await markUploadedBatch(presentFiles);
 
+  if (stoppedDuringCheck) {
+    return {
+      uploaded: 0,
+      skipped: present.size,
+      total: files.length,
+      errors: 0,
+      deviceTotalFiles: serverDeviceTotalFiles,
+      deviceTotalSize: serverDeviceTotalSize,
+      stopped: true,
+    };
+  }
+
   const pending = files.filter((file) => (
     !present.has(`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`)
   ));
@@ -448,7 +481,9 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
   async function worker() {
     while (nextIndex < pending.length) {
-      await waitForResume(onProgress);
+      // Graceful stop: don't pick up any new file once stop is requested.
+      // isStopRequested() is also true during force-stop (forceStop implies stopRequested).
+      if (isStopRequested() || isAborted()) break;
       let file = pending[nextIndex++];
       if (!file) break;
       if (onProgress) {
@@ -457,7 +492,17 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
       try {
         file = await enrichFileMetadata(file);
-        const res = await uploadFile(file, () => {});
+
+        // Graceful stop: stop pressed while loading metadata — don't start the upload.
+        // Force stop: also caught here since forceStop sets stopRequested too.
+        if (isStopRequested() || isAborted()) break;
+
+        // Race the upload against the per-sync AbortController.
+        // Graceful stop: upload runs to completion (one file per worker).
+        // Force stop:    AbortController fires → raceWithAbort rejects immediately;
+        //                the native HTTP call may still complete, but JS exits now.
+        const res = await raceWithAbort(uploadFile(file, () => {}));
+
         if (res.success) {
           serverDeviceTotalFiles = res.deviceTotalFiles;
           serverDeviceTotalSize = res.deviceTotalSize;
@@ -472,14 +517,21 @@ export async function performActualSync(onProgress, runOptions = {}) {
           lastError = 'Server rejected the file. Check server logs.';
         }
       } catch (err) {
+        // Abandoned via force-stop or abort — not a real upload error.
+        if (isForceStop() || isAborted()) {
+          break;
+        }
         console.warn('[BackupTask] Upload failed:', file.relativePath, err?.message);
         errors++;
         lastError = err?.message || 'Unknown network error';
       } finally {
         completed++;
-        if (onProgress) {
+        if (onProgress && !isForceStop() && !isAborted()) {
           await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
         }
+        // Graceful stop: break immediately after the current file completes.
+        // Workers will not pick up another file from the shared queue.
+        if (isForceStop() || isAborted() || isStopRequested()) break;
       }
     }
   }
@@ -500,6 +552,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
     errors,
     deviceTotalFiles: serverDeviceTotalFiles,
     deviceTotalSize: serverDeviceTotalSize,
+    stopped: isStopRequested(),
   };
 }
 
@@ -588,17 +641,18 @@ export async function runSync(onProgress, runOptions = {}) {
           console.log('[BackgroundTask] Sync skipped: Device is no longer approved by server.');
           return emptySyncResult('device_removed');
         }
-      } catch (err) {
+      } catch (_err) {
         clearTimeout(timeout);
         console.log('[BackgroundTask] Sync skipped: Server unreachable/offline.');
         return emptySyncResult('server_unreachable');
       }
     }
 
-    await setSyncControlPaused(false).catch(() => {});
+    currentSyncState.stopRequested = false;
+    currentSyncState.forceStop = false;
+    syncAbortController = new AbortController();
     await writeSyncState({
       active: true,
-      paused: false,
       phase: 'scanning',
       current: 0,
       total: 0,
@@ -638,27 +692,32 @@ export async function runSync(onProgress, runOptions = {}) {
       skipped: result.skipped,
       errors: result.errors,
       total: result.total,
+      stopped: !!result.stopped,
     });
 
     await clearSyncRuntimeState().catch(() => {});
-    currentSyncState = { active: false, paused: false, phase: 'idle' };
+    currentSyncState = { active: false, phase: 'idle', stopRequested: false, stopping: false, forceStop: false };
     emitSyncState(currentSyncState);
     await reportServerActivity(null);
     await updateIdleNotification(true);
 
     return result;
   } catch (err) {
-    if (!isBackgroundFetch) {
-      await showSyncErrorNotification(err?.message || 'Unknown error').catch(() => {});
-      emitSyncFailed(err?.message || 'Unknown error');
+    // If a force-stop already cleaned up state, don't emit a spurious failure.
+    if (!isForceStop() && !isAborted()) {
+      if (!isBackgroundFetch) {
+        await showSyncErrorNotification(err?.message || 'Unknown error').catch(() => {});
+        emitSyncFailed(err?.message || 'Unknown error');
+      }
+      await clearSyncRuntimeState().catch(() => {});
+      currentSyncState = { active: false, phase: 'idle', stopRequested: false, stopping: false, forceStop: false };
+      emitSyncState(currentSyncState);
+      await reportServerActivity(null);
+      await updateIdleNotification(true);
     }
-    await clearSyncRuntimeState().catch(() => {});
-    currentSyncState = { active: false, paused: false, phase: 'idle' };
-    emitSyncState(currentSyncState);
-    await reportServerActivity(null);
-    await updateIdleNotification(true);
     throw err;
   } finally {
+    syncAbortController = null;
     await releaseSyncWakeLock(wakeLockAcquired);
     isSyncInProgress = false;
   }

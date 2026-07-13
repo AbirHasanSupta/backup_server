@@ -15,7 +15,7 @@ import { useAppTheme } from '@/hooks/use-app-theme';
 const RING_SIZE = 226;
 const INNER_SIZE = 176;
 
-export type SyncPhase = 'scanning' | 'checking' | 'uploading' | 'paused' | 'idle';
+export type SyncPhase = 'scanning' | 'checking' | 'uploading' | 'stopping' | 'idle';
 
 interface Props {
   isActive: boolean;
@@ -42,7 +42,7 @@ export function SyncProgressRing({
   const sweep = useSharedValue(0);
 
   useEffect(() => {
-    if (isActive && phase !== 'paused') {
+    if (isActive && phase !== 'stopping') {
       pulse.value = withRepeat(
         withSequence(
           withTiming(1.04, { duration: 950, easing: Easing.inOut(Easing.ease) }),
@@ -75,7 +75,7 @@ export function SyncProgressRing({
 
   const label = (() => {
     if (!isActive) return 'Ready to back up';
-    if (phase === 'paused') return 'Backup paused';
+    if (phase === 'stopping') return 'Finishing current file\u2026';
     if (phase === 'scanning') return 'Scanning folders';
     if (phase === 'checking') return checkTotal > 0 ? `${checked} of ${checkTotal} checked` : 'Checking server';
     if (phase === 'uploading' && total > 0) return `${uploaded} of ${total} files`;
@@ -90,11 +90,11 @@ export function SyncProgressRing({
         <View style={styles.inner}>
           <View style={styles.iconWrap}>
             <AppIcon
-              androidName={phase === 'paused' ? 'pause' : isActive ? 'sync' : 'cloud_done'}
-              iosName={phase === 'paused' ? 'pause.fill' : isActive ? 'arrow.triangle.2.circlepath' : 'checkmark.icloud'}
-              color={isActive ? colors.primary : colors.success}
+              androidName={phase === 'stopping' ? 'hourglass_top' : isActive ? 'sync' : 'cloud_done'}
+              iosName={phase === 'stopping' ? 'hourglass' : isActive ? 'arrow.triangle.2.circlepath' : 'checkmark.icloud'}
+              color={phase === 'stopping' ? colors.warning : isActive ? colors.primary : colors.success}
               size={30}
-              fallback={phase === 'paused' ? 'P' : isActive ? 'S' : 'OK'}
+              fallback={phase === 'stopping' ? 'S' : isActive ? 'S' : 'OK'}
             />
           </View>
           {isActive && (phase === 'checking' || phase === 'uploading') ? (
@@ -103,7 +103,9 @@ export function SyncProgressRing({
               <Text style={styles.progressSymbol}>%</Text>
             </View>
           ) : (
-            <Text style={styles.readyText}>{phase === 'paused' ? 'Paused' : isActive ? 'Working' : 'All set'}</Text>
+            <Text style={styles.readyText}>
+              {phase === 'stopping' ? 'Stopping' : isActive ? 'Working' : 'All set'}
+            </Text>
           )}
           <Text style={styles.progressLabel} numberOfLines={2}>
             {label}

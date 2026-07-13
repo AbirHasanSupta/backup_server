@@ -8,7 +8,7 @@ let BackgroundServiceModule = null;
 if (hasNativeBackgroundActions) {
   try {
     BackgroundServiceModule = require('react-native-background-actions');
-  } catch (e) {}
+  } catch (_e) {}
 }
 const BackgroundService = BackgroundServiceModule ? (BackgroundServiceModule.default || BackgroundServiceModule) : null;
 
@@ -94,12 +94,12 @@ export async function setupNotifications() {
 }
 
 function buildSyncProgressText(current, total, detail) {
-  if (detail?.paused) {
+  if (detail?.stopping) {
     if (detail?.currentFile) {
       const filename = detail.currentFile.split('/').pop() || detail.currentFile;
-      return `Paused\n${filename}`;
+      return `Stopping…\n${filename}`;
     }
-    return 'Backup paused';
+    return 'Stopping backup';
   }
 
   if (detail?.phase === 'scanning') {
