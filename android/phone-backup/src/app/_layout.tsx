@@ -95,6 +95,15 @@ function RootLayoutContent() {
             ),
           }}
         />
+        <Tabs.Screen
+          name="history"
+          options={{
+            title: 'History',
+            tabBarIcon: ({ focused }) => (
+              <TabIcon androidName="history" iosName="clock.arrow.circlepath" focused={focused} colors={colors} styles={styles} />
+            ),
+          }}
+        />
         <Tabs.Screen name="explore" options={{ href: null }} />
       </Tabs>
     </SafeAreaProvider>

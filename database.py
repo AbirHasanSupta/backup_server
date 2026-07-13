@@ -122,6 +122,30 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_status_seen ON devices(status, last_seen)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_device_id ON devices(device_id)")
 
+    # 5. sync_sessions table — one row per completed/stopped/failed sync session
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_sessions (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id    TEXT,
+            device_name  TEXT,
+            started_at   INTEGER NOT NULL,
+            ended_at     INTEGER NOT NULL,
+            duration_ms  INTEGER NOT NULL DEFAULT 0,
+            trigger      TEXT    NOT NULL DEFAULT 'manual',
+            outcome      TEXT    NOT NULL DEFAULT 'completed',
+            scanned      INTEGER NOT NULL DEFAULT 0,
+            checked      INTEGER NOT NULL DEFAULT 0,
+            uploaded     INTEGER NOT NULL DEFAULT 0,
+            skipped      INTEGER NOT NULL DEFAULT 0,
+            errors       INTEGER NOT NULL DEFAULT 0,
+            total_files  INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_device ON sync_sessions(device_id, started_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_started ON sync_sessions(started_at DESC)")
+
     conn.commit()
     conn.close()
 
@@ -454,3 +478,66 @@ def is_device_known(device_ip: str, device_id: str | None = None) -> bool:
         ).fetchone()
     conn.close()
     return row is not None
+
+
+# ─── Sync session helpers ──────────────────────────────────────────────────────
+
+def insert_sync_session(
+    device_id: str | None,
+    device_name: str | None,
+    started_at: int,
+    ended_at: int,
+    duration_ms: int,
+    trigger: str,
+    outcome: str,
+    scanned: int = 0,
+    checked: int = 0,
+    uploaded: int = 0,
+    skipped: int = 0,
+    errors: int = 0,
+    total_files: int = 0,
+) -> int:
+    """Insert one sync session record and return its new id."""
+    conn = get_conn()
+    cur = conn.execute(
+        """
+        INSERT INTO sync_sessions
+            (device_id, device_name, started_at, ended_at, duration_ms,
+             trigger, outcome, scanned, checked, uploaded, skipped, errors, total_files)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (device_id, device_name, started_at, ended_at, duration_ms,
+         trigger, outcome, scanned, checked, uploaded, skipped, errors, total_files),
+    )
+    conn.commit()
+    row_id = cur.lastrowid
+    conn.close()
+    return row_id
+
+
+def get_sync_sessions(device_id: str | None = None, limit: int = 100) -> list[dict]:
+    """Return sync sessions newest-first, optionally filtered by device."""
+    conn = get_conn()
+    if device_id:
+        rows = conn.execute(
+            "SELECT * FROM sync_sessions WHERE device_id=? ORDER BY started_at DESC LIMIT ?",
+            (device_id, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM sync_sessions ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def clear_sync_sessions(device_id: str | None = None) -> None:
+    """Delete all sessions, or only those for a specific device."""
+    conn = get_conn()
+    if device_id:
+        conn.execute("DELETE FROM sync_sessions WHERE device_id=?", (device_id,))
+    else:
+        conn.execute("DELETE FROM sync_sessions")
+    conn.commit()
+    conn.close()

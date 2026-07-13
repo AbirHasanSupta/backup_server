@@ -13,6 +13,9 @@ from database import (
     get_device_stats,
     get_devices,
     insert_file,
+    insert_sync_session,
+    get_sync_sessions,
+    clear_sync_sessions,
     is_device_known,
     is_uploaded_compatible,
     remove_device,
@@ -399,3 +402,92 @@ async def upload_file(
         sha256 = saved_sha256
 
     return finish_upload_record(relative_path, size, modified_time, device_ip, external_id, sha256, device_id)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sync session history
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SyncSessionRequest(BaseModel):
+    device_id:   str | None = None
+    device_name: str | None = None
+    started_at:  int
+    ended_at:    int
+    duration_ms: int = 0
+    trigger:     str = "manual"
+    outcome:     str = "completed"
+    scanned:     int = 0
+    checked:     int = 0
+    uploaded:    int = 0
+    skipped:     int = 0
+    errors:      int = 0
+    total_files: int = 0
+
+
+@router.post("/sync/session")
+async def record_sync_session(
+    body: SyncSessionRequest,
+    request: Request,
+    authorization: str = Header(None),
+):
+    """
+    Called by the Android app at the end of each sync session to persist a
+    summary record on the server.  The record is shown in the desktop History
+    page so the operator can audit every device's backup activity.
+    """
+    verify_auth(authorization)
+
+    # Resolve device name from DB if not supplied
+    device_name = body.device_name
+    if not device_name and body.device_id:
+        devices = get_devices()
+        match = next((d for d in devices if d.get("device_id") == body.device_id), None)
+        if match:
+            device_name = match.get("device_name")
+
+    session_id = insert_sync_session(
+        device_id=body.device_id,
+        device_name=device_name,
+        started_at=body.started_at,
+        ended_at=body.ended_at,
+        duration_ms=body.duration_ms,
+        trigger=body.trigger,
+        outcome=body.outcome,
+        scanned=body.scanned,
+        checked=body.checked,
+        uploaded=body.uploaded,
+        skipped=body.skipped,
+        errors=body.errors,
+        total_files=body.total_files,
+    )
+
+    label = {"completed": "✅", "stopped": "⏹", "force_stopped": "⚡", "failed": "❌"}.get(body.outcome, "🔄")
+    add_log(
+        f"{label} Sync session from {device_name or body.device_id or 'unknown'}: "
+        f"{body.uploaded} uploaded, {body.skipped} skipped, {body.errors} errors — {body.outcome}"
+    )
+
+    return {"ok": True, "id": session_id}
+
+
+@router.get("/sync/sessions")
+async def list_sync_sessions(
+    device_id: str | None = None,
+    limit: int = 100,
+    authorization: str = Header(None),
+):
+    """Return sync session records, optionally filtered by device_id."""
+    verify_auth(authorization)
+    sessions = get_sync_sessions(device_id=device_id, limit=min(limit, 500))
+    return {"sessions": sessions}
+
+
+@router.delete("/sync/sessions")
+async def delete_sync_sessions(
+    device_id: str | None = None,
+    authorization: str = Header(None),
+):
+    """Clear all or device-specific session history."""
+    verify_auth(authorization)
+    clear_sync_sessions(device_id=device_id)
+    return {"ok": True}

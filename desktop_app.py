@@ -13,6 +13,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 from tkinter import filedialog, messagebox
 import tkinter as tk
@@ -48,7 +49,7 @@ from state import (
     resolve_connection,
 )
 from config import load_config, save_config
-from database import get_devices, get_stats, init_db, remove_device
+from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessions, init_db, remove_device
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
 ctk.set_default_color_theme("blue")
@@ -345,24 +346,27 @@ class BreathingDot(ctk.CTkCanvas):
 
 class BackupServerApp(ctk.CTk):
 
-    PAGES      = ["dashboard", "devices", "settings", "logs"]
+    PAGES      = ["dashboard", "devices", "settings", "logs", "history"]
     PAGE_ICONS = {
         "dashboard": "󰕇",   # fallback to text if font missing
         "devices":   "󰄛",
         "settings":  "󰒓",
         "logs":      "󰉩",
+        "history":   "H",
     }
     PAGE_LABELS = {
         "dashboard": "Dashboard",
         "devices":   "Devices",
         "settings":  "Settings",
         "logs":      "Logs",
+        "history":   "Sync History",
     }
     PAGE_EMOJI = {
         "dashboard": "D",
         "devices":   "P",
         "settings":  "S",
         "logs":      "L",
+        "history":   "H",
     }
 
     def __init__(self):
@@ -625,6 +629,7 @@ class BackupServerApp(ctk.CTk):
             "devices":   self._build_devices(container),
             "settings":  self._build_settings(container),
             "logs":      self._build_logs(container),
+            "history":   self._build_history(container),
         }
         for f in self._pages.values():
             f.grid(row=0, column=0, sticky="nsew")
@@ -1309,6 +1314,303 @@ class BackupServerApp(ctk.CTk):
         clear_logs()
         self._refresh_logs()
 
+    # ─── Page: Sync History ───────────────────────────────────────────────────
+
+    def _build_history(self, parent) -> ctk.CTkFrame:
+        frame = ctk.CTkFrame(parent, fg_color=C_BG)
+        hdr = self._page_header(frame, "Sync History", "Per-session audit trail from all devices")
+
+        ctrl = ctk.CTkFrame(hdr, fg_color="transparent")
+        ctrl.pack(side="right")
+
+        self._hist_device_var = tk.StringVar(value="All Devices")
+        self._hist_device_menu = ctk.CTkOptionMenu(
+            ctrl,
+            variable=self._hist_device_var,
+            values=["All Devices"],
+            width=160, height=36,
+            fg_color=C_ELEVATED,
+            button_color=C_ELEVATED,
+            button_hover_color=C_SOFT_BLUE,
+            text_color=C_TEXT,
+            dropdown_fg_color=C_SURFACE,
+            dropdown_text_color=C_TEXT,
+            dropdown_hover_color=C_SOFT_BLUE,
+            corner_radius=12,
+            command=lambda _: self._refresh_history(force=True),
+        )
+        self._hist_device_menu.pack(side="left", padx=(0, 8))
+
+        ctk.CTkButton(
+            ctrl, text="Refresh", width=100, height=36,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
+            text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER,
+            corner_radius=12,
+            command=lambda: self._refresh_history(force=True),
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            ctrl, text="Clear", width=90, height=36,
+            fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
+            text_color=C_ERROR,
+            border_width=1, border_color=C_ERROR_BORDER,
+            corner_radius=12,
+            command=self._clear_history,
+        ).pack(side="left")
+
+        self._divider(frame)
+
+        # Single fixed-height banner label — updated in-place, never destroyed
+        self._hist_banner = ctk.CTkFrame(
+            frame, fg_color=C_SURFACE,
+            corner_radius=14, border_width=1, border_color=C_BORDER,
+            height=44,
+        )
+        self._hist_banner.pack(fill="x", padx=32, pady=(14, 0))
+        self._hist_banner.pack_propagate(False)
+        self._hist_banner_lbl = ctk.CTkLabel(
+            self._hist_banner,
+            text="Navigate to this page to load history",
+            font=FONT_SMALL, text_color=C_MUTED,
+        )
+        self._hist_banner_lbl.pack(expand=True)
+
+        # Scrollable card area — uses grid inside so cards are compact
+        self._hist_scroll = ctk.CTkScrollableFrame(
+            frame, fg_color="transparent", label_text="",
+        )
+        self._hist_scroll.pack(fill="both", expand=True, padx=22, pady=(10, 16))
+        self._hist_scroll.grid_columnconfigure(0, weight=1)
+
+        # Fingerprint string cache (prevents full redraw when data unchanged)
+        self._hist_cache_key: str = ""
+        self._hist_sessions_cache: list[dict] = []
+        return frame
+
+    @staticmethod
+    def _history_cache_key(sessions: list[dict]) -> str:
+        return "|".join(
+            f"{s.get('id','')}:{s.get('outcome','')}:{s.get('uploaded',0)}"
+            for s in sessions
+        )
+
+    def _refresh_history(self, force: bool = False):
+        try:
+            # ── Device filter ─────────────────────────────────────────────────
+            devices = get_devices()
+            device_names = ["All Devices"] + [
+                d.get("device_name") or d.get("device_id") or "Unknown"
+                for d in devices
+            ]
+            device_id_map = {
+                (d.get("device_name") or d.get("device_id") or "Unknown"): d.get("device_id")
+                for d in devices
+            }
+            current = self._hist_device_var.get()
+            self._hist_device_menu.configure(values=device_names)
+            if current not in device_names:
+                self._hist_device_var.set("All Devices")
+            selected   = self._hist_device_var.get()
+            filter_id  = device_id_map.get(selected) if selected != "All Devices" else None
+            sessions   = get_sync_sessions(device_id=filter_id, limit=100)
+
+            # ── Early exit if nothing changed ─────────────────────────────────
+            new_key = self._history_cache_key(sessions)
+            if not force and new_key == self._hist_cache_key:
+                return
+            self._hist_cache_key     = new_key
+            self._hist_sessions_cache = sessions
+
+            # ── Banner: update label text in-place (no destroy = no blink) ───
+            if not sessions:
+                self._hist_banner_lbl.configure(
+                    text="No sessions yet — records appear here after the Android app syncs",
+                    text_color=C_MUTED,
+                )
+            else:
+                total_up   = sum(s.get("uploaded",    0) for s in sessions)
+                total_err  = sum(s.get("errors",      0) for s in sessions)
+                total_ms   = sum(s.get("duration_ms", 0) for s in sessions)
+                n_done     = sum(1 for s in sessions if s.get("outcome") == "completed")
+                n_fail     = sum(1 for s in sessions if s.get("outcome") in ("failed", "force_stopped"))
+
+                def _bd(ms):
+                    secs = ms // 1000
+                    if secs < 60:  return f"{secs}s"
+                    m = secs // 60; return f"{m}m {secs % 60}s"
+
+                parts = [
+                    f"Sessions: {len(sessions)}",
+                    f"Uploaded: {total_up:,}",
+                    f"Completed: {n_done}",
+                    f"Time: {_bd(total_ms)}",
+                ]
+                if total_err:  parts.append(f"Errors: {total_err}")
+                if n_fail:     parts.append(f"Interrupted: {n_fail}")
+                self._hist_banner_lbl.configure(
+                    text="   ·   ".join(parts),
+                    text_color=C_TEXT,
+                )
+
+            # ── Card list: destroy only when data changed (already past early-exit) ──
+            for w in self._hist_scroll.winfo_children():
+                w.destroy()
+
+            if not sessions:
+                empty = ctk.CTkFrame(
+                    self._hist_scroll, fg_color=C_SURFACE,
+                    corner_radius=16, border_width=1, border_color=C_BORDER,
+                )
+                empty.grid(row=0, column=0, sticky="ew", padx=8, pady=24)
+                ctk.CTkLabel(
+                    empty, text="No sync sessions yet",
+                    font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
+                    text_color=C_TEXT,
+                ).pack(pady=(22, 4))
+                ctk.CTkLabel(
+                    empty,
+                    text="Each time the Android app completes, stops, or fails a sync,\na record is posted here automatically.",
+                    font=FONT_BODY, text_color=C_MUTED, justify="center",
+                ).pack(pady=(0, 22))
+                return
+
+            OUTCOME_CFG = {
+                "completed":    ("Completed",    C_SUCCESS, C_SOFT_GREEN),
+                "stopped":      ("Stopped",      C_WARNING, C_SOFT_AMBER),
+                "force_stopped":("Force stopped",C_ERROR,   C_SOFT_RED),
+                "failed":       ("Failed",       C_ERROR,   C_SOFT_RED),
+            }
+            OUTCOME_ICON = {
+                "completed": "✅", "stopped": "⏹",
+                "force_stopped": "⚡", "failed": "❌",
+            }
+
+            def _fmt_ts(ts):
+                try:    return datetime.fromtimestamp(ts / 1000).strftime("%b %d  %H:%M")
+                except: return ""
+
+            def _fmt_dur(ms):
+                secs = max(0, ms // 1000)
+                if secs < 60:  return f"{secs}s"
+                m, s = divmod(secs, 60)
+                if m  < 60:  return f"{m}m {s}s" if s else f"{m}m"
+                h, mr = divmod(m, 60)
+                return f"{h}h {mr}m" if mr else f"{h}h"
+
+            for row_idx, sess in enumerate(sessions):
+                outcome      = sess.get("outcome", "completed")
+                label, fg, bg = OUTCOME_CFG.get(outcome, ("Unknown", C_ACCENT, C_SOFT_BLUE))
+                icon         = OUTCOME_ICON.get(outcome, "🔄")
+                device_label = sess.get("device_name") or sess.get("device_id") or "Unknown device"
+                started_ts   = sess.get("started_at", 0)
+                trigger      = sess.get("trigger", "manual")
+                uploaded     = sess.get("uploaded",    0)
+                skipped      = sess.get("skipped",     0)
+                errors       = sess.get("errors",      0)
+                scanned      = sess.get("scanned",     0)
+                dur_ms       = sess.get("duration_ms", 0)
+
+                # Card — grid-based so height is driven only by content
+                card = ctk.CTkFrame(
+                    self._hist_scroll,
+                    fg_color=C_SURFACE,
+                    corner_radius=12,
+                    border_width=1,
+                    border_color=C_BORDER,
+                )
+                card.grid(row=row_idx, column=0, sticky="ew", padx=8, pady=4)
+                card.grid_columnconfigure(1, weight=1)
+
+                # Left accent strip — column 0, sticky ns keeps it flush
+                accent_bar = ctk.CTkFrame(card, width=5, fg_color=fg, corner_radius=0)
+                accent_bar.grid(row=0, column=0, rowspan=2, sticky="ns")
+
+                # Body — column 1
+                body = ctk.CTkFrame(card, fg_color="transparent")
+                body.grid(row=0, column=1, sticky="ew", padx=(12, 14), pady=(9, 9))
+                body.grid_columnconfigure(0, weight=1)
+
+                # Top row: badge · auto-chip · device-name · timestamp
+                top = ctk.CTkFrame(body, fg_color="transparent")
+                top.grid(row=0, column=0, sticky="ew")
+                top.grid_columnconfigure(2, weight=1)   # device name stretches
+
+                badge_pill = ctk.CTkFrame(top, fg_color=bg, corner_radius=999)
+                badge_pill.grid(row=0, column=0, sticky="w")
+                ctk.CTkLabel(
+                    badge_pill,
+                    text=f"{icon}  {label}",
+                    font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+                    text_color=fg,
+                ).pack(padx=9, pady=2)
+
+                col_off = 1
+                if trigger == "auto":
+                    auto_pill = ctk.CTkFrame(
+                        top, fg_color=C_ELEVATED, corner_radius=999,
+                        border_width=1, border_color=C_BORDER,
+                    )
+                    auto_pill.grid(row=0, column=col_off, sticky="w", padx=(5, 0))
+                    ctk.CTkLabel(
+                        auto_pill, text="AUTO",
+                        font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+                        text_color=C_MUTED,
+                    ).pack(padx=7, pady=2)
+                    col_off = 2
+
+                ctk.CTkLabel(
+                    top, text=device_label,
+                    font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                    text_color=C_TEXT, anchor="w",
+                ).grid(row=0, column=col_off, sticky="w", padx=(8, 0))
+
+                ctk.CTkLabel(
+                    top, text=_fmt_ts(started_ts),
+                    font=FONT_SMALL, text_color=C_MUTED, anchor="e",
+                ).grid(row=0, column=3, sticky="e", padx=(8, 0))
+
+                # Stats row: inline chips
+                chips = ctk.CTkFrame(body, fg_color="transparent")
+                chips.grid(row=1, column=0, sticky="w", pady=(5, 0))
+
+                chip_defs = [
+                    (f"⬆︎ {uploaded:,} uploaded", C_SUCCESS if uploaded else C_MUTED),
+                    (f"✓ {skipped:,} already saved",   C_MUTED),
+                    (f"⏱ {_fmt_dur(dur_ms)}",          C_MUTED),
+                ]
+                if errors:
+                    chip_defs.insert(2, (f"✗ {errors} errors", C_ERROR))
+                if scanned:
+                    chip_defs.append((f"⊙ {scanned:,} scanned", C_MUTED))
+
+                for ci, (txt, clr) in enumerate(chip_defs):
+                    ctk.CTkLabel(
+                        chips, text=txt,
+                        font=ctk.CTkFont(family="Segoe UI", size=11),
+                        text_color=clr,
+                    ).grid(row=0, column=ci, padx=(0, 14), sticky="w")
+
+        except Exception:
+            traceback.print_exc()
+
+    def _clear_history(self):
+        if not confirm_dialog(self, "Clear Sync History",
+                              "This will permanently delete all sync session records from the server database."):
+            return
+        selected = self._hist_device_var.get()
+        devices  = get_devices()
+        device_id_map = {
+            (d.get("device_name") or d.get("device_id") or "Unknown"): d.get("device_id")
+            for d in devices
+        }
+        filter_id = device_id_map.get(selected) if selected != "All Devices" else None
+        clear_sync_sessions(device_id=filter_id)
+        self._hist_cache_key = ""
+        self._hist_sessions_cache = []
+        self._refresh_history(force=True)
+
+
     # ─── Navigation ───────────────────────────────────────────────────────────
 
     def _show_page(self, page: str):
@@ -1332,6 +1634,8 @@ class BackupServerApp(ctk.CTk):
             self._refresh_settings()
         elif page == "logs":
             self._refresh_logs()
+        elif page == "history":
+            self._refresh_history(force=True)
 
     # ─── Auto-refresh ─────────────────────────────────────────────────────────
 
@@ -1361,6 +1665,8 @@ class BackupServerApp(ctk.CTk):
             self._refresh_devices()
         elif self._current_page == "logs":
             self._refresh_logs()
+        elif self._current_page == "history":
+            self._refresh_history()
         self.after(2000, self._auto_refresh)
 
     # ─── Server control ───────────────────────────────────────────────────────

@@ -173,3 +173,26 @@ export async function uploadFile(item, onProgress) {
     await FileSystem.deleteAsync(cacheUri, { idempotent: true }).catch(() => {});
   }
 }
+
+/**
+ * Post a completed sync session summary to the server so the desktop History
+ * page shows per-device audit records without relying solely on the phone.
+ * This is best-effort: a network failure here must never break the sync flow.
+ *
+ * @param {object} session  — fields matching SyncSessionRequest on the server
+ */
+export async function postSyncSession(session) {
+  try {
+    const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
+    await fetch(`http://${serverIp}:${serverPort}/sync/session`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ ...session, device_id: session.device_id ?? deviceId }),
+    });
+  } catch {
+    // Intentionally silenced — server history is supplementary; local history is primary
+  }
+}

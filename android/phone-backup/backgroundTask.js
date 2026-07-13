@@ -1,6 +1,6 @@
 import { DeviceEventEmitter, Platform, NativeModules } from 'react-native';
 import { enrichFileMetadata, scan } from './scanner';
-import { checkDeviceConnection, checkServerFiles, uploadFile } from './uploader';
+import { checkDeviceConnection, checkServerFiles, postSyncSession, uploadFile } from './uploader';
 import { acquireSyncWakeLock, releaseSyncWakeLock } from './wakeLock';
 import {
   markUploadedBatch,
@@ -16,6 +16,7 @@ import {
   getApiKey,
   getServerPort,
   getDeviceId,
+  getFolders,
 } from './settings';
 import {
   showSyncProgressNotification,
@@ -23,6 +24,7 @@ import {
   showSyncErrorNotification,
   buildSyncProgressText,
 } from './notificationService';
+import { appendSyncSession } from './syncHistory';
 
 const hasNativeBackgroundActions = !!(
   NativeModules &&
@@ -507,6 +509,10 @@ export async function performActualSync(onProgress, runOptions = {}) {
           serverDeviceTotalFiles = res.deviceTotalFiles;
           serverDeviceTotalSize = res.deviceTotalSize;
           uploadedFiles.push(file);
+          // Collect basenames for session history (capped at 20)
+          if (runOptions.sessionBuilder && runOptions.sessionBuilder.uploadedFiles.length < 20) {
+            runOptions.sessionBuilder.uploadedFiles.push(file.name || file.relativePath.split('/').pop() || file.relativePath);
+          }
           if (res.status === 'skipped') {
             skipped++;
           } else {
@@ -524,6 +530,10 @@ export async function performActualSync(onProgress, runOptions = {}) {
         console.warn('[BackupTask] Upload failed:', file.relativePath, err?.message);
         errors++;
         lastError = err?.message || 'Unknown network error';
+        // Record error detail for history
+        if (runOptions.sessionBuilder) {
+          runOptions.sessionBuilder.errorDetails.push(`${file.relativePath}: ${err?.message || 'Upload failed'}`);
+        }
       } finally {
         completed++;
         if (onProgress && !isForceStop() && !isAborted()) {
@@ -549,6 +559,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
     uploaded,
     skipped,
     total: files.length,
+    scanned: files.length,
     errors,
     deviceTotalFiles: serverDeviceTotalFiles,
     deviceTotalSize: serverDeviceTotalSize,
@@ -617,6 +628,17 @@ export async function runSync(onProgress, runOptions = {}) {
   }
   isSyncInProgress = true;
 
+  const isAuto = !!runOptions.isBackgroundFetch;
+  const sessionBuilder = {
+    id:            String(Date.now()),
+    startedAt:     Date.now(),
+    trigger:       isAuto ? 'auto' : 'manual',
+    uploadedFiles: [],
+    errorDetails:  [],
+  };
+  // Thread through so worker can accumulate files/errors
+  runOptions = { ...runOptions, sessionBuilder };
+
   const progressHandler = async (current, total, detail) => {
     if (onProgress) await onProgress(current, total, detail);
     await reportProgress(current, total, detail);
@@ -681,6 +703,43 @@ export async function runSync(onProgress, runOptions = {}) {
     const totalSynced = result.deviceTotalFiles > 0 ? result.deviceTotalFiles : (result.uploaded + result.skipped);
     if (totalSynced > 0) await setTotalSynced(totalSynced);
 
+    // ── Persist sync session history ─────────────────────────────────────────
+    const folders = await getFolders().catch(() => []);
+    const outcome = isForceStop() || isAborted()
+      ? 'force_stopped'
+      : result.stopped
+        ? 'stopped'
+        : 'completed';
+    await appendSyncSession({
+      ...sessionBuilder,
+      endedAt:      now,
+      durationMs:   now - sessionBuilder.startedAt,
+      outcome,
+      scanned:      result.scanned   ?? result.total ?? 0,
+      checked:      result.total     ?? 0,
+      uploaded:     result.uploaded  ?? 0,
+      skipped:      result.skipped   ?? 0,
+      errors:       result.errors    ?? 0,
+      totalFiles:   totalSynced,
+      totalSize:    result.deviceTotalSize ?? 0,
+      folders:      folders.map((f) => f.name),
+    }).catch(() => {});
+    // Fire-and-forget: also post to server (best-effort, never blocks sync completion)
+    postSyncSession({
+      started_at:  sessionBuilder.startedAt,
+      ended_at:    now,
+      duration_ms: now - sessionBuilder.startedAt,
+      trigger:     sessionBuilder.trigger,
+      outcome,
+      scanned:     result.scanned   ?? result.total ?? 0,
+      checked:     result.total     ?? 0,
+      uploaded:    result.uploaded  ?? 0,
+      skipped:     result.skipped   ?? 0,
+      errors:      result.errors    ?? 0,
+      total_files: totalSynced,
+    }).catch(() => {});
+    // ─────────────────────────────────────────────────────────────────────────
+
     if (!isBackgroundFetch || result.uploaded > 0) {
       await showSyncCompleteNotification(result.uploaded, result.skipped);
     }
@@ -703,18 +762,53 @@ export async function runSync(onProgress, runOptions = {}) {
 
     return result;
   } catch (err) {
-    // If a force-stop already cleaned up state, don't emit a spurious failure.
-    if (!isForceStop() && !isAborted()) {
-      if (!isBackgroundFetch) {
-        await showSyncErrorNotification(err?.message || 'Unknown error').catch(() => {});
-        emitSyncFailed(err?.message || 'Unknown error');
-      }
-      await clearSyncRuntimeState().catch(() => {});
-      currentSyncState = { active: false, phase: 'idle', stopRequested: false, stopping: false, forceStop: false };
-      emitSyncState(currentSyncState);
-      await reportServerActivity(null);
-      await updateIdleNotification(true);
+    const failedAt = Date.now();
+    // If a force-stop already cleaned up state, record a force_stopped session
+    // and exit cleanly — do NOT emit a spurious failure notification.
+    if (isForceStop() || isAborted()) {
+      await appendSyncSession({
+        ...sessionBuilder,
+        endedAt:    failedAt,
+        durationMs: failedAt - sessionBuilder.startedAt,
+        outcome:    'force_stopped',
+        uploaded:   sessionBuilder.uploadedFiles.length,
+        errors:     sessionBuilder.errorDetails.length,
+      }).catch(() => {});
+      postSyncSession({
+        started_at:  sessionBuilder.startedAt,
+        ended_at:    failedAt,
+        duration_ms: failedAt - sessionBuilder.startedAt,
+        trigger:     sessionBuilder.trigger,
+        outcome:     'force_stopped',
+      }).catch(() => {});
+      return;  // swallow the thrown abort error
     }
+    if (!isBackgroundFetch) {
+      await showSyncErrorNotification(err?.message || 'Unknown error').catch(() => {});
+      emitSyncFailed(err?.message || 'Unknown error');
+    }
+    // Persist failed session with single consistent timestamp
+    await appendSyncSession({
+      ...sessionBuilder,
+      endedAt:      failedAt,
+      durationMs:   failedAt - sessionBuilder.startedAt,
+      outcome:      'failed',
+      errors:       (sessionBuilder.errorDetails.length || 0) + 1,
+      errorDetails: [...sessionBuilder.errorDetails, err?.message || 'Unknown error'].slice(0, 10),
+    }).catch(() => {});
+    postSyncSession({
+      started_at:  sessionBuilder.startedAt,
+      ended_at:    failedAt,
+      duration_ms: failedAt - sessionBuilder.startedAt,
+      trigger:     sessionBuilder.trigger,
+      outcome:     'failed',
+      errors:      1,
+    }).catch(() => {});
+    await clearSyncRuntimeState().catch(() => {});
+    currentSyncState = { active: false, phase: 'idle', stopRequested: false, stopping: false, forceStop: false };
+    emitSyncState(currentSyncState);
+    await reportServerActivity(null);
+    await updateIdleNotification(true);
     throw err;
   } finally {
     syncAbortController = null;
