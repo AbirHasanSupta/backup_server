@@ -33,7 +33,9 @@ def init_db():
                 status         TEXT    NOT NULL DEFAULT 'accepted',
                 first_seen     INTEGER NOT NULL,
                 last_seen      INTEGER NOT NULL,
-                files_backed_up INTEGER NOT NULL DEFAULT 0
+                files_backed_up INTEGER NOT NULL DEFAULT 0,
+                folder_name    TEXT,
+                device_model   TEXT
             )
         """)
         # Copy data, handle missing device_id by using device_ip as fallback
@@ -55,10 +57,38 @@ def init_db():
             status         TEXT    NOT NULL DEFAULT 'accepted',
             first_seen     INTEGER NOT NULL,
             last_seen      INTEGER NOT NULL,
-            files_backed_up INTEGER NOT NULL DEFAULT 0
+            files_backed_up INTEGER NOT NULL DEFAULT 0,
+            folder_name    TEXT,
+            device_model   TEXT
         )
         """
     )
+
+    # 2b. Add folder_name / device_model columns to existing tables that predate them
+    cursor = conn.execute("PRAGMA table_info(devices)")
+    existing_cols = {row['name'] for row in cursor.fetchall()}
+    if 'folder_name' not in existing_cols:
+        conn.execute("ALTER TABLE devices ADD COLUMN folder_name TEXT")
+    if 'device_model' not in existing_cols:
+        conn.execute("ALTER TABLE devices ADD COLUMN device_model TEXT")
+
+    # 2c. Back-fill folder_name for any pre-existing devices that have NULL there.
+    #     We derive it the same way _make_folder_name() does so existing uploads
+    #     (stored under device_id-named folders) start resolving to name-based
+    #     folders on the next sync.  The old device_id folder on disk is NOT
+    #     renamed — only NEW uploads go to the name folder.
+    #     NOTE: we skip the rename to avoid breaking in-progress backups.
+    null_folders = conn.execute(
+        "SELECT device_id, device_name FROM devices WHERE folder_name IS NULL AND device_id IS NOT NULL"
+    ).fetchall()
+    import re as _re_init
+    for _row in null_folders:
+        _raw = (_row["device_name"] or "device").strip()
+        _safe = _re_init.sub(r'[<>:"/\\|?*]', "_", _raw).strip(". ") or "device"
+        conn.execute(
+            "UPDATE devices SET folder_name = ? WHERE device_id = ?",
+            (_safe, _row["device_id"]),
+        )
 
     # 3. Migrate files table if needed
     cursor = conn.execute("PRAGMA table_info(files)")
@@ -367,40 +397,127 @@ def get_device_stats(device_ip: str, device_id: str | None = None) -> dict:
 
 # ─── Device helpers ────────────────────────────────────────────────────────────
 
-def upsert_device(device_name: str, device_ip: str, device_id: str | None = None) -> None:
-    """Insert a new device or update its name/last_seen."""
+def _make_folder_name(device_name: str) -> str:
+    """Derive a safe, human-readable folder name from the device name.
+    This is set once when the device is first registered and never changes,
+    so the folder always reflects the device's name."""
+    import re as _re
+    name = (device_name or "device").strip()
+    # Replace characters that are illegal in Windows/Linux directory names
+    safe = _re.sub(r'[<>:"/\\|?*]', '_', name)
+    safe = safe.strip('. ')  # no leading/trailing dots or spaces
+    return safe or "device"
+
+
+def upsert_device(
+    device_name: str,
+    device_ip: str,
+    device_id: str | None = None,
+    device_model: str | None = None,
+) -> None:
+    """Insert a new device or update its name/last_seen.
+    
+    folder_name is set ONCE on first insert and never updated afterward,
+    so the on-disk backup folder always keeps the original device name.
+    """
     now = int(_time.time())
     conn = get_conn()
     if device_id:
+        # Check if a folder_name already exists for this device_id
+        row = conn.execute(
+            "SELECT folder_name FROM devices WHERE device_id = ?", (device_id,)
+        ).fetchone()
+        existing_folder = row["folder_name"] if row else None
+        folder_name = existing_folder or _make_folder_name(device_name)
+
         conn.execute(
             """
-            INSERT INTO devices (device_id, device_name, device_ip, status, first_seen, last_seen)
-            VALUES (?, ?, ?, 'accepted', ?, ?)
+            INSERT INTO devices (device_id, device_name, device_ip, status, first_seen, last_seen, folder_name, device_model)
+            VALUES (?, ?, ?, 'accepted', ?, ?, ?, ?)
             ON CONFLICT(device_id) DO UPDATE SET
-                device_name = excluded.device_name,
-                device_ip   = excluded.device_ip,
-                last_seen   = excluded.last_seen,
-                status      = 'accepted'
+                device_name  = excluded.device_name,
+                device_ip    = excluded.device_ip,
+                last_seen    = excluded.last_seen,
+                status       = 'accepted',
+                device_model = COALESCE(devices.device_model, excluded.device_model),
+                folder_name  = COALESCE(devices.folder_name, excluded.folder_name)
             """,
-            (device_id, device_name, device_ip, now, now),
+            (device_id, device_name, device_ip, now, now, folder_name, device_model),
         )
     else:
         # Legacy fallback: try to update by IP if device_id is missing
-        res = conn.execute("UPDATE devices SET device_name=?, last_seen=? WHERE device_ip=? AND device_id IS NULL", 
-                         (device_name, now, device_ip))
+        res = conn.execute(
+            "UPDATE devices SET device_name=?, last_seen=? WHERE device_ip=? AND device_id IS NULL",
+            (device_name, now, device_ip),
+        )
         if res.rowcount == 0:
+            folder_name = _make_folder_name(device_name)
             conn.execute(
                 """
-                INSERT INTO devices (device_name, device_ip, status, first_seen, last_seen)
-                VALUES (?, ?, 'accepted', ?, ?)
+                INSERT INTO devices (device_name, device_ip, status, first_seen, last_seen, folder_name, device_model)
+                VALUES (?, ?, 'accepted', ?, ?, ?, ?)
                 """,
-                (device_name, device_ip, now, now),
+                (device_name, device_ip, now, now, folder_name, device_model),
             )
     conn.commit()
     conn.close()
-    
+
     # Recalculate file count immediately
     touch_device(device_ip, device_id)
+
+
+def get_device_folder_name(device_id: str) -> str | None:
+    """Return the stable on-disk folder_name for a device_id, or None if not found."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT folder_name FROM devices WHERE device_id = ?", (device_id,)
+    ).fetchone()
+    conn.close()
+    return row["folder_name"] if row else None
+
+
+def find_device_by_name_model(
+    device_name: str, device_model: str | None
+) -> dict | None:
+    """Find an existing accepted device by name AND model.
+    Used to detect a reinstalled app that got a new device_id.
+    Returns the full device row or None.
+
+    We only attempt a match when device_model is available — name-only matches
+    are too ambiguous (e.g. multiple "Android Device" entries from different
+    phones) and could cause incorrect merges.
+    """
+    if not device_model:
+        # Without a model identifier it's unsafe to auto-merge — bail out.
+        return None
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM devices WHERE device_name=? AND device_model=? AND status='accepted' LIMIT 1",
+        (device_name, device_model),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) -> None:
+    """Reassign all file records from old_device_id to new_device_id and update the
+    devices row.  Called when a reinstalled app presents a new device_id but we
+    detect it belongs to the same physical device (by name + model match).
+    """
+    now = int(_time.time())
+    conn = get_conn()
+    # Migrate file records
+    conn.execute(
+        "UPDATE files SET device_id = ? WHERE device_id = ?",
+        (new_device_id, old_device_id),
+    )
+    # Update the device row — keep folder_name intact
+    conn.execute(
+        "UPDATE devices SET device_id=?, device_ip=?, last_seen=? WHERE device_id=?",
+        (new_device_id, new_device_ip, now, old_device_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def touch_device(device_ip: str, device_id: str | None = None, files_delta: int = 1) -> None:

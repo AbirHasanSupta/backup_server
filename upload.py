@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from config import load_config
 from database import (
     batch_check_files,
+    find_device_by_name_model,
     get_stats,
     get_device_stats,
     get_devices,
@@ -18,6 +19,7 @@ from database import (
     clear_sync_sessions,
     is_device_known,
     is_uploaded_compatible,
+    merge_device_id,
     remove_device,
     remove_file_record,
     touch_device,
@@ -74,6 +76,7 @@ async def ping():
 class ConnectRequest(BaseModel):
     device_name: str
     device_id: str | None = None
+    device_model: str | None = None
 
 
 class FileCheckItem(BaseModel):
@@ -107,17 +110,36 @@ async def connect_device(
     device_ip = request.client.host
     device_name = body.device_name.strip() or device_ip
     device_id = body.device_id
+    device_model = (body.device_model or "").strip() or None
 
     # Already registered — just refresh the record, no dialog needed
     if is_device_known(device_ip, device_id):
-        upsert_device(device_name, device_ip, device_id)
+        upsert_device(device_name, device_ip, device_id, device_model)
         add_log(f"📱 Re-connected: {device_name} ({device_id or device_ip})")
         return {"status": "accepted"}
+
+    # ── Reinstall detection ────────────────────────────────────────────────────
+    # A new device_id might belong to a phone that already has a backup record
+    # (same device_name + model).  If so, silently re-link the new ID to the
+    # existing device row and migrate all file records — the old backup folder
+    # is preserved, and already-uploaded files are not re-uploaded.
+    if device_id:
+        existing = find_device_by_name_model(device_name, device_model)
+        if existing and existing.get("device_id") and existing["device_id"] != device_id:
+            old_id = existing["device_id"]
+            add_log(
+                f"🔄 Reinstall detected for '{device_name}' ({device_model or 'unknown model'}). "
+                f"Merging {old_id[:12]}… → {device_id[:12]}…"
+            )
+            merge_device_id(old_id, device_id, device_ip)
+            # Update the name/ip/model in case they changed slightly
+            upsert_device(device_name, device_ip, device_id, device_model)
+            return {"status": "accepted"}
 
     add_log(f"📱 New connection request: {device_name} ({device_id or device_ip})")
 
     if not load_config().get("REQUIRE_APPROVAL", True):
-        upsert_device(device_name, device_ip, device_id)
+        upsert_device(device_name, device_ip, device_id, device_model)
         add_log(f"✅ Auto-accepted: {device_name} ({device_id or device_ip})")
         return {"status": "accepted"}
 
@@ -143,7 +165,7 @@ async def connect_device(
         return {"status": "rejected", "reason": "timeout"}
 
     if accepted:
-        upsert_device(device_name, device_ip, device_id)
+        upsert_device(device_name, device_ip, device_id, device_model)
         return {"status": "accepted"}
 
     return {"status": "rejected"}

@@ -1004,13 +1004,19 @@ class BackupServerApp(ctk.CTk):
             import re
             from config import load_config
             root = os.path.abspath(load_config()["BACKUP_ROOT"])
-            device_id = dev.get("device_id")
-            if device_id:
+            # Prefer the stable, human-readable folder_name set at registration.
+            # Fall back to a sanitized device_id for legacy devices that predate
+            # the folder_name column.
+            folder_name = dev.get("folder_name")
+            device_id   = dev.get("device_id")
+            if folder_name:
+                device_folder = os.path.join(root, folder_name)
+            elif device_id:
                 safe_device_id = re.sub(r'[<>:"|?*]', "_", device_id).strip()
                 device_folder = os.path.join(root, safe_device_id)
             else:
                 device_folder = root
-            
+
             try:
                 os.makedirs(device_folder, exist_ok=True)
                 os.startfile(device_folder)

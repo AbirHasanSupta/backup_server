@@ -5,6 +5,32 @@ import threading
 
 from config import load_config
 
+# Lazy import to avoid circular dependency — database imports config, not storage.
+_get_device_folder_name = None
+
+
+def _resolve_device_folder(device_id: str) -> str:
+    """Return the human-readable folder name for *device_id*.
+
+    The first time this is called we import ``get_device_folder_name`` from
+    database (deferred to break any import cycle).  If the DB has no entry yet
+    (e.g. during the very first upsert) we fall back to the raw device_id so
+    files are never lost.
+    """
+    global _get_device_folder_name
+    if _get_device_folder_name is None:
+        try:
+            from database import get_device_folder_name as _fn
+            _get_device_folder_name = _fn
+        except Exception:
+            _get_device_folder_name = lambda did: None  # noqa: E731
+
+    folder = _get_device_folder_name(device_id)
+    if folder:
+        return folder
+    # Fallback: sanitize device_id itself (keeps old behaviour for legacy rows)
+    return re.sub(r'[<>:"|?*]', "_", device_id).strip()
+
 
 def _backup_root() -> str:
     """Read BACKUP_ROOT fresh from config on every call so reloads propagate."""
@@ -24,16 +50,16 @@ def sanitize_relative_path(relative_path: str) -> str:
 
 def full_path_for(relative_path: str, device_id: str | None = None) -> str:
     root = os.path.abspath(_backup_root())
-    
-    # If device_id is provided, nest files under a device-specific folder
-    # This prevents different devices from overwriting each other's files.
+
+    # If device_id is provided, nest files under the device's human-readable
+    # folder name (derived from device_name, stored in DB).  This makes the
+    # backup directory legible and stable across app reinstalls.
     if device_id:
-        # Sanitize device_id to prevent path traversal
-        safe_device_id = re.sub(r'[<>:"|?*]', "_", device_id).strip()
-        root = os.path.join(root, safe_device_id)
+        folder = _resolve_device_folder(device_id)
+        root = os.path.join(root, folder)
 
     full_path = os.path.abspath(os.path.join(root, sanitize_relative_path(relative_path)))
-    
+
     # Ensure the final path is still within the expected device-specific root (or global root)
     if os.path.commonpath([root, full_path]) != root:
         raise ValueError("Invalid backup path")

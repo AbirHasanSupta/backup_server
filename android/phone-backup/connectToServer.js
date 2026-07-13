@@ -45,6 +45,9 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
     Device?.modelName ||
     `Android Device`;
 
+  // modelName is the hardware model (e.g. "Pixel 7") — stable across reinstalls
+  const deviceModel = Device?.modelName || null;
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS);
 
@@ -58,7 +61,8 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
       },
       body: JSON.stringify({ 
         device_name: deviceName,
-        device_id: deviceId
+        device_id: deviceId,
+        device_model: deviceModel,
       }),
       signal: controller.signal,
     });
