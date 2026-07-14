@@ -1442,9 +1442,27 @@ class BackupServerApp(ctk.CTk):
                 n_fail     = sum(1 for s in sessions if s.get("outcome") in ("failed", "force_stopped"))
 
                 def _bd(ms):
-                    secs = ms // 1000
-                    if secs < 60:  return f"{secs}s"
-                    m = secs // 60; return f"{m}m {secs % 60}s"
+                    secs = max(0, ms // 1000)
+                    if secs < 60: return f"{secs}s"
+                    mins = secs // 60
+                    if mins < 60:
+                        s = secs % 60
+                        return f"{mins}m {s}s" if s else f"{mins}m"
+                    hrs = mins // 60
+                    if hrs < 24:
+                        m = mins % 60
+                        return f"{hrs}h {m}m" if m else f"{hrs}h"
+                    days = hrs // 24
+                    if days < 30:
+                        h = hrs % 24
+                        return f"{days}d {h}h" if h else f"{days}d"
+                    months = days // 30
+                    if months < 12:
+                        d = days % 30
+                        return f"{months}mo {d}d" if d else f"{months}mo"
+                    years = months // 12
+                    mo = months % 12
+                    return f"{years}y {mo}mo" if mo else f"{years}y"
 
                 parts = [
                     f"Sessions: {len(sessions)}",
@@ -1498,11 +1516,26 @@ class BackupServerApp(ctk.CTk):
 
             def _fmt_dur(ms):
                 secs = max(0, ms // 1000)
-                if secs < 60:  return f"{secs}s"
-                m, s = divmod(secs, 60)
-                if m  < 60:  return f"{m}m {s}s" if s else f"{m}m"
-                h, mr = divmod(m, 60)
-                return f"{h}h {mr}m" if mr else f"{h}h"
+                if secs < 60: return f"{secs}s"
+                mins = secs // 60
+                if mins < 60:
+                    s = secs % 60
+                    return f"{mins}m {s}s" if s else f"{mins}m"
+                hrs = mins // 60
+                if hrs < 24:
+                    m = mins % 60
+                    return f"{hrs}h {m}m" if m else f"{hrs}h"
+                days = hrs // 24
+                if days < 30:
+                    h = hrs % 24
+                    return f"{days}d {h}h" if h else f"{days}d"
+                months = days // 30
+                if months < 12:
+                    d = days % 30
+                    return f"{months}mo {d}d" if d else f"{months}mo"
+                years = months // 12
+                mo = months % 12
+                return f"{years}y {mo}mo" if mo else f"{years}y"
 
             for row_idx, sess in enumerate(sessions):
                 outcome      = sess.get("outcome", "completed")

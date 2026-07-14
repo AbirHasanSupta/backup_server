@@ -6,7 +6,7 @@ from database import init_db
 from upload import router
 from config import HOST, PORT
 
-app = FastAPI(title="Phone Backup Server", version="2.1.0")
+app = FastAPI(title="Phone Backup Server", version="2.1.1")
 
 app.add_middleware(
     CORSMiddleware,

@@ -35,14 +35,31 @@ interface Props {
 }
 
 function formatDuration(ms: number): string {
-  const secs = Math.floor(ms / 1000);
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  const rem  = secs % 60;
-  if (mins < 60) return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
-  const hrs  = Math.floor(mins / 60);
-  const mrem = mins % 60;
-  return mrem > 0 ? `${hrs}h ${mrem}m` : `${hrs}h`;
+  const totalSecs = Math.floor(ms / 1000);
+  if (totalSecs < 60) return `${totalSecs}s`;
+  const totalMins = Math.floor(totalSecs / 60);
+  if (totalMins < 60) {
+    const s = totalSecs % 60;
+    return s > 0 ? `${totalMins}m ${s}s` : `${totalMins}m`;
+  }
+  const totalHrs = Math.floor(totalMins / 60);
+  if (totalHrs < 24) {
+    const m = totalMins % 60;
+    return m > 0 ? `${totalHrs}h ${m}m` : `${totalHrs}h`;
+  }
+  const totalDays = Math.floor(totalHrs / 24);
+  if (totalDays < 30) {
+    const h = totalHrs % 24;
+    return h > 0 ? `${totalDays}d ${h}h` : `${totalDays}d`;
+  }
+  const totalMonths = Math.floor(totalDays / 30);
+  if (totalMonths < 12) {
+    const d = totalDays % 30;
+    return d > 0 ? `${totalMonths}mo ${d}d` : `${totalMonths}mo`;
+  }
+  const years = Math.floor(totalMonths / 12);
+  const mo = totalMonths % 12;
+  return mo > 0 ? `${years}y ${mo}mo` : `${years}y`;
 }
 
 function formatTime(ts: number): string {
