@@ -176,6 +176,24 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_device ON sync_sessions(device_id, started_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_started ON sync_sessions(started_at DESC)")
 
+    # 6. One-time cleanup: remove stale duplicate file rows that may have
+    #    accumulated from phone reinstalls before the insert_file deduplication
+    #    fix was applied.  For each (device_ip, path) pair we keep only the row
+    #    with the most recent uploaded_time (highest rowid as tie-breaker).
+    #    Rows with no device_ip are left untouched.
+    conn.execute(
+        """
+        DELETE FROM files
+        WHERE device_ip IS NOT NULL
+          AND rowid NOT IN (
+              SELECT MAX(rowid)
+              FROM files
+              WHERE device_ip IS NOT NULL
+              GROUP BY device_ip, path
+          )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -316,6 +334,16 @@ def insert_file(path, size, modified_time, uploaded_time, device_ip=None, extern
     path = (path or "").replace("\\", "/")
     # If we have device_id, we can use it for a more specific update
     if device_id:
+        # Before inserting, remove any stale rows for the same path from a
+        # *different* device_id on the same device_ip.  This prevents duplicate
+        # file counts when a phone is reinstalled and gets a new device_id
+        # without triggering the normal reinstall-merge flow (e.g. the device
+        # name changed slightly so find_device_by_name_model() found no match).
+        if device_ip:
+            conn.execute(
+                "DELETE FROM files WHERE path = ? AND device_ip = ? AND device_id != ?",
+                (path, device_ip, device_id),
+            )
         conn.execute(
             "INSERT INTO files (device_id, path, size, modified_time, uploaded_time, device_ip, external_id, sha256)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
