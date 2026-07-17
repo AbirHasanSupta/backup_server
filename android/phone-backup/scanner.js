@@ -131,25 +131,31 @@ export async function enrichFileMetadata(file) {
   };
 }
 
-function addFile(uri, relativePath, name, result, shouldInclude, reportActivity, counters, metadataScheduler) {
+function addFile(uri, relativePath, name, result, shouldInclude, reportActivity, counters, metadataScheduler, snapshotCache) {
   if (!shouldInclude(name)) return;
+
+  const cached = snapshotCache ? snapshotCache.get(relativePath) : null;
 
   const file = {
     uri,
     relativePath,
-    modifiedTime: 0,
-    size: 0,
+    modifiedTime: cached ? cached.mtime : 0,
+    size: cached ? cached.size : 0,
     name,
     id: uri,
-    metadataLoaded: false,
+    metadataLoaded: !!cached,
   };
   result.push(file);
   counters.files++;
-  metadataScheduler.add(file);
+  if (cached) {
+    counters.snapshotHits = (counters.snapshotHits || 0) + 1;
+  } else {
+    metadataScheduler.add(file);
+  }
   reportActivity({ phase: 'scanning', files: counters.files, currentFile: relativePath });
 }
 
-async function walk(uri, base, result, shouldInclude, reportActivity, counters, metadataScheduler, knownItems = null) {
+async function walk(uri, base, result, shouldInclude, reportActivity, counters, metadataScheduler, knownItems = null, snapshotCache = null) {
   let items = knownItems;
   try {
     if (!items) {
@@ -157,7 +163,7 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
     }
   } catch {
     const name = getSafName(uri);
-    addFile(uri, base, name, result, shouldInclude, reportActivity, counters, metadataScheduler);
+    addFile(uri, base, name, result, shouldInclude, reportActivity, counters, metadataScheduler, snapshotCache);
     return;
   }
 
@@ -173,9 +179,9 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
     }
 
     if (childItems) {
-      await walk(itemUri, newBase, result, shouldInclude, reportActivity, counters, metadataScheduler, childItems);
+      await walk(itemUri, newBase, result, shouldInclude, reportActivity, counters, metadataScheduler, childItems, snapshotCache);
     } else {
-      addFile(itemUri, newBase, name, result, shouldInclude, reportActivity, counters, metadataScheduler);
+      addFile(itemUri, newBase, name, result, shouldInclude, reportActivity, counters, metadataScheduler, snapshotCache);
     }
   }
 
@@ -184,7 +190,7 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
   }
 }
 
-export async function scan(onActivity, targetFolderUri) {
+export async function scan(onActivity, targetFolderUri, snapshotCache = null) {
   const [folders, selectedTypes] = await Promise.all([
     getFolders(),
     getFileTypes(),
@@ -197,13 +203,14 @@ export async function scan(onActivity, targetFolderUri) {
     : folders;
 
   const result = [];
-  const counters = { files: 0 };
+  const counters = { files: 0, snapshotHits: 0 };
   const metadataScheduler = createMetadataScheduler(reportActivity);
   for (const folder of foldersToScan) {
     reportActivity({ phase: 'scanning', currentFile: folder.name, files: counters.files }, true);
-    await walk(folder.uri, folder.name, result, shouldInclude, reportActivity, counters, metadataScheduler);
+    await walk(folder.uri, folder.name, result, shouldInclude, reportActivity, counters, metadataScheduler, null, snapshotCache);
   }
   await metadataScheduler.drain();
   reportActivity({ phase: 'scanning', currentFile: '', files: counters.files }, true);
+  result.snapshotHits = counters.snapshotHits;
   return result;
 }

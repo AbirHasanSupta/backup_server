@@ -16,6 +16,7 @@ const KEYS = {
   FORCE_REFRESH_ALL: 'force_refresh_all',
   FORCE_REFRESH_FOLDERS: 'force_refresh_folders',
   THEME_MODE:     'theme_mode',
+  SCAN_SNAPSHOT:  'scan_snapshot_v1',
 };
 
 function safeJsonParse(raw, fallback) {
@@ -121,6 +122,7 @@ export async function removeFolder(uri) {
     ? keys.filter((k) => k.startsWith(`uploaded_${removed.name}/`) || k === `uploaded_${removed.name}`)
     : [];
   if (folderKeys.length > 0) await AsyncStorage.multiRemove(folderKeys);
+  if (removed) await clearScanSnapshotForFolder(removed.name);
   return updated;
 }
 
@@ -139,6 +141,7 @@ export async function setFileTypes(types) {
     ? types.filter((type) => Object.prototype.hasOwnProperty.call(FILE_TYPE_LABELS, type))
     : [];
   await AsyncStorage.setItem(KEYS.FILE_TYPES, JSON.stringify(valid.length > 0 ? valid : ['all']));
+  await clearScanSnapshot();
 }
 
 // ─── Upload dedup cache ───────────────────────────────────────────────────────
@@ -245,4 +248,45 @@ export async function clearAllUploads() {
   const match = keys.filter((k) => k.startsWith('uploaded_'));
   if (match.length > 0) await AsyncStorage.multiRemove(match);
   return match.length;
+}
+
+// ─── Scan snapshot cache ───────────────────────────────────────────────────────
+// Key: "scan_snapshot_v1", value: { "<relativePath>": "<mtime>:<size>", ... }
+
+export async function loadScanSnapshot() {
+  const raw = await AsyncStorage.getItem(KEYS.SCAN_SNAPSHOT);
+  const obj = safeJsonParse(raw, null);
+  const map = new Map();
+  if (!obj || typeof obj !== 'object') return map;
+  for (const [path, val] of Object.entries(obj)) {
+    const [mtime, size] = String(val).split(':');
+    map.set(path, { mtime: Number(mtime) || 0, size: Number(size) || 0 });
+  }
+  return map;
+}
+
+export async function saveScanSnapshot(files) {
+  const obj = {};
+  for (const file of files) {
+    obj[file.relativePath] = `${file.modifiedTime}:${file.size || 0}`;
+  }
+  await AsyncStorage.setItem(KEYS.SCAN_SNAPSHOT, JSON.stringify(obj));
+}
+
+export async function clearScanSnapshot() {
+  await AsyncStorage.removeItem(KEYS.SCAN_SNAPSHOT);
+}
+
+export async function clearScanSnapshotForFolder(folderName) {
+  const raw = await AsyncStorage.getItem(KEYS.SCAN_SNAPSHOT);
+  const obj = safeJsonParse(raw, null);
+  if (!obj || typeof obj !== 'object') return;
+  let changed = false;
+  for (const path of Object.keys(obj)) {
+    if (path === folderName || path.startsWith(`${folderName}/`)) {
+      delete obj[path];
+      changed = true;
+    }
+  }
+  if (changed) await AsyncStorage.setItem(KEYS.SCAN_SNAPSHOT, JSON.stringify(obj));
 }

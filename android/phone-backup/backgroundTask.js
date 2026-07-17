@@ -17,6 +17,10 @@ import {
   getServerPort,
   getDeviceId,
   getFolders,
+  loadScanSnapshot,
+  saveScanSnapshot,
+  clearScanSnapshot,
+  clearScanSnapshotForFolder,
 } from './settings';
 import {
   showSyncProgressNotification,
@@ -400,14 +404,22 @@ async function reportProgress(current, total, detail) {
 export async function performActualSync(onProgress, runOptions = {}) {
   const forceRefreshFolder = runOptions.forceRefreshFolder;
   const targetFolderUri = runOptions.targetFolderUri;
+  const forceRefreshAll = runOptions.forceRefreshAll;
 
   if (isStopRequested()) return { ...emptySyncResult('stopped'), stopped: true };
 
+  if (forceRefreshAll) {
+    await clearScanSnapshot();
+  } else if (forceRefreshFolder) {
+    await clearScanSnapshotForFolder(forceRefreshFolder);
+  }
+
   if (onProgress) await onProgress(0, 0, { phase: 'scanning' });
   await reportServerActivity('Scanning folders');
+  const snapshotCache = await loadScanSnapshot();
   const files = await scan(async (detail) => {
     if (onProgress) await onProgress(0, 0, detail);
-  }, targetFolderUri);
+  }, targetFolderUri, snapshotCache);
 
   if (isStopRequested()) return { ...emptySyncResult('stopped'), stopped: true };
 
@@ -434,7 +446,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
     for (const status of statuses) {
       const key = `${status.relative_path}|${status.modified_time}|${status.size || 0}`;
-      
+
       let isPresentStatus = status.status === 'present';
       if (forceRefreshFolder && (status.relative_path.startsWith(`${forceRefreshFolder}/`) || status.relative_path === forceRefreshFolder)) {
         isPresentStatus = false;
@@ -549,6 +561,10 @@ export async function performActualSync(onProgress, runOptions = {}) {
   const uploadConcurrency = getUploadConcurrency(pending);
   await Promise.all(Array.from({ length: uploadConcurrency }, () => worker()));
   await markUploadedBatch(uploadedFiles);
+
+  if (!isStopRequested()) {
+    await saveScanSnapshot(files).catch(() => {});
+  }
 
   if (totalUploads > 0 && uploaded === 0 && errors === totalUploads && present.size === 0) {
     const msg = lastError ? `Last error: ${lastError}` : 'Check folder permissions and API key';
