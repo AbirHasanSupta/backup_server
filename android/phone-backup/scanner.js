@@ -28,8 +28,12 @@ function getSafName(itemUri) {
   return decoded.substring(Math.max(decoded.lastIndexOf('/'), decoded.lastIndexOf(':')) + 1);
 }
 
+export function hasProperExtension(name) {
+  return getFileExtension(name) !== '';
+}
+
 function createFileMatcher(selectedTypes) {
-  if (selectedTypes.includes('all')) return () => true;
+  if (selectedTypes.includes('all')) return (name) => hasProperExtension(name);
 
   const includeOthers = selectedTypes.includes('others');
   const selectedExtensions = new Set();
@@ -42,6 +46,7 @@ function createFileMatcher(selectedTypes) {
   }
 
   return (name) => {
+    if (!hasProperExtension(name)) return false;
     const ext = getFileExtension(name);
     if (selectedExtensions.has(ext)) return true;
     return includeOthers && !ALL_KNOWN_EXTENSIONS.has(ext);

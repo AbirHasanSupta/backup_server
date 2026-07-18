@@ -3,7 +3,7 @@
     "name": "Phone Backup",
     "slug": "phone-backup",
     "scheme": "phonebackup",
-    "version": "2.1.1",
+    "version": "2.1.2",
     "plugins": [
       "expo-media-library",
       "expo-task-manager",

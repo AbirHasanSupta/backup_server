@@ -163,6 +163,20 @@ export async function markUploadedBatch(files) {
   );
 }
 
+export async function isUploadedBatch(files) {
+  const trusted = new Set();
+  if (!files.length) return trusted;
+  const pairs = await AsyncStorage.multiGet(files.map((file) => `uploaded_${file.relativePath}`));
+  const valueByKey = new Map(pairs);
+  for (const file of files) {
+    const val = valueByKey.get(`uploaded_${file.relativePath}`);
+    if (val === String(file.modifiedTime)) {
+      trusted.add(`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`);
+    }
+  }
+  return trusted;
+}
+
 // ─── Sync schedule ────────────────────────────────────────────────────────────
 export async function getSyncInterval() {
   const val = parseStoredInteger(await AsyncStorage.getItem(KEYS.SYNC_INTERVAL), 15);

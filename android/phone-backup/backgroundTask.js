@@ -1,9 +1,10 @@
 import { DeviceEventEmitter, Platform, NativeModules } from 'react-native';
-import { enrichFileMetadata, scan } from './scanner';
+import { enrichFileMetadata, scan, hasProperExtension } from './scanner';
 import { checkDeviceConnection, checkServerFiles, postSyncSession, uploadFile } from './uploader';
 import { acquireSyncWakeLock, releaseSyncWakeLock } from './wakeLock';
 import {
   markUploadedBatch,
+  isUploadedBatch,
   clearSyncRuntimeState,
   getSyncPaused,
   getSyncInterval,
@@ -417,9 +418,10 @@ export async function performActualSync(onProgress, runOptions = {}) {
   if (onProgress) await onProgress(0, 0, { phase: 'scanning' });
   await reportServerActivity('Scanning folders');
   const snapshotCache = await loadScanSnapshot();
-  const files = await scan(async (detail) => {
+  const scanned = await scan(async (detail) => {
     if (onProgress) await onProgress(0, 0, detail);
   }, targetFolderUri, snapshotCache);
+  const files = scanned.filter((file) => hasProperExtension(file.name));
 
   if (isStopRequested()) return { ...emptySyncResult('stopped'), stopped: true };
 
@@ -433,7 +435,19 @@ export async function performActualSync(onProgress, runOptions = {}) {
   let serverDeviceTotalSize = 0;
   let stoppedDuringCheck = false;
 
-  for (const batch of chunk(files, CHECK_BATCH_SIZE)) {
+  let filesToCheck = files;
+  if (runOptions.isAuto && !forceRefreshAll && !forceRefreshFolder) {
+    const trusted = await isUploadedBatch(files);
+    filesToCheck = files.filter((file) => !trusted.has(`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`));
+    for (const file of files) {
+      const key = `${file.relativePath}|${file.modifiedTime}|${file.size || 0}`;
+      if (trusted.has(key)) present.add(key);
+    }
+    checked = files.length - filesToCheck.length;
+    if (onProgress) await onProgress(0, 0, { phase: 'checking', checked, total: files.length });
+  }
+
+  for (const batch of chunk(filesToCheck, CHECK_BATCH_SIZE)) {
     if (isStopRequested()) { stoppedDuringCheck = true; break; }
     const res = await checkServerFiles(batch);
     const statuses = res.files;
@@ -653,7 +667,7 @@ export async function runSync(onProgress, runOptions = {}) {
     errorDetails:  [],
   };
   // Thread through so worker can accumulate files/errors
-  runOptions = { ...runOptions, sessionBuilder };
+  runOptions = { ...runOptions, sessionBuilder, isAuto };
 
   const progressHandler = async (current, total, detail) => {
     if (onProgress) await onProgress(current, total, detail);
@@ -891,11 +905,6 @@ export async function startPersistentSyncService() {
   }
 }
 
-export async function stopPersistentSyncService() {
-  if (!BackgroundService) return;
-  await BackgroundService.stop().catch(() => {});
-}
-
 export async function registerBackgroundTask(intervalMinutes) {
   if (Platform.OS === 'android') {
     await startPersistentSyncService();
@@ -926,9 +935,4 @@ export async function registerBackgroundTask(intervalMinutes) {
   } catch (err) {
     console.warn('[BackupTask] Safety-net registration failed (will retry):', err?.message);
   }
-}
-
-export async function unregisterBackgroundTask() {
-  if (!BackgroundFetch) return;
-  await BackgroundFetch.unregisterTaskAsync(TASK_NAME).catch(() => {});
 }
