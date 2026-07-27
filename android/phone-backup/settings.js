@@ -17,6 +17,8 @@ const KEYS = {
   FORCE_REFRESH_FOLDERS: 'force_refresh_folders',
   THEME_MODE:     'theme_mode',
   SCAN_SNAPSHOT:  'scan_snapshot_v1',
+  DEVICE_TOKEN:   'device_token',
+  CERT_FINGERPRINT: 'server_cert_fp',
 };
 
 function safeJsonParse(raw, fallback) {
@@ -178,9 +180,27 @@ export async function isUploadedBatch(files) {
 }
 
 // ─── Sync schedule ────────────────────────────────────────────────────────────
+export const SYNC_INTERVAL_PRESETS = [
+  { label: '1 hr', value: 60 },
+  { label: '6 hr', value: 360 },
+  { label: '12 hr', value: 720 },
+  { label: '24 hr', value: 1440 },
+  { label: '72 hr', value: 4320 },
+  { label: '1 week', value: 10080 },
+  { label: '1 month', value: 43200 },
+];
+
+export function formatSyncIntervalLabel(minutes) {
+  const preset = SYNC_INTERVAL_PRESETS.find((item) => item.value === minutes);
+  if (preset) return preset.label;
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes % 1440 === 0) return `${minutes / 1440}d`;
+  return `${minutes / 60}h`;
+}
+
 export async function getSyncInterval() {
-  const val = parseStoredInteger(await AsyncStorage.getItem(KEYS.SYNC_INTERVAL), 15);
-  return isNaN(val) || val < 15 ? 15 : val;
+  const val = parseStoredInteger(await AsyncStorage.getItem(KEYS.SYNC_INTERVAL), 60);
+  return isNaN(val) || val < 60 ? 60 : val;
 }
 export async function setSyncInterval(minutes) { await AsyncStorage.setItem(KEYS.SYNC_INTERVAL, String(minutes)); }
 
@@ -304,3 +324,11 @@ export async function clearScanSnapshotForFolder(folderName) {
   }
   if (changed) await AsyncStorage.setItem(KEYS.SCAN_SNAPSHOT, JSON.stringify(obj));
 }
+
+// ─── Device token (per-device auth from server) ───────────────────────────────
+export async function getDeviceToken() { return (await AsyncStorage.getItem(KEYS.DEVICE_TOKEN)) || ''; }
+export async function setDeviceToken(token) { await AsyncStorage.setItem(KEYS.DEVICE_TOKEN, token); }
+
+// ─── TLS cert fingerprint ─────────────────────────────────────────────────────
+export async function getServerCertFingerprint() { return (await AsyncStorage.getItem(KEYS.CERT_FINGERPRINT)) || ''; }
+export async function setServerCertFingerprint(fp) { await AsyncStorage.setItem(KEYS.CERT_FINGERPRINT, fp); }

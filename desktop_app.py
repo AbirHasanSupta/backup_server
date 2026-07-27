@@ -1175,6 +1175,40 @@ class BackupServerApp(ctk.CTk):
             font=FONT_BODY, text_color=C_TEXT,
         ).pack(side="left", padx=12)
 
+        # ── TLS CERTIFICATE ──────────────────────────────────────────────
+        tls_card = settings_card("TLS Certificate")
+        fp_row = ctk.CTkFrame(tls_card, fg_color="transparent")
+        fp_row.pack(fill="x", padx=18, pady=(14, 6))
+        ctk.CTkLabel(fp_row, text="SHA-256 Fingerprint", font=FONT_BODY, text_color=C_TEXT).pack(anchor="w")
+        ctk.CTkLabel(
+            fp_row,
+            text="Compare this with the fingerprint shown on your phone during pairing.",
+            font=FONT_SMALL, text_color=C_MUTED,
+        ).pack(anchor="w", pady=(2, 0))
+
+        self._lbl_cert_fp = ctk.CTkLabel(
+            tls_card, text="generating…",
+            font=ctk.CTkFont(family="Consolas", size=11),
+            text_color=C_TEXT, wraplength=440, justify="left",
+        )
+        self._lbl_cert_fp.pack(fill="x", padx=18, pady=(6, 6))
+
+        def _copy_fp():
+            fp = self._lbl_cert_fp.cget("text")
+            if fp and fp != "generating…":
+                self.clipboard_clear()
+                self.clipboard_append(fp)
+                add_log("Cert fingerprint copied to clipboard")
+
+        ctk.CTkButton(
+            tls_card, text="Copy Fingerprint", width=160, height=34,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
+            text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER,
+            corner_radius=10, font=FONT_SMALL,
+            command=_copy_fp,
+        ).pack(anchor="w", padx=18, pady=(0, 14))
+
         # ── Save button ───────────────────────────────────────────────────
         ctk.CTkButton(
             scroll, text="Save and Restart Server", height=50,
@@ -1216,6 +1250,19 @@ class BackupServerApp(ctk.CTk):
         save_config(cfg)
         add_log("Settings saved - restarting server")
         self._restart_server()
+
+    def _refresh_cert_fingerprint(self):
+        """Read the TLS cert fingerprint and update the Settings label."""
+        try:
+            from ssl_utils import get_cert_fingerprint
+            fp = get_cert_fingerprint()
+            # Format as colon-separated pairs for readability
+            formatted = ":".join(fp[i:i+2] for i in range(0, len(fp), 2)).upper()
+            if hasattr(self, "_lbl_cert_fp"):
+                self._lbl_cert_fp.configure(text=formatted)
+        except Exception as e:
+            if hasattr(self, "_lbl_cert_fp"):
+                self._lbl_cert_fp.configure(text=f"Error: {e}")
 
     def _apply_theme_from_settings(self):
         mode = "dark" if bool(self._sw_dark_mode.get()) else "light"
@@ -1720,6 +1767,9 @@ class BackupServerApp(ctk.CTk):
 
         from server import app as fastapi_app
         from config import HOST, PORT
+        from ssl_utils import ensure_cert
+
+        cert_path, key_path = ensure_cert()
 
         # Pre-flight check: is the port already in use?
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -1744,6 +1794,8 @@ class BackupServerApp(ctk.CTk):
             log_config=None,   # disable uvicorn's default logging; avoids
                                # isatty() crash when stdout/stderr are None
                                # (windowed PyInstaller build)
+            ssl_certfile=cert_path,
+            ssl_keyfile=key_path,
         )
         self._uvicorn_server = uvicorn.Server(ucfg)
 
@@ -1759,10 +1811,11 @@ class BackupServerApp(ctk.CTk):
         self._server_start_time = time.time()
 
         local_ip = get_local_ip()
-        addr = f"http://{local_ip}:{PORT}"
+        addr = f"https://{local_ip}:{PORT}"
         self.after(0, lambda: self._set_status(True, addr))
         self.after(0, self._configure_server_button)
         add_log(f"Server started - {addr}")
+        self.after(0, self._refresh_cert_fingerprint)
 
     def _stop_server(self):
         if self._uvicorn_server:

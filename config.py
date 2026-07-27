@@ -40,6 +40,8 @@ _DEFAULTS = {
     "DB_PATH": DB_PATH,
     "REQUIRE_APPROVAL": True,
     "THEME_MODE": "light",
+    "SSL_CERT": os.path.join(APP_DATA_DIR, "cert.pem"),
+    "SSL_KEY": os.path.join(APP_DATA_DIR, "key.pem"),
 }
 
 

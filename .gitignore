@@ -1,5 +1,14 @@
 .idea
-backup.db
 .venv
+__pycache__/
+build/
+dist/
+
+# Server data & config
 backup.db
 server_config.json
+
+# TLS certificates (generated at runtime, contain private key)
+cert.pem
+key.pem
+*.pem

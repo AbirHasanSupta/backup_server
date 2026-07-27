@@ -1,4 +1,5 @@
 import sqlite3
+import secrets
 import time as _time
 from config import DB_PATH
 
@@ -71,6 +72,8 @@ def init_db():
         conn.execute("ALTER TABLE devices ADD COLUMN folder_name TEXT")
     if 'device_model' not in existing_cols:
         conn.execute("ALTER TABLE devices ADD COLUMN device_model TEXT")
+    if 'token' not in existing_cols:
+        conn.execute("ALTER TABLE devices ADD COLUMN token TEXT")
 
     # 2c. Back-fill folder_name for any pre-existing devices that have NULL there.
     #     We derive it the same way _make_folder_name() does so existing uploads
@@ -490,8 +493,59 @@ def upsert_device(
     conn.commit()
     conn.close()
 
+    if device_id:
+        ensure_device_token(device_id)
+
     # Recalculate file count immediately
     touch_device(device_ip, device_id)
+
+
+def _generate_device_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def ensure_device_token(device_id: str) -> str:
+    """Return the per-device auth token, creating one if missing."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT token FROM devices WHERE device_id = ?", (device_id,)
+    ).fetchone()
+    if row and row["token"]:
+        token = row["token"]
+        conn.close()
+        return token
+
+    token = _generate_device_token()
+    conn.execute(
+        "UPDATE devices SET token = ? WHERE device_id = ?",
+        (token, device_id),
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def verify_device_token(device_id: str, token: str) -> bool:
+    if not device_id or not token:
+        return False
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM devices WHERE device_id = ? AND token = ? AND status = 'accepted'",
+        (device_id, token),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def get_files_for_device(device_id: str) -> list[dict]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT path, size, modified_time, sha256, uploaded_time "
+        "FROM files WHERE device_id = ? ORDER BY path",
+        (device_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_device_folder_name(device_id: str) -> str | None:

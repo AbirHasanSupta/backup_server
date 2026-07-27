@@ -13,12 +13,14 @@ import { AppColors, Radius, Shadows, Spacing, TextScale } from '@/constants/them
 import { discoverServers } from '../../serverDiscovery';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { setServerCertFingerprint } from '../../settings';
 
 interface Server {
   ip: string;
   port: number;
   name: string;
   version: string;
+  certFingerprint?: string;
 }
 
 interface Props {
@@ -58,7 +60,10 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
     }
   }, []);
 
-  const handleSelect = (server: Server) => {
+  const handleSelect = async (server: Server) => {
+    if (server.certFingerprint) {
+      await setServerCertFingerprint(server.certFingerprint);
+    }
     onSelect(server);
     onClose();
   };

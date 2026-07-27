@@ -1,4 +1,4 @@
-import { getDeviceId } from './settings';
+import { getDeviceId, setDeviceToken } from './settings';
 
 /**
  * connectToServer.js
@@ -53,7 +53,7 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
 
   try {
     const deviceId = await getDeviceId();
-    const res = await fetch(`http://${serverIp}:${serverPort}/connect`, {
+    const res = await fetch(`https://${serverIp}:${serverPort}/connect`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -73,7 +73,12 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
       return { status: 'error', reason: `HTTP ${res.status}` };
     }
 
-    return await readConnectionResponse(res); // { status: 'accepted' | 'rejected', reason?: ... }
+    const result = await readConnectionResponse(res);
+    // Store per-device token if server provided one
+    if (result.status === 'accepted' && result.token) {
+      await setDeviceToken(result.token);
+    }
+    return result;
   } catch (err) {
     clearTimeout(timer);
     if (err?.name === 'AbortError') {

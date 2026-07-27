@@ -1,5 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { getServerIp, getApiKey, getServerPort, getDeviceId } from './settings';
+import { getServerIp, getApiKey, getServerPort, getDeviceId, getDeviceToken } from './settings';
 
 async function readJsonResponse(res, context) {
   try {
@@ -18,15 +18,16 @@ function parseUploadBody(body) {
 }
 
 async function getServerConfig() {
-  const [serverIp, apiKey, serverPort, deviceId] = await Promise.all([
+  const [serverIp, apiKey, serverPort, deviceId, deviceToken] = await Promise.all([
     getServerIp(),
     getApiKey(),
     getServerPort(),
     getDeviceId(),
+    getDeviceToken(),
   ]);
 
   if (!serverIp) throw new Error('No server IP configured');
-  return { serverIp, apiKey, serverPort, deviceId };
+  return { serverIp, apiKey: deviceToken || apiKey, serverPort, deviceId };
 }
 
 function removedDeviceError() {
@@ -36,7 +37,7 @@ function removedDeviceError() {
 export async function checkDeviceConnection(options = {}) {
   const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
   const params = new URLSearchParams({ device_id: deviceId });
-  const res = await fetch(`http://${serverIp}:${serverPort}/status?${params.toString()}`, {
+  const res = await fetch(`https://${serverIp}:${serverPort}/status?${params.toString()}`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${apiKey}` },
     signal: options.signal,
@@ -52,9 +53,9 @@ export async function checkDeviceConnection(options = {}) {
   };
 }
 
-export async function checkServerFiles(files) {
+export async function checkServerFiles(files, options = {}) {
   const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
-  const url = `http://${serverIp}:${serverPort}/files/check`;
+  const url = `https://${serverIp}:${serverPort}/files/check`;
 
   const res = await fetch(url, {
     method: 'POST',
@@ -64,6 +65,7 @@ export async function checkServerFiles(files) {
     },
     body: JSON.stringify({
       device_id: deviceId,
+      verify_disk: options.verifyDisk === true,
       files: files.map((file) => ({
         relative_path: file.relativePath,
         modified_time: file.modifiedTime,
@@ -95,8 +97,9 @@ export async function checkServerFiles(files) {
  * @param {(bytes: number) => void} [onProgress]
  * @returns {Promise<boolean>} true if uploaded or already on server, false on failure
  */
-export async function uploadFile(item, onProgress) {
+export async function uploadFile(item, onProgress, options = {}) {
   const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
+  const verifyDisk = options.verifyDisk === true ? 'true' : 'false';
 
   const params = new URLSearchParams({
     relative_path: item.relativePath,
@@ -105,9 +108,10 @@ export async function uploadFile(item, onProgress) {
     external_id: item.id || '',
     sha256: item.sha256 || '',
     device_id: deviceId,
+    verify_disk: verifyDisk,
   });
-  const rawUrl = `http://${serverIp}:${serverPort}/upload/raw?${params.toString()}`;
-  const multipartUrl = `http://${serverIp}:${serverPort}/upload`;
+  const rawUrl = `https://${serverIp}:${serverPort}/upload/raw?${params.toString()}`;
+  const multipartUrl = `https://${serverIp}:${serverPort}/upload`;
   const safeName = (item.name || item.relativePath.split('/').pop() || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
   const uniqueId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const cacheUri = `${FileSystem.cacheDirectory}${uniqueId}_${safeName}`;
@@ -136,6 +140,7 @@ export async function uploadFile(item, onProgress) {
         external_id: item.id || '',
         sha256: item.sha256 || '',
         device_id: deviceId,
+        verify_disk: verifyDisk,
       },
       headers: { Authorization: `Bearer ${apiKey}` },
     });
@@ -184,7 +189,7 @@ export async function uploadFile(item, onProgress) {
 export async function postSyncSession(session) {
   try {
     const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
-    await fetch(`http://${serverIp}:${serverPort}/sync/session`, {
+    await fetch(`https://${serverIp}:${serverPort}/sync/session`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

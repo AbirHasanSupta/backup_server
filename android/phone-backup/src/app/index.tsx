@@ -26,6 +26,7 @@ import {
   getSyncInterval,
   getSyncPaused,
   getFolders,
+  formatSyncIntervalLabel,
 } from '../../settings';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { SyncProgressRing, SyncPhase } from '@/components/SyncProgressRing';
@@ -434,12 +435,7 @@ export default function HomeScreen() {
     unknown: 'No server',
   };
 
-  const intervalLabel =
-    syncInterval < 60
-      ? `${syncInterval}m`
-      : syncInterval === 60
-      ? '1 hr'
-      : `${Math.floor(syncInterval / 60)}h`;
+  const intervalLabel = formatSyncIntervalLabel(syncInterval);
 
   const serverColor = statusColors[serverStatus];
 

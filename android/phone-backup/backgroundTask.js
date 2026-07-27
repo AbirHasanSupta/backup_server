@@ -17,6 +17,7 @@ import {
   getApiKey,
   getServerPort,
   getDeviceId,
+  getDeviceToken,
   getFolders,
   loadScanSnapshot,
   saveScanSnapshot,
@@ -197,18 +198,19 @@ function buildStateFromProgress(current, total, detail = {}) {
 
 async function reportServerActivity(message) {
   try {
-    const [serverIp, apiKey, serverPort, deviceId] = await Promise.all([
+    const [serverIp, apiKey, serverPort, deviceId, deviceToken] = await Promise.all([
       getServerIp(),
       getApiKey(),
       getServerPort(),
       getDeviceId(),
+      getDeviceToken(),
     ]);
     if (!serverIp || !apiKey) return;
 
-    await fetch(`http://${serverIp}:${serverPort}/status/activity`, {
+    await fetch(`https://${serverIp}:${serverPort}/status/activity`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${deviceToken || apiKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -406,6 +408,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   const forceRefreshFolder = runOptions.forceRefreshFolder;
   const targetFolderUri = runOptions.targetFolderUri;
   const forceRefreshAll = runOptions.forceRefreshAll;
+  const isTwoWay = !!(forceRefreshAll || forceRefreshFolder);
 
   if (isStopRequested()) return { ...emptySyncResult('stopped'), stopped: true };
 
@@ -436,9 +439,11 @@ export async function performActualSync(onProgress, runOptions = {}) {
   let stoppedDuringCheck = false;
 
   let filesToCheck = files;
-  if (runOptions.isAuto && !forceRefreshAll && !forceRefreshFolder) {
+  if (!isTwoWay) {
     const trusted = await isUploadedBatch(files);
-    filesToCheck = files.filter((file) => !trusted.has(`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`));
+    filesToCheck = files.filter(
+      (file) => !trusted.has(`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`)
+    );
     for (const file of files) {
       const key = `${file.relativePath}|${file.modifiedTime}|${file.size || 0}`;
       if (trusted.has(key)) present.add(key);
@@ -449,7 +454,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
   for (const batch of chunk(filesToCheck, CHECK_BATCH_SIZE)) {
     if (isStopRequested()) { stoppedDuringCheck = true; break; }
-    const res = await checkServerFiles(batch);
+    const res = await checkServerFiles(batch, { verifyDisk: isTwoWay });
     const statuses = res.files;
     serverDeviceTotalFiles = res.deviceTotalFiles;
     serverDeviceTotalSize = res.deviceTotalSize;
@@ -461,12 +466,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
     for (const status of statuses) {
       const key = `${status.relative_path}|${status.modified_time}|${status.size || 0}`;
 
-      let isPresentStatus = status.status === 'present';
-      if (forceRefreshFolder && (status.relative_path.startsWith(`${forceRefreshFolder}/`) || status.relative_path === forceRefreshFolder)) {
-        isPresentStatus = false;
-      }
-
-      if (isPresentStatus) {
+      if (status.status === 'present') {
         present.add(key);
         const file = batchByKey.get(key);
         if (file) presentFiles.push(file);
@@ -529,7 +529,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
         // Graceful stop: upload runs to completion (one file per worker).
         // Force stop:    AbortController fires → raceWithAbort rejects immediately;
         //                the native HTTP call may still complete, but JS exits now.
-        const res = await raceWithAbort(uploadFile(file, () => {}));
+        const res = await raceWithAbort(uploadFile(file, () => {}, { verifyDisk: isTwoWay }));
 
         if (res.success) {
           serverDeviceTotalFiles = res.deviceTotalFiles;
@@ -927,7 +927,7 @@ export async function registerBackgroundTask(intervalMinutes) {
     }
 
     await BackgroundFetch.registerTaskAsync(TASK_NAME, {
-      minimumInterval: 15 * 60,
+      minimumInterval: 60 * 60,
       stopOnTerminate: false,
       startOnBoot: true,
     });

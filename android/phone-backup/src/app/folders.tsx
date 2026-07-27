@@ -69,7 +69,7 @@ export default function FoldersScreen() {
 
       Alert.alert(
         'Refresh complete',
-        `Finished backing up "${folder.name}". ${result.uploaded} files uploaded.`
+        `Finished backing up "${folder.name}". ${result?.uploaded ?? 0} files uploaded.`
       );
     } catch (err: any) {
       Alert.alert('Error', err?.message || 'Could not refresh backup');

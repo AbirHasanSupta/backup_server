@@ -1,9 +1,11 @@
 import asyncio
+import os
 import socket
 import time
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from config import load_config
@@ -13,6 +15,7 @@ from database import (
     get_stats,
     get_device_stats,
     get_devices,
+    get_files_for_device,
     insert_file,
     insert_sync_session,
     get_sync_sessions,
@@ -24,9 +27,12 @@ from database import (
     remove_file_record,
     touch_device,
     upsert_device,
+    ensure_device_token,
+    verify_device_token,
 )
 from state import add_log, get_current_activity, pending_connections, set_current_activity
-from storage import file_exists, save_fileobj, save_upload_stream
+from storage import file_exists, save_fileobj, save_upload_stream, full_path_for
+from ssl_utils import get_cert_fingerprint
 
 router = APIRouter()
 
@@ -37,10 +43,33 @@ APP_VERSION = "1.0.0"
 # Auth helper
 # ──────────────────────────────────────────────────────────────────────────────
 
-def verify_auth(authorization: str | None) -> None:
-    """Reads the API key fresh from disk on every call so key changes take effect immediately."""
+def _extract_bearer(authorization: str | None) -> str | None:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    return authorization[7:]
+
+
+def verify_auth(authorization: str | None, device_id: str | None = None) -> None:
+    """Accept global API key or a per-device token when device_id is supplied."""
+    token = _extract_bearer(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     current_key = load_config()["API_KEY"]
-    if authorization != f"Bearer {current_key}":
+    if token == current_key:
+        return
+
+    if device_id and verify_device_token(device_id, token):
+        return
+
+    raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def verify_connect_auth(authorization: str | None) -> None:
+    """Initial pairing uses the shared API key only."""
+    token = _extract_bearer(authorization)
+    current_key = load_config()["API_KEY"]
+    if token != current_key:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -50,6 +79,11 @@ def verify_known_device(device_ip: str, device_id: str | None) -> None:
             status_code=403,
             detail="Device is not approved. Reconnect from the Android app settings.",
         )
+
+
+def verify_known_device_by_id(device_id: str) -> None:
+    if not any(d["device_id"] == device_id for d in get_devices()):
+        raise HTTPException(status_code=403, detail="Device not approved")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -66,6 +100,7 @@ async def ping():
         "status": "ok",
         "name": socket.gethostname(),
         "version": APP_VERSION,
+        "cert_fingerprint": get_cert_fingerprint(),
     }
 
 
@@ -89,6 +124,7 @@ class FileCheckItem(BaseModel):
 
 class FileCheckRequest(BaseModel):
     device_id: str | None = None
+    verify_disk: bool = False
     files: list[FileCheckItem]
 
 
@@ -105,18 +141,24 @@ async def connect_device(
       clicks Accept or Reject (30-second auto-reject timeout).
     • If REQUIRE_APPROVAL is False → auto-accept immediately.
     """
-    verify_auth(authorization)
+    verify_connect_auth(authorization)
 
     device_ip = request.client.host
     device_name = body.device_name.strip() or device_ip
     device_id = body.device_id
     device_model = (body.device_model or "").strip() or None
 
+    def accepted_response() -> dict:
+        if device_id:
+            token = ensure_device_token(device_id)
+            return {"status": "accepted", "token": token}
+        return {"status": "accepted"}
+
     # Already registered — just refresh the record, no dialog needed
     if is_device_known(device_ip, device_id):
         upsert_device(device_name, device_ip, device_id, device_model)
         add_log(f"📱 Re-connected: {device_name} ({device_id or device_ip})")
-        return {"status": "accepted"}
+        return accepted_response()
 
     # ── Reinstall detection ────────────────────────────────────────────────────
     # A new device_id might belong to a phone that already has a backup record
@@ -134,14 +176,14 @@ async def connect_device(
             merge_device_id(old_id, device_id, device_ip)
             # Update the name/ip/model in case they changed slightly
             upsert_device(device_name, device_ip, device_id, device_model)
-            return {"status": "accepted"}
+            return accepted_response()
 
     add_log(f"📱 New connection request: {device_name} ({device_id or device_ip})")
 
     if not load_config().get("REQUIRE_APPROVAL", True):
         upsert_device(device_name, device_ip, device_id, device_model)
         add_log(f"✅ Auto-accepted: {device_name} ({device_id or device_ip})")
-        return {"status": "accepted"}
+        return accepted_response()
 
     # ── Approval flow ─────────────────────────────────────────────────────────
     req_id = str(uuid.uuid4())
@@ -166,7 +208,7 @@ async def connect_device(
 
     if accepted:
         upsert_device(device_name, device_ip, device_id, device_model)
-        return {"status": "accepted"}
+        return accepted_response()
 
     return {"status": "rejected"}
 
@@ -202,7 +244,7 @@ async def status(request: Request, device_id: str | None = None, authorization: 
     Aggregate server stats.
     Intended for the future desktop UI or monitoring scripts.
     """
-    verify_auth(authorization)
+    verify_auth(authorization, device_id)
     stats = get_stats()
     devices = get_devices()
     device_connected = is_device_known(request.client.host, device_id) if device_id else None
@@ -223,7 +265,7 @@ class ActivityReport(BaseModel):
 
 @router.post("/status/activity")
 async def report_activity(body: ActivityReport, request: Request, authorization: str = Header(None)):
-    verify_auth(authorization)
+    verify_auth(authorization, body.device_id)
     if body.device_id:
         verify_known_device(request.client.host, body.device_id)
     set_current_activity(body.message, request.client.host)
@@ -240,7 +282,7 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
     Batch metadata check used before upload.
     Files deleted from the PC are reported as missing even when an old DB row exists.
     """
-    verify_auth(authorization)
+    verify_auth(authorization, body.device_id)
     device_ip = request.client.host
     device_id = body.device_id
     verify_known_device(device_ip, device_id)
@@ -265,20 +307,20 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
 
     checked = []
     present = 0
+    verify_disk = body.verify_disk
     for item in body.files:
         key = f"{item.relative_path}|{item.modified_time}|{item.size}"
         db_exists = key in present_in_db
-        
-        # Check disk only for DB matches; missing DB rows are already known missing.
-        on_disk = db_exists and file_exists(item.relative_path, item.size, device_id=device_id)
-        
-        if db_exists and not on_disk:
-            # File is in DB but missing from disk. 
-            # Remove it from DB so counts are accurate and it gets re-uploaded.
-            add_log(f"⚠️  {item.relative_path} in DB but missing from disk. Removing record.")
-            remove_file_record(item.relative_path, item.size, item.modified_time, device_id=device_id)
-            db_exists = False
-            
+
+        on_disk = True
+        if verify_disk:
+            on_disk = db_exists and file_exists(item.relative_path, item.size, device_id=device_id)
+
+            if db_exists and not on_disk:
+                add_log(f"⚠️  {item.relative_path} in DB but missing from disk. Removing record.")
+                remove_file_record(item.relative_path, item.size, item.modified_time, device_id=device_id)
+                db_exists = False
+
         is_present = db_exists and on_disk
         
         if is_present:
@@ -341,6 +383,21 @@ def skipped_upload_response(device_ip: str, device_id: str | None):
     }
 
 
+def should_skip_upload(
+    relative_path: str,
+    size: int,
+    modified_time: int,
+    external_id: str | None,
+    device_id: str | None,
+    verify_disk: bool,
+) -> bool:
+    if not is_uploaded_compatible(relative_path, size, modified_time, external_id, device_id=device_id):
+        return False
+    if verify_disk:
+        return file_exists(relative_path, size, device_id=device_id)
+    return True
+
+
 @router.post("/upload/raw")
 async def upload_file_raw(
     request: Request,
@@ -350,14 +407,15 @@ async def upload_file_raw(
     external_id: str = None,
     sha256: str = None,
     device_id: str = None,
+    verify_disk: bool = False,
     authorization: str = Header(None),
 ):
-    verify_auth(authorization)
+    verify_auth(authorization, device_id)
 
     device_ip = request.client.host
     verify_known_device(device_ip, device_id)
 
-    if is_uploaded_compatible(relative_path, size, modified_time, external_id, device_id=device_id) and file_exists(relative_path, size, device_id=device_id):
+    if should_skip_upload(relative_path, size, modified_time, external_id, device_id, verify_disk):
         return skipped_upload_response(device_ip, device_id)
 
     set_current_activity(f"Uploading {relative_path}", device_ip)
@@ -392,14 +450,15 @@ async def upload_file(
     external_id: str = Form(None),
     sha256: str = Form(None),
     device_id: str = Form(None),
+    verify_disk: bool = Form(False),
     authorization: str = Header(None),
 ):
-    verify_auth(authorization)
+    verify_auth(authorization, device_id)
 
     device_ip = request.client.host
     verify_known_device(device_ip, device_id)
 
-    if is_uploaded_compatible(relative_path, size, modified_time, external_id, device_id=device_id) and file_exists(relative_path, size, device_id=device_id):
+    if should_skip_upload(relative_path, size, modified_time, external_id, device_id, verify_disk):
         return skipped_upload_response(device_ip, device_id)
 
     set_current_activity(f"Uploading {relative_path}", device_ip)
@@ -424,6 +483,42 @@ async def upload_file(
         sha256 = saved_sha256
 
     return finish_upload_record(relative_path, size, modified_time, device_ip, external_id, sha256, device_id)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# File download / restore
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.get("/files/list")
+async def list_files(device_id: str, authorization: str = Header(None)):
+    verify_auth(authorization, device_id)
+    verify_known_device_by_id(device_id)
+    return {"files": get_files_for_device(device_id)}
+
+
+@router.get("/files/download")
+async def download_file(
+    relative_path: str,
+    device_id: str,
+    authorization: str = Header(None),
+):
+    verify_auth(authorization, device_id)
+    verify_known_device_by_id(device_id)
+    path = full_path_for(relative_path, device_id=device_id)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    def stream():
+        with open(path, "rb") as f:
+            while chunk := f.read(1024 * 1024):
+                yield chunk
+
+    filename = os.path.basename(path)
+    return StreamingResponse(
+        stream(),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -457,7 +552,7 @@ async def record_sync_session(
     summary record on the server.  The record is shown in the desktop History
     page so the operator can audit every device's backup activity.
     """
-    verify_auth(authorization)
+    verify_auth(authorization, body.device_id)
 
     # Resolve device name from DB if not supplied
     device_name = body.device_name
@@ -499,7 +594,7 @@ async def list_sync_sessions(
     authorization: str = Header(None),
 ):
     """Return sync session records, optionally filtered by device_id."""
-    verify_auth(authorization)
+    verify_auth(authorization, device_id)
     sessions = get_sync_sessions(device_id=device_id, limit=min(limit, 500))
     return {"sessions": sessions}
 
@@ -510,6 +605,6 @@ async def delete_sync_sessions(
     authorization: str = Header(None),
 ):
     """Clear all or device-specific session history."""
-    verify_auth(authorization)
+    verify_auth(authorization, device_id)
     clear_sync_sessions(device_id=device_id)
     return {"ok": True}

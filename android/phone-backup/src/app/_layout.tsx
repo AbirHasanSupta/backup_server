@@ -104,6 +104,15 @@ function RootLayoutContent() {
             ),
           }}
         />
+        <Tabs.Screen
+          name="restore"
+          options={{
+            title: 'Restore',
+            tabBarIcon: ({ focused }) => (
+              <TabIcon androidName="cloud_download" iosName="icloud.and.arrow.down" focused={focused} colors={colors} styles={styles} />
+            ),
+          }}
+        />
         <Tabs.Screen name="explore" options={{ href: null }} />
       </Tabs>
     </SafeAreaProvider>

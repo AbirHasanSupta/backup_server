@@ -25,23 +25,15 @@ import {
   getSyncPaused,
   setSyncPaused,
   clearAllUploads,
+  clearScanSnapshot,
+  SYNC_INTERVAL_PRESETS,
 } from '../../settings';
-import { registerBackgroundTask } from '../../backgroundTask';
+import { registerBackgroundTask, runSync } from '../../backgroundTask';
 import { connectToServer } from '../../connectToServer';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
-
-const INTERVAL_PRESETS = [
-  { label: '15 min', value: 15 },
-  { label: '30 min', value: 30 },
-  { label: '1 hr', value: 60 },
-  { label: '2 hr', value: 120 },
-  { label: '6 hr', value: 360 },
-  { label: '12 hr', value: 720 },
-  { label: '24 hr', value: 1440 },
-];
 
 function SectionHeader({ title, styles }: { title: string; styles: ReturnType<typeof createStyles> }) {
   return <Text style={styles.sectionHeader}>{title}</Text>;
@@ -63,7 +55,7 @@ export default function SettingsScreen() {
   const [serverIp, setServerIpState] = useState('');
   const [serverPort, setServerPortState] = useState('8000');
   const [apiKey, setApiKeyState] = useState('');
-  const [syncInterval, setSyncIntervalState] = useState(15);
+  const [syncInterval, setSyncIntervalState] = useState(60);
   const [syncPaused, setSyncPausedState] = useState(false);
   const [savingServer, setSavingServer] = useState(false);
   const [discoveryVisible, setDiscoveryVisible] = useState(false);
@@ -162,15 +154,24 @@ export default function SettingsScreen() {
   const handleRefreshAll = () => {
     Alert.alert(
       'Refresh all backups',
-      'This clears the sync cache and re-uploads every file on the next sync. Continue?',
+      'This clears the sync cache and re-checks every file against the server. Files missing on the server will be re-uploaded. Continue?',
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Refresh all',
           style: 'destructive',
           onPress: async () => {
-            const count = await clearAllUploads();
-            Alert.alert('Done', `Cleared ${count} cached entries. Files will re-upload on the next sync.`);
+            try {
+              const count = await clearAllUploads();
+              await clearScanSnapshot();
+              const result = await runSync(null, { forceRefreshAll: true });
+              Alert.alert(
+                'Refresh complete',
+                `Cleared ${count} cached entries. ${result?.uploaded ?? 0} files uploaded.`
+              );
+            } catch (err: any) {
+              Alert.alert('Error', err?.message || 'Could not refresh backups');
+            }
           },
         },
       ]
@@ -322,7 +323,7 @@ export default function SettingsScreen() {
               <View style={styles.divider} />
               <FieldLabel text="Sync every" styles={styles} />
               <View style={styles.presetGrid}>
-                {INTERVAL_PRESETS.map((p) => {
+                {SYNC_INTERVAL_PRESETS.map((p) => {
                   const active = syncInterval === p.value;
                   return (
                     <TouchableOpacity
