@@ -8,6 +8,7 @@ import {
   StyleSheet,
   ActivityIndicator,
   Pressable,
+  TextInput,
 } from 'react-native';
 import { AppColors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
 import { discoverServers } from '../../serverDiscovery';
@@ -36,6 +37,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
   const [progress, setProgress] = useState(0);
   const [servers, setServers] = useState<Server[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [manualUrl, setManualUrl] = useState('');
 
   const startScan = useCallback(async () => {
     setScanning(true);
@@ -65,6 +67,33 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
       await setServerCertFingerprint(server.certFingerprint);
     }
     onSelect(server);
+    onClose();
+  };
+
+  const handleManualConnect = () => {
+    const raw = manualUrl.trim();
+    if (!raw) return;
+    // Parse the URL: strip protocol, extract IP/hostname and port
+    let addr = raw.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    // Strip URL path (e.g., "192.168.1.5:8000/ping" → "192.168.1.5:8000")
+    const slashIdx = addr.indexOf('/');
+    if (slashIdx > 0) addr = addr.slice(0, slashIdx);
+    let ip = addr;
+    let port = 8000;
+    const colonIdx = addr.lastIndexOf(':');
+    if (colonIdx > 0) {
+      const maybePort = addr.slice(colonIdx + 1);
+      if (/^\d+$/.test(maybePort)) {
+        const parsed = Number.parseInt(maybePort, 10);
+        if (parsed >= 1 && parsed <= 65535) {
+          port = parsed;
+          ip = addr.slice(0, colonIdx);
+        }
+      }
+    }
+    if (!ip) return;
+    onSelect({ ip, port, name: ip, version: '?' });
+    setManualUrl('');
     onClose();
   };
 
@@ -139,7 +168,33 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
           />
         )}
 
-        <Text style={styles.hint}>If it does not appear, enter the IP address manually in Settings.</Text>
+        <View style={styles.manualSection}>
+          <Text style={styles.manualLabel}>Or enter address manually</Text>
+          <View style={styles.manualRow}>
+            <TextInput
+              style={styles.manualInput}
+              value={manualUrl}
+              onChangeText={setManualUrl}
+              placeholder="https://192.168.1.100:8000"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="url"
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="go"
+              onSubmitEditing={handleManualConnect}
+            />
+            <TouchableOpacity
+              style={[styles.manualConnectBtn, !manualUrl.trim() && { opacity: 0.5 }]}
+              onPress={handleManualConnect}
+              disabled={!manualUrl.trim()}
+              accessibilityLabel="Connect to manually entered server"
+            >
+              <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.white} size={18} fallback=">" />
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <Text style={styles.hint}>Tip: You can enter an IP, hostname, or full URL with port.</Text>
       </View>
     </Modal>
   );
@@ -281,5 +336,43 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     textAlign: 'center',
     marginTop: Spacing.four,
     lineHeight: 17,
+  },
+  manualSection: {
+    marginTop: Spacing.five,
+    gap: Spacing.two,
+  },
+  manualLabel: {
+    fontSize: TextScale.xs,
+    fontWeight: '800',
+    color: colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  manualRow: {
+    flexDirection: 'row',
+    gap: Spacing.two,
+    alignItems: 'center',
+  },
+  manualInput: {
+    flex: 1,
+    minHeight: 46,
+    backgroundColor: colors.surfaceSoft,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: colors.surfaceBorder,
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.three,
+    fontSize: TextScale.base,
+    color: colors.text,
+    fontWeight: '600',
+  },
+  manualConnectBtn: {
+    width: 46,
+    height: 46,
+    borderRadius: Radius.md,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    ...Shadows.soft,
   },
 });

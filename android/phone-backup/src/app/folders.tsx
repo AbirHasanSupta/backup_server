@@ -10,6 +10,7 @@ import {
   getFileTypes,
   setFileTypes,
   clearFolderUploads,
+  getServerIp,
 } from '../../settings';
 import { runSync } from '../../backgroundTask';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
@@ -17,6 +18,7 @@ import { FolderCard, Folder } from '@/components/FolderCard';
 import { FileTypeSelector } from '@/components/FileTypeSelector';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { checkDeviceConnection } from '../../uploader';
 
 export default function FoldersScreen() {
   const insets = useSafeAreaInsets();
@@ -27,6 +29,27 @@ export default function FoldersScreen() {
   const [selectedTypes, setSelectedTypes] = useState<string[]>(['all']);
   const [refreshing, setRefreshing] = useState<string | null>(null);
 
+  // Server status for disabling folder refresh when offline
+  const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
+
+  const checkServer = useCallback(async () => {
+    const ip = await getServerIp();
+    if (!ip) { setServerStatus('unknown'); return; }
+    setServerStatus('checking');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      const result = await checkDeviceConnection({ signal: controller.signal });
+      clearTimeout(timeout);
+      setServerStatus(result.connected ? 'connected' : 'disconnected');
+    } catch {
+      clearTimeout(timeout);
+      setServerStatus('disconnected');
+    }
+  }, []);
+
+  const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
+
   const loadData = useCallback(async () => {
     const [f, t] = await Promise.all([getFolders(), getFileTypes()]);
     setFolders(f);
@@ -36,7 +59,8 @@ export default function FoldersScreen() {
   useFocusEffect(
     useCallback(() => {
       loadData();
-    }, [loadData])
+      checkServer();
+    }, [loadData, checkServer])
   );
 
   const handleAddFolder = async () => {
@@ -140,7 +164,7 @@ export default function FoldersScreen() {
         ListEmptyComponent={renderEmpty}
         renderItem={({ item }) => (
           <View style={item.uri === refreshing ? styles.refreshing : undefined}>
-            <FolderCard folder={item} onRemove={handleRemove} onRefresh={handleRefresh} />
+            <FolderCard folder={item} onRemove={handleRemove} onRefresh={handleRefresh} refreshDisabled={isOffline} />
           </View>
         )}
         showsVerticalScrollIndicator={false}

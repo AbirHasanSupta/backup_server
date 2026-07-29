@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -13,11 +13,14 @@ import {
   Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect } from 'expo-router';
 import * as FileSystem from 'expo-file-system/legacy';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { listServerFiles, downloadFile } from '../../downloader';
+import { checkDeviceConnection } from '../../uploader';
+import { getServerIp } from '../../settings';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -57,7 +60,31 @@ export default function RestoreScreen() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<{ current: number, total: number, fileName: string } | null>(null);
 
+  const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
 
+  const checkServer = useCallback(async () => {
+    const ip = await getServerIp();
+    if (!ip) { setServerStatus('unknown'); return; }
+    setServerStatus('checking');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      const result = await checkDeviceConnection({ signal: controller.signal });
+      setServerStatus(result.connected ? 'connected' : 'disconnected');
+    } catch {
+      setServerStatus('disconnected');
+    } finally {
+      clearTimeout(timeout);
+    }
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      checkServer();
+    }, [checkServer])
+  );
+
+  const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
 
   const handleFetch = async () => {
     setIsFetching(true);
@@ -220,7 +247,7 @@ export default function RestoreScreen() {
         </View>
         
         <View style={styles.headerButtons}>
-          <TouchableOpacity onPress={handleFetch} style={styles.actionBtn} disabled={isFetching || isDownloading}>
+          <TouchableOpacity onPress={handleFetch} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isFetching || isDownloading || isOffline}>
             {isFetching ? (
               <ActivityIndicator size="small" color={colors.primary} />
             ) : (
@@ -231,7 +258,7 @@ export default function RestoreScreen() {
             )}
           </TouchableOpacity>
           {files.length > 0 && (
-            <TouchableOpacity onPress={selectAll} style={styles.actionBtn} disabled={isDownloading}>
+            <TouchableOpacity onPress={selectAll} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isDownloading || isOffline}>
               <Text style={[styles.actionBtnText, { color: colors.primary }]}>
                 {selectedPaths.size === files.length ? 'Deselect All' : 'Select All'}
               </Text>
@@ -260,7 +287,7 @@ export default function RestoreScreen() {
       />
 
       {selectedPaths.size > 0 && !isDownloading && (
-        <TouchableOpacity style={[styles.fab, { bottom: BottomTabInset + Spacing.four }]} onPress={handleDownload}>
+        <TouchableOpacity style={[styles.fab, { bottom: BottomTabInset + Spacing.four }, isOffline && styles.disabledBtn]} onPress={handleDownload} disabled={isOffline}>
           <AppIcon androidName="download" iosName="arrow.down.circle" color={colors.white} size={24} />
           <Text style={styles.fabText}>Restore {selectedPaths.size} Files</Text>
         </TouchableOpacity>
@@ -400,6 +427,9 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     color: colors.white,
     fontWeight: '700',
     fontSize: TextScale.md,
+  },
+  disabledBtn: {
+    opacity: 0.4,
   },
   emptyContainer: {
     flex: 1,

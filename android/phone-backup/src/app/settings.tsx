@@ -30,10 +30,28 @@ import {
 } from '../../settings';
 import { registerBackgroundTask, runSync } from '../../backgroundTask';
 import { connectToServer } from '../../connectToServer';
+import { checkDeviceConnection } from '../../uploader';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
+
+/**
+ * Strip protocol prefix (https:// or http://) and trailing slashes from a server address.
+ * Users may paste a full URL; we store only the raw hostname/IP.
+ */
+function normalizeServerAddress(input: string): string {
+  let addr = input.trim();
+  addr = addr.replace(/^https?:\/\//i, '');
+  // Remove trailing slash(es)
+  addr = addr.replace(/\/+$/, '');
+  // Strip any URL path (e.g., "192.168.1.5:8000/ping" → "192.168.1.5:8000")
+  const slashIdx = addr.indexOf('/');
+  if (slashIdx > 0) {
+    addr = addr.slice(0, slashIdx);
+  }
+  return addr;
+}
 
 function SectionHeader({ title, styles }: { title: string; styles: ReturnType<typeof createStyles> }) {
   return <Text style={styles.sectionHeader}>{title}</Text>;
@@ -60,6 +78,28 @@ export default function SettingsScreen() {
   const [savingServer, setSavingServer] = useState(false);
   const [discoveryVisible, setDiscoveryVisible] = useState(false);
 
+  // Server status for disabling connection-dependent buttons
+  type ServerStatus = 'connected' | 'disconnected' | 'unknown' | 'checking';
+  const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
+
+  const checkServer = useCallback(async () => {
+    const ip = await getServerIp();
+    if (!ip) { setServerStatus('unknown'); return; }
+    setServerStatus('checking');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3000);
+    try {
+      const result = await checkDeviceConnection({ signal: controller.signal });
+      clearTimeout(timeout);
+      setServerStatus(result.connected ? 'connected' : 'disconnected');
+    } catch {
+      clearTimeout(timeout);
+      setServerStatus('disconnected');
+    }
+  }, []);
+
+  const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
+
   const loadSettings = useCallback(async () => {
     const [ip, port, key, interval, paused] = await Promise.all([
       getServerIp(),
@@ -78,7 +118,8 @@ export default function SettingsScreen() {
   useFocusEffect(
     useCallback(() => {
       loadSettings();
-    }, [loadSettings])
+      checkServer();
+    }, [loadSettings, checkServer])
   );
 
   const handleSaveServer = async () => {
@@ -86,25 +127,54 @@ export default function SettingsScreen() {
       Alert.alert('Missing IP', 'Please enter the server IP address.');
       return;
     }
-    const portNum = Number.parseInt(serverPort, 10);
+
+    // Normalize: strip https://, http://, trailing slashes
+    let cleanIp = normalizeServerAddress(serverIp);
+    let portNum = Number.parseInt(serverPort, 10);
+
+    // If the user pasted something like "192.168.1.5:9000" in the IP field,
+    // extract the port automatically.
+    const colonIdx = cleanIp.lastIndexOf(':');
+    if (colonIdx > 0) {
+      const maybPort = cleanIp.slice(colonIdx + 1);
+      if (/^\d+$/.test(maybPort)) {
+        portNum = Number.parseInt(maybPort, 10);
+        cleanIp = cleanIp.slice(0, colonIdx);
+        setServerPortState(String(portNum));
+      }
+    }
+
     if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
       Alert.alert('Invalid port', 'Port must be a number between 1 and 65535.');
       return;
     }
+
+    // Update displayed value with normalized address
+    setServerIpState(cleanIp);
+
     setSavingServer(true);
     try {
       const key = apiKey.trim() || 'YOUR_SECRET_KEY';
-      await Promise.all([setServerIp(serverIp.trim()), setServerPort(portNum), setApiKey(key)]);
+      await Promise.all([setServerIp(cleanIp), setServerPort(portNum), setApiKey(key)]);
 
-      Alert.alert('Saved', 'Server settings saved.');
+      Alert.alert('Saved', 'Server settings saved. Connecting…');
 
-      connectToServer(serverIp.trim(), portNum, key).then((result) => {
-        if (result.status === 'accepted') {
-          Alert.alert('Connected', 'This device was accepted by the server and is ready to back up.');
-        } else if (result.status === 'rejected') {
-          Alert.alert('Rejected', 'The server rejected this device. Ask the server owner to approve it.');
-        }
-      });
+      connectToServer(cleanIp, portNum, key)
+        .then((result) => {
+          if (result.status === 'accepted') {
+            setServerStatus('connected');
+            Alert.alert('Connected', 'This device was accepted by the server and is ready to back up.');
+          } else if (result.status === 'rejected') {
+            Alert.alert('Rejected', 'The server rejected this device. Ask the server owner to approve it.');
+          } else if (result.status === 'error') {
+            Alert.alert('Connection Error', result.reason || 'Could not connect to the server. Check that it is running.');
+          }
+          checkServer();
+        })
+        .catch((err: any) => {
+          Alert.alert('Connection Failed', err?.message || 'Could not reach the server.');
+          checkServer();
+        });
     } finally {
       setSavingServer(false);
     }
@@ -116,11 +186,12 @@ export default function SettingsScreen() {
     name: string;
     version: string;
   }) => {
-    setServerIpState(server.ip);
+    const cleanIp = normalizeServerAddress(server.ip);
+    setServerIpState(cleanIp);
     setServerPortState(String(server.port));
     const key = apiKey.trim() || 'YOUR_SECRET_KEY';
     await Promise.all([
-      setServerIp(server.ip),
+      setServerIp(cleanIp),
       setServerPort(server.port),
       setServerName(server.name),
       setApiKey(key),
@@ -128,16 +199,25 @@ export default function SettingsScreen() {
 
     Alert.alert(
       'Server found',
-      `"${server.name}" (${server.ip}:${server.port}) was saved. Sending connection request.`
+      `"${server.name}" (${cleanIp}:${server.port}) was saved. Sending connection request.`
     );
 
-    connectToServer(server.ip, server.port, key).then((result) => {
-      if (result.status === 'accepted') {
-        Alert.alert('Connected', `"${server.name}" accepted this device. You are ready to back up.`);
-      } else if (result.status === 'rejected') {
-        Alert.alert('Rejected', 'The server rejected this device. Check the API key or ask for approval.');
-      }
-    });
+    connectToServer(cleanIp, server.port, key)
+      .then((result) => {
+        if (result.status === 'accepted') {
+          setServerStatus('connected');
+          Alert.alert('Connected', `"${server.name}" accepted this device. You are ready to back up.`);
+        } else if (result.status === 'rejected') {
+          Alert.alert('Rejected', 'The server rejected this device. Check the API key or ask for approval.');
+        } else if (result.status === 'error') {
+          Alert.alert('Connection Error', result.reason || 'Could not connect to the server.');
+        }
+        checkServer();
+      })
+      .catch((err: any) => {
+        Alert.alert('Connection Failed', err?.message || 'Could not reach the server.');
+        checkServer();
+      });
   };
 
   const handleIntervalChange = async (minutes: number) => {
@@ -204,9 +284,9 @@ export default function SettingsScreen() {
             style={styles.textInput}
             value={serverIp}
             onChangeText={setServerIpState}
-            placeholder="192.168.1.100"
+            placeholder="192.168.1.100 or https://myserver"
             placeholderTextColor={colors.textMuted}
-            keyboardType="numeric"
+            keyboardType="url"
             autoCapitalize="none"
             autoCorrect={false}
             returnKeyType="next"
@@ -352,16 +432,19 @@ export default function SettingsScreen() {
         <SettingsCard styles={styles}>
           <TouchableOpacity
             id="refresh-all-button"
-            style={styles.dangerBtn}
+            style={[styles.dangerBtn, isOffline && styles.disabledBtn]}
             onPress={handleRefreshAll}
+            disabled={isOffline}
             accessibilityLabel="Refresh all backups"
             accessibilityRole="button"
           >
-            <AppIcon androidName="restart_alt" iosName="arrow.clockwise" color={colors.error} size={18} fallback="R" />
-            <Text style={styles.dangerBtnText}>Refresh all backups</Text>
+            <AppIcon androidName="restart_alt" iosName="arrow.clockwise" color={isOffline ? colors.textMuted : colors.error} size={18} fallback="R" />
+            <Text style={[styles.dangerBtnText, isOffline && { color: colors.textMuted }]}>Refresh all backups</Text>
           </TouchableOpacity>
           <Text style={styles.hintText}>
-            Use this when files are missing on the server. Existing cache entries are cleared, then files upload again.
+            {isOffline
+              ? 'Connect to a server first to use this feature.'
+              : 'Use this when files are missing on the server. Existing cache entries are cleared, then files upload again.'}
           </Text>
         </SettingsCard>
 
@@ -600,5 +683,8 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     color: colors.text,
     fontWeight: '800',
     textAlign: 'right',
+  },
+  disabledBtn: {
+    opacity: 0.4,
   },
 });

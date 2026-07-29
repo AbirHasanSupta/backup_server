@@ -14,9 +14,10 @@ interface Props {
   folder: Folder;
   onRemove: (uri: string) => void;
   onRefresh: (folder: Folder) => void;
+  refreshDisabled?: boolean;
 }
 
-export function FolderCard({ folder, onRemove, onRefresh }: Props) {
+export function FolderCard({ folder, onRemove, onRefresh, refreshDisabled }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -61,12 +62,13 @@ export function FolderCard({ folder, onRemove, onRefresh }: Props) {
 
       <View style={styles.actions}>
         <TouchableOpacity
-          style={[styles.actionBtn, styles.refreshBtn]}
+          style={[styles.actionBtn, styles.refreshBtn, refreshDisabled && { opacity: 0.35 }]}
           onPress={handleRefresh}
+          disabled={refreshDisabled}
           accessibilityLabel={`Refresh backup for ${folder.name}`}
           accessibilityRole="button"
         >
-          <AppIcon androidName="sync" iosName="arrow.triangle.2.circlepath" color={colors.primary} size={18} fallback="R" />
+          <AppIcon androidName="sync" iosName="arrow.triangle.2.circlepath" color={refreshDisabled ? colors.textMuted : colors.primary} size={18} fallback="R" />
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.actionBtn, styles.removeBtn]}

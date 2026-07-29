@@ -87,11 +87,11 @@ function RootLayoutContent() {
           }}
         />
         <Tabs.Screen
-          name="settings"
+          name="restore"
           options={{
-            title: 'Settings',
+            title: 'Restore',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="settings" iosName="gearshape" focused={focused} colors={colors} styles={styles} />
+              <TabIcon androidName="cloud_download" iosName="icloud.and.arrow.down" focused={focused} colors={colors} styles={styles} />
             ),
           }}
         />
@@ -105,11 +105,11 @@ function RootLayoutContent() {
           }}
         />
         <Tabs.Screen
-          name="restore"
+          name="settings"
           options={{
-            title: 'Restore',
+            title: 'Settings',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="cloud_download" iosName="icloud.and.arrow.down" focused={focused} colors={colors} styles={styles} />
+              <TabIcon androidName="settings" iosName="gearshape" focused={focused} colors={colors} styles={styles} />
             ),
           }}
         />

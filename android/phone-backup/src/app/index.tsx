@@ -439,6 +439,9 @@ export default function HomeScreen() {
 
   const serverColor = statusColors[serverStatus];
 
+  // Buttons that require a server connection are disabled when fully offline
+  const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown' || serverStatus === 'removed';
+
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
@@ -517,8 +520,10 @@ export default function HomeScreen() {
             syncing && !stopRequested && styles.syncBtnStop,
             stopRequested && !forceStopPressedAt && styles.syncBtnStopping,
             stopRequested && !!forceStopPressedAt && styles.syncBtnForceHint,
+            isOffline && !syncing && styles.disabledBtn,
           ]}
           onPress={handleSync}
+          disabled={isOffline && !syncing}
           accessibilityLabel={
             syncing
               ? stopRequested
@@ -714,6 +719,9 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   },
   syncBtnBusy: {
     opacity: 0.92,
+  },
+  disabledBtn: {
+    opacity: 0.45,
   },
   syncBtnStop: {
     backgroundColor: colors.error,
