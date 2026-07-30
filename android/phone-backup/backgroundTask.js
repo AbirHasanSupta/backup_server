@@ -207,7 +207,7 @@ async function reportServerActivity(message) {
     ]);
     if (!serverIp || !apiKey) return;
 
-    await fetch(`https://${serverIp}:${serverPort}/status/activity`, {
+    await fetch(`http://${serverIp}:${serverPort}/status/activity`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${deviceToken || apiKey}`,

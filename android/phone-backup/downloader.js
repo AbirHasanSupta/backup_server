@@ -15,7 +15,7 @@ async function getConfig() {
 export async function listServerFiles() {
   const { ip, port, key, deviceId } = await getConfig();
   const res = await fetch(
-    `https://${ip}:${port}/files/list?device_id=${encodeURIComponent(deviceId)}`,
+    `http://${ip}:${port}/files/list?device_id=${encodeURIComponent(deviceId)}`,
     { headers: { Authorization: `Bearer ${key}` } },
   );
   if (!res.ok) throw new Error(`List failed (${res.status})`);
@@ -32,7 +32,7 @@ export async function listServerFiles() {
 export async function downloadFile(relativePath, destUri, onProgress) {
   const { ip, port, key, deviceId } = await getConfig();
   const url =
-    `https://${ip}:${port}/files/download` +
+    `http://${ip}:${port}/files/download` +
     `?relative_path=${encodeURIComponent(relativePath)}` +
     `&device_id=${encodeURIComponent(deviceId)}`;
 

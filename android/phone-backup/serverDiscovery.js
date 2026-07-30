@@ -43,7 +43,7 @@ async function fetchWithTimeout(url, timeoutMs) {
 }
 
 async function probeServer(ip, port) {
-  const data = await fetchWithTimeout(`https://${ip}:${port}/ping`, TIMEOUT_MS);
+  const data = await fetchWithTimeout(`http://${ip}:${port}/ping`, TIMEOUT_MS);
   if (data && data.status === 'ok') {
     return { ip, port, name: data.name || ip, version: data.version || '?', certFingerprint: data.cert_fingerprint || '' };
   }

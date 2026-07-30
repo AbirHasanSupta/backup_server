@@ -175,7 +175,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
               style={styles.manualInput}
               value={manualUrl}
               onChangeText={setManualUrl}
-              placeholder="https://192.168.1.100:8000"
+              placeholder="http://192.168.1.100:8000"
               placeholderTextColor={colors.textMuted}
               keyboardType="url"
               autoCapitalize="none"

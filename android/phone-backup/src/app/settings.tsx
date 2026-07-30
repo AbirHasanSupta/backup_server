@@ -284,7 +284,7 @@ export default function SettingsScreen() {
             style={styles.textInput}
             value={serverIp}
             onChangeText={setServerIpState}
-            placeholder="192.168.1.100 or https://myserver"
+            placeholder="192.168.1.100 or http://myserver"
             placeholderTextColor={colors.textMuted}
             keyboardType="url"
             autoCapitalize="none"

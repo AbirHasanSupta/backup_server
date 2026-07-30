@@ -32,7 +32,6 @@ from database import (
 )
 from state import add_log, get_current_activity, pending_connections, set_current_activity
 from storage import file_exists, save_fileobj, save_upload_stream, full_path_for
-from ssl_utils import get_cert_fingerprint
 
 router = APIRouter()
 
@@ -100,7 +99,6 @@ async def ping():
         "status": "ok",
         "name": socket.gethostname(),
         "version": APP_VERSION,
-        "cert_fingerprint": get_cert_fingerprint(),
     }
 
 
@@ -130,9 +128,9 @@ class FileCheckRequest(BaseModel):
 
 @router.post("/connect")
 async def connect_device(
-    body: ConnectRequest,
-    request: Request,
-    authorization: str = Header(None),
+        body: ConnectRequest,
+        request: Request,
+        authorization: str = Header(None),
 ):
     """
     Called by the Android app when it first connects (or re-saves) its server config.
@@ -211,7 +209,6 @@ async def connect_device(
         return accepted_response()
 
     return {"status": "rejected"}
-
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -300,7 +297,7 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
 
     # Get all that ARE in database
     present_in_db = batch_check_files(items)
-    
+
     # Debug logging for check
     if len(items) > 0:
         add_log(f"🔍 Checking {len(items)} files for {device_id or device_ip}. Found in DB: {len(present_in_db)}")
@@ -322,10 +319,10 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
                 db_exists = False
 
         is_present = db_exists and on_disk
-        
+
         if is_present:
             present += 1
-        
+
         checked.append({
             "relative_path": item.relative_path,
             "modified_time": item.modified_time,
@@ -347,13 +344,13 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
 
 
 def finish_upload_record(
-    relative_path: str,
-    size: int,
-    modified_time: int,
-    device_ip: str,
-    external_id: str | None,
-    sha256: str | None,
-    device_id: str | None,
+        relative_path: str,
+        size: int,
+        modified_time: int,
+        device_ip: str,
+        external_id: str | None,
+        sha256: str | None,
+        device_id: str | None,
 ):
     now = int(time.time())
     try:
@@ -384,12 +381,12 @@ def skipped_upload_response(device_ip: str, device_id: str | None):
 
 
 def should_skip_upload(
-    relative_path: str,
-    size: int,
-    modified_time: int,
-    external_id: str | None,
-    device_id: str | None,
-    verify_disk: bool,
+        relative_path: str,
+        size: int,
+        modified_time: int,
+        external_id: str | None,
+        device_id: str | None,
+        verify_disk: bool,
 ) -> bool:
     if not is_uploaded_compatible(relative_path, size, modified_time, external_id, device_id=device_id):
         return False
@@ -400,15 +397,15 @@ def should_skip_upload(
 
 @router.post("/upload/raw")
 async def upload_file_raw(
-    request: Request,
-    relative_path: str,
-    modified_time: int,
-    size: int,
-    external_id: str = None,
-    sha256: str = None,
-    device_id: str = None,
-    verify_disk: bool = False,
-    authorization: str = Header(None),
+        request: Request,
+        relative_path: str,
+        modified_time: int,
+        size: int,
+        external_id: str = None,
+        sha256: str = None,
+        device_id: str = None,
+        verify_disk: bool = False,
+        authorization: str = Header(None),
 ):
     verify_auth(authorization, device_id)
 
@@ -442,16 +439,16 @@ async def upload_file_raw(
 
 @router.post("/upload")
 async def upload_file(
-    request: Request,
-    file: UploadFile,
-    relative_path: str = Form(...),
-    modified_time: int = Form(...),
-    size: int = Form(...),
-    external_id: str = Form(None),
-    sha256: str = Form(None),
-    device_id: str = Form(None),
-    verify_disk: bool = Form(False),
-    authorization: str = Header(None),
+        request: Request,
+        file: UploadFile,
+        relative_path: str = Form(...),
+        modified_time: int = Form(...),
+        size: int = Form(...),
+        external_id: str = Form(None),
+        sha256: str = Form(None),
+        device_id: str = Form(None),
+        verify_disk: bool = Form(False),
+        authorization: str = Header(None),
 ):
     verify_auth(authorization, device_id)
 
@@ -478,7 +475,7 @@ async def upload_file(
         raise
     finally:
         set_current_activity(None)
-    
+
     if not sha256:
         sha256 = saved_sha256
 
@@ -498,9 +495,9 @@ async def list_files(device_id: str, authorization: str = Header(None)):
 
 @router.get("/files/download")
 async def download_file(
-    relative_path: str,
-    device_id: str,
-    authorization: str = Header(None),
+        relative_path: str,
+        device_id: str,
+        authorization: str = Header(None),
 ):
     verify_auth(authorization, device_id)
     verify_known_device_by_id(device_id)
@@ -526,26 +523,26 @@ async def download_file(
 # ──────────────────────────────────────────────────────────────────────────────
 
 class SyncSessionRequest(BaseModel):
-    device_id:   str | None = None
+    device_id: str | None = None
     device_name: str | None = None
-    started_at:  int
-    ended_at:    int
+    started_at: int
+    ended_at: int
     duration_ms: int = 0
-    trigger:     str = "manual"
-    outcome:     str = "completed"
-    scanned:     int = 0
-    checked:     int = 0
-    uploaded:    int = 0
-    skipped:     int = 0
-    errors:      int = 0
+    trigger: str = "manual"
+    outcome: str = "completed"
+    scanned: int = 0
+    checked: int = 0
+    uploaded: int = 0
+    skipped: int = 0
+    errors: int = 0
     total_files: int = 0
 
 
 @router.post("/sync/session")
 async def record_sync_session(
-    body: SyncSessionRequest,
-    request: Request,
-    authorization: str = Header(None),
+        body: SyncSessionRequest,
+        request: Request,
+        authorization: str = Header(None),
 ):
     """
     Called by the Android app at the end of each sync session to persist a
@@ -589,9 +586,9 @@ async def record_sync_session(
 
 @router.get("/sync/sessions")
 async def list_sync_sessions(
-    device_id: str | None = None,
-    limit: int = 100,
-    authorization: str = Header(None),
+        device_id: str | None = None,
+        limit: int = 100,
+        authorization: str = Header(None),
 ):
     """Return sync session records, optionally filtered by device_id."""
     verify_auth(authorization, device_id)
@@ -601,8 +598,8 @@ async def list_sync_sessions(
 
 @router.delete("/sync/sessions")
 async def delete_sync_sessions(
-    device_id: str | None = None,
-    authorization: str = Header(None),
+        device_id: str | None = None,
+        authorization: str = Header(None),
 ):
     """Clear all or device-specific session history."""
     verify_auth(authorization, device_id)

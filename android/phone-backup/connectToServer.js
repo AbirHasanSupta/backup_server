@@ -53,13 +53,13 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
 
   try {
     const deviceId = await getDeviceId();
-    const res = await fetch(`https://${serverIp}:${serverPort}/connect`, {
+    const res = await fetch(`http://${serverIp}:${serverPort}/connect`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ 
+      body: JSON.stringify({
         device_name: deviceName,
         device_id: deviceId,
         device_model: deviceModel,
