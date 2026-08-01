@@ -27,6 +27,8 @@ import {
   clearAllUploads,
   clearScanSnapshot,
   SYNC_INTERVAL_PRESETS,
+  setDeviceToken,
+  setServerCertFingerprint,
 } from '../../settings';
 import { registerBackgroundTask, runSync } from '../../backgroundTask';
 import { connectToServer } from '../../connectToServer';
@@ -155,7 +157,14 @@ export default function SettingsScreen() {
     setSavingServer(true);
     try {
       const key = apiKey.trim() || 'YOUR_SECRET_KEY';
-      await Promise.all([setServerIp(cleanIp), setServerPort(portNum), setApiKey(key)]);
+      await Promise.all([
+        setServerIp(cleanIp),
+        setServerPort(portNum),
+        setApiKey(key),
+        setServerName(''),           // Clear name so Home shows the new IP
+        setDeviceToken(''),          // New server, need new token
+        setServerCertFingerprint(''), // New server, new certificate
+      ]);
 
       Alert.alert('Saved', 'Server settings saved. Connecting…');
 
@@ -195,6 +204,7 @@ export default function SettingsScreen() {
       setServerPort(server.port),
       setServerName(server.name),
       setApiKey(key),
+      setDeviceToken(''),
     ]);
 
     Alert.alert(

@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { DeviceEventEmitter } from 'react-native';
 
 const KEYS = {
   SERVER_IP:      'server_ip',
@@ -72,19 +73,31 @@ export const FILE_TYPE_EXTENSIONS = {
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 export async function getServerIp()   { return (await AsyncStorage.getItem(KEYS.SERVER_IP)) || ''; }
-export async function setServerIp(ip) { await AsyncStorage.setItem(KEYS.SERVER_IP, ip); }
+export async function setServerIp(ip) {
+  await AsyncStorage.setItem(KEYS.SERVER_IP, ip);
+  DeviceEventEmitter.emit('settings-updated');
+}
 
 export async function getServerPort() {
   const port = parseStoredInteger(await AsyncStorage.getItem(KEYS.SERVER_PORT), 8000);
   return port >= 1 && port <= 65535 ? port : 8000;
 }
-export async function setServerPort(port)  { await AsyncStorage.setItem(KEYS.SERVER_PORT, String(port)); }
+export async function setServerPort(port)  {
+  await AsyncStorage.setItem(KEYS.SERVER_PORT, String(port));
+  DeviceEventEmitter.emit('settings-updated');
+}
 
 export async function getServerName()      { return (await AsyncStorage.getItem(KEYS.SERVER_NAME)) || ''; }
-export async function setServerName(name)  { await AsyncStorage.setItem(KEYS.SERVER_NAME, name); }
+export async function setServerName(name)  {
+  await AsyncStorage.setItem(KEYS.SERVER_NAME, name);
+  DeviceEventEmitter.emit('settings-updated');
+}
 
 export async function getApiKey()          { return (await AsyncStorage.getItem(KEYS.API_KEY)) || 'YOUR_SECRET_KEY'; }
-export async function setApiKey(key)       { await AsyncStorage.setItem(KEYS.API_KEY, key); }
+export async function setApiKey(key)       {
+  await AsyncStorage.setItem(KEYS.API_KEY, key);
+  DeviceEventEmitter.emit('settings-updated');
+}
 
 export async function getDeviceId() {
   let id = await AsyncStorage.getItem(KEYS.DEVICE_ID);
@@ -202,10 +215,16 @@ export async function getSyncInterval() {
   const val = parseStoredInteger(await AsyncStorage.getItem(KEYS.SYNC_INTERVAL), 60);
   return isNaN(val) || val < 60 ? 60 : val;
 }
-export async function setSyncInterval(minutes) { await AsyncStorage.setItem(KEYS.SYNC_INTERVAL, String(minutes)); }
+export async function setSyncInterval(minutes) {
+  await AsyncStorage.setItem(KEYS.SYNC_INTERVAL, String(minutes));
+  DeviceEventEmitter.emit('settings-updated');
+}
 
 export async function getSyncPaused()     { return (await AsyncStorage.getItem(KEYS.SYNC_PAUSED)) === 'true'; }
-export async function setSyncPaused(val)  { await AsyncStorage.setItem(KEYS.SYNC_PAUSED, val ? 'true' : 'false'); }
+export async function setSyncPaused(val)  {
+  await AsyncStorage.setItem(KEYS.SYNC_PAUSED, val ? 'true' : 'false');
+  DeviceEventEmitter.emit('settings-updated');
+}
 
 export async function getSyncRuntimeState() {
   const state = safeJsonParse(await AsyncStorage.getItem(KEYS.SYNC_RUNTIME_STATE), null);
@@ -238,6 +257,7 @@ export async function getLastSyncTime() {
 }
 export async function setLastSyncTime(ts) {
   await AsyncStorage.setItem(KEYS.LAST_SYNC_TIME, String(ts));
+  DeviceEventEmitter.emit('settings-updated');
 }
 
 export async function getTotalSynced() {
@@ -245,6 +265,7 @@ export async function getTotalSynced() {
 }
 export async function setTotalSynced(count) {
   await AsyncStorage.setItem(KEYS.TOTAL_SYNCED, String(Math.max(0, count || 0)));
+  DeviceEventEmitter.emit('settings-updated');
 }
 
 export async function getForceRefresh() {
@@ -331,4 +352,4 @@ export async function setDeviceToken(token) { await AsyncStorage.setItem(KEYS.DE
 
 // ─── TLS cert fingerprint ─────────────────────────────────────────────────────
 export async function getServerCertFingerprint() { return (await AsyncStorage.getItem(KEYS.CERT_FINGERPRINT)) || ''; }
-export async function setServerCertFingerprint(fp) { await AsyncStorage.setItem(KEYS.CERT_FINGERPRINT, fp); }
+export async function setServerCertFingerprint(fp) { await AsyncStorage.setItem(KEYS.CERT_FINGERPRINT, fp); }

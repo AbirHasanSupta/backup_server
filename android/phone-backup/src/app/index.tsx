@@ -327,6 +327,7 @@ export default function HomeScreen() {
       DeviceEventEmitter.addListener('sync-state', applySyncSnapshot),
       DeviceEventEmitter.addListener('sync-completed', onCompleted),
       DeviceEventEmitter.addListener('sync-failed', onFailed),
+      DeviceEventEmitter.addListener('settings-updated', loadAll),
     ];
 
     return () => subs.forEach((sub) => sub.remove());
