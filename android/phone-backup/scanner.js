@@ -3,7 +3,7 @@ import { getFolders, getFileTypes, FILE_TYPE_EXTENSIONS } from './settings';
 
 function getFileExtension(name) {
   const dot = name.lastIndexOf('.');
-  return dot >= 0 ? name.slice(dot).toLowerCase() : '';
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot).toLowerCase() : '';
 }
 
 const ALL_KNOWN_EXTENSIONS = new Set(
@@ -59,7 +59,7 @@ function createScanReporter(onActivity) {
 
   return (detail, force = false) => {
     if (!onActivity) return;
-    const files = detail.files || 0;
+    const files = (detail.files || 0) + (detail.skipped || 0);
     const now = Date.now();
     const enoughFiles = files - lastReportFiles >= SCAN_PROGRESS_FILE_STEP;
     const enoughTime = now - lastReportAt >= SCAN_PROGRESS_INTERVAL_MS;
@@ -136,10 +136,21 @@ export async function enrichFileMetadata(file) {
   };
 }
 
-function addFile(uri, relativePath, name, result, shouldInclude, reportActivity, counters, metadataScheduler, snapshotCache) {
+function addFile(uri, relativePath, name, result, shouldInclude, reportActivity, counters, metadataScheduler, snapshotCache, options = {}) {
   if (!shouldInclude(name)) return;
 
   const cached = snapshotCache ? snapshotCache.get(relativePath) : null;
+
+  if (options.incremental && cached) {
+    counters.skippedFromSnapshot = (counters.skippedFromSnapshot || 0) + 1;
+    reportActivity({
+      phase: 'scanning',
+      files: counters.files,
+      skipped: counters.skippedFromSnapshot,
+      currentFile: relativePath,
+    });
+    return;
+  }
 
   const file = {
     uri,
@@ -160,7 +171,7 @@ function addFile(uri, relativePath, name, result, shouldInclude, reportActivity,
   reportActivity({ phase: 'scanning', files: counters.files, currentFile: relativePath });
 }
 
-async function walk(uri, base, result, shouldInclude, reportActivity, counters, metadataScheduler, knownItems = null, snapshotCache = null) {
+async function walk(uri, base, result, shouldInclude, reportActivity, counters, metadataScheduler, knownItems = null, snapshotCache = null, options = {}) {
   let items = knownItems;
   try {
     if (!items) {
@@ -168,13 +179,24 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
     }
   } catch {
     const name = getSafName(uri);
-    addFile(uri, base, name, result, shouldInclude, reportActivity, counters, metadataScheduler, snapshotCache);
+    addFile(uri, base, name, result, shouldInclude, reportActivity, counters, metadataScheduler, snapshotCache, options);
     return;
   }
 
   async function processItem(itemUri) {
     const name = getSafName(itemUri);
     const newBase = `${base}/${name}`;
+
+    if (options.incremental && snapshotCache?.has(newBase) && shouldInclude(name)) {
+      counters.skippedFromSnapshot = (counters.skippedFromSnapshot || 0) + 1;
+      reportActivity({
+        phase: 'scanning',
+        files: counters.files,
+        skipped: counters.skippedFromSnapshot,
+        currentFile: newBase,
+      });
+      return;
+    }
 
     let childItems = null;
     try {
@@ -184,9 +206,9 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
     }
 
     if (childItems) {
-      await walk(itemUri, newBase, result, shouldInclude, reportActivity, counters, metadataScheduler, childItems, snapshotCache);
+      await walk(itemUri, newBase, result, shouldInclude, reportActivity, counters, metadataScheduler, childItems, snapshotCache, options);
     } else {
-      addFile(itemUri, newBase, name, result, shouldInclude, reportActivity, counters, metadataScheduler, snapshotCache);
+      addFile(itemUri, newBase, name, result, shouldInclude, reportActivity, counters, metadataScheduler, snapshotCache, options);
     }
   }
 
@@ -195,7 +217,7 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
   }
 }
 
-export async function scan(onActivity, targetFolderUri, snapshotCache = null) {
+export async function scan(onActivity, targetFolderUri, snapshotCache = null, options = {}) {
   const [folders, selectedTypes] = await Promise.all([
     getFolders(),
     getFileTypes(),
@@ -208,14 +230,20 @@ export async function scan(onActivity, targetFolderUri, snapshotCache = null) {
     : folders;
 
   const result = [];
-  const counters = { files: 0, snapshotHits: 0 };
+  const counters = { files: 0, snapshotHits: 0, skippedFromSnapshot: 0 };
   const metadataScheduler = createMetadataScheduler(reportActivity);
   for (const folder of foldersToScan) {
     reportActivity({ phase: 'scanning', currentFile: folder.name, files: counters.files }, true);
-    await walk(folder.uri, folder.name, result, shouldInclude, reportActivity, counters, metadataScheduler, null, snapshotCache);
+    await walk(folder.uri, folder.name, result, shouldInclude, reportActivity, counters, metadataScheduler, null, snapshotCache, options);
   }
   await metadataScheduler.drain();
-  reportActivity({ phase: 'scanning', currentFile: '', files: counters.files }, true);
+  reportActivity({
+    phase: 'scanning',
+    currentFile: '',
+    files: counters.files,
+    skipped: counters.skippedFromSnapshot,
+  }, true);
   result.snapshotHits = counters.snapshotHits;
+  result.skippedFromSnapshot = counters.skippedFromSnapshot;
   return result;
 }

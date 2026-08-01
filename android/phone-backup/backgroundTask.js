@@ -409,6 +409,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   const targetFolderUri = runOptions.targetFolderUri;
   const forceRefreshAll = runOptions.forceRefreshAll;
   const isTwoWay = !!(forceRefreshAll || forceRefreshFolder);
+  const incrementalScan = !isTwoWay;
 
   if (isStopRequested()) return { ...emptySyncResult('stopped'), stopped: true };
 
@@ -423,8 +424,9 @@ export async function performActualSync(onProgress, runOptions = {}) {
   const snapshotCache = await loadScanSnapshot();
   const scanned = await scan(async (detail) => {
     if (onProgress) await onProgress(0, 0, detail);
-  }, targetFolderUri, snapshotCache);
+  }, targetFolderUri, snapshotCache, { incremental: incrementalScan });
   const files = scanned.filter((file) => hasProperExtension(file.name));
+  const snapshotSkipped = scanned.skippedFromSnapshot || 0;
 
   if (isStopRequested()) return { ...emptySyncResult('stopped'), stopped: true };
 
@@ -433,6 +435,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
   const present = new Set();
   const presentFiles = [];
+  const trustedFiles = [];
   let checked = 0;
   let serverDeviceTotalFiles = 0;
   let serverDeviceTotalSize = 0;
@@ -446,7 +449,10 @@ export async function performActualSync(onProgress, runOptions = {}) {
     );
     for (const file of files) {
       const key = `${file.relativePath}|${file.modifiedTime}|${file.size || 0}`;
-      if (trusted.has(key)) present.add(key);
+      if (trusted.has(key)) {
+        present.add(key);
+        trustedFiles.push(file);
+      }
     }
     checked = files.length - filesToCheck.length;
     if (onProgress) await onProgress(0, 0, { phase: 'checking', checked, total: files.length });
@@ -482,8 +488,8 @@ export async function performActualSync(onProgress, runOptions = {}) {
   if (stoppedDuringCheck) {
     return {
       uploaded: 0,
-      skipped: present.size,
-      total: files.length,
+      skipped: present.size + snapshotSkipped,
+      total: files.length + snapshotSkipped,
       errors: 0,
       deviceTotalFiles: serverDeviceTotalFiles,
       deviceTotalSize: serverDeviceTotalSize,
@@ -497,7 +503,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
   const totalUploads = pending.length;
   let uploaded = 0;
-  let skipped = files.length - pending.length;
+  let skipped = files.length - pending.length + snapshotSkipped;
   let completed = 0;
   let errors = 0;
   let lastError = null;
@@ -577,7 +583,8 @@ export async function performActualSync(onProgress, runOptions = {}) {
   await markUploadedBatch(uploadedFiles);
 
   if (!isStopRequested()) {
-    await saveScanSnapshot(files).catch(() => {});
+    const scannedSuccessfully = [...trustedFiles, ...presentFiles, ...uploadedFiles];
+    await saveScanSnapshot(scannedSuccessfully, { merge: !forceRefreshAll }).catch(() => {});
   }
 
   if (totalUploads > 0 && uploaded === 0 && errors === totalUploads && present.size === 0) {
@@ -588,7 +595,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   return {
     uploaded,
     skipped,
-    total: files.length,
+    total: files.length + snapshotSkipped,
     scanned: files.length,
     errors,
     deviceTotalFiles: serverDeviceTotalFiles,

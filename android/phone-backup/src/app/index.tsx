@@ -71,13 +71,14 @@ function applyProgressUpdate(
   }
 
   if (detail?.phase === 'scanning') {
+    const scannedFiles = detail.files || 0;
     setters.setPhase('scanning');
     setters.setProgress(0);
     setters.setUploaded(0);
     setters.setTotal(0);
     setters.setStatusMessage(
-      detail.files
-        ? `Scanning files: ${detail.files.toLocaleString()} found`
+      scannedFiles
+        ? `Scanning files: ${scannedFiles.toLocaleString()} found`
         : 'Scanning your selected folders'
     );
     return;
@@ -331,7 +332,7 @@ export default function HomeScreen() {
     ];
 
     return () => subs.forEach((sub) => sub.remove());
-  }, [applySyncSnapshot]);
+  }, [applySyncSnapshot, loadAll]);
 
   const handleSync = async () => {
     const snapshot = await getCurrentSyncState().catch(() => null);

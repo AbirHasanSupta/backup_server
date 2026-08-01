@@ -1,6 +1,11 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { getServerIp, getApiKey, getServerPort, getDeviceId, getDeviceToken } from './settings';
 
+function hasProperExtension(name) {
+  const dot = (name || '').lastIndexOf('.');
+  return dot > 0 && dot < name.length - 1;
+}
+
 async function readJsonResponse(res, context) {
   try {
     return await res.json();
@@ -98,6 +103,11 @@ export async function checkServerFiles(files, options = {}) {
  * @returns {Promise<boolean>} true if uploaded or already on server, false on failure
  */
 export async function uploadFile(item, onProgress, options = {}) {
+  const name = item.name || item.relativePath.split('/').pop() || '';
+  if (!hasProperExtension(name)) {
+    return { success: true, status: 'skipped', deviceTotalFiles: 0, deviceTotalSize: 0 };
+  }
+
   const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
   const verifyDisk = options.verifyDisk === true ? 'true' : 'false';
 

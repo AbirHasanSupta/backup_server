@@ -320,8 +320,15 @@ export async function loadScanSnapshot() {
   return map;
 }
 
-export async function saveScanSnapshot(files) {
-  const obj = {};
+export async function saveScanSnapshot(files, options = {}) {
+  let obj = {};
+  if (options.merge) {
+    const raw = await AsyncStorage.getItem(KEYS.SCAN_SNAPSHOT);
+    const existing = safeJsonParse(raw, null);
+    if (existing && typeof existing === 'object') {
+      obj = existing;
+    }
+  }
   for (const file of files) {
     obj[file.relativePath] = `${file.modifiedTime}:${file.size || 0}`;
   }
