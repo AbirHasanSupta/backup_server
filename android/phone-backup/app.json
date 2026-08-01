@@ -3,7 +3,7 @@
     "name": "Phone Backup",
     "slug": "phone-backup",
     "scheme": "phonebackup",
-    "version": "2.1.2",
+    "version": "2.2.0",
     "plugins": [
       "expo-media-library",
       "expo-task-manager",
@@ -49,7 +49,7 @@
         "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
       ],
       "package": "com.abirsupta.phonebackup",
-      "versionCode": 3
+      "versionCode": 4
     },
     "extra": {
       "eas": {
