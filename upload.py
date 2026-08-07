@@ -4,9 +4,11 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import time
 import uuid
 
+import memories
 from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -1027,3 +1029,30 @@ async def preview_shared_file(
 
     cache_control = "private, no-cache" if preview_path == full_path else None
     return _file_range_response(preview_path, request, cache_control=cache_control)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Memories Endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.get("/memories/today")
+async def get_memories_today(
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    return memories.get_todays_memories(device_id)
+
+
+@router.post("/memories/reindex")
+async def reindex_memories(
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    threading.Thread(target=memories.reindex_all, daemon=True).start()
+    return {"ok": True}

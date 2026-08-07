@@ -109,7 +109,7 @@ function RootLayoutContent() {
         <Tabs.Screen
           name="restore"
           options={{
-            title: 'Restore',
+            title: 'Library',
             tabBarIcon: ({ focused }) => (
               <TabIcon androidName="cloud_download" iosName="icloud.and.arrow.down" focused={focused} colors={colors} styles={styles} />
             ),
@@ -134,6 +134,7 @@ function RootLayoutContent() {
           }}
         />
         <Tabs.Screen name="explore" options={{ href: null }} />
+        <Tabs.Screen name="memories" options={{ href: null }} />
       </Tabs>
     </SafeAreaProvider>
   );

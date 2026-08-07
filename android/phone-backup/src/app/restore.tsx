@@ -20,7 +20,7 @@ import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
@@ -39,6 +39,7 @@ import {
   buildPreviewUrl,
   buildVideoPreviewUrl,
   warmVideoPreviews,
+  getTodaysMemories,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
@@ -1706,6 +1707,30 @@ export default function RestoreScreen() {
   const { colors, isDark } = useAppTheme();
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const router = useRouter();
+
+  // Memories availability state
+  const [hasMemories, setHasMemories] = useState(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      getTodaysMemories()
+        .then(res => {
+          if (active && res && Array.isArray(res.groups) && res.groups.length > 0) {
+            setHasMemories(true);
+          } else if (active) {
+            setHasMemories(false);
+          }
+        })
+        .catch(() => {
+          if (active) setHasMemories(false);
+        });
+      return () => {
+        active = false;
+      };
+    }, [])
+  );
 
   // Source mode state
   const [sourceMode, setSourceMode] = useState<SourceMode>('phone');
@@ -2293,7 +2318,18 @@ export default function RestoreScreen() {
           ]}
         >
           <View>
-            <Text style={styles.pageTitle}>Restore Files</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <Text style={styles.pageTitle}>Library</Text>
+              <AnimatedPressable
+                onPress={() => router.push('/memories')}
+                style={styles.memoriesHeaderBtn}
+                scaleDown={0.88}
+                accessibilityLabel="Open Memories"
+              >
+                <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={18} />
+                {hasMemories && <View style={styles.memoriesBadgeDot} />}
+              </AnimatedPressable>
+            </View>
             <Text style={styles.pageSubtitle}>
               {files.length > 0 ? `${files.length} files on server` : 'Download files from server'}
             </Text>
@@ -2459,6 +2495,24 @@ const createStyles = (colors: AppColors) =>
     },
     pageTitle: { fontSize: TextScale.xl, fontWeight: '800', color: colors.text, letterSpacing: -0.5 },
     pageSubtitle: { fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '500', marginTop: 2 },
+    memoriesHeaderBtn: {
+      width: 32,
+      height: 32,
+      borderRadius: 16,
+      backgroundColor: colors.primarySoft,
+      alignItems: 'center',
+      justifyContent: 'center',
+      position: 'relative',
+    },
+    memoriesBadgeDot: {
+      position: 'absolute',
+      top: 3,
+      right: 3,
+      width: 7,
+      height: 7,
+      borderRadius: 3.5,
+      backgroundColor: colors.primary,
+    },
     headerButtons: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
     actionBtn: {
       flexDirection: 'row', alignItems: 'center', gap: Spacing.one,

@@ -184,3 +184,33 @@ export async function getSharedFilePreviewUrl(sourceId, relativePath) {
     `&token=${encodeURIComponent(key)}`
   );
 }
+
+/**
+ * Fetch today's memories from the server.
+ * @returns {Promise<{today: {month: number, day: number}, groups: Array<{year: number, years_ago: number, items: Array<any>}>}>}
+ */
+export async function getTodaysMemories() {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/memories/today?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch memories (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Trigger media reindexing on the server.
+ */
+export async function triggerMemoriesReindex() {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/memories/reindex?device_id=${encodeURIComponent(deviceId)}`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}` },
+    },
+  );
+  if (!res.ok) throw new Error(`Reindex failed (${res.status})`);
+  return await res.json();
+}

@@ -179,7 +179,31 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_device ON sync_sessions(device_id, started_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_started ON sync_sessions(started_at DESC)")
 
-    # 6. One-time cleanup: remove stale duplicate file rows that may have
+    # 6. media_index table for memories precomputation
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS media_index (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type   TEXT NOT NULL,      -- 'phone' | 'shared'
+            source_key    TEXT NOT NULL,      -- device_id  | shared source id
+            relative_path TEXT NOT NULL,
+            size          INTEGER NOT NULL,
+            modified_time INTEGER NOT NULL,
+            capture_time  INTEGER,            -- unix epoch seconds, nullable
+            capture_source TEXT,              -- 'exif' | 'video' | 'fs_ctime'
+            cap_month     INTEGER,
+            cap_day       INTEGER,
+            cap_year      INTEGER,
+            indexed_at    INTEGER NOT NULL,
+            UNIQUE(source_type, source_key, relative_path)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_media_lookup ON media_index(source_type, source_key, cap_month, cap_day)"
+    )
+
+    # 7. One-time cleanup: remove stale duplicate file rows that may have
     #    accumulated from phone reinstalls before the insert_file deduplication
     #    fix was applied.  For each (device_ip, path) pair we keep only the row
     #    with the most recent uploaded_time (highest rowid as tie-breaker).
@@ -740,3 +764,119 @@ def clear_sync_sessions(device_id: str | None = None) -> None:
         conn.execute("DELETE FROM sync_sessions")
     conn.commit()
     conn.close()
+
+
+# ─── Media Index / Memories helpers ──────────────────────────────────────────
+
+def upsert_media_index_row(
+    source_type: str,
+    source_key: str,
+    relative_path: str,
+    size: int,
+    modified_time: int,
+    capture_time: int | None,
+    capture_source: str | None,
+    cap_month: int | None,
+    cap_day: int | None,
+    cap_year: int | None,
+    indexed_at: int,
+) -> None:
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO media_index (
+            source_type, source_key, relative_path, size, modified_time,
+            capture_time, capture_source, cap_month, cap_day, cap_year, indexed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_type, source_key, relative_path) DO UPDATE SET
+            size=excluded.size,
+            modified_time=excluded.modified_time,
+            capture_time=excluded.capture_time,
+            capture_source=excluded.capture_source,
+            cap_month=excluded.cap_month,
+            cap_day=excluded.cap_day,
+            cap_year=excluded.cap_year,
+            indexed_at=excluded.indexed_at
+        """,
+        (
+            source_type,
+            source_key,
+            relative_path,
+            size,
+            modified_time,
+            capture_time,
+            capture_source,
+            cap_month,
+            cap_day,
+            cap_year,
+            indexed_at,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_media_index_cache(source_type: str, source_key: str) -> dict[str, tuple[int, int]]:
+    """Return {relative_path: (size, modified_time)} for a given source."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT relative_path, size, modified_time FROM media_index WHERE source_type = ? AND source_key = ?",
+        (source_type, source_key),
+    ).fetchall()
+    conn.close()
+    return {r["relative_path"]: (r["size"], r["modified_time"]) for r in rows}
+
+
+def get_media_for_day(
+    source_type_and_keys: list[tuple[str, str]],
+    month: int,
+    day: int,
+    exclude_year: int,
+) -> list[dict]:
+    if not source_type_and_keys:
+        return []
+    conn = get_conn()
+    or_clauses = []
+    params: list = []
+    for stype, skey in source_type_and_keys:
+        or_clauses.append("(source_type = ? AND source_key = ?)")
+        params.extend([stype, skey])
+
+    where_source = " OR ".join(or_clauses)
+    params.extend([month, day, exclude_year])
+
+    sql = f"""
+        SELECT source_type, source_key, relative_path, size, modified_time, capture_time, capture_source, cap_month, cap_day, cap_year
+        FROM media_index
+        WHERE ({where_source})
+          AND cap_month = ?
+          AND cap_day = ?
+          AND (cap_year IS NULL OR cap_year != ?)
+        ORDER BY capture_time DESC, relative_path ASC
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def prune_media_index(source_type: str, source_key: str, keep_paths: set[str]) -> None:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT relative_path FROM media_index WHERE source_type = ? AND source_key = ?",
+        (source_type, source_key),
+    ).fetchall()
+    existing = {r["relative_path"] for r in rows}
+    to_delete = existing - keep_paths
+    if to_delete:
+        to_delete_list = list(to_delete)
+        chunk_size = 500
+        for i in range(0, len(to_delete_list), chunk_size):
+            chunk = to_delete_list[i : i + chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            conn.execute(
+                f"DELETE FROM media_index WHERE source_type = ? AND source_key = ? AND relative_path IN ({placeholders})",
+                [source_type, source_key] + chunk,
+            )
+        conn.commit()
+    conn.close()
+

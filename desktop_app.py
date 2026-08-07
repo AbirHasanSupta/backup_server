@@ -38,6 +38,9 @@ if sys.stderr is None:
 
 import customtkinter as ctk
 import uvicorn
+import memories
+
+_memories_daemon_started = False
 
 # ── Local imports ──────────────────────────────────────────────────────────────
 from state import (
@@ -2352,6 +2355,11 @@ class BackupServerApp(ctk.CTk):
         self._server_thread.start()
         self._server_running  = True
         self._server_start_time = time.time()
+
+        global _memories_daemon_started
+        if not _memories_daemon_started:
+            _memories_daemon_started = True
+            threading.Thread(target=memories.startup_scan_loop, daemon=True).start()
 
         local_ip = get_local_ip()
         addr = f"http://{local_ip}:{PORT}"
