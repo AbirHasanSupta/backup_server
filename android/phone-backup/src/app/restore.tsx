@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,8 @@ import {
   ScrollView,
   Dimensions,
   Pressable,
+  PanResponder,
+  Animated,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -410,56 +412,139 @@ type PreviewState =
 
 type PreviewModalProps = {
   file: RemoteFile | null;
+  fileList: RemoteFile[];      // ordered flat list of all previewable files
+  currentIndex: number;        // index of `file` in fileList
   onClose: () => void;
+  onNavigate: (index: number) => void;  // called when user swipes to a neighbour
   onDownload: (file: RemoteFile) => void;
   previewUrl: string | null;
+  previewCache: React.MutableRefObject<Map<string, string>>; // path -> localUri cache
   colors: AppColors;
 };
 
 const PreviewModal = React.memo(function PreviewModal({
-  file, onClose, onDownload, previewUrl, colors,
+  file, fileList, currentIndex, onClose, onNavigate, onDownload, previewUrl, previewCache, colors,
 }: PreviewModalProps) {
   const insets = useSafeAreaInsets();
 
   const category = file ? getFileCategory(file.path) : 'other';
   const fileName = file ? (file.path.split(/[/\\]/).pop() ?? file.path) : '';
 
-  // Compute the correct initial phase upfront so we never call setState
-  // synchronously inside an effect (which triggers cascading renders).
-  // 'other' files need no download, so they start in 'ready' immediately.
-  const initialState = useMemo<PreviewState>(() => {
+  const [state, setState] = useState<PreviewState>(() => {
     if (!file || category === 'other') return { phase: 'ready', localUri: '' };
     return { phase: 'loading' };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file?.path]);
+  });
 
-  const [state, setState] = useState<PreviewState>(initialState);
+  // Reset state when file changes
+  const [prevPath, setPrevPath] = useState<string | undefined>(file?.path);
+  if (file?.path !== prevPath) {
+    setPrevPath(file?.path);
+    if (!file || category === 'other') {
+      setState({ phase: 'ready', localUri: '' });
+    } else {
+      setState({ phase: 'loading' });
+    }
+  }
 
-  // Download into temp cache — only for previewable types (image/video/audio)
+  // Unified effect: checks cache or downloads asynchronously
   React.useEffect(() => {
     if (!file || !previewUrl || category === 'other') return;
 
     let cancelled = false;
-    const tmpUri =
-      (FileSystem.cacheDirectory ?? '') +
-      `preview_${Date.now()}_${fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
 
     (async () => {
+      // Check cache first
+      const cachedUri = previewCache.current.get(file.path);
+      if (cachedUri) {
+        if (!cancelled) setState({ phase: 'ready', localUri: cachedUri });
+        return;
+      }
+
+      // Cache miss: download
+      const safeKey = file.path.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const tmpUri = (FileSystem.cacheDirectory ?? '') + `preview_${safeKey}`;
+
       try {
         const result = await FileSystem.downloadAsync(previewUrl, tmpUri);
-        if (!cancelled) setState({ phase: 'ready', localUri: result.uri });
+        if (!cancelled) {
+          previewCache.current.set(file.path, result.uri);
+          setState({ phase: 'ready', localUri: result.uri });
+        }
       } catch (e: any) {
-        if (!cancelled)
+        if (!cancelled) {
           setState({ phase: 'error', message: e?.message ?? 'Failed to load preview' });
+        }
       }
     })();
 
     return () => {
       cancelled = true;
-      FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file?.path, previewUrl]);
+  }, [file, previewUrl, category, previewCache]);
+
+  // ── Swipe navigation via PanResponder ──────────────────────────────────────
+  const [slideAnim] = useState(() => new Animated.Value(0));
+  const hasPrev = currentIndex > 0;
+  const hasNext = currentIndex < fileList.length - 1;
+
+  const navigateTo = useCallback((idx: number) => {
+    const dir = idx > currentIndex ? -1 : 1;
+    // Slide-out, then switch file, then snap back
+    Animated.timing(slideAnim, {
+      toValue: dir * SCREEN_W * 0.25,
+      duration: 100,
+      useNativeDriver: true,
+    }).start(() => {
+      onNavigate(idx);
+      slideAnim.setValue(-dir * SCREEN_W * 0.15);
+      Animated.spring(slideAnim, {
+        toValue: 0,
+        useNativeDriver: true,
+        speed: 30,
+        bounciness: 0,
+      }).start();
+    });
+  }, [currentIndex, onNavigate, slideAnim]);
+
+  // Use ref updated in useEffect so PanResponder callbacks access latest values without ref access during render
+  const latestRef = useRef<{
+    hasNext: boolean;
+    hasPrev: boolean;
+    navigateTo: (idx: number) => void;
+    currentIndex: number;
+  }>({ hasNext, hasPrev, navigateTo, currentIndex });
+
+  useEffect(() => {
+    latestRef.current = { hasNext, hasPrev, navigateTo, currentIndex };
+  }, [hasNext, hasPrev, navigateTo, currentIndex]);
+
+  const [panResponder, setPanResponder] = useState<ReturnType<typeof PanResponder.create> | null>(null);
+
+  useEffect(() => {
+    setPanResponder(
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, gs) =>
+          Math.abs(gs.dx) > 12 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.5,
+        onPanResponderGrant: () => {
+          slideAnim.setValue(0);
+        },
+        onPanResponderMove: (_, gs) => {
+          slideAnim.setValue(gs.dx * 0.25);
+        },
+        onPanResponderRelease: (_, gs) => {
+          const cur = latestRef.current;
+          if (gs.dx < -60 && cur.hasNext) {
+            cur.navigateTo(cur.currentIndex + 1);
+          } else if (gs.dx > 60 && cur.hasPrev) {
+            cur.navigateTo(cur.currentIndex - 1);
+          } else {
+            // Snap back
+            Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, speed: 20, bounciness: 4 }).start();
+          }
+        },
+      })
+    );
+  }, [slideAnim]);
 
   if (!file) return null;
 
@@ -541,7 +626,14 @@ const PreviewModal = React.memo(function PreviewModal({
           <TouchableOpacity onPress={onClose} style={pvStyles.topBarBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <AppIcon androidName="close" iosName="xmark" color="#fff" size={22} />
           </TouchableOpacity>
-          <Text style={pvStyles.topBarTitle} numberOfLines={1}>{fileName}</Text>
+          <View style={pvStyles.topBarCenter}>
+            <Text style={pvStyles.topBarTitle} numberOfLines={1}>{fileName}</Text>
+            {fileList.length > 1 && (
+              <Text style={pvStyles.topBarCounter}>
+                {currentIndex + 1} / {fileList.length}
+              </Text>
+            )}
+          </View>
           <TouchableOpacity
             onPress={() => onDownload(file)}
             style={[pvStyles.topBarBtn, pvStyles.downloadBtn]}
@@ -551,10 +643,33 @@ const PreviewModal = React.memo(function PreviewModal({
           </TouchableOpacity>
         </View>
 
-        {/* Content */}
-        <View style={pvStyles.contentArea}>
+        {/* Content area with swipe gesture */}
+        <Animated.View
+          style={[pvStyles.contentArea, { transform: [{ translateX: slideAnim }] }]}
+          {...(panResponder?.panHandlers ?? {})}
+        >
           {renderContent()}
-        </View>
+        </Animated.View>
+
+        {/* Left / Right nav arrows — only when neighbours exist */}
+        {hasPrev && (
+          <TouchableOpacity
+            style={pvStyles.navArrowLeft}
+            onPress={() => navigateTo(currentIndex - 1)}
+            hitSlop={{ top: 20, bottom: 20, left: 10, right: 10 }}
+          >
+            <AppIcon androidName="chevron_left" iosName="chevron.left" color="rgba(255,255,255,0.85)" size={28} />
+          </TouchableOpacity>
+        )}
+        {hasNext && (
+          <TouchableOpacity
+            style={pvStyles.navArrowRight}
+            onPress={() => navigateTo(currentIndex + 1)}
+            hitSlop={{ top: 20, bottom: 20, left: 10, right: 10 }}
+          >
+            <AppIcon androidName="chevron_right" iosName="chevron.right" color="rgba(255,255,255,0.85)" size={28} />
+          </TouchableOpacity>
+        )}
 
         {/* Bottom info strip */}
         <View style={[pvStyles.bottomBar, { paddingBottom: insets.bottom + Spacing.two, backgroundColor: 'rgba(0,0,0,0.8)' }]}>
@@ -680,44 +795,66 @@ function SortBar({ field, dir, onChange, colors }: SortBarProps) {
   };
 
   return (
-    <ScrollView
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      contentContainerStyle={sortStyles.row}
-    >
-      {SORT_OPTIONS.map(opt => {
-        const active = opt.field === field;
-        return (
-          <TouchableOpacity
-            key={opt.field}
-            onPress={() => handlePress(opt.field)}
-            style={[
-              sortStyles.chip,
-              { borderColor: active ? colors.primary : colors.surfaceBorder,
-                backgroundColor: active ? colors.primarySoft : colors.surface },
-            ]}
-            activeOpacity={0.7}
-          >
-            <Text style={[sortStyles.chipLabel, { color: active ? colors.primary : colors.textSecondary }]}>
-              {opt.label}
-            </Text>
-            {active && (
-              <Text style={[sortStyles.chipArrow, { color: colors.primary }]}>
-                {dir === 'asc' ? '↑' : '↓'}
+    <View style={[sortStyles.wrapper, { backgroundColor: colors.surface, borderBottomColor: colors.surfaceBorder }]}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={sortStyles.row}
+        style={{ flexGrow: 0 }}
+      >
+        {SORT_OPTIONS.map(opt => {
+          const active = opt.field === field;
+          return (
+            <TouchableOpacity
+              key={opt.field}
+              onPress={() => handlePress(opt.field)}
+              style={[
+                sortStyles.chip,
+                { borderColor: active ? colors.primary : colors.surfaceBorder,
+                  backgroundColor: active ? colors.primarySoft : 'transparent' },
+              ]}
+              activeOpacity={0.7}
+            >
+              <Text style={[sortStyles.chipLabel, { color: active ? colors.primary : colors.textSecondary }]}>
+                {opt.label}
               </Text>
-            )}
-          </TouchableOpacity>
-        );
-      })}
-    </ScrollView>
+              {active && (
+                <Text style={[sortStyles.chipArrow, { color: colors.primary }]}>
+                  {dir === 'asc' ? '↑' : '↓'}
+                </Text>
+              )}
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+    </View>
   );
 }
 
 const sortStyles = StyleSheet.create({
-  row: { paddingHorizontal: Spacing.four, paddingVertical: Spacing.two, gap: Spacing.two, flexDirection: 'row' },
-  chip: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: Spacing.three, paddingVertical: 6, borderRadius: Radius.full, borderWidth: 1 },
-  chipLabel: { fontSize: TextScale.xs, fontWeight: '600' },
-  chipArrow: { fontSize: TextScale.sm, fontWeight: '700' },
+  wrapper: {
+    // Ensure the sort bar always has a consistent height and doesn't stretch
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  row: {
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.two,
+    gap: Spacing.two,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: Radius.full,
+    borderWidth: 1.5,
+    height: 30,
+  },
+  chipLabel: { fontSize: TextScale.xs, fontWeight: '600', lineHeight: 16 },
+  chipArrow: { fontSize: 12, fontWeight: '700', lineHeight: 16 },
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -728,15 +865,17 @@ type TreeNodeViewProps = {
   node: TreeNode;
   depth: number;
   selectedPaths: Set<string>;
+  selectionMode: boolean;
   onToggleNode: (node: TreeNode) => void;
   onToggleExpand: (nodeKey: string) => void;
   onPreview: (file: RemoteFile) => void;
+  onEnterSelectionMode: (node: TreeNode) => void;
   styles: ReturnType<typeof createStyles>;
   colors: AppColors;
 };
 
 const TreeNodeView = React.memo(function TreeNodeView({
-  node, depth, selectedPaths, onToggleNode, onToggleExpand, onPreview, styles, colors,
+  node, depth, selectedPaths, selectionMode, onToggleNode, onToggleExpand, onPreview, onEnterSelectionMode, styles, colors,
 }: TreeNodeViewProps) {
   const indent = depth * 16;
 
@@ -745,22 +884,55 @@ const TreeNodeView = React.memo(function TreeNodeView({
     const category = getFileCategory(node.name);
     const catMeta = categoryMeta(category);
 
+    const handlePress = () => {
+      if (selectionMode) {
+        // In selection mode: tap anywhere (including file row) selects/deselects
+        onToggleNode(node);
+      } else {
+        node.file && onPreview(node.file);
+      }
+    };
+
+    const handleLongPress = () => {
+      if (selectionMode) {
+        // In selection mode: long press previews the file
+        node.file && onPreview(node.file);
+      } else {
+        // Outside selection mode: long press enters selection mode
+        onEnterSelectionMode(node);
+      }
+    };
+
+    const handleCheckboxPress = () => {
+      if (selectionMode) {
+        // Already in selection mode — just toggle
+        onToggleNode(node);
+      } else {
+        // Enter selection mode AND select this item
+        onEnterSelectionMode(node);
+      }
+    };
+
     return (
       <Pressable
         style={[styles.fileRow, { paddingLeft: indent + Spacing.four }]}
-        onPress={() => node.file && onPreview(node.file)}
-        onLongPress={() => onToggleNode(node)}
+        onPress={handlePress}
+        onLongPress={handleLongPress}
         delayLongPress={350}
         android_ripple={{ color: colors.primarySoft }}
       >
-        {/* Checkbox — uses onPress at Pressable level; this View is purely visual */}
-        <View
-          style={[styles.checkbox, isSelected && styles.checkboxSelected]}
+        {/* Checkbox — tapping it always toggles selection */}
+        <TouchableOpacity
+          onPress={handleCheckboxPress}
+          hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
+          activeOpacity={0.7}
         >
-          {isSelected ? (
-            <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />
-          ) : null}
-        </View>
+          <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
+            {isSelected ? (
+              <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />
+            ) : null}
+          </View>
+        </TouchableOpacity>
 
         <AppIcon androidName={catMeta.icon} iosName={catMeta.iosIcon} color={colors.textMuted} size={16} />
 
@@ -773,8 +945,10 @@ const TreeNodeView = React.memo(function TreeNodeView({
           </View>
         </View>
 
-        {/* Tap hint icon */}
-        <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={14} />
+        {/* Show preview hint only when NOT in selection mode */}
+        {!selectionMode && (
+          <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={14} />
+        )}
       </Pressable>
     );
   }
@@ -791,7 +965,19 @@ const TreeNodeView = React.memo(function TreeNodeView({
         <TouchableOpacity style={styles.chevronBtn} onPress={() => onToggleExpand(node.key)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 4 }}>
           <AppIcon androidName={node.isExpanded ? 'expand_more' : 'chevron_right'} iosName={node.isExpanded ? 'chevron.down' : 'chevron.right'} color={colors.textSecondary} size={22} />
         </TouchableOpacity>
-        <TouchableOpacity style={checkboxStyle} onPress={() => onToggleNode(node)} hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}>
+        <TouchableOpacity
+          style={checkboxStyle}
+          onPress={() => {
+            if (selectionMode) {
+              // Already in selection mode: just toggle this folder
+              onToggleNode(node);
+            } else {
+              // First tap: enter selection mode and toggle (onEnterSelectionMode handles both)
+              onEnterSelectionMode(node);
+            }
+          }}
+          hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
+        >
           {isAllSelected && <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />}
           {isPartial && <View style={styles.partialDot} />}
         </TouchableOpacity>
@@ -807,7 +993,8 @@ const TreeNodeView = React.memo(function TreeNodeView({
       {node.isExpanded && node.children.map(child => (
         <TreeNodeView
           key={child.key} node={child} depth={depth + 1}
-          selectedPaths={selectedPaths} onToggleNode={onToggleNode}
+          selectedPaths={selectedPaths} selectionMode={selectionMode}
+          onToggleNode={onToggleNode} onEnterSelectionMode={onEnterSelectionMode}
           onToggleExpand={onToggleExpand} onPreview={onPreview}
           styles={styles} colors={colors}
         />
@@ -861,9 +1048,26 @@ export default function RestoreScreen() {
   const [sortField, setSortField] = useState<SortField>('date');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
 
+  // Selection mode state
+  const [selectionMode, setSelectionMode] = useState(false);
+
   // Preview state
   const [previewFile, setPreviewFile] = useState<RemoteFile | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewIndex, setPreviewIndex] = useState<number>(0);
+
+  // Preview file cache: path -> local file URI. Persists across modal open/close.
+  const previewCacheRef = useRef<Map<string, string>>(new Map());
+
+  // Clear cache helper (deletes all cached preview files from disk)
+  const clearPreviewCache = useCallback(async () => {
+    const entries = Array.from(previewCacheRef.current.entries());
+    previewCacheRef.current.clear();
+    for (const [, uri] of entries) {
+      FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+    }
+  }, []);
+
 
   // ── Server status ──────────────────────────────────────────────────────────
   const checkServer = useCallback(async () => {
@@ -928,6 +1132,20 @@ export default function RestoreScreen() {
     return sortTreeChildren(tree, sortField, sortDir);
   }, [tree, sortField, sortDir]);
 
+  // Flat ordered list of all files (for swipe navigation). Refreshed whenever sortedTree changes.
+  const previewableFiles = useMemo<RemoteFile[]>(() => {
+    const result: RemoteFile[] = [];
+    function collect(node: TreeNode) {
+      if (!node.isFolder && node.file) {
+        result.push(node.file);
+      } else {
+        node.children.forEach(collect);
+      }
+    }
+    if (sortedTree) sortedTree.children.forEach(collect);
+    return result;
+  }, [sortedTree]);
+
   // ── Fetch ──────────────────────────────────────────────────────────────────
   const handleFetch = async () => {
     // Guard early before showing the spinner
@@ -935,6 +1153,8 @@ export default function RestoreScreen() {
       Alert.alert('No Source', 'Please select a shared folder first.');
       return;
     }
+    // Clear preview cache when re-fetching so stale previews don’t persist
+    await clearPreviewCache();
     setIsFetching(true);
     try {
       let serverFiles: RemoteFile[];
@@ -960,6 +1180,36 @@ export default function RestoreScreen() {
     setSortDir(dir);
   }, []);
 
+  // ── Preview ────────────────────────────────────────────────────────────────
+  const openPreview = useCallback(async (file: RemoteFile, index?: number) => {
+    let url: string;
+    if (sourceMode === 'shared' && selectedSourceId) {
+      url = await getSharedFilePreviewUrl(selectedSourceId, file.path);
+    } else {
+      url = await getFilePreviewUrl(file.path);
+    }
+    const idx = index !== undefined ? index : previewableFiles.findIndex(f => f.path === file.path);
+    setPreviewIndex(idx >= 0 ? idx : 0);
+    setPreviewUrl(url);
+    setPreviewFile(file);
+  }, [sourceMode, selectedSourceId, previewableFiles]);
+
+  const handlePreview = useCallback((file: RemoteFile) => {
+    openPreview(file);
+  }, [openPreview]);
+
+  // Navigate to prev/next file in preview
+  const handlePreviewNavigate = useCallback(async (newIndex: number) => {
+    if (newIndex < 0 || newIndex >= previewableFiles.length) return;
+    const nextFile = previewableFiles[newIndex];
+    openPreview(nextFile, newIndex);
+  }, [previewableFiles, openPreview]);
+
+  const closePreview = useCallback(() => {
+    setPreviewFile(null);
+    setPreviewUrl(null);
+  }, []);
+
   // ── Expand / collapse ──────────────────────────────────────────────────────
   const handleToggleExpand = useCallback((nodeKey: string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -972,7 +1222,20 @@ export default function RestoreScreen() {
     });
   }, []);
 
-  // ── Selection (long press) ─────────────────────────────────────────────────
+  // ── Selection mode ─────────────────────────────────────────────────────────
+  // Enter selection mode and immediately toggle the given node
+  const handleEnterSelectionMode = useCallback((node: TreeNode) => {
+    setSelectionMode(true);
+    const paths = collectFilePaths(node);
+    setSelectedPaths(prev => {
+      const next = new Set(prev);
+      const allSelected = paths.every(p => next.has(p));
+      if (allSelected) paths.forEach(p => next.delete(p));
+      else paths.forEach(p => next.add(p));
+      return next;
+    });
+  }, []);
+
   const handleToggleNode = useCallback((node: TreeNode) => {
     const paths = collectFilePaths(node);
     setSelectedPaths(prev => {
@@ -985,8 +1248,13 @@ export default function RestoreScreen() {
   }, []);
 
   const selectAll = () => {
-    if (selectedPaths.size === files.length) setSelectedPaths(new Set());
-    else setSelectedPaths(new Set(files.map(f => f.path)));
+    if (selectedPaths.size === files.length) {
+      setSelectedPaths(new Set());
+      setSelectionMode(false);
+    } else {
+      setSelectionMode(true);
+      setSelectedPaths(new Set(files.map(f => f.path)));
+    }
   };
 
   // ── Download (selected) ────────────────────────────────────────────────────
@@ -1062,22 +1330,6 @@ export default function RestoreScreen() {
     setSelectedPaths(new Set());
   }, [files, sourceMode, selectedSourceId]);
 
-  // ── Preview (single tap) ───────────────────────────────────────────────────
-  const handlePreview = useCallback(async (file: RemoteFile) => {
-    let url: string;
-    if (sourceMode === 'shared' && selectedSourceId) {
-      url = await getSharedFilePreviewUrl(selectedSourceId, file.path);
-    } else {
-      url = await getFilePreviewUrl(file.path);
-    }
-    setPreviewUrl(url);
-    setPreviewFile(file);
-  }, [sourceMode, selectedSourceId]);
-
-  const closePreview = useCallback(() => {
-    setPreviewFile(null);
-    setPreviewUrl(null);
-  }, []);
 
   // ── Download a single file triggered from the preview modal ───────────────
   const handleDownloadSingle = useCallback(async (file: RemoteFile) => {
@@ -1164,11 +1416,13 @@ export default function RestoreScreen() {
         <SortBar field={sortField} dir={sortDir} onChange={handleSortChange} colors={colors} />
       )}
 
-      {/* Tap hint */}
+      {/* Tap hint — changes based on selection mode */}
       {files.length > 0 && selectedPaths.size === 0 && (
         <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
           <AppIcon androidName="touch_app" iosName="hand.tap" color={colors.textMuted} size={13} />
-          <Text style={[styles.hintText, { color: colors.textMuted }]}>Tap to preview · Hold to select</Text>
+          <Text style={[styles.hintText, { color: colors.textMuted }]}>
+            {selectionMode ? 'Tap to select · Long press for preview' : 'Tap to preview · Hold to select'}
+          </Text>
         </View>
       )}
 
@@ -1179,7 +1433,10 @@ export default function RestoreScreen() {
           <Text style={[styles.selectionBarText, { color: colors.primary }]}>
             {selectedPaths.size} {selectedPaths.size === 1 ? 'file' : 'files'} selected
           </Text>
-          <TouchableOpacity onPress={() => setSelectedPaths(new Set())} style={styles.clearSelBtn}>
+          <TouchableOpacity
+            onPress={() => { setSelectedPaths(new Set()); setSelectionMode(false); }}
+            style={styles.clearSelBtn}
+          >
             <Text style={[styles.clearSelText, { color: colors.textSecondary }]}>Clear</Text>
           </TouchableOpacity>
         </View>
@@ -1193,7 +1450,9 @@ export default function RestoreScreen() {
           <TreeNodeView
             node={item} depth={0}
             selectedPaths={selectedPaths}
+            selectionMode={selectionMode}
             onToggleNode={handleToggleNode}
+            onEnterSelectionMode={handleEnterSelectionMode}
             onToggleExpand={handleToggleExpand}
             onPreview={handlePreview}
             styles={styles} colors={colors}
@@ -1230,14 +1489,17 @@ export default function RestoreScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Preview modal — key forces a clean remount per file so state resets correctly */}
+      {/* Preview modal — stays mounted across navigation; state resets via unified effect */}
       {previewFile && (
         <PreviewModal
-          key={previewFile.path}
           file={previewFile}
+          fileList={previewableFiles}
+          currentIndex={previewIndex}
           onClose={closePreview}
+          onNavigate={handlePreviewNavigate}
           onDownload={handleDownloadSingle}
           previewUrl={previewUrl}
+          previewCache={previewCacheRef}
           colors={colors}
         />
       )}
@@ -1358,9 +1620,13 @@ const pvStyles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', gap: Spacing.two,
     paddingHorizontal: Spacing.four, paddingBottom: Spacing.three, zIndex: 10,
   },
+  topBarCenter: { flex: 1, alignItems: 'center' },
   topBarTitle: {
-    flex: 1, color: '#fff', fontSize: TextScale.sm, fontWeight: '600',
+    color: '#fff', fontSize: TextScale.sm, fontWeight: '600',
     textAlign: 'center',
+  },
+  topBarCounter: {
+    color: 'rgba(255,255,255,0.5)', fontSize: TextScale.xs, textAlign: 'center', marginTop: 1,
   },
   topBarBtn: {
     padding: Spacing.two, borderRadius: Radius.md,
@@ -1370,6 +1636,34 @@ const pvStyles = StyleSheet.create({
   downloadBtnText: { color: '#fff', fontSize: TextScale.sm, fontWeight: '600' },
 
   contentArea: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+
+  // Navigation arrows
+  navArrowLeft: {
+    position: 'absolute',
+    left: 8,
+    top: '50%',
+    marginTop: -24,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 20,
+  },
+  navArrowRight: {
+    position: 'absolute',
+    right: 8,
+    top: '50%',
+    marginTop: -24,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 20,
+  },
 
   bottomBar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
