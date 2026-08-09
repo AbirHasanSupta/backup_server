@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -17,7 +17,8 @@ import {
   Pressable,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { Video, ResizeMode, AVPlaybackStatusSuccess } from 'expo-av';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -500,15 +501,7 @@ const PreviewModal = React.memo(function PreviewModal({
 
     if (category === 'video') {
       return (
-        <View style={pvStyles.videoContainer}>
-          <Video
-            source={{ uri: state.localUri }}
-            style={pvStyles.videoFull}
-            resizeMode={ResizeMode.CONTAIN}
-            useNativeControls
-            shouldPlay={false}
-          />
-        </View>
+        <VideoPreviewPlayer uri={state.localUri} />
       );
     }
 
@@ -584,47 +577,54 @@ function MetaRow({ label, value, colors, last }: { label: string; value: string;
   );
 }
 
+// ── Video preview player ──────────────────────────────────────────────────────
+function VideoPreviewPlayer({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri, p => {
+    p.pause();
+  });
+
+  return (
+    <View style={pvStyles.videoContainer}>
+      <VideoView
+        player={player}
+        style={pvStyles.videoFull}
+        contentFit="contain"
+        nativeControls
+      />
+    </View>
+  );
+}
+
 // ── Simple audio player ───────────────────────────────────────────────────────
 function AudioPlayer({ uri, colors, fileName }: { uri: string; colors: AppColors; fileName: string }) {
-  const videoRef = useRef<Video>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [positionMs, setPositionMs] = useState(0);
-  const [durationMs, setDurationMs] = useState(0);
+  const player = useAudioPlayer(uri);
+  const status = useAudioPlayerStatus(player);
 
-  const togglePlay = async () => {
-    if (!videoRef.current) return;
-    if (isPlaying) {
-      await videoRef.current.pauseAsync();
+  // Clean up player on unmount
+  useEffect(() => {
+    return () => { player.remove(); };
+  }, [player]);
+
+  const togglePlay = () => {
+    if (status.playing) {
+      player.pause();
     } else {
-      await videoRef.current.playAsync();
+      player.play();
     }
   };
 
-  const formatMs = (ms: number) => {
-    const s = Math.floor(ms / 1000);
+  const formatSec = (sec: number) => {
+    const s = Math.floor(sec);
     const m = Math.floor(s / 60);
     return `${m}:${String(s % 60).padStart(2, '0')}`;
   };
 
-  const progress = durationMs > 0 ? positionMs / durationMs : 0;
+  const positionSec = status.currentTime ?? 0;
+  const durationSec = status.duration ?? 0;
+  const progress = durationSec > 0 ? positionSec / durationSec : 0;
 
   return (
     <View style={pvStyles.audioPlayer}>
-      {/* Hidden video component for audio playback */}
-      <Video
-        ref={videoRef}
-        source={{ uri }}
-        style={{ width: 0, height: 0 }}
-        shouldPlay={false}
-        onPlaybackStatusUpdate={s => {
-          const ok = s as AVPlaybackStatusSuccess;
-          if (ok.isLoaded) {
-            setIsPlaying(ok.isPlaying);
-            setPositionMs(ok.positionMillis ?? 0);
-            setDurationMs(ok.durationMillis ?? 0);
-          }
-        }}
-      />
       <View style={[pvStyles.audioIconWrap, { backgroundColor: colors.primarySoft }]}>
         <AppIcon androidName="music_note" iosName="music.note" color={colors.primary} size={52} />
       </View>
@@ -635,15 +635,15 @@ function AudioPlayer({ uri, colors, fileName }: { uri: string; colors: AppColors
         <View style={[pvStyles.audioProgressFill, { width: `${progress * 100}%`, backgroundColor: colors.primary }]} />
       </View>
       <View style={pvStyles.audioTimings}>
-        <Text style={pvStyles.audioTime}>{formatMs(positionMs)}</Text>
-        <Text style={pvStyles.audioTime}>{formatMs(durationMs)}</Text>
+        <Text style={pvStyles.audioTime}>{formatSec(positionSec)}</Text>
+        <Text style={pvStyles.audioTime}>{formatSec(durationSec)}</Text>
       </View>
 
       {/* Play/Pause */}
       <TouchableOpacity onPress={togglePlay} style={[pvStyles.audioPlayBtn, { backgroundColor: colors.primary }]}>
         <AppIcon
-          androidName={isPlaying ? 'pause' : 'play_arrow'}
-          iosName={isPlaying ? 'pause.fill' : 'play.fill'}
+          androidName={status.playing ? 'pause' : 'play_arrow'}
+          iosName={status.playing ? 'pause.fill' : 'play.fill'}
           color="#fff"
           size={28}
         />

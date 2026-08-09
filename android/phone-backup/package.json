@@ -6,7 +6,8 @@
     "@expo/ui": "~57.0.7",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~57.0.8",
-    "expo-av": "~16.0.8",
+    "expo-asset": "~57.0.9",
+    "expo-audio": "~57.0.3",
     "expo-background-fetch": "~57.0.6",
     "expo-build-properties": "~57.0.7",
     "expo-constants": "~57.0.3",
@@ -26,6 +27,7 @@
     "expo-symbols": "~57.0.1",
     "expo-system-ui": "~57.0.1",
     "expo-task-manager": "~57.0.6",
+    "expo-video": "~57.0.2",
     "expo-web-browser": "~57.0.2",
     "react": "19.2.3",
     "react-dom": "19.2.3",
@@ -56,8 +58,7 @@
     "doctor": {
       "reactNativeDirectoryCheck": {
         "exclude": [
-          "react-native-background-actions",
-          "expo-av"
+          "react-native-background-actions"
         ]
       }
     }
