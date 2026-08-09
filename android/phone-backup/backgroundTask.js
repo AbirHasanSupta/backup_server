@@ -32,6 +32,49 @@ import {
 } from './notificationService';
 import { appendSyncSession } from './syncHistory';
 
+/**
+ * Converts any raw error message to a short, user-readable string.
+ * Keeps technical noise (native module names, Java exception classes, stack
+ * traces) in the Expo / developer console only — not visible in the app UI.
+ */
+function sanitizeErrorForUser(msg) {
+  const raw = msg || 'Unknown error';
+
+  // Native ExponentFileSystem / NativeModule noise
+  if (
+    raw.includes('ExponentFileSystem') ||
+    raw.includes('uploadAsync') ||
+    raw.includes('has been rejected') ||
+    raw.includes('NativeModule') ||
+    raw.includes('Invariant Violation')
+  ) {
+    const caused = raw.match(/(?:Caused by|caused by)[:\s]+(.+?)(?:\n|$)/i);
+    if (caused && caused[1]) {
+      return caused[1].replace(/^[a-z][\w.]+Exception:\s*/i, '').trim().substring(0, 100) || 'File could not be uploaded';
+    }
+    return 'File could not be uploaded (inaccessible or removed)';
+  }
+
+  // Common Android / network errors
+  if (raw.includes('FileNotFoundException') || raw.includes('ENOENT') || raw.includes('No such file')) {
+    return 'File not found — it may have been moved or deleted';
+  }
+  if (raw.includes('SecurityException') || raw.includes('EPERM') || raw.includes('EACCES')) {
+    return 'Permission denied — check folder access in Settings';
+  }
+  if (raw.includes('SocketException') || raw.includes('ConnectException') || raw.includes('ECONNREFUSED') || raw.includes('ETIMEDOUT')) {
+    return 'Network error — check Wi-Fi and server connection';
+  }
+  if (raw.includes('IOException')) {
+    return 'File read error — the file may be corrupted or in use';
+  }
+
+  // Truncate anything excessively long
+  if (raw.length > 120) return raw.substring(0, 117).replace(/\n.*$/, '').trim() + '…';
+
+  return raw;
+}
+
 const hasNativeBackgroundActions = !!(
   NativeModules &&
   NativeModules.RNBackgroundActions
@@ -561,10 +604,13 @@ export async function performActualSync(onProgress, runOptions = {}) {
         }
         console.warn('[BackupTask] Upload failed:', file.relativePath, err?.message);
         errors++;
-        lastError = err?.message || 'Unknown network error';
-        // Record error detail for history
+        // Errors from uploader.js are already sanitized; sanitize anything else
+        // (e.g. enrichFileMetadata failures) so no technical strings reach the UI.
+        const friendlyMsg = sanitizeErrorForUser(err?.message || 'Upload failed');
+        lastError = friendlyMsg;
+        // Record error detail for history using file basename, not full path
         if (runOptions.sessionBuilder) {
-          runOptions.sessionBuilder.errorDetails.push(`${file.relativePath}: ${err?.message || 'Upload failed'}`);
+          runOptions.sessionBuilder.errorDetails.push(`${file.name || file.relativePath.split('/').pop()}: ${friendlyMsg}`);
         }
       } finally {
         completed++;
@@ -588,7 +634,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   }
 
   if (totalUploads > 0 && uploaded === 0 && errors === totalUploads && present.size === 0) {
-    const msg = lastError ? `Last error: ${lastError}` : 'Check folder permissions and API key';
+    const msg = lastError ? `Last error: ${lastError}` : 'Check folder permissions and server connection';
     throw new Error(`Upload failed for all ${errors} file(s). ${msg}`);
   }
 
@@ -821,8 +867,10 @@ export async function runSync(onProgress, runOptions = {}) {
       return;  // swallow the thrown abort error
     }
     if (!isBackgroundFetch) {
-      await showSyncErrorNotification(err?.message || 'Unknown error').catch(() => {});
-      emitSyncFailed(err?.message || 'Unknown error');
+      // Sanitize before showing to user — no native module names in UI
+      const userMsg = sanitizeErrorForUser(err?.message || 'Unknown error');
+      await showSyncErrorNotification(userMsg).catch(() => {});
+      emitSyncFailed(userMsg);
     }
     // Persist failed session with single consistent timestamp
     await appendSyncSession({
@@ -831,7 +879,10 @@ export async function runSync(onProgress, runOptions = {}) {
       durationMs:   failedAt - sessionBuilder.startedAt,
       outcome:      'failed',
       errors:       (sessionBuilder.errorDetails.length || 0) + 1,
-      errorDetails: [...sessionBuilder.errorDetails, err?.message || 'Unknown error'].slice(0, 10),
+      errorDetails: [
+        ...sessionBuilder.errorDetails,
+        sanitizeErrorForUser(err?.message || 'Unknown error'),
+      ].slice(0, 10),
     }).catch(() => {});
     postSyncSession({
       started_at:  sessionBuilder.startedAt,

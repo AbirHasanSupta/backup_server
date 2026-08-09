@@ -1,9 +1,73 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { getServerIp, getApiKey, getServerPort, getDeviceId, getDeviceToken } from './settings';
 
+/**
+ * Returns true only for files with a real extension that are not hidden system
+ * files (names starting with a dot are OS/system internals like .sys_install_s_time.cfg).
+ */
 function hasProperExtension(name) {
-  const dot = (name || '').lastIndexOf('.');
-  return dot > 0 && dot < name.length - 1;
+  const n = name || '';
+  if (n.startsWith('.')) return false;          // hidden / system file — skip
+  const dot = n.lastIndexOf('.');
+  return dot > 0 && dot < n.length - 1;
+}
+
+/**
+ * Converts a raw native / network exception into a short, human-readable
+ * message that is safe to display in the app UI.
+ * Technical details (module names, stack traces, rejected-promise noise) are
+ * stripped out so users never see "ExponentFileSystem.uploadAsync has been
+ * rejected" or similar internal strings.
+ */
+function toUserFriendlyError(err) {
+  const raw = (err?.message || String(err || ''));
+
+  // Native module rejection noise — never show this verbatim
+  if (
+    raw.includes('ExponentFileSystem') ||
+    raw.includes('uploadAsync') ||
+    raw.includes('has been rejected') ||
+    raw.includes('NativeModule') ||
+    raw.includes('Invariant Violation')
+  ) {
+    // Try to extract a meaningful sub-message after the colon, e.g.
+    // "Call to function '…' has been rejected\nCaused by: java.io.FileNotFoundException: …"
+    const caused = raw.match(/(?:Caused by|caused by)[:\s]+(.+?)(?:\n|$)/i);
+    if (caused && caused[1]) {
+      return sanitizeJavaException(caused[1].trim());
+    }
+    // Fallback: file could not be read
+    return 'File could not be uploaded (inaccessible or removed)';
+  }
+
+  // Java / Android exception class names
+  if (raw.includes('FileNotFoundException') || raw.includes('ENOENT') || raw.includes('No such file')) {
+    return 'File not found — it may have been moved or deleted';
+  }
+  if (raw.includes('SecurityException') || raw.includes('Permission') || raw.includes('EPERM') || raw.includes('EACCES')) {
+    return 'Permission denied — check folder access in Settings';
+  }
+  if (raw.includes('SocketException') || raw.includes('ConnectException') || raw.includes('ECONNREFUSED') || raw.includes('ECONNRESET') || raw.includes('ETIMEDOUT') || raw.includes('Network')) {
+    return 'Network error — check Wi-Fi and server connection';
+  }
+  if (raw.includes('OutOfMemory') || raw.includes('ENOMEM')) {
+    return 'Not enough memory to upload this file';
+  }
+  if (raw.includes('IOException')) {
+    return 'File read error — the file may be corrupted or in use';
+  }
+
+  // Generic long messages: truncate to keep them readable
+  if (raw.length > 120) {
+    return raw.substring(0, 117).replace(/\n.*$/, '').trim() + '…';
+  }
+
+  return raw || 'Upload failed';
+}
+
+function sanitizeJavaException(msg) {
+  // Strip Java class prefixes like "java.io.FileNotFoundException: "
+  return msg.replace(/^[a-z][a-zA-Z0-9_.]+Exception:\s*/i, '').trim() || msg;
 }
 
 async function readJsonResponse(res, context) {
@@ -105,6 +169,8 @@ export async function checkServerFiles(files, options = {}) {
 export async function uploadFile(item, onProgress, options = {}) {
   const name = item.name || item.relativePath.split('/').pop() || '';
   if (!hasProperExtension(name)) {
+    // Hidden system files (e.g. .sys_install_s_time.cfg) or extension-less
+    // entries are silently skipped — they are not user files.
     return { success: true, status: 'skipped', deviceTotalFiles: 0, deviceTotalSize: 0 };
   }
 
@@ -126,9 +192,23 @@ export async function uploadFile(item, onProgress, options = {}) {
   const uniqueId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const cacheUri = `${FileSystem.cacheDirectory}${uniqueId}_${safeName}`;
 
-  // Copy SAF file to a local cache path that expo-file-system can upload
-  await FileSystem.StorageAccessFramework.copyAsync({ from: item.uri, to: cacheUri });
+  // ── Step 1: Copy SAF file to a local cache path ───────────────────────────
+  // Some SAF URIs (system files, recently-deleted files, restricted paths) can
+  // not be read. Treat those as graceful skips rather than hard failures.
+  try {
+    await FileSystem.StorageAccessFramework.copyAsync({ from: item.uri, to: cacheUri });
+  } catch (copyErr) {
+    // Log the raw technical detail to the Expo console / dev tools only.
+    console.warn(
+      '[Uploader] Could not read file for upload (skipped):',
+      item.relativePath,
+      copyErr?.message
+    );
+    // Translate to a user-friendly error and re-throw so the worker counts it.
+    throw new Error(toUserFriendlyError(copyErr));
+  }
 
+  // ── Step 2: Upload via HTTP ────────────────────────────────────────────────
   try {
     const uploadRaw = () => FileSystem.uploadAsync(rawUrl, cacheUri, {
       httpMethod: 'POST',
@@ -156,13 +236,23 @@ export async function uploadFile(item, onProgress, options = {}) {
     });
 
     let res;
-    if (FileSystem.FileSystemUploadType.BINARY_CONTENT) {
-      res = await uploadRaw();
-      if ([404, 405, 414, 422].includes(res.status)) {
+    try {
+      if (FileSystem.FileSystemUploadType.BINARY_CONTENT) {
+        res = await uploadRaw();
+        if ([404, 405, 414, 422].includes(res.status)) {
+          res = await uploadMultipart();
+        }
+      } else {
         res = await uploadMultipart();
       }
-    } else {
-      res = await uploadMultipart();
+    } catch (uploadErr) {
+      // Raw native rejection from ExponentFileSystem — sanitize before propagating.
+      console.warn(
+        '[Uploader] uploadAsync native error (sanitized for UI):',
+        item.relativePath,
+        uploadErr?.message
+      );
+      throw new Error(toUserFriendlyError(uploadErr));
     }
 
     onProgress && onProgress(item.size || 0);
