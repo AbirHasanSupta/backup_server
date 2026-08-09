@@ -35,7 +35,7 @@ from storage import file_exists, save_fileobj, save_upload_stream, full_path_for
 
 router = APIRouter()
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -634,3 +634,133 @@ async def delete_sync_sessions(
     verify_auth(authorization, device_id)
     clear_sync_sessions(device_id=device_id)
     return {"ok": True}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Shared Directories  (read-only browse + download from arbitrary PC folders)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _get_shared_dirs() -> list[dict]:
+    """Return the current SHARED_DIRS list from live config."""
+    return load_config().get("SHARED_DIRS", [])
+
+
+def _find_shared_dir(source_id: str) -> dict | None:
+    """Return the shared-dir entry matching *source_id*, or None."""
+    return next((d for d in _get_shared_dirs() if d.get("id") == source_id), None)
+
+
+@router.get("/shared/list")
+async def list_shared_sources(
+        device_id: str | None = None,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    """
+    Return the list of shared directories configured in the desktop app.
+    Only id + label are exposed — the real filesystem path is never sent.
+    Accepts an optional device_id so that paired-device tokens are accepted.
+    """
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    dirs = _get_shared_dirs()
+    return {
+        "sources": [
+            {"id": d["id"], "label": d["label"]}
+            for d in dirs
+            if d.get("id") and d.get("label")
+        ]
+    }
+
+
+@router.get("/shared/{source_id}/files")
+async def list_shared_files(
+        source_id: str,
+        device_id: str | None = None,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    """
+    Recursively list all files inside the shared directory identified by
+    *source_id*.  Returns paths relative to the shared-dir root.
+    Accepts an optional device_id so that paired-device tokens are accepted.
+    """
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+
+    entry = _find_shared_dir(source_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Shared source not found")
+
+    root = os.path.abspath(entry["path"])
+    if not os.path.isdir(root):
+        return {"files": [], "warning": "Directory does not exist on server"}
+
+    files = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for fname in filenames:
+            full = os.path.join(dirpath, fname)
+            try:
+                stat = os.stat(full)
+                rel = os.path.relpath(full, root).replace("\\", "/")
+                files.append({
+                    "path": rel,
+                    "size": stat.st_size,
+                    "modified_time": int(stat.st_mtime),
+                })
+            except OSError:
+                continue
+
+    return {"files": files, "source_id": source_id, "label": entry["label"]}
+
+
+@router.get("/shared/{source_id}/download")
+async def download_shared_file(
+        source_id: str,
+        relative_path: str,
+        device_id: str | None = None,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    """
+    Stream a file from a shared directory.
+    `relative_path` must be relative to that shared directory's root.
+    Path-traversal is blocked: the resolved absolute path must remain inside
+    the configured shared directory.
+    Accepts an optional device_id so that paired-device tokens are accepted.
+    """
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+
+    entry = _find_shared_dir(source_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Shared source not found")
+
+    root = os.path.abspath(entry["path"])
+    if not os.path.isdir(root):
+        raise HTTPException(status_code=404, detail="Shared directory not found on server")
+
+    # Sanitize + path-traversal guard
+    safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
+    full_path = os.path.abspath(os.path.join(root, safe_rel))
+    if os.path.commonpath([root, full_path]) != root:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    ext = os.path.splitext(full_path)[1].lower()
+    mime = _MIME_MAP.get(ext, "application/octet-stream")
+    file_size = os.path.getsize(full_path)
+
+    def _stream():
+        with open(full_path, "rb") as fh:
+            while chunk := fh.read(1024 * 1024):
+                yield chunk
+
+    filename = os.path.basename(full_path)
+    return StreamingResponse(
+        _stream(),
+        media_type=mime,
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Content-Length": str(file_size),
+        },
+    )

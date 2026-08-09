@@ -1176,6 +1176,38 @@ class BackupServerApp(ctk.CTk):
         ).pack(side="left", padx=12)
 
 
+        # ── SHARED FOLDERS ────────────────────────────────────────────────
+        sfd_card = settings_card("Shared Folders")
+
+        # Info hint
+        hint_row = ctk.CTkFrame(sfd_card, fg_color="transparent")
+        hint_row.pack(fill="x", padx=18, pady=(14, 0))
+        ctk.CTkLabel(
+            hint_row,
+            text="📂  Pick any folder on this PC. It will appear in the Android Restore tab under\n"
+                 "'Shared Folders', allowing you to browse and download its files on your phone.",
+            font=FONT_SMALL, text_color=C_MUTED,
+            justify="left", wraplength=520,
+        ).pack(anchor="w")
+
+        # Scroll list for current shared folders
+        self._shared_dirs_list_frame = ctk.CTkFrame(sfd_card, fg_color="transparent")
+        self._shared_dirs_list_frame.pack(fill="x", padx=18, pady=(10, 0))
+
+        # Add-folder button row
+        add_btn_row = ctk.CTkFrame(sfd_card, fg_color="transparent")
+        add_btn_row.pack(fill="x", padx=18, pady=(10, 14))
+        ctk.CTkButton(
+            add_btn_row, text="+ Add Folder", width=150, height=38,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
+            text_color=C_ACCENT, border_width=1, border_color=C_BORDER,
+            corner_radius=12, font=FONT_BODY,
+            command=self._add_shared_folder,
+        ).pack(side="left")
+
+        # Initialise list from current config
+        self._shared_dirs: list[dict] = list(cfg.get("SHARED_DIRS", []))
+        self._refresh_shared_dirs_list()
 
         # ── Save button ───────────────────────────────────────────────────
         ctk.CTkButton(
@@ -1194,11 +1226,105 @@ class BackupServerApp(ctk.CTk):
 
         return frame
 
+
     def _browse_root(self):
         folder = filedialog.askdirectory(title="Select Backup Root Folder")
         if folder:
             self._e_root.delete(0, "end")
             self._e_root.insert(0, folder)
+
+    # ── Shared Folders helpers ─────────────────────────────────────────
+
+    def _refresh_shared_dirs_list(self):
+        """Re-render the list of shared folder entries in the settings card."""
+        for w in self._shared_dirs_list_frame.winfo_children():
+            w.destroy()
+
+        if not self._shared_dirs:
+            ctk.CTkLabel(
+                self._shared_dirs_list_frame,
+                text="No shared folders added yet.",
+                font=FONT_SMALL, text_color=C_MUTED,
+            ).pack(anchor="w", pady=(0, 4))
+            return
+
+        for idx, entry in enumerate(self._shared_dirs):
+            row = ctk.CTkFrame(
+                self._shared_dirs_list_frame,
+                fg_color=C_ELEVATED, corner_radius=10,
+                border_width=1, border_color=C_BORDER,
+            )
+            row.pack(fill="x", pady=(0, 6))
+            row.grid_columnconfigure(1, weight=1)
+
+            # Folder icon badge
+            icon_badge = ctk.CTkFrame(row, width=34, height=34, fg_color=C_SOFT_BLUE, corner_radius=8)
+            icon_badge.grid(row=0, column=0, rowspan=2, padx=(10, 0), pady=8)
+            icon_badge.grid_propagate(False)
+            ctk.CTkLabel(icon_badge, text="📂", font=ctk.CTkFont(size=16)).pack(expand=True)
+
+            # Editable label entry
+            lbl_var = tk.StringVar(value=entry.get("label", f"Folder {idx + 1}"))
+            lbl_entry = ctk.CTkEntry(
+                row, textvariable=lbl_var, height=26,
+                fg_color=C_SURFACE, border_color=C_BORDER, border_width=1,
+                text_color=C_TEXT, corner_radius=7, font=FONT_BODY,
+            )
+            lbl_entry.grid(row=0, column=1, sticky="ew", padx=(10, 8), pady=(8, 2))
+
+            # Keep label in sync as user types
+            def _on_label_change(var=lbl_var, i=idx):
+                if i < len(self._shared_dirs):
+                    self._shared_dirs[i]["label"] = var.get()
+            lbl_var.trace_add("write", lambda *_, fn=_on_label_change: fn())
+
+            # Path label (truncated)
+            path_text = entry.get("path", "")
+            ctk.CTkLabel(
+                row, text=path_text, font=FONT_SMALL, text_color=C_MUTED,
+                anchor="w", wraplength=440,
+            ).grid(row=1, column=1, sticky="ew", padx=(10, 8), pady=(0, 8))
+
+            # Remove button
+            def _remove(i=idx):
+                self._remove_shared_folder(i)
+            ctk.CTkButton(
+                row, text="Remove", width=76, height=30,
+                fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
+                text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
+                font=FONT_SMALL, corner_radius=8,
+                command=_remove,
+            ).grid(row=0, column=2, rowspan=2, padx=(0, 10))
+
+    def _add_shared_folder(self):
+        """Open a directory picker and add the result to the shared dirs list."""
+        folder = filedialog.askdirectory(title="Select Folder to Share with Android")
+        if not folder:
+            return
+        folder = os.path.abspath(folder)
+        # Avoid duplicates
+        if any(os.path.abspath(d.get("path", "")) == folder for d in self._shared_dirs):
+            messagebox.showinfo("Shared Folders", "That folder is already in the list.")
+            return
+        # Generate a stable ID
+        new_id = f"shared_{len(self._shared_dirs)}"
+        # Make sure it's unique even if some were removed
+        existing_ids = {d.get("id") for d in self._shared_dirs}
+        counter = 0
+        while new_id in existing_ids:
+            counter += 1
+            new_id = f"shared_{len(self._shared_dirs) + counter}"
+        label = os.path.basename(folder) or folder
+        self._shared_dirs.append({"id": new_id, "label": label, "path": folder})
+        self._refresh_shared_dirs_list()
+
+    def _remove_shared_folder(self, idx: int):
+        """Remove the shared folder entry at *idx*."""
+        if 0 <= idx < len(self._shared_dirs):
+            removed = self._shared_dirs.pop(idx)
+            add_log(f"📂 Removed shared folder: {removed.get('label', '')}")
+            self._refresh_shared_dirs_list()
+
 
     def _save_settings(self):
         try:
@@ -1214,6 +1340,7 @@ class BackupServerApp(ctk.CTk):
             "API_KEY":          self._e_key.get().strip() or "YOUR_SECRET_KEY",
             "REQUIRE_APPROVAL": bool(self._sw_approval.get()),
             "THEME_MODE":       "dark" if bool(self._sw_dark_mode.get()) else "light",
+            "SHARED_DIRS":      list(self._shared_dirs),
         }
         save_config(cfg)
         add_log("Settings saved - restarting server")

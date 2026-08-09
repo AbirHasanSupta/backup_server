@@ -66,3 +66,82 @@ export async function getFilePreviewUrl(relativePath) {
     `&token=${encodeURIComponent(key)}`
   );
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared Directories  (read-only folders configured in the Desktop app)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Return the list of shared sources configured on the server.
+ * @returns {Promise<Array<{id: string, label: string}>>}
+ */
+export async function listSharedSources() {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/shared/list?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Shared list failed (${res.status})`);
+  return (await res.json()).sources ?? [];
+}
+
+/**
+ * List all files inside a shared directory source.
+ * @param {string} sourceId — the source id from listSharedSources()
+ * @returns {Promise<Array<{path: string, size: number, modified_time: number}>>}
+ */
+export async function listSharedFiles(sourceId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/files?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Shared files failed (${res.status})`);
+  const data = await res.json();
+  if (data.warning) console.warn('[SharedDir]', data.warning);
+  return data.files ?? [];
+}
+
+/**
+ * Download a file from a shared directory.
+ * @param {string} sourceId      — the source id
+ * @param {string} relativePath  — path relative to the shared dir root
+ * @param {string} destUri       — local file URI to write into
+ * @param {(written: number, total: number) => void} [onProgress]
+ */
+export async function downloadSharedFile(sourceId, relativePath, destUri, onProgress) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const url =
+    `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/download` +
+    `?relative_path=${encodeURIComponent(relativePath)}` +
+    `&device_id=${encodeURIComponent(deviceId)}`;
+
+  const downloadResumable = FileSystem.createDownloadResumable(
+    url,
+    destUri,
+    { headers: { Authorization: `Bearer ${key}` } },
+    (progress) => {
+      onProgress?.(progress.totalBytesWritten, progress.totalBytesExpectedToWrite);
+    },
+  );
+  return downloadResumable.downloadAsync();
+}
+
+
+/**
+ * Build the full authenticated URL for a shared file preview
+ * (auth via ?token= query param since expo-av doesn't support custom headers on Android).
+ * @param {string} sourceId
+ * @param {string} relativePath
+ * @returns {Promise<string>}
+ */
+export async function getSharedFilePreviewUrl(sourceId, relativePath) {
+  const { ip, port, key, deviceId } = await getConfig();
+  return (
+    `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/download` +
+    `?relative_path=${encodeURIComponent(relativePath)}` +
+    `&device_id=${encodeURIComponent(deviceId)}` +
+    `&token=${encodeURIComponent(key)}`
+  );
+}

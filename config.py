@@ -42,6 +42,9 @@ _DEFAULTS = {
     "THEME_MODE": "light",
     "SSL_CERT": os.path.join(APP_DATA_DIR, "cert.pem"),
     "SSL_KEY": os.path.join(APP_DATA_DIR, "key.pem"),
+    # List of dicts: [{id: str, label: str, path: str}, ...]
+    # IDs are stable slugs like "shared_0", "shared_1", etc.
+    "SHARED_DIRS": [],
 }
 
 
@@ -111,3 +114,4 @@ HOST = _cfg["HOST"]
 PORT = int(_cfg["PORT"])
 DB_PATH = _cfg["DB_PATH"]
 REQUIRE_APPROVAL = bool(_cfg.get("REQUIRE_APPROVAL", True))
+SHARED_DIRS: list = _cfg.get("SHARED_DIRS", [])
