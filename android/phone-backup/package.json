@@ -6,6 +6,7 @@
     "@expo/ui": "~57.0.7",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~57.0.8",
+    "expo-av": "~16.0.8",
     "expo-background-fetch": "~57.0.6",
     "expo-build-properties": "~57.0.7",
     "expo-constants": "~57.0.3",
@@ -55,7 +56,8 @@
     "doctor": {
       "reactNativeDirectoryCheck": {
         "exclude": [
-          "react-native-background-actions"
+          "react-native-background-actions",
+          "expo-av"
         ]
       }
     }

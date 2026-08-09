@@ -487,10 +487,28 @@ async def upload_file(
 # ──────────────────────────────────────────────────────────────────────────────
 
 @router.get("/files/list")
-async def list_files(device_id: str, authorization: str = Header(None)):
-    verify_auth(authorization, device_id)
+async def list_files(device_id: str, authorization: str = Header(None), token: str = None):
+    # Accept auth either via Authorization header or ?token= query param
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
     return {"files": get_files_for_device(device_id)}
+
+
+_MIME_MAP = {
+    # Images
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp", ".heic": "image/heic",
+    ".heif": "image/heif", ".bmp": "image/bmp", ".tiff": "image/tiff",
+    ".tif": "image/tiff", ".avif": "image/avif", ".svg": "image/svg+xml",
+    # Video
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska", ".webm": "video/webm", ".3gp": "video/3gpp",
+    ".m4v": "video/x-m4v", ".wmv": "video/x-ms-wmv",
+    # Audio
+    ".mp3": "audio/mpeg", ".aac": "audio/aac", ".wav": "audio/wav",
+    ".flac": "audio/flac", ".ogg": "audio/ogg", ".m4a": "audio/mp4",
+    ".opus": "audio/opus", ".wma": "audio/x-ms-wma",
+}
 
 
 @router.get("/files/download")
@@ -498,12 +516,20 @@ async def download_file(
         relative_path: str,
         device_id: str,
         authorization: str = Header(None),
+        token: str = None,
 ):
-    verify_auth(authorization, device_id)
+    # Accept auth either via Authorization header or ?token= query param
+    # (expo-av on Android cannot set custom headers, so we support the token QP)
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
     path = full_path_for(relative_path, device_id=device_id)
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
+
+    ext = os.path.splitext(path)[1].lower()
+    mime = _MIME_MAP.get(ext, "application/octet-stream")
+
+    file_size = os.path.getsize(path)
 
     def stream():
         with open(path, "rb") as f:
@@ -513,8 +539,11 @@ async def download_file(
     filename = os.path.basename(path)
     return StreamingResponse(
         stream(),
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        media_type=mime,
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            "Content-Length": str(file_size),
+        },
     )
 
 

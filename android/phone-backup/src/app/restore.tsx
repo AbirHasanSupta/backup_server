@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,7 +11,13 @@ import {
   LayoutAnimation,
   UIManager,
   Platform,
+  Modal,
+  ScrollView,
+  Dimensions,
+  Pressable,
 } from 'react-native';
+import { Image } from 'expo-image';
+import { Video, ResizeMode, AVPlaybackStatusSuccess } from 'expo-av';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -19,13 +25,15 @@ import * as MediaLibrary from 'expo-media-library/legacy';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
-import { listServerFiles, downloadFile } from '../../downloader';
+import { listServerFiles, downloadFile, getFilePreviewUrl } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
+
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -41,23 +49,57 @@ type RemoteFile = {
 
 /** A node in the recursive folder tree */
 type TreeNode = {
-  /** Segment name, e.g. "WhatsApp" or "photo.jpg" */
   name: string;
-  /** Full path segments joined — used as a stable key */
   key: string;
   isFolder: boolean;
-  /** Populated only when isFolder=false */
   file?: RemoteFile;
   children: TreeNode[];
-  /** Total bytes under this node (recursive) */
   totalSize: number;
-  /** Total leaf file count under this node */
   fileCount: number;
   isExpanded: boolean;
 };
 
+type SortField = 'name' | 'date' | 'type' | 'size';
+type SortDir   = 'asc' | 'desc';
+
+type FileCategory = 'image' | 'video' | 'audio' | 'other';
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers
+// File-type helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+const IMAGE_EXTS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'bmp', 'tiff', 'tif', 'avif']);
+const VIDEO_EXTS = new Set(['mp4', 'mov', 'avi', 'mkv', 'webm', '3gp', 'm4v', 'wmv', 'flv', 'ts', 'mts']);
+const AUDIO_EXTS = new Set(['mp3', 'aac', 'wav', 'flac', 'ogg', 'm4a', 'opus', 'wma', 'aiff']);
+
+function getExt(name: string): string {
+  return (name.split('.').pop() ?? '').toLowerCase();
+}
+
+function getFileCategory(name: string): FileCategory {
+  const ext = getExt(name);
+  if (IMAGE_EXTS.has(ext)) return 'image';
+  if (VIDEO_EXTS.has(ext)) return 'video';
+  if (AUDIO_EXTS.has(ext)) return 'audio';
+  return 'other';
+}
+
+function isMediaExtension(ext: string): boolean {
+  return IMAGE_EXTS.has(ext) || VIDEO_EXTS.has(ext) || AUDIO_EXTS.has(ext);
+}
+
+/** Returns a color/icon for a file category to use in the metadata card */
+function categoryMeta(cat: FileCategory): { icon: string; iosIcon: string; label: string } {
+  switch (cat) {
+    case 'image': return { icon: 'image', iosIcon: 'photo', label: 'Image' };
+    case 'video': return { icon: 'videocam', iosIcon: 'video', label: 'Video' };
+    case 'audio': return { icon: 'music_note', iosIcon: 'music.note', label: 'Audio' };
+    default:      return { icon: 'insert_drive_file', iosIcon: 'doc', label: 'File' };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Format helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 function formatSize(bytes: number) {
@@ -67,82 +109,44 @@ function formatSize(bytes: number) {
   return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
-/**
- * Android SAF paths are stored as e.g. "primary:Pictures/WhatsApp/photo.jpg".
- * Strip the "volume:" prefix so the path is a valid relative filesystem path
- * that can be safely appended to documentDirectory.
- *
- * Examples:
- *   "primary:Pictures/WhatsApp/photo.jpg" → "Pictures/WhatsApp/photo.jpg"
- *   "secondary:DCIM/Camera/img.jpg"       → "secondary/DCIM/Camera/img.jpg"
- *   "Pictures/Camera/img.jpg"              → "Pictures/Camera/img.jpg"  (unchanged)
- */
+function formatDate(ts: number): string {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleDateString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+  });
+}
+
 function sanitizeRelativePath(raw: string): string {
-  // Normalise backslashes first
   const normalised = raw.replace(/\\/g, '/');
-  // Match an optional Android volume prefix like "primary:" or "1234-ABCD:"
   const match = normalised.match(/^([^/]+):(.+)$/);
   if (!match) return normalised;
   const [, volume, rest] = match;
-  // "primary" volume is the internal storage root — just use the rest
   if (volume.toLowerCase() === 'primary') return rest;
-  // Other volumes (SD-card, etc.) — prefix with the volume name as a folder
   return `${volume}/${rest}`;
 }
 
-/**
- * Returns true for file extensions that MediaLibrary can save to the gallery.
- * These files are routed through MediaLibrary.saveToLibraryAsync() so they
- * appear in the phone's Photos / Gallery app.
- */
-function isMediaExtension(ext: string): boolean {
-  const IMAGE_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'heif', 'bmp', 'tiff', 'tif', 'avif', 'svg'];
-  const VIDEO_EXTS = ['mp4', 'mov', 'avi', 'mkv', 'webm', '3gp', 'm4v', 'wmv', 'flv', 'ts', 'mts'];
-  const AUDIO_EXTS = ['mp3', 'aac', 'wav', 'flac', 'ogg', 'm4a', 'opus', 'wma', 'aiff'];
-  return IMAGE_EXTS.includes(ext) || VIDEO_EXTS.includes(ext) || AUDIO_EXTS.includes(ext);
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Tree construction & helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
-/** Insert a file into the nested tree map, creating intermediate folders on the fly */
-function insertFileIntoTree(
-  node: TreeNode,
-  segments: string[],
-  file: RemoteFile,
-  depth: number,
-): void {
+function insertFileIntoTree(node: TreeNode, segments: string[], file: RemoteFile, depth: number): void {
   if (depth === segments.length - 1) {
-    // leaf — add file node
     node.children.push({
-      name: segments[depth],
-      key: file.path,
-      isFolder: false,
-      file,
-      children: [],
-      totalSize: file.size,
-      fileCount: 1,
-      isExpanded: false,
+      name: segments[depth], key: file.path, isFolder: false,
+      file, children: [], totalSize: file.size, fileCount: 1, isExpanded: false,
     });
     return;
   }
-  // intermediate folder
   const segName = segments[depth];
   const folderKey = segments.slice(0, depth + 1).join('/');
   let child = node.children.find(c => c.isFolder && c.name === segName);
   if (!child) {
-    child = {
-      name: segName,
-      key: folderKey,
-      isFolder: true,
-      children: [],
-      totalSize: 0,
-      fileCount: 0,
-      isExpanded: false,
-    };
+    child = { name: segName, key: folderKey, isFolder: true, children: [], totalSize: 0, fileCount: 0, isExpanded: false };
     node.children.push(child);
   }
   insertFileIntoTree(child, segments, file, depth + 1);
 }
 
-/** After building the tree, roll up sizes and counts bottom-up */
 function rollupStats(node: TreeNode): void {
   if (!node.isFolder) return;
   for (const child of node.children) rollupStats(child);
@@ -150,63 +154,28 @@ function rollupStats(node: TreeNode): void {
   node.fileCount = node.children.reduce((s, c) => s + c.fileCount, 0);
 }
 
-/** Sort children: folders first (alpha), then files (alpha) */
-function sortChildren(node: TreeNode): void {
-  node.children.sort((a, b) => {
-    if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
-  for (const child of node.children) if (child.isFolder) sortChildren(child);
-}
-
-/** Build a root-level tree from a flat file list */
 function buildTree(files: RemoteFile[]): TreeNode {
-  const root: TreeNode = {
-    name: '__root__',
-    key: '__root__',
-    isFolder: true,
-    children: [],
-    totalSize: 0,
-    fileCount: 0,
-    isExpanded: true,
-  };
+  const root: TreeNode = { name: '__root__', key: '__root__', isFolder: true, children: [], totalSize: 0, fileCount: 0, isExpanded: true };
   for (const file of files) {
-    // Use the sanitized path for display/folder hierarchy, but file.path stays
-    // as the server lookup key throughout the tree (file.path is never mutated).
     const displayPath = sanitizeRelativePath(file.path);
     const segments = displayPath.split('/').filter(Boolean);
     if (segments.length === 0) continue;
     if (segments.length === 1) {
-      root.children.push({
-        name: segments[0],
-        key: file.path,
-        isFolder: false,
-        file,
-        children: [],
-        totalSize: file.size,
-        fileCount: 1,
-        isExpanded: false,
-      });
+      root.children.push({ name: segments[0], key: file.path, isFolder: false, file, children: [], totalSize: file.size, fileCount: 1, isExpanded: false });
     } else {
       insertFileIntoTree(root, segments, file, 0);
     }
   }
   rollupStats(root);
-  sortChildren(root);
   return root;
 }
 
-/** Collect every leaf file path under a node (recursively) */
 function collectFilePaths(node: TreeNode): string[] {
   if (!node.isFolder) return node.file ? [node.file.path] : [];
   return node.children.flatMap(collectFilePaths);
 }
 
-/** Check selection state for a folder node */
-function folderSelectionState(
-  node: TreeNode,
-  selectedPaths: Set<string>,
-): 'none' | 'partial' | 'all' {
+function folderSelectionState(node: TreeNode, selectedPaths: Set<string>): 'none' | 'partial' | 'all' {
   const paths = collectFilePaths(node);
   if (paths.length === 0) return 'none';
   const selected = paths.filter(p => selectedPaths.has(p)).length;
@@ -216,7 +185,359 @@ function folderSelectionState(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Recursive tree renderer — fully self-contained component
+// Sort helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function sortTreeChildren(node: TreeNode, field: SortField, dir: SortDir): TreeNode {
+  if (!node.isFolder) return node;
+  const sorted = [...node.children].sort((a, b) => {
+    // Folders always float to the top regardless of sort
+    if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1;
+
+    let cmp = 0;
+    if (field === 'name') {
+      cmp = a.name.localeCompare(b.name);
+    } else if (field === 'size') {
+      cmp = a.totalSize - b.totalSize;
+    } else if (field === 'date') {
+      const ta = a.file?.uploaded_time ?? 0;
+      const tb = b.file?.uploaded_time ?? 0;
+      cmp = ta - tb;
+    } else if (field === 'type') {
+      const ea = getExt(a.name);
+      const eb = getExt(b.name);
+      cmp = ea.localeCompare(eb);
+      if (cmp === 0) cmp = a.name.localeCompare(b.name);
+    }
+    return dir === 'asc' ? cmp : -cmp;
+  });
+  return { ...node, children: sorted.map(c => sortTreeChildren(c, field, dir)) };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Preview Modal
+// ─────────────────────────────────────────────────────────────────────────────
+
+type PreviewState =
+  | { phase: 'loading' }
+  | { phase: 'ready'; localUri: string }
+  | { phase: 'error'; message: string };
+
+type PreviewModalProps = {
+  file: RemoteFile | null;
+  onClose: () => void;
+  onDownload: (file: RemoteFile) => void;
+  previewUrl: string | null;
+  colors: AppColors;
+};
+
+const PreviewModal = React.memo(function PreviewModal({
+  file, onClose, onDownload, previewUrl, colors,
+}: PreviewModalProps) {
+  const insets = useSafeAreaInsets();
+
+  const category = file ? getFileCategory(file.path) : 'other';
+  const fileName = file ? (file.path.split(/[/\\]/).pop() ?? file.path) : '';
+
+  // Compute the correct initial phase upfront so we never call setState
+  // synchronously inside an effect (which triggers cascading renders).
+  // 'other' files need no download, so they start in 'ready' immediately.
+  const initialState = useMemo<PreviewState>(() => {
+    if (!file || category === 'other') return { phase: 'ready', localUri: '' };
+    return { phase: 'loading' };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file?.path]);
+
+  const [state, setState] = useState<PreviewState>(initialState);
+
+  // Download into temp cache — only for previewable types (image/video/audio)
+  React.useEffect(() => {
+    if (!file || !previewUrl || category === 'other') return;
+
+    let cancelled = false;
+    const tmpUri =
+      (FileSystem.cacheDirectory ?? '') +
+      `preview_${Date.now()}_${fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+
+    (async () => {
+      try {
+        const result = await FileSystem.downloadAsync(previewUrl, tmpUri);
+        if (!cancelled) setState({ phase: 'ready', localUri: result.uri });
+      } catch (e: any) {
+        if (!cancelled)
+          setState({ phase: 'error', message: e?.message ?? 'Failed to load preview' });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file?.path, previewUrl]);
+
+  if (!file) return null;
+
+  const cat = categoryMeta(category);
+  const uploadedDate = formatDate(file.uploaded_time);
+  const modDate = formatDate(file.modified_time);
+
+  const renderContent = () => {
+    if (state.phase === 'loading') {
+      return (
+        <View style={pvStyles.centeredBox}>
+          <ActivityIndicator size="large" color={colors.primary} />
+          <Text style={[pvStyles.loadingText, { color: colors.textSecondary }]}>Loading preview…</Text>
+        </View>
+      );
+    }
+
+    if (state.phase === 'error') {
+      return (
+        <View style={pvStyles.centeredBox}>
+          <AppIcon androidName="error_outline" iosName="exclamationmark.circle" color={colors.error} size={40} />
+          <Text style={[pvStyles.errorText, { color: colors.error }]}>Preview failed</Text>
+          <Text style={[pvStyles.errorSub, { color: colors.textSecondary }]}>{state.message}</Text>
+        </View>
+      );
+    }
+
+    // ready
+    if (category === 'image') {
+      return (
+        <Image
+          source={{ uri: state.localUri }}
+          style={pvStyles.imageFull}
+          contentFit="contain"
+          transition={200}
+        />
+      );
+    }
+
+    if (category === 'video') {
+      return (
+        <View style={pvStyles.videoContainer}>
+          <Video
+            source={{ uri: state.localUri }}
+            style={pvStyles.videoFull}
+            resizeMode={ResizeMode.CONTAIN}
+            useNativeControls
+            shouldPlay={false}
+          />
+        </View>
+      );
+    }
+
+    if (category === 'audio') {
+      return (
+        <AudioPlayer uri={state.localUri} colors={colors} fileName={fileName} />
+      );
+    }
+
+    // other — metadata card
+    return (
+      <View style={pvStyles.metaCard}>
+        <View style={[pvStyles.metaIconWrap, { backgroundColor: colors.primarySoft }]}>
+          <AppIcon androidName={cat.icon} iosName={cat.iosIcon} color={colors.primary} size={48} />
+        </View>
+        <Text style={[pvStyles.metaFileName, { color: colors.text }]}>{fileName}</Text>
+        <View style={[pvStyles.metaTable, { borderColor: colors.surfaceBorder }]}>
+          <MetaRow label="Size" value={formatSize(file.size)} colors={colors} />
+          <MetaRow label="Uploaded" value={uploadedDate} colors={colors} />
+          <MetaRow label="Modified" value={modDate} colors={colors} />
+          <MetaRow label="Type" value={getExt(fileName).toUpperCase() || '—'} colors={colors} last />
+        </View>
+        <Text style={[pvStyles.metaNote, { color: colors.textMuted }]}>
+          This file type cannot be previewed. Download it to open on your device.
+        </Text>
+      </View>
+    );
+  };
+
+  return (
+    <Modal visible animationType="slide" transparent={false} onRequestClose={onClose} statusBarTranslucent>
+      <View style={[pvStyles.root, { backgroundColor: '#000' }]}>
+        <StatusBar barStyle="light-content" backgroundColor="#000" />
+
+        {/* Top bar */}
+        <View style={[pvStyles.topBar, { paddingTop: insets.top + Spacing.two, backgroundColor: 'rgba(0,0,0,0.85)' }]}>
+          <TouchableOpacity onPress={onClose} style={pvStyles.topBarBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <AppIcon androidName="close" iosName="xmark" color="#fff" size={22} />
+          </TouchableOpacity>
+          <Text style={pvStyles.topBarTitle} numberOfLines={1}>{fileName}</Text>
+          <TouchableOpacity
+            onPress={() => onDownload(file)}
+            style={[pvStyles.topBarBtn, pvStyles.downloadBtn]}
+          >
+            <AppIcon androidName="download" iosName="arrow.down.circle" color="#fff" size={20} />
+            <Text style={pvStyles.downloadBtnText}>Save</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Content */}
+        <View style={pvStyles.contentArea}>
+          {renderContent()}
+        </View>
+
+        {/* Bottom info strip */}
+        <View style={[pvStyles.bottomBar, { paddingBottom: insets.bottom + Spacing.two, backgroundColor: 'rgba(0,0,0,0.8)' }]}>
+          <Text style={pvStyles.bottomSize}>{formatSize(file.size)}</Text>
+          <Text style={pvStyles.bottomDot}>·</Text>
+          <Text style={pvStyles.bottomDate}>{uploadedDate}</Text>
+        </View>
+      </View>
+    </Modal>
+  );
+});
+
+// ── Tiny metadata row ─────────────────────────────────────────────────────────
+function MetaRow({ label, value, colors, last }: { label: string; value: string; colors: AppColors; last?: boolean }) {
+  return (
+    <View style={[pvStyles.metaRow, !last && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.surfaceBorder }]}>
+      <Text style={[pvStyles.metaLabel, { color: colors.textSecondary }]}>{label}</Text>
+      <Text style={[pvStyles.metaValue, { color: colors.text }]}>{value}</Text>
+    </View>
+  );
+}
+
+// ── Simple audio player ───────────────────────────────────────────────────────
+function AudioPlayer({ uri, colors, fileName }: { uri: string; colors: AppColors; fileName: string }) {
+  const videoRef = useRef<Video>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [positionMs, setPositionMs] = useState(0);
+  const [durationMs, setDurationMs] = useState(0);
+
+  const togglePlay = async () => {
+    if (!videoRef.current) return;
+    if (isPlaying) {
+      await videoRef.current.pauseAsync();
+    } else {
+      await videoRef.current.playAsync();
+    }
+  };
+
+  const formatMs = (ms: number) => {
+    const s = Math.floor(ms / 1000);
+    const m = Math.floor(s / 60);
+    return `${m}:${String(s % 60).padStart(2, '0')}`;
+  };
+
+  const progress = durationMs > 0 ? positionMs / durationMs : 0;
+
+  return (
+    <View style={pvStyles.audioPlayer}>
+      {/* Hidden video component for audio playback */}
+      <Video
+        ref={videoRef}
+        source={{ uri }}
+        style={{ width: 0, height: 0 }}
+        shouldPlay={false}
+        onPlaybackStatusUpdate={s => {
+          const ok = s as AVPlaybackStatusSuccess;
+          if (ok.isLoaded) {
+            setIsPlaying(ok.isPlaying);
+            setPositionMs(ok.positionMillis ?? 0);
+            setDurationMs(ok.durationMillis ?? 0);
+          }
+        }}
+      />
+      <View style={[pvStyles.audioIconWrap, { backgroundColor: colors.primarySoft }]}>
+        <AppIcon androidName="music_note" iosName="music.note" color={colors.primary} size={52} />
+      </View>
+      <Text style={pvStyles.audioFileName} numberOfLines={2}>{fileName}</Text>
+
+      {/* Progress bar */}
+      <View style={pvStyles.audioProgressBg}>
+        <View style={[pvStyles.audioProgressFill, { width: `${progress * 100}%`, backgroundColor: colors.primary }]} />
+      </View>
+      <View style={pvStyles.audioTimings}>
+        <Text style={pvStyles.audioTime}>{formatMs(positionMs)}</Text>
+        <Text style={pvStyles.audioTime}>{formatMs(durationMs)}</Text>
+      </View>
+
+      {/* Play/Pause */}
+      <TouchableOpacity onPress={togglePlay} style={[pvStyles.audioPlayBtn, { backgroundColor: colors.primary }]}>
+        <AppIcon
+          androidName={isPlaying ? 'pause' : 'play_arrow'}
+          iosName={isPlaying ? 'pause.fill' : 'play.fill'}
+          color="#fff"
+          size={28}
+        />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sort Bar
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SORT_OPTIONS: { field: SortField; label: string }[] = [
+  { field: 'name', label: 'Name' },
+  { field: 'date', label: 'Date' },
+  { field: 'type', label: 'Type' },
+  { field: 'size', label: 'Size' },
+];
+
+type SortBarProps = {
+  field: SortField;
+  dir: SortDir;
+  onChange: (field: SortField, dir: SortDir) => void;
+  colors: AppColors;
+};
+
+function SortBar({ field, dir, onChange, colors }: SortBarProps) {
+  const handlePress = (f: SortField) => {
+    if (f === field) {
+      onChange(f, dir === 'asc' ? 'desc' : 'asc');
+    } else {
+      onChange(f, 'asc');
+    }
+  };
+
+  return (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      contentContainerStyle={sortStyles.row}
+    >
+      {SORT_OPTIONS.map(opt => {
+        const active = opt.field === field;
+        return (
+          <TouchableOpacity
+            key={opt.field}
+            onPress={() => handlePress(opt.field)}
+            style={[
+              sortStyles.chip,
+              { borderColor: active ? colors.primary : colors.surfaceBorder,
+                backgroundColor: active ? colors.primarySoft : colors.surface },
+            ]}
+            activeOpacity={0.7}
+          >
+            <Text style={[sortStyles.chipLabel, { color: active ? colors.primary : colors.textSecondary }]}>
+              {opt.label}
+            </Text>
+            {active && (
+              <Text style={[sortStyles.chipArrow, { color: colors.primary }]}>
+                {dir === 'asc' ? '↑' : '↓'}
+              </Text>
+            )}
+          </TouchableOpacity>
+        );
+      })}
+    </ScrollView>
+  );
+}
+
+const sortStyles = StyleSheet.create({
+  row: { paddingHorizontal: Spacing.four, paddingVertical: Spacing.two, gap: Spacing.two, flexDirection: 'row' },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: Spacing.three, paddingVertical: 6, borderRadius: Radius.full, borderWidth: 1 },
+  chipLabel: { fontSize: TextScale.xs, fontWeight: '600' },
+  chipArrow: { fontSize: TextScale.sm, fontWeight: '700' },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tree node renderer
 // ─────────────────────────────────────────────────────────────────────────────
 
 type TreeNodeViewProps = {
@@ -225,133 +546,108 @@ type TreeNodeViewProps = {
   selectedPaths: Set<string>;
   onToggleNode: (node: TreeNode) => void;
   onToggleExpand: (nodeKey: string) => void;
+  onPreview: (file: RemoteFile) => void;
   styles: ReturnType<typeof createStyles>;
   colors: AppColors;
 };
 
 const TreeNodeView = React.memo(function TreeNodeView({
-  node,
-  depth,
-  selectedPaths,
-  onToggleNode,
-  onToggleExpand,
-  styles,
-  colors,
+  node, depth, selectedPaths, onToggleNode, onToggleExpand, onPreview, styles, colors,
 }: TreeNodeViewProps) {
   const indent = depth * 16;
 
   if (!node.isFolder) {
-    // ── File row ──────────────────────────────────────────────────────────
     const isSelected = selectedPaths.has(node.key);
+    const category = getFileCategory(node.name);
+    const catMeta = categoryMeta(category);
+
     return (
-      <TouchableOpacity
+      <Pressable
         style={[styles.fileRow, { paddingLeft: indent + Spacing.four }]}
-        onPress={() => onToggleNode(node)}
-        activeOpacity={0.7}
+        onPress={() => node.file && onPreview(node.file)}
+        onLongPress={() => onToggleNode(node)}
+        delayLongPress={350}
+        android_ripple={{ color: colors.primarySoft }}
       >
-        <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
-          {isSelected && (
+        {/* Checkbox — uses onPress at Pressable level; this View is purely visual */}
+        <View
+          style={[styles.checkbox, isSelected && styles.checkboxSelected]}
+        >
+          {isSelected ? (
             <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />
-          )}
+          ) : null}
         </View>
-        <AppIcon
-          androidName="insert_drive_file"
-          iosName="doc"
-          color={colors.textMuted}
-          size={16}
-        />
+
+        <AppIcon androidName={catMeta.icon} iosName={catMeta.iosIcon} color={colors.textMuted} size={16} />
+
         <View style={styles.fileInfo}>
-          <Text style={styles.fileName} numberOfLines={1}>
-            {node.name}
-          </Text>
-          <Text style={styles.fileSize}>{formatSize(node.file!.size)}</Text>
+          <Text style={styles.fileName} numberOfLines={1}>{node.name}</Text>
+          <View style={styles.fileMetaRow}>
+            <Text style={styles.fileSize}>{formatSize(node.file!.size)}</Text>
+            <Text style={styles.fileDot}>·</Text>
+            <Text style={styles.fileDate}>{formatDate(node.file!.uploaded_time)}</Text>
+          </View>
         </View>
-      </TouchableOpacity>
+
+        {/* Tap hint icon */}
+        <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={14} />
+      </Pressable>
     );
   }
 
-  // ── Folder row ────────────────────────────────────────────────────────
+  // ── Folder row ─────────────────────────────────────────────────────────
   const selState = folderSelectionState(node, selectedPaths);
   const isPartial = selState === 'partial';
   const isAllSelected = selState === 'all';
-  const checkboxStyle = [
-    styles.checkbox,
-    (isAllSelected || isPartial) && styles.checkboxSelected,
-    isPartial && styles.checkboxPartial,
-  ];
+  const checkboxStyle = [styles.checkbox, (isAllSelected || isPartial) && styles.checkboxSelected, isPartial && styles.checkboxPartial];
 
   return (
     <View>
       <View style={[styles.folderRow, { paddingLeft: indent + Spacing.four }]}>
-        {/* Expand/collapse chevron */}
-        <TouchableOpacity
-          style={styles.chevronBtn}
-          onPress={() => onToggleExpand(node.key)}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 4 }}
-        >
-          <AppIcon
-            androidName={node.isExpanded ? 'expand_more' : 'chevron_right'}
-            iosName={node.isExpanded ? 'chevron.down' : 'chevron.right'}
-            color={colors.textSecondary}
-            size={22}
-          />
+        <TouchableOpacity style={styles.chevronBtn} onPress={() => onToggleExpand(node.key)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 4 }}>
+          <AppIcon androidName={node.isExpanded ? 'expand_more' : 'chevron_right'} iosName={node.isExpanded ? 'chevron.down' : 'chevron.right'} color={colors.textSecondary} size={22} />
         </TouchableOpacity>
-
-        {/* Folder checkbox */}
-        <TouchableOpacity
-          style={checkboxStyle}
-          onPress={() => onToggleNode(node)}
-          hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
-        >
-          {isAllSelected && (
-            <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />
-          )}
+        <TouchableOpacity style={checkboxStyle} onPress={() => onToggleNode(node)} hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}>
+          {isAllSelected && <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />}
           {isPartial && <View style={styles.partialDot} />}
         </TouchableOpacity>
-
-        {/* Folder icon + name (also toggles expand) */}
-        <TouchableOpacity
-          style={styles.folderLabelBtn}
-          onPress={() => onToggleExpand(node.key)}
-          activeOpacity={0.7}
-        >
-          <AppIcon
-            androidName="folder"
-            iosName="folder.fill"
-            color={colors.primary}
-            size={18}
-          />
-          <Text style={styles.folderName} numberOfLines={1}>
-            {node.name}
-          </Text>
+        <TouchableOpacity style={styles.folderLabelBtn} onPress={() => onToggleExpand(node.key)} activeOpacity={0.7}>
+          <AppIcon androidName="folder" iosName="folder.fill" color={colors.primary} size={18} />
+          <Text style={styles.folderName} numberOfLines={1}>{node.name}</Text>
         </TouchableOpacity>
-
-        {/* Stats badge */}
         <View style={styles.folderBadge}>
-          <Text style={styles.folderBadgeText}>
-            {node.fileCount} {node.fileCount === 1 ? 'file' : 'files'}
-          </Text>
+          <Text style={styles.folderBadgeText}>{node.fileCount} {node.fileCount === 1 ? 'file' : 'files'}</Text>
           <Text style={styles.folderBadgeSize}>{formatSize(node.totalSize)}</Text>
         </View>
       </View>
-
-      {/* Children */}
-      {node.isExpanded &&
-        node.children.map(child => (
-          <TreeNodeView
-            key={child.key}
-            node={child}
-            depth={depth + 1}
-            selectedPaths={selectedPaths}
-            onToggleNode={onToggleNode}
-            onToggleExpand={onToggleExpand}
-            styles={styles}
-            colors={colors}
-          />
-        ))}
+      {node.isExpanded && node.children.map(child => (
+        <TreeNodeView
+          key={child.key} node={child} depth={depth + 1}
+          selectedPaths={selectedPaths} onToggleNode={onToggleNode}
+          onToggleExpand={onToggleExpand} onPreview={onPreview}
+          styles={styles} colors={colors}
+        />
+      ))}
     </View>
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tree mutation helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function deepCloneTree(node: TreeNode): TreeNode {
+  return { ...node, children: node.children.map(deepCloneTree) };
+}
+
+function findNodeByKey(node: TreeNode, key: string): TreeNode | null {
+  if (node.key === key) return node;
+  for (const child of node.children) {
+    const found = findNodeByKey(child, key);
+    if (found) return found;
+  }
+  return null;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main screen
@@ -367,22 +663,21 @@ export default function RestoreScreen() {
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [isFetching, setIsFetching] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState<{
-    current: number;
-    total: number;
-    fileName: string;
-  } | null>(null);
-  const [serverStatus, setServerStatus] = useState<
-    'connected' | 'disconnected' | 'unknown' | 'checking'
-  >('unknown');
+  const [downloadProgress, setDownloadProgress] = useState<{ current: number; total: number; fileName: string } | null>(null);
+  const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
+
+  // Sort state
+  const [sortField, setSortField] = useState<SortField>('date');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
+
+  // Preview state
+  const [previewFile, setPreviewFile] = useState<RemoteFile | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   // ── Server status ──────────────────────────────────────────────────────────
   const checkServer = useCallback(async () => {
     const ip = await getServerIp();
-    if (!ip) {
-      setServerStatus('unknown');
-      return;
-    }
+    if (!ip) { setServerStatus('unknown'); return; }
     setServerStatus('checking');
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
@@ -396,13 +691,16 @@ export default function RestoreScreen() {
     }
   }, []);
 
-  useFocusEffect(
-    useCallback(() => {
-      checkServer();
-    }, [checkServer]),
-  );
+  useFocusEffect(useCallback(() => { checkServer(); }, [checkServer]));
 
   const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
+
+  // ── Sorted tree ────────────────────────────────────────────────────────────
+  const sortedTree = useMemo(() => {
+    if (!tree) return null;
+    // sortTreeChildren already creates new node objects via spread — no prior clone needed
+    return sortTreeChildren(tree, sortField, sortDir);
+  }, [tree, sortField, sortDir]);
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
   const handleFetch = async () => {
@@ -420,6 +718,12 @@ export default function RestoreScreen() {
     }
   };
 
+  // ── Sort ───────────────────────────────────────────────────────────────────
+  const handleSortChange = useCallback((field: SortField, dir: SortDir) => {
+    setSortField(field);
+    setSortDir(dir);
+  }, []);
+
   // ── Expand / collapse ──────────────────────────────────────────────────────
   const handleToggleExpand = useCallback((nodeKey: string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -432,103 +736,69 @@ export default function RestoreScreen() {
     });
   }, []);
 
-  // ── Selection ──────────────────────────────────────────────────────────────
-  const handleToggleNode = useCallback(
-    (node: TreeNode) => {
-      const paths = collectFilePaths(node);
-      setSelectedPaths(prev => {
-        const next = new Set(prev);
-        const allSelected = paths.every(p => next.has(p));
-        if (allSelected) {
-          paths.forEach(p => next.delete(p));
-        } else {
-          paths.forEach(p => next.add(p));
-        }
-        return next;
-      });
-    },
-    [],
-  );
+  // ── Selection (long press) ─────────────────────────────────────────────────
+  const handleToggleNode = useCallback((node: TreeNode) => {
+    const paths = collectFilePaths(node);
+    setSelectedPaths(prev => {
+      const next = new Set(prev);
+      const allSelected = paths.every(p => next.has(p));
+      if (allSelected) paths.forEach(p => next.delete(p));
+      else paths.forEach(p => next.add(p));
+      return next;
+    });
+  }, []);
 
   const selectAll = () => {
-    if (selectedPaths.size === files.length) {
-      setSelectedPaths(new Set());
-    } else {
-      setSelectedPaths(new Set(files.map(f => f.path)));
-    }
+    if (selectedPaths.size === files.length) setSelectedPaths(new Set());
+    else setSelectedPaths(new Set(files.map(f => f.path)));
   };
 
-  // ── Download ───────────────────────────────────────────────────────────────
-  const handleDownload = async () => {
-    if (selectedPaths.size === 0) return;
+  // ── Download (selected) ────────────────────────────────────────────────────
+  // Hoisted above handleDownloadSingle so it can be referenced in that callback
+  const handleDownloadFiles = useCallback(async (pathSet: Set<string>) => {
+    if (pathSet.size === 0) return;
     setIsDownloading(true);
 
-    // Request media library permission once up-front (needed for images/videos/audio)
     const { status } = await MediaLibrary.requestPermissionsAsync();
     const canSaveToGallery = status === 'granted';
 
-    let index = 0;
-    let saved = 0;
-    let skipped = 0;
-    let failed = 0;
+    let index = 0, saved = 0, skipped = 0, failed = 0;
 
-    for (const path of selectedPaths) {
+    for (const path of pathSet) {
       const fileInfo = files.find(f => f.path === path);
       if (!fileInfo) continue;
 
       index++;
       const displayName = path.split(/[/\\]/).pop() ?? path;
-      setDownloadProgress({ current: index, total: selectedPaths.size, fileName: displayName });
+      setDownloadProgress({ current: index, total: pathSet.size, fileName: displayName });
 
       try {
-        if (!FileSystem.cacheDirectory) {
-          console.warn('cacheDirectory is null, skipping:', path);
-          failed++;
-          continue;
-        }
+        if (!FileSystem.cacheDirectory) { failed++; continue; }
 
         const localPath = sanitizeRelativePath(path);
         const ext = localPath.split('.').pop()?.toLowerCase() ?? '';
         const isMedia = isMediaExtension(ext);
 
-        // ── Strategy A: media file → save via MediaLibrary so it appears in Gallery ──
         if (isMedia && canSaveToGallery) {
-          // Download to a temp cache file first
           const tmpUri = FileSystem.cacheDirectory + 'restore_tmp_' + Date.now() + '_' + displayName;
-
-          // Skip if already in the library with the same size? We can't easily check,
-          // so we always re-download media files (user can deduplicate later).
           await downloadFile(path, tmpUri);
-
           try {
             await MediaLibrary.saveToLibraryAsync(tmpUri);
             saved++;
           } finally {
-            // Clean up temp file regardless of whether saveToLibrary succeeded
             await FileSystem.deleteAsync(tmpUri, { idempotent: true });
           }
           continue;
         }
 
-        // ── Strategy B: non-media (docs, APKs, etc.) → documentDirectory ────────────
-        if (!FileSystem.documentDirectory) {
-          console.warn('documentDirectory is null, skipping:', path);
-          failed++;
-          continue;
-        }
-
+        if (!FileSystem.documentDirectory) { failed++; continue; }
         const destUri = FileSystem.documentDirectory + localPath;
         const folderUri = destUri.substring(0, destUri.lastIndexOf('/'));
         const folderInfo = await FileSystem.getInfoAsync(folderUri);
-        if (!folderInfo.exists) {
-          await FileSystem.makeDirectoryAsync(folderUri, { intermediates: true });
-        }
+        if (!folderInfo.exists) await FileSystem.makeDirectoryAsync(folderUri, { intermediates: true });
 
         const existingInfo = await FileSystem.getInfoAsync(destUri);
-        if (existingInfo.exists && (existingInfo as any).size === fileInfo.size) {
-          skipped++;
-          continue;
-        }
+        if (existingInfo.exists && (existingInfo as any).size === fileInfo.size) { skipped++; continue; }
 
         await downloadFile(path, destUri);
         saved++;
@@ -545,15 +815,36 @@ export default function RestoreScreen() {
     if (saved > 0) parts.push(`${saved} saved to gallery / storage`);
     if (skipped > 0) parts.push(`${skipped} already present`);
     if (failed > 0) parts.push(`${failed} failed`);
-    Alert.alert(
-      'Restore Complete',
-      parts.join('\n') || 'Nothing was downloaded.',
-    );
+    Alert.alert('Restore Complete', parts.join('\n') || 'Nothing was downloaded.');
     setSelectedPaths(new Set());
-  };
+  }, [files]);
+
+  // ── Preview (single tap) ───────────────────────────────────────────────────
+  const handlePreview = useCallback(async (file: RemoteFile) => {
+    const url = await getFilePreviewUrl(file.path);
+    setPreviewUrl(url);
+    setPreviewFile(file);
+  }, []);
+
+  const closePreview = useCallback(() => {
+    setPreviewFile(null);
+    setPreviewUrl(null);
+  }, []);
+
+  // ── Download a single file triggered from the preview modal ───────────────
+  const handleDownloadSingle = useCallback(async (file: RemoteFile) => {
+    closePreview();
+    // Small delay so the modal animation completes before download begins
+    setTimeout(() => handleDownloadFiles(new Set([file.path])), 300);
+  }, [closePreview, handleDownloadFiles]);
+
+  const handleDownload = useCallback(
+    () => handleDownloadFiles(selectedPaths),
+    [handleDownloadFiles, selectedPaths],
+  );
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const rootChildren = tree?.children ?? [];
+  const rootChildren = sortedTree?.children ?? [];
 
   return (
     <View style={[styles.root, { backgroundColor: colors.bg }]}>
@@ -562,37 +853,22 @@ export default function RestoreScreen() {
       {/* Download progress banner */}
       {isDownloading && downloadProgress && (
         <View style={[styles.progressContainer, { paddingTop: insets.top + Spacing.two }]}>
-          <Text style={styles.progressText}>
-            Downloading {downloadProgress.current} / {downloadProgress.total}
-          </Text>
-          <Text style={styles.progressSubtext} numberOfLines={1}>
-            {downloadProgress.fileName}
-          </Text>
+          <Text style={styles.progressText}>Downloading {downloadProgress.current} / {downloadProgress.total}</Text>
+          <Text style={styles.progressSubtext} numberOfLines={1}>{downloadProgress.fileName}</Text>
           <View style={styles.progressBarBg}>
-            <View
-              style={[
-                styles.progressBarFill,
-                {
-                  width: `${(downloadProgress.current / downloadProgress.total) * 100}%`,
-                },
-              ]}
-            />
+            <View style={[styles.progressBarFill, { width: `${(downloadProgress.current / downloadProgress.total) * 100}%` }]} />
           </View>
         </View>
       )}
 
       {/* Page header */}
-      <View
-        style={[
-          styles.pageHeader,
-          { paddingTop: !isDownloading ? insets.top + Spacing.five : Spacing.four },
-        ]}
-      >
+      <View style={[styles.pageHeader, { paddingTop: !isDownloading ? insets.top + Spacing.five : Spacing.four }]}>
         <View>
           <Text style={styles.pageTitle}>Restore Files</Text>
-          <Text style={styles.pageSubtitle}>Download files from server</Text>
+          <Text style={styles.pageSubtitle}>
+            {files.length > 0 ? `${files.length} files on server` : 'Download files from server'}
+          </Text>
         </View>
-
         <View style={styles.headerButtons}>
           <TouchableOpacity
             onPress={handleFetch}
@@ -603,23 +879,13 @@ export default function RestoreScreen() {
               <ActivityIndicator size="small" color={colors.primary} />
             ) : (
               <>
-                <AppIcon
-                  androidName="sync"
-                  iosName="arrow.triangle.2.circlepath"
-                  color={colors.primary}
-                  size={16}
-                />
+                <AppIcon androidName="sync" iosName="arrow.triangle.2.circlepath" color={colors.primary} size={16} />
                 <Text style={[styles.actionBtnText, { color: colors.primary }]}>Fetch</Text>
               </>
             )}
           </TouchableOpacity>
-
           {files.length > 0 && (
-            <TouchableOpacity
-              onPress={selectAll}
-              style={[styles.actionBtn, isOffline && styles.disabledBtn]}
-              disabled={isDownloading || isOffline}
-            >
+            <TouchableOpacity onPress={selectAll} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isDownloading || isOffline}>
               <Text style={[styles.actionBtnText, { color: colors.primary }]}>
                 {selectedPaths.size === files.length ? 'Deselect All' : 'Select All'}
               </Text>
@@ -627,6 +893,19 @@ export default function RestoreScreen() {
           )}
         </View>
       </View>
+
+      {/* Sort bar (only when files are loaded) */}
+      {files.length > 0 && !isDownloading && (
+        <SortBar field={sortField} dir={sortDir} onChange={handleSortChange} colors={colors} />
+      )}
+
+      {/* Tap hint */}
+      {files.length > 0 && selectedPaths.size === 0 && (
+        <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
+          <AppIcon androidName="touch_app" iosName="hand.tap" color={colors.textMuted} size={13} />
+          <Text style={[styles.hintText, { color: colors.textMuted }]}>Tap to preview · Hold to select</Text>
+        </View>
+      )}
 
       {/* Selection info bar */}
       {selectedPaths.size > 0 && !isDownloading && (
@@ -647,36 +926,24 @@ export default function RestoreScreen() {
         keyExtractor={item => item.key}
         renderItem={({ item }) => (
           <TreeNodeView
-            node={item}
-            depth={0}
+            node={item} depth={0}
             selectedPaths={selectedPaths}
             onToggleNode={handleToggleNode}
             onToggleExpand={handleToggleExpand}
-            styles={styles}
-            colors={colors}
+            onPreview={handlePreview}
+            styles={styles} colors={colors}
           />
         )}
-        contentContainerStyle={[
-          styles.listContent,
-          { paddingBottom: BottomTabInset + Spacing.eight },
-        ]}
+        contentContainerStyle={[styles.listContent, { paddingBottom: BottomTabInset + Spacing.eight }]}
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
           !isFetching ? (
             <View style={styles.emptyContainer}>
               <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft }]}>
-                <AppIcon
-                  androidName="cloud_download"
-                  iosName="icloud.and.arrow.down"
-                  color={colors.primary}
-                  size={36}
-                  fallback="⬇️"
-                />
+                <AppIcon androidName="cloud_download" iosName="icloud.and.arrow.down" color={colors.primary} size={36} fallback="⬇️" />
               </View>
               <Text style={styles.emptyTitle}>No files fetched</Text>
-              <Text style={styles.emptySubtitle}>
-                Tap Fetch to see files available on the server.
-              </Text>
+              <Text style={styles.emptySubtitle}>Tap Fetch to see files available on the server.</Text>
             </View>
           ) : null
         }
@@ -685,37 +952,28 @@ export default function RestoreScreen() {
       {/* Download FAB */}
       {selectedPaths.size > 0 && !isDownloading && (
         <TouchableOpacity
-          style={[
-            styles.fab,
-            { bottom: BottomTabInset + Spacing.four },
-            isOffline && styles.disabledBtn,
-          ]}
+          style={[styles.fab, { bottom: BottomTabInset + Spacing.four }, isOffline && styles.disabledBtn]}
           onPress={handleDownload}
           disabled={isOffline}
         >
           <AppIcon androidName="download" iosName="arrow.down.circle" color={colors.white} size={22} />
-          <Text style={styles.fabText}>Restore {selectedPaths.size} Files</Text>
+          <Text style={styles.fabText}>Download {selectedPaths.size} {selectedPaths.size === 1 ? 'File' : 'Files'}</Text>
         </TouchableOpacity>
+      )}
+
+      {/* Preview modal — key forces a clean remount per file so state resets correctly */}
+      {previewFile && (
+        <PreviewModal
+          key={previewFile.path}
+          file={previewFile}
+          onClose={closePreview}
+          onDownload={handleDownloadSingle}
+          previewUrl={previewUrl}
+          colors={colors}
+        />
       )}
     </View>
   );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tree mutation helpers (immutable clones for React state)
-// ─────────────────────────────────────────────────────────────────────────────
-
-function deepCloneTree(node: TreeNode): TreeNode {
-  return { ...node, children: node.children.map(deepCloneTree) };
-}
-
-function findNodeByKey(node: TreeNode, key: string): TreeNode | null {
-  if (node.key === key) return node;
-  for (const child of node.children) {
-    const found = findNodeByKey(child, key);
-    if (found) return found;
-  }
-  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -724,240 +982,161 @@ function findNodeByKey(node: TreeNode, key: string): TreeNode | null {
 
 const createStyles = (colors: AppColors) =>
   StyleSheet.create({
-    root: {
-      flex: 1,
-    },
-    listContent: {
-      paddingHorizontal: Spacing.four,
-      paddingTop: Spacing.two,
-      flexGrow: 1,
-    },
+    root: { flex: 1 },
+    listContent: { paddingHorizontal: Spacing.four, paddingTop: Spacing.two, flexGrow: 1 },
     pageHeader: {
-      flexDirection: 'row',
-      alignItems: 'flex-start',
-      justifyContent: 'space-between',
-      paddingHorizontal: Spacing.five,
-      paddingBottom: Spacing.three,
+      flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between',
+      paddingHorizontal: Spacing.five, paddingBottom: Spacing.three,
     },
-    pageTitle: {
-      fontSize: TextScale.xl,
-      fontWeight: '800',
-      color: colors.text,
-      letterSpacing: -0.5,
-    },
-    pageSubtitle: {
-      fontSize: TextScale.sm,
-      color: colors.textSecondary,
-      fontWeight: '500',
-      marginTop: 2,
-    },
-    headerButtons: {
-      alignItems: 'flex-end',
-      gap: Spacing.two,
-    },
+    pageTitle: { fontSize: TextScale.xl, fontWeight: '800', color: colors.text, letterSpacing: -0.5 },
+    pageSubtitle: { fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '500', marginTop: 2 },
+    headerButtons: { alignItems: 'flex-end', gap: Spacing.two },
     actionBtn: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: Spacing.one,
-      paddingHorizontal: Spacing.three,
-      paddingVertical: Spacing.two,
-      borderRadius: Radius.md,
-      backgroundColor: colors.primarySoft,
+      flexDirection: 'row', alignItems: 'center', gap: Spacing.one,
+      paddingHorizontal: Spacing.three, paddingVertical: Spacing.two,
+      borderRadius: Radius.md, backgroundColor: colors.primarySoft,
     },
-    actionBtnText: {
-      fontSize: TextScale.xs,
-      fontWeight: '700',
+    actionBtnText: { fontSize: TextScale.xs, fontWeight: '700' },
+
+    // Hint bar
+    hintBar: {
+      flexDirection: 'row', alignItems: 'center', gap: 5,
+      paddingHorizontal: Spacing.five, paddingVertical: 5,
+      borderBottomWidth: StyleSheet.hairlineWidth,
     },
+    hintText: { fontSize: TextScale.xs },
 
     // Selection bar
     selectionBar: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingHorizontal: Spacing.five,
-      paddingVertical: Spacing.two,
-      borderBottomWidth: 1,
-      gap: Spacing.two,
+      flexDirection: 'row', alignItems: 'center',
+      paddingHorizontal: Spacing.five, paddingVertical: Spacing.two,
+      borderBottomWidth: 1, gap: Spacing.two,
     },
-    selectionBarText: {
-      fontSize: TextScale.sm,
-      fontWeight: '600',
-      flex: 1,
-    },
-    clearSelBtn: {
-      paddingHorizontal: Spacing.two,
-      paddingVertical: Spacing.one,
-    },
-    clearSelText: {
-      fontSize: TextScale.sm,
-      fontWeight: '500',
-    },
+    selectionBarText: { fontSize: TextScale.sm, fontWeight: '600', flex: 1 },
+    clearSelBtn: { paddingHorizontal: Spacing.two, paddingVertical: Spacing.one },
+    clearSelText: { fontSize: TextScale.sm, fontWeight: '500' },
 
     // Folder rows
     folderRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingRight: Spacing.three,
-      paddingVertical: Spacing.two,
-      gap: Spacing.two,
+      flexDirection: 'row', alignItems: 'center',
+      paddingRight: Spacing.three, paddingVertical: Spacing.two, gap: Spacing.two,
     },
-    chevronBtn: {
-      width: 28,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    folderLabelBtn: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: Spacing.two,
-      flex: 1,
-    },
-    folderName: {
-      fontSize: TextScale.base,
-      fontWeight: '600',
-      color: colors.text,
-      flex: 1,
-    },
-    folderBadge: {
-      alignItems: 'flex-end',
-    },
-    folderBadgeText: {
-      fontSize: TextScale.xs,
-      color: colors.textSecondary,
-    },
-    folderBadgeSize: {
-      fontSize: TextScale.xs,
-      color: colors.textMuted,
-    },
+    chevronBtn: { width: 28, alignItems: 'center', justifyContent: 'center' },
+    folderLabelBtn: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, flex: 1 },
+    folderName: { fontSize: TextScale.base, fontWeight: '600', color: colors.text, flex: 1 },
+    folderBadge: { alignItems: 'flex-end' },
+    folderBadgeText: { fontSize: TextScale.xs, color: colors.textSecondary },
+    folderBadgeSize: { fontSize: TextScale.xs, color: colors.textMuted },
 
     // File rows
     fileRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingRight: Spacing.three,
-      paddingVertical: Spacing.two,
-      gap: Spacing.two,
-      borderTopWidth: StyleSheet.hairlineWidth,
-      borderTopColor: colors.surfaceBorder,
+      flexDirection: 'row', alignItems: 'center',
+      paddingRight: Spacing.three, paddingVertical: Spacing.two + 2, gap: Spacing.two,
+      borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.surfaceBorder,
     },
-    fileInfo: {
-      flex: 1,
-    },
-    fileName: {
-      fontSize: TextScale.sm,
-      color: colors.text,
-      fontWeight: '500',
-    },
-    fileSize: {
-      fontSize: TextScale.xs,
-      color: colors.textMuted,
-      marginTop: 1,
-    },
+    fileInfo: { flex: 1 },
+    fileName: { fontSize: TextScale.sm, color: colors.text, fontWeight: '500' },
+    fileMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 },
+    fileSize: { fontSize: TextScale.xs, color: colors.textMuted },
+    fileDot: { fontSize: TextScale.xs, color: colors.textMuted },
+    fileDate: { fontSize: TextScale.xs, color: colors.textMuted },
 
     // Checkboxes
     checkbox: {
-      width: 20,
-      height: 20,
-      borderRadius: 5,
-      borderWidth: 2,
-      borderColor: colors.textSecondary,
-      alignItems: 'center',
-      justifyContent: 'center',
-      flexShrink: 0,
+      width: 20, height: 20, borderRadius: 5, borderWidth: 2,
+      borderColor: colors.textSecondary, alignItems: 'center', justifyContent: 'center', flexShrink: 0,
     },
-    checkboxSelected: {
-      backgroundColor: colors.primary,
-      borderColor: colors.primary,
-    },
-    checkboxPartial: {
-      backgroundColor: colors.primarySoft,
-      borderColor: colors.primary,
-    },
-    partialDot: {
-      width: 8,
-      height: 8,
-      borderRadius: 2,
-      backgroundColor: colors.primary,
-    },
+    checkboxSelected: { backgroundColor: colors.primary, borderColor: colors.primary },
+    checkboxPartial: { backgroundColor: colors.primarySoft, borderColor: colors.primary },
+    partialDot: { width: 8, height: 8, borderRadius: 2, backgroundColor: colors.primary },
 
     // FAB
     fab: {
-      position: 'absolute',
-      alignSelf: 'center',
-      flexDirection: 'row',
-      alignItems: 'center',
-      backgroundColor: colors.primary,
-      paddingVertical: Spacing.three,
-      paddingHorizontal: Spacing.six,
-      borderRadius: Radius.full,
-      gap: Spacing.two,
-      ...Shadows.soft,
+      position: 'absolute', alignSelf: 'center', flexDirection: 'row', alignItems: 'center',
+      backgroundColor: colors.primary, paddingVertical: Spacing.three, paddingHorizontal: Spacing.six,
+      borderRadius: Radius.full, gap: Spacing.two, ...Shadows.soft,
     },
-    fabText: {
-      color: colors.white,
-      fontWeight: '700',
-      fontSize: TextScale.md,
-    },
-    disabledBtn: {
-      opacity: 0.4,
-    },
+    fabText: { color: colors.white, fontWeight: '700', fontSize: TextScale.md },
+    disabledBtn: { opacity: 0.4 },
 
     // Empty state
     emptyContainer: {
-      flex: 1,
-      alignItems: 'center',
-      justifyContent: 'center',
-      paddingHorizontal: Spacing.seven,
-      paddingTop: Spacing.nine,
-      gap: Spacing.four,
+      flex: 1, alignItems: 'center', justifyContent: 'center',
+      paddingHorizontal: Spacing.seven, paddingTop: Spacing.nine, gap: Spacing.four,
     },
-    emptyIconWrap: {
-      width: 88,
-      height: 88,
-      borderRadius: Radius.xxl,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    emptyTitle: {
-      fontSize: TextScale.md,
-      fontWeight: '800',
-      color: colors.text,
-      textAlign: 'center',
-    },
-    emptySubtitle: {
-      fontSize: TextScale.sm,
-      color: colors.textSecondary,
-      textAlign: 'center',
-      lineHeight: 22,
-      fontWeight: '500',
-    },
+    emptyIconWrap: { width: 88, height: 88, borderRadius: Radius.xxl, alignItems: 'center', justifyContent: 'center' },
+    emptyTitle: { fontSize: TextScale.md, fontWeight: '800', color: colors.text, textAlign: 'center' },
+    emptySubtitle: { fontSize: TextScale.sm, color: colors.textSecondary, textAlign: 'center', lineHeight: 22, fontWeight: '500' },
 
     // Progress banner
     progressContainer: {
-      backgroundColor: colors.surface,
-      paddingHorizontal: Spacing.five,
-      paddingBottom: Spacing.three,
-      borderBottomWidth: 1,
-      borderBottomColor: colors.surfaceBorder,
+      backgroundColor: colors.surface, paddingHorizontal: Spacing.five,
+      paddingBottom: Spacing.three, borderBottomWidth: 1, borderBottomColor: colors.surfaceBorder,
     },
-    progressText: {
-      fontSize: TextScale.sm,
-      fontWeight: '700',
-      color: colors.text,
-      marginBottom: Spacing.one,
-    },
-    progressSubtext: {
-      fontSize: TextScale.xs,
-      color: colors.textSecondary,
-      marginBottom: Spacing.two,
-    },
-    progressBarBg: {
-      height: 6,
-      backgroundColor: colors.surfaceBorder,
-      borderRadius: Radius.full,
-      overflow: 'hidden',
-    },
-    progressBarFill: {
-      height: '100%',
-      backgroundColor: colors.primary,
-    },
+    progressText: { fontSize: TextScale.sm, fontWeight: '700', color: colors.text, marginBottom: Spacing.one },
+    progressSubtext: { fontSize: TextScale.xs, color: colors.textSecondary, marginBottom: Spacing.two },
+    progressBarBg: { height: 6, backgroundColor: colors.surfaceBorder, borderRadius: Radius.full, overflow: 'hidden' },
+    progressBarFill: { height: '100%', backgroundColor: colors.primary },
   });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Preview modal styles (dark-only, always on black bg)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const pvStyles = StyleSheet.create({
+  root: { flex: 1 },
+  topBar: {
+    flexDirection: 'row', alignItems: 'center', gap: Spacing.two,
+    paddingHorizontal: Spacing.four, paddingBottom: Spacing.three, zIndex: 10,
+  },
+  topBarTitle: {
+    flex: 1, color: '#fff', fontSize: TextScale.sm, fontWeight: '600',
+    textAlign: 'center',
+  },
+  topBarBtn: {
+    padding: Spacing.two, borderRadius: Radius.md,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  downloadBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: Spacing.three },
+  downloadBtnText: { color: '#fff', fontSize: TextScale.sm, fontWeight: '600' },
+
+  contentArea: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+
+  bottomBar: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: Spacing.five, paddingTop: Spacing.two, gap: 6,
+  },
+  bottomSize: { color: 'rgba(255,255,255,0.7)', fontSize: TextScale.xs },
+  bottomDot: { color: 'rgba(255,255,255,0.4)', fontSize: TextScale.xs },
+  bottomDate: { color: 'rgba(255,255,255,0.7)', fontSize: TextScale.xs },
+
+  centeredBox: { alignItems: 'center', gap: Spacing.three, padding: Spacing.six },
+  loadingText: { fontSize: TextScale.sm, marginTop: Spacing.two },
+  errorText: { fontSize: TextScale.base, fontWeight: '700' },
+  errorSub: { fontSize: TextScale.sm, textAlign: 'center' },
+
+  imageFull: { width: SCREEN_W, height: SCREEN_H * 0.72 },
+
+  videoContainer: { width: SCREEN_W, height: SCREEN_H * 0.65 },
+  videoFull: { width: '100%', height: '100%' },
+
+  // Audio player
+  audioPlayer: { alignItems: 'center', padding: Spacing.six, gap: Spacing.four, width: SCREEN_W },
+  audioIconWrap: { width: 100, height: 100, borderRadius: 50, alignItems: 'center', justifyContent: 'center' },
+  audioFileName: { color: '#fff', fontSize: TextScale.base, fontWeight: '600', textAlign: 'center', paddingHorizontal: Spacing.six },
+  audioProgressBg: { width: SCREEN_W * 0.8, height: 4, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: Radius.full, overflow: 'hidden' },
+  audioProgressFill: { height: '100%', borderRadius: Radius.full },
+  audioTimings: { flexDirection: 'row', justifyContent: 'space-between', width: SCREEN_W * 0.8 },
+  audioTime: { color: 'rgba(255,255,255,0.6)', fontSize: TextScale.xs },
+  audioPlayBtn: { width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center', marginTop: Spacing.two },
+
+  // Metadata card (other files)
+  metaCard: { alignItems: 'center', padding: Spacing.six, gap: Spacing.four, width: SCREEN_W * 0.9 },
+  metaIconWrap: { width: 96, height: 96, borderRadius: Radius.xxl, alignItems: 'center', justifyContent: 'center' },
+  metaFileName: { fontSize: TextScale.base, fontWeight: '700', textAlign: 'center', color: '#fff' },
+  metaTable: { width: '100%', borderRadius: Radius.lg, borderWidth: 1, overflow: 'hidden', backgroundColor: 'rgba(255,255,255,0.07)' },
+  metaRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: Spacing.four, paddingVertical: Spacing.three },
+  metaLabel: { fontSize: TextScale.sm, color: 'rgba(255,255,255,0.5)' },
+  metaValue: { fontSize: TextScale.sm, fontWeight: '600', color: '#fff' },
+  metaNote: { fontSize: TextScale.xs, textAlign: 'center', color: 'rgba(255,255,255,0.45)', lineHeight: 18 },
+});
