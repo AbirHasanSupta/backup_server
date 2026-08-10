@@ -1,11 +1,19 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { getServerIp, getServerPort, getApiKey, getDeviceId, getDeviceToken } from './settings';
 
-async function getConfig() {
+export async function getConfig() {
   const [ip, port, apiKey, deviceId, deviceToken] = await Promise.all([
     getServerIp(), getServerPort(), getApiKey(), getDeviceId(), getDeviceToken(),
   ]);
   return { ip, port, key: deviceToken || apiKey, deviceId };
+}
+
+export function buildPreviewUrl(config, relativePath, sourceMode, sourceId) {
+  if (!config || !config.ip || !config.port) return '';
+  if (sourceMode === 'shared' && sourceId) {
+    return `http://${config.ip}:${config.port}/shared/${encodeURIComponent(sourceId)}/download?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+  }
+  return `http://${config.ip}:${config.port}/files/download?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
 }
 
 /**

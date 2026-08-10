@@ -1259,7 +1259,7 @@ class BackupServerApp(ctk.CTk):
 
             # Folder icon badge
             icon_badge = ctk.CTkFrame(row, width=34, height=34, fg_color=C_SOFT_BLUE, corner_radius=8)
-            icon_badge.grid(row=0, column=0, rowspan=2, padx=(10, 0), pady=8)
+            icon_badge.grid(row=0, column=0, rowspan=3, padx=(10, 0), pady=8)
             icon_badge.grid_propagate(False)
             ctk.CTkLabel(icon_badge, text="📂", font=ctk.CTkFont(size=16)).pack(expand=True)
 
@@ -1283,7 +1283,41 @@ class BackupServerApp(ctk.CTk):
             ctk.CTkLabel(
                 row, text=path_text, font=FONT_SMALL, text_color=C_MUTED,
                 anchor="w", wraplength=440,
-            ).grid(row=1, column=1, sticky="ew", padx=(10, 8), pady=(0, 8))
+            ).grid(row=1, column=1, sticky="ew", padx=(10, 8), pady=(0, 2))
+
+            # Device tag checkboxes
+            dev_row = ctk.CTkFrame(row, fg_color="transparent")
+            dev_row.grid(row=2, column=1, sticky="ew", padx=(10, 8), pady=(0, 8))
+
+            devices = get_devices()
+            tagged = set(entry.get("device_ids", []))
+            if not devices:
+                ctk.CTkLabel(
+                    dev_row, text="No paired devices yet.",
+                    font=FONT_SMALL, text_color=C_MUTED,
+                ).pack(side="left")
+            for dev in devices:
+                did = dev.get("device_id")
+                if not did:
+                    continue
+                dvar = tk.BooleanVar(value=did in tagged or "all" in tagged)
+                def _on_toggle(i=idx, d=did, v=dvar):
+                    if i >= len(self._shared_dirs):
+                        return
+                    ids = set(self._shared_dirs[i].setdefault("device_ids", []))
+                    if v.get():
+                        ids.add(d)
+                    else:
+                        ids.discard(d)
+                        ids.discard("all")
+                    self._shared_dirs[i]["device_ids"] = list(ids)
+                    self._save_shared_dirs_to_config()
+                ctk.CTkCheckBox(
+                    dev_row, text=dev.get("device_name", did),
+                    variable=dvar, font=FONT_SMALL,
+                    command=_on_toggle,
+                    width=0, checkbox_width=16, checkbox_height=16,
+                ).pack(side="left", padx=(0, 10))
 
             # Remove button
             def _remove(i=idx):
@@ -1294,7 +1328,16 @@ class BackupServerApp(ctk.CTk):
                 text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
                 font=FONT_SMALL, corner_radius=8,
                 command=_remove,
-            ).grid(row=0, column=2, rowspan=2, padx=(0, 10))
+            ).grid(row=0, column=2, rowspan=3, padx=(0, 10))
+
+    def _save_shared_dirs_to_config(self):
+        """Save current _shared_dirs list to config.json immediately."""
+        try:
+            cfg = load_config()
+            cfg["SHARED_DIRS"] = list(self._shared_dirs)
+            save_config(cfg)
+        except Exception as e:
+            print(f"[DesktopApp] Error saving shared dirs config: {e}")
 
     def _add_shared_folder(self):
         """Open a directory picker and add the result to the shared dirs list."""
@@ -1315,7 +1358,8 @@ class BackupServerApp(ctk.CTk):
             counter += 1
             new_id = f"shared_{len(self._shared_dirs) + counter}"
         label = os.path.basename(folder) or folder
-        self._shared_dirs.append({"id": new_id, "label": label, "path": folder})
+        self._shared_dirs.append({"id": new_id, "label": label, "path": folder, "device_ids": []})
+        self._save_shared_dirs_to_config()
         self._refresh_shared_dirs_list()
 
     def _remove_shared_folder(self, idx: int):
@@ -1323,6 +1367,7 @@ class BackupServerApp(ctk.CTk):
         if 0 <= idx < len(self._shared_dirs):
             removed = self._shared_dirs.pop(idx)
             add_log(f"📂 Removed shared folder: {removed.get('label', '')}")
+            self._save_shared_dirs_to_config()
             self._refresh_shared_dirs_list()
 
 

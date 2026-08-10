@@ -10,6 +10,7 @@ import {
   Alert,
   Switch,
 } from 'react-native';
+import Constants from 'expo-constants';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import {
@@ -462,7 +463,7 @@ export default function SettingsScreen() {
         <SettingsCard styles={styles}>
           <View style={styles.aboutRow}>
             <Text style={styles.aboutLabel}>App version</Text>
-            <Text style={styles.aboutValue}>1.1.0</Text>
+            <Text style={styles.aboutValue}>{Constants.expoConfig?.version ?? '2.4.0'}</Text>
           </View>
           <View style={styles.divider} />
           <View style={styles.aboutRow}>

@@ -35,7 +35,7 @@ from storage import file_exists, save_fileobj, save_upload_stream, full_path_for
 
 router = APIRouter()
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "2.4.0"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -650,6 +650,30 @@ def _find_shared_dir(source_id: str) -> dict | None:
     return next((d for d in _get_shared_dirs() if d.get("id") == source_id), None)
 
 
+def _is_folder_tagged_for_device(
+    entry: dict,
+    device_id: str | None,
+    authorization: str | None = None,
+    query_token: str | None = None,
+) -> bool:
+    """
+    Check if a shared folder entry is tagged for the given device_id.
+    Device-specific sharing rules:
+    - Requests using the master API key have access to all shared directories.
+    - Device requests must supply device_id and match tagged device IDs (or 'all').
+    """
+    req_token = _extract_bearer(authorization) or query_token
+    if req_token and req_token == load_config()["API_KEY"]:
+        return True
+
+    if not device_id:
+        return False
+    tagged = entry.get("device_ids", [])
+    if not isinstance(tagged, list) or len(tagged) == 0:
+        return False
+    return device_id in tagged or "all" in tagged
+
+
 @router.get("/shared/list")
 async def list_shared_sources(
         device_id: str | None = None,
@@ -657,9 +681,8 @@ async def list_shared_sources(
         token: str = None,
 ):
     """
-    Return the list of shared directories configured in the desktop app.
+    Return the list of shared directories configured in the desktop app for this device.
     Only id + label are exposed — the real filesystem path is never sent.
-    Accepts an optional device_id so that paired-device tokens are accepted.
     """
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     dirs = _get_shared_dirs()
@@ -667,7 +690,7 @@ async def list_shared_sources(
         "sources": [
             {"id": d["id"], "label": d["label"]}
             for d in dirs
-            if d.get("id") and d.get("label")
+            if d.get("id") and d.get("label") and _is_folder_tagged_for_device(d, device_id, authorization, token)
         ]
     }
 
@@ -680,15 +703,16 @@ async def list_shared_files(
         token: str = None,
 ):
     """
-    Recursively list all files inside the shared directory identified by
-    *source_id*.  Returns paths relative to the shared-dir root.
-    Accepts an optional device_id so that paired-device tokens are accepted.
+    Recursively list all files inside the shared directory identified by *source_id*.
+    Only accessible if the folder is tagged for this device.
     """
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
 
     entry = _find_shared_dir(source_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Shared source not found")
+    if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
+        raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
     root = os.path.abspath(entry["path"])
     if not os.path.isdir(root):
@@ -722,16 +746,15 @@ async def download_shared_file(
 ):
     """
     Stream a file from a shared directory.
-    `relative_path` must be relative to that shared directory's root.
-    Path-traversal is blocked: the resolved absolute path must remain inside
-    the configured shared directory.
-    Accepts an optional device_id so that paired-device tokens are accepted.
+    Only accessible if the folder is tagged for this device.
     """
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
 
     entry = _find_shared_dir(source_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Shared source not found")
+    if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
+        raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
     root = os.path.abspath(entry["path"])
     if not os.path.isdir(root):

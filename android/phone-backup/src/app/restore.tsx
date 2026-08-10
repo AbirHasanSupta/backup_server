@@ -17,6 +17,7 @@ import {
   Pressable,
   PanResponder,
   Animated,
+  Easing,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -31,20 +32,23 @@ import { useAppTheme } from '@/hooks/use-app-theme';
 import {
   listServerFiles,
   downloadFile,
-  getFilePreviewUrl,
   listSharedSources,
   listSharedFiles,
   downloadSharedFile,
-  getSharedFilePreviewUrl,
+  getConfig,
+  buildPreviewUrl,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
+import { prunePreviewCache, clearAllDiskCache } from '@/utils/previewCacheManager';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+
+const getCurrentTimestamp = (): number => Date.now();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -61,6 +65,8 @@ type RemoteFile = {
   sha256?: string;
   uploaded_time?: number;
 };
+
+type ServerConfig = { ip: string; port: string; key: string; deviceId: string } | null;
 
 /** A node in the recursive folder tree */
 type TreeNode = {
@@ -206,7 +212,6 @@ function folderSelectionState(node: TreeNode, selectedPaths: Set<string>): 'none
 function sortTreeChildren(node: TreeNode, field: SortField, dir: SortDir): TreeNode {
   if (!node.isFolder) return node;
   const sorted = [...node.children].sort((a, b) => {
-    // Folders always float to the top regardless of sort
     if (a.isFolder !== b.isFolder) return a.isFolder ? -1 : 1;
 
     let cmp = 0;
@@ -252,7 +257,6 @@ function SourceSelector({
 
   return (
     <View style={[srcStyles.container, { backgroundColor: colors.surface, borderBottomColor: colors.surfaceBorder }]}>
-      {/* Pill tabs */}
       <View style={srcStyles.pillRow}>
         <TouchableOpacity
           onPress={() => onModeChange('phone')}
@@ -285,7 +289,6 @@ function SourceSelector({
         </TouchableOpacity>
       </View>
 
-      {/* Source dropdown row — only when in shared mode */}
       {mode === 'shared' && (
         <View style={srcStyles.sourceRow}>
           {isLoadingSources ? (
@@ -368,12 +371,10 @@ const srcStyles = StyleSheet.create({
     borderWidth: 1.5,
   },
   pillText: { fontSize: TextScale.xs, fontWeight: '700' },
-
   sourceRow: { paddingHorizontal: Spacing.four, paddingTop: Spacing.two },
   sourceLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   sourceLoadingText: { fontSize: TextScale.xs },
   noSourceText: { fontSize: TextScale.xs, lineHeight: 18 },
-
   sourcePicker: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -384,7 +385,6 @@ const srcStyles = StyleSheet.create({
     paddingVertical: Spacing.two + 2,
   },
   sourcePickerText: { flex: 1, fontSize: TextScale.sm, fontWeight: '500' },
-
   sourceMenu: {
     marginTop: Spacing.one,
     borderWidth: 1,
@@ -405,198 +405,374 @@ const srcStyles = StyleSheet.create({
 // Preview Modal
 // ─────────────────────────────────────────────────────────────────────────────
 
-type PreviewState =
-  | { phase: 'loading' }
-  | { phase: 'ready'; localUri: string }
-  | { phase: 'error'; message: string };
-
 type PreviewModalProps = {
   file: RemoteFile | null;
   fileList: RemoteFile[];      // ordered flat list of all previewable files
   currentIndex: number;        // index of `file` in fileList
+  sourceMode: SourceMode;
+  selectedSourceId: string | null;
+  serverConfig: ServerConfig;
   onClose: () => void;
-  onNavigate: (index: number) => void;  // called when user swipes to a neighbour
+  onNavigate: (index: number) => void;  // called when user navigates
   onDownload: (file: RemoteFile) => void;
-  previewUrl: string | null;
-  previewCache: React.MutableRefObject<Map<string, string>>; // path -> localUri cache
   colors: AppColors;
 };
 
 const PreviewModal = React.memo(function PreviewModal({
-  file, fileList, currentIndex, onClose, onNavigate, onDownload, previewUrl, previewCache, colors,
+  file, fileList, currentIndex, sourceMode, selectedSourceId, serverConfig,
+  onClose, onNavigate, onDownload, colors,
 }: PreviewModalProps) {
   const insets = useSafeAreaInsets();
 
-  const category = file ? getFileCategory(file.path) : 'other';
-  const fileName = file ? (file.path.split(/[/\\]/).pop() ?? file.path) : '';
-
-  const [state, setState] = useState<PreviewState>(() => {
-    if (!file || category === 'other') return { phase: 'ready', localUri: '' };
-    return { phase: 'loading' };
-  });
-
-  // Reset state when file changes
-  const [prevPath, setPrevPath] = useState<string | undefined>(file?.path);
-  if (file?.path !== prevPath) {
-    setPrevPath(file?.path);
-    if (!file || category === 'other') {
-      setState({ phase: 'ready', localUri: '' });
-    } else {
-      setState({ phase: 'loading' });
-    }
+  // Internal active file index state
+  const [activeIdx, setActiveIdx] = useState<number>(currentIndex);
+  
+  // Derived state synchronization
+  const [prevIndexProp, setPrevIndexProp] = useState(currentIndex);
+  if (currentIndex !== prevIndexProp) {
+    setPrevIndexProp(currentIndex);
+    setActiveIdx(currentIndex);
   }
 
-  // Unified effect: checks cache or downloads asynchronously
-  React.useEffect(() => {
-    if (!file || !previewUrl || category === 'other') return;
+  const currentFile = fileList[activeIdx] ?? file;
+  const category = currentFile ? getFileCategory(currentFile.path) : 'other';
+  const fileName = currentFile ? (currentFile.path.split(/[/\\]/).pop() ?? currentFile.path) : '';
 
-    let cancelled = false;
+  // Synchronous preview URL generator
+  const getUrlForFile = useCallback((f: RemoteFile | null): string => {
+    if (!f || !serverConfig) return '';
+    return buildPreviewUrl(serverConfig, f.path, sourceMode, selectedSourceId);
+  }, [serverConfig, sourceMode, selectedSourceId]);
 
-    (async () => {
-      // Check cache first
-      const cachedUri = previewCache.current.get(file.path);
-      if (cachedUri) {
-        if (!cancelled) setState({ phase: 'ready', localUri: cachedUri });
-        return;
-      }
+  const previewUrl = useMemo(() => getUrlForFile(currentFile), [getUrlForFile, currentFile]);
 
-      // Cache miss: download
-      const safeKey = file.path.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const tmpUri = (FileSystem.cacheDirectory ?? '') + `preview_${safeKey}`;
+  // Loading state for images
+  const [imgLoading, setImgLoading] = useState(category === 'image');
 
-      try {
-        const result = await FileSystem.downloadAsync(previewUrl, tmpUri);
-        if (!cancelled) {
-          previewCache.current.set(file.path, result.uri);
-          setState({ phase: 'ready', localUri: result.uri });
-        }
-      } catch (e: any) {
-        if (!cancelled) {
-          setState({ phase: 'error', message: e?.message ?? 'Failed to load preview' });
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [file, previewUrl, category, previewCache]);
-
-  // ── Swipe navigation via PanResponder ──────────────────────────────────────
+  // ── Swipe navigation animation ──────────────────────────────────────────────
   const [slideAnim] = useState(() => new Animated.Value(0));
-  const hasPrev = currentIndex > 0;
-  const hasNext = currentIndex < fileList.length - 1;
+  const [isAnimating, setIsAnimating] = useState(false);
 
-  const navigateTo = useCallback((idx: number) => {
-    const dir = idx > currentIndex ? -1 : 1;
-    // Slide-out, then switch file, then snap back
+  // Automatically prune disk cache to last 10 preview items
+  useEffect(() => {
+    prunePreviewCache(10);
+  }, [activeIdx]);
+
+  // Prefetch adjacent image files to make preview swiping instantaneous
+  useEffect(() => {
+    const nextFile = fileList[activeIdx + 1];
+    const prevFile = fileList[activeIdx - 1];
+    [nextFile, prevFile].forEach(f => {
+      if (f && getFileCategory(f.path) === 'image') {
+        const url = getUrlForFile(f);
+        if (url) {
+          Image.prefetch(url);
+        }
+      }
+    });
+  }, [activeIdx, fileList, getUrlForFile]);
+
+  const hasPrev = activeIdx > 0;
+  const hasNext = activeIdx < fileList.length - 1;
+  const canZoom = category === 'image' || category === 'video';
+
+  // Zoom parameters
+  const ZOOM_MIN = 1;
+  const ZOOM_MAX = 4;
+  const DOUBLE_TAP_ZOOM = 2.5;
+
+  const [scaleAnim] = useState(() => new Animated.Value(1));
+  const [translateXAnim] = useState(() => new Animated.Value(0));
+  const [translateYAnim] = useState(() => new Animated.Value(0));
+
+  const scaleRef = useRef(1);
+  const translateRef = useRef({ x: 0, y: 0 });
+  const panStartRef = useRef({ x: 0, y: 0 });
+  const pinchStartRef = useRef<{ distance: number; scale: number } | null>(null);
+  const lastTapRef = useRef(0);
+  const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [currentScaleDisplay, setCurrentScaleDisplay] = useState(1);
+
+  const resetZoom = useCallback((animated: boolean) => {
+    scaleRef.current = 1;
+    translateRef.current = { x: 0, y: 0 };
+    setCurrentScaleDisplay(1);
+    if (animated) {
+      Animated.parallel([
+        Animated.spring(scaleAnim, { toValue: 1, useNativeDriver: true, speed: 22, bounciness: 0 }),
+        Animated.spring(translateXAnim, { toValue: 0, useNativeDriver: true, speed: 22, bounciness: 0 }),
+        Animated.spring(translateYAnim, { toValue: 0, useNativeDriver: true, speed: 22, bounciness: 0 }),
+      ]).start();
+    } else {
+      scaleAnim.setValue(1);
+      translateXAnim.setValue(0);
+      translateYAnim.setValue(0);
+    }
+  }, [scaleAnim, translateXAnim, translateYAnim]);
+
+  // Fullscreen mode state
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [chromeAnim] = useState(() => new Animated.Value(0));
+
+  // Reset zoom and fullscreen when file changes
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setIsFullscreen(false);
+    scaleAnim.setValue(1);
+    translateXAnim.setValue(0);
+    translateYAnim.setValue(0);
+    scaleRef.current = 1;
+    translateRef.current = { x: 0, y: 0 };
+  }, [currentFile?.path, scaleAnim, translateXAnim, translateYAnim]);
+
+  const setZoomTo = useCallback((targetScale: number) => {
+    const nextScale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, targetScale));
+    scaleRef.current = nextScale;
+    setCurrentScaleDisplay(nextScale);
+    if (nextScale === 1) {
+      translateRef.current = { x: 0, y: 0 };
+    }
+    Animated.parallel([
+      Animated.spring(scaleAnim, { toValue: nextScale, useNativeDriver: true, speed: 22, bounciness: 0 }),
+      Animated.spring(translateXAnim, { toValue: translateRef.current.x, useNativeDriver: true, speed: 22, bounciness: 0 }),
+      Animated.spring(translateYAnim, { toValue: translateRef.current.y, useNativeDriver: true, speed: 22, bounciness: 0 }),
+    ]).start();
+  }, [scaleAnim, translateXAnim, translateYAnim]);
+
+  const zoomIn = useCallback(() => {
+    setZoomTo(scaleRef.current + 0.5);
+  }, [setZoomTo]);
+
+  const zoomOut = useCallback(() => {
+    setZoomTo(scaleRef.current - 0.5);
+  }, [setZoomTo]);
+
+  // Smooth slide navigation helper
+  const animateToFile = useCallback((targetIndex: number, startDx?: number) => {
+    if (isAnimating || targetIndex < 0 || targetIndex >= fileList.length || targetIndex === activeIdx) return;
+    setIsAnimating(true);
+
+    const isNext = targetIndex > activeIdx;
+    const slideOutVal = isNext ? -SCREEN_W : SCREEN_W;
+    const slideInVal = isNext ? SCREEN_W : -SCREEN_W;
+
+    const fromVal = startDx !== undefined ? startDx : 0;
+    slideAnim.setValue(fromVal);
+
+    // 1. Slide out current file
     Animated.timing(slideAnim, {
-      toValue: dir * SCREEN_W * 0.25,
-      duration: 100,
+      toValue: slideOutVal,
+      duration: 160,
+      easing: Easing.out(Easing.quad),
       useNativeDriver: true,
     }).start(() => {
-      onNavigate(idx);
-      slideAnim.setValue(-dir * SCREEN_W * 0.15);
-      Animated.spring(slideAnim, {
+      // 2. Position new file off-screen and update active index
+      slideAnim.setValue(slideInVal);
+      setActiveIdx(targetIndex);
+      onNavigate(targetIndex);
+      scaleAnim.setValue(1);
+      translateXAnim.setValue(0);
+      translateYAnim.setValue(0);
+      scaleRef.current = 1;
+      translateRef.current = { x: 0, y: 0 };
+
+      // 3. Slide in to center smoothly
+      Animated.timing(slideAnim, {
         toValue: 0,
+        duration: 160,
+        easing: Easing.out(Easing.quad),
         useNativeDriver: true,
-        speed: 30,
-        bounciness: 0,
-      }).start();
+      }).start(() => {
+        setIsAnimating(false);
+      });
     });
-  }, [currentIndex, onNavigate, slideAnim]);
+  }, [isAnimating, fileList.length, activeIdx, slideAnim, onNavigate, scaleAnim, translateXAnim, translateYAnim]);
 
-  // Use ref updated in useEffect so PanResponder callbacks access latest values without ref access during render
-  const latestRef = useRef<{
-    hasNext: boolean;
-    hasPrev: boolean;
-    navigateTo: (idx: number) => void;
-    currentIndex: number;
-  }>({ hasNext, hasPrev, navigateTo, currentIndex });
-
+  // ── Fullscreen mode (tap content to hide/show chrome) ──────────────────────
   useEffect(() => {
-    latestRef.current = { hasNext, hasPrev, navigateTo, currentIndex };
-  }, [hasNext, hasPrev, navigateTo, currentIndex]);
+    Animated.timing(chromeAnim, {
+      toValue: isFullscreen ? 1 : 0,
+      duration: 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [isFullscreen, chromeAnim]);
 
-  const [panResponder, setPanResponder] = useState<ReturnType<typeof PanResponder.create> | null>(null);
-
+  const latestRef = useRef({ activeIdx, fileListLen: fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim });
   useEffect(() => {
-    setPanResponder(
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gs) =>
-          Math.abs(gs.dx) > 12 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.5,
-        onPanResponderGrant: () => {
-          slideAnim.setValue(0);
-        },
-        onPanResponderMove: (_, gs) => {
-          slideAnim.setValue(gs.dx * 0.25);
-        },
-        onPanResponderRelease: (_, gs) => {
-          const cur = latestRef.current;
-          if (gs.dx < -60 && cur.hasNext) {
-            cur.navigateTo(cur.currentIndex + 1);
-          } else if (gs.dx > 60 && cur.hasPrev) {
-            cur.navigateTo(cur.currentIndex - 1);
-          } else {
-            // Snap back
-            Animated.spring(slideAnim, { toValue: 0, useNativeDriver: true, speed: 20, bounciness: 4 }).start();
+    latestRef.current = { activeIdx, fileListLen: fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim };
+  }, [activeIdx, fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim]);
+
+  const getTouchDistance = (touches: { pageX: number; pageY: number }[]) => {
+    const [a, b] = touches;
+    return Math.hypot(a.pageX - b.pageX, a.pageY - b.pageY);
+  };
+
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+
+  // ── Memoized PanResponder ──────────────────
+  const panResponder = useMemo(() => {
+    // eslint-disable-next-line react-hooks/refs
+    return PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (evt, gs) => {
+        const touches = evt.nativeEvent.touches;
+        const cur = latestRef.current;
+        if (cur.canZoom && touches.length === 2) return true;
+        if (cur.canZoom && scaleRef.current > 1.02) return true;
+        return Math.abs(gs.dx) > 10 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.2;
+      },
+      onPanResponderGrant: (evt) => {
+        const touches = evt.nativeEvent.touches;
+        const cur = latestRef.current;
+        if (cur.canZoom && touches.length === 2) {
+          pinchStartRef.current = { distance: getTouchDistance(touches), scale: scaleRef.current };
+        } else {
+          panStartRef.current = { ...translateRef.current };
+          if (scaleRef.current <= 1.02) {
+            cur.slideAnim.setValue(0);
           }
-        },
-      })
-    );
-  }, [slideAnim]);
+        }
+      },
+      onPanResponderMove: (evt, gs) => {
+        const touches = evt.nativeEvent.touches;
+        const cur = latestRef.current;
+        if (cur.canZoom && touches.length === 2 && pinchStartRef.current) {
+          const dist = getTouchDistance(touches);
+          const newScale = clamp(
+            pinchStartRef.current.scale * (dist / pinchStartRef.current.distance),
+            ZOOM_MIN, ZOOM_MAX,
+          );
+          scaleRef.current = newScale;
+          setCurrentScaleDisplay(newScale);
+          cur.scaleAnim.setValue(newScale);
+        } else if (cur.canZoom && scaleRef.current > 1.02) {
+          const maxX = (SCREEN_W * (scaleRef.current - 1)) / 2;
+          const maxY = (SCREEN_H * (scaleRef.current - 1)) / 2;
+          const nx = clamp(panStartRef.current.x + gs.dx, -maxX, maxX);
+          const ny = clamp(panStartRef.current.y + gs.dy, -maxY, maxY);
+          translateRef.current = { x: nx, y: ny };
+          cur.translateXAnim.setValue(nx);
+          cur.translateYAnim.setValue(ny);
+        } else {
+          cur.slideAnim.setValue(gs.dx);
+        }
+      },
+      onPanResponderRelease: (evt, gs) => {
+        const touches = evt.nativeEvent.touches;
+        const cur = latestRef.current;
+        if (cur.canZoom && (pinchStartRef.current || scaleRef.current > 1.02)) {
+          pinchStartRef.current = null;
+          if (touches.length === 0) {
+            if (scaleRef.current <= 1.02) {
+              resetZoom(true);
+            } else {
+              panStartRef.current = { ...translateRef.current };
+            }
+          }
+          return;
+        }
 
-  if (!file) return null;
+        // Tap handling (single vs double tap) using reliable timestamp helper
+        if (Math.abs(gs.dx) < 8 && Math.abs(gs.dy) < 8) {
+          const now = getCurrentTimestamp();
+          if (now - lastTapRef.current < 280) {
+            if (tapTimerRef.current) {
+              clearTimeout(tapTimerRef.current);
+              tapTimerRef.current = null;
+            }
+            lastTapRef.current = 0;
+            if (cur.canZoom) {
+              cur.setZoomTo(scaleRef.current > 1.02 ? 1 : DOUBLE_TAP_ZOOM);
+            }
+          } else {
+            lastTapRef.current = now;
+            tapTimerRef.current = setTimeout(() => {
+              setIsFullscreen(f => !f);
+              lastTapRef.current = 0;
+            }, 260);
+          }
+          return;
+        }
+
+        // Swipe navigation release
+        const flung = Math.abs(gs.vx) > 0.4;
+        if ((gs.dx < -50 || (flung && gs.vx < 0)) && cur.hasNext) {
+          cur.animateToFile(cur.activeIdx + 1, gs.dx);
+        } else if ((gs.dx > 50 || (flung && gs.vx > 0)) && cur.hasPrev) {
+          cur.animateToFile(cur.activeIdx - 1, gs.dx);
+        } else {
+          Animated.spring(cur.slideAnim, { toValue: 0, useNativeDriver: true, speed: 22, bounciness: 4 }).start();
+        }
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (!currentFile) return null;
 
   const cat = categoryMeta(category);
-  const uploadedDate = formatDate(file.uploaded_time ?? file.modified_time);
-  const modDate = formatDate(file.modified_time);
+  const uploadedDate = formatDate(currentFile.uploaded_time ?? currentFile.modified_time);
+  const modDate = formatDate(currentFile.modified_time);
 
   const renderContent = () => {
-    if (state.phase === 'loading') {
+    if (!previewUrl) {
       return (
         <View style={pvStyles.centeredBox}>
           <ActivityIndicator size="large" color={colors.primary} />
-          <Text style={[pvStyles.loadingText, { color: colors.textSecondary }]}>Loading preview…</Text>
+          <Text style={[pvStyles.loadingText, { color: colors.textSecondary }]}>Loading server preview…</Text>
         </View>
       );
     }
 
-    if (state.phase === 'error') {
-      return (
-        <View style={pvStyles.centeredBox}>
-          <AppIcon androidName="error_outline" iosName="exclamationmark.circle" color={colors.error} size={40} />
-          <Text style={[pvStyles.errorText, { color: colors.error }]}>Preview failed</Text>
-          <Text style={[pvStyles.errorSub, { color: colors.textSecondary }]}>{state.message}</Text>
-        </View>
-      );
-    }
-
-    // ready
     if (category === 'image') {
       return (
-        <Image
-          source={{ uri: state.localUri }}
-          style={pvStyles.imageFull}
-          contentFit="contain"
-          transition={200}
-        />
+        <Animated.View
+          style={[
+            pvStyles.zoomWrap,
+            { transform: [{ scale: scaleAnim }, { translateX: translateXAnim }, { translateY: translateYAnim }] },
+          ]}
+        >
+          <Image
+            source={{ uri: previewUrl }}
+            style={pvStyles.imageFull}
+            contentFit="contain"
+            cachePolicy="memory-disk"
+            transition={150}
+            onLoadStart={() => setImgLoading(true)}
+            onLoad={() => setImgLoading(false)}
+            onError={() => setImgLoading(false)}
+          />
+          {imgLoading && (
+            <View style={pvStyles.imgLoadingOverlay} pointerEvents="none">
+              <ActivityIndicator size="large" color="#fff" />
+            </View>
+          )}
+        </Animated.View>
       );
     }
 
     if (category === 'video') {
       return (
-        <VideoPreviewPlayer uri={state.localUri} />
+        <Animated.View
+          style={[
+            pvStyles.zoomWrap,
+            { transform: [{ scale: scaleAnim }, { translateX: translateXAnim }, { translateY: translateYAnim }] },
+          ]}
+        >
+          <VideoPreviewPlayer uri={previewUrl} isFullscreen={isFullscreen} />
+        </Animated.View>
       );
     }
 
     if (category === 'audio') {
       return (
-        <AudioPlayer uri={state.localUri} colors={colors} fileName={fileName} />
+        <AudioPlayer uri={previewUrl} colors={colors} fileName={fileName} />
       );
     }
 
-    // other — metadata card
+    // Other — Metadata card
     return (
       <View style={pvStyles.metaCard}>
         <View style={[pvStyles.metaIconWrap, { backgroundColor: colors.primarySoft }]}>
@@ -604,7 +780,7 @@ const PreviewModal = React.memo(function PreviewModal({
         </View>
         <Text style={[pvStyles.metaFileName, { color: colors.text }]}>{fileName}</Text>
         <View style={[pvStyles.metaTable, { borderColor: colors.surfaceBorder }]}>
-          <MetaRow label="Size" value={formatSize(file.size)} colors={colors} />
+          <MetaRow label="Size" value={formatSize(currentFile.size)} colors={colors} />
           <MetaRow label="Uploaded" value={uploadedDate} colors={colors} />
           <MetaRow label="Modified" value={modDate} colors={colors} />
           <MetaRow label="Type" value={getExt(fileName).toUpperCase() || '—'} colors={colors} last />
@@ -616,13 +792,43 @@ const PreviewModal = React.memo(function PreviewModal({
     );
   };
 
+  const chromeOpacity = chromeAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 0] });
+  const topBarTranslate = chromeAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -70] });
+  const bottomBarTranslate = chromeAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 70] });
+
   return (
     <Modal visible animationType="slide" transparent={false} onRequestClose={onClose} statusBarTranslucent>
       <View style={[pvStyles.root, { backgroundColor: '#000' }]}>
-        <StatusBar barStyle="light-content" backgroundColor="#000" />
+        <StatusBar barStyle="light-content" backgroundColor="#000" hidden={isFullscreen} />
 
-        {/* Top bar */}
-        <View style={[pvStyles.topBar, { paddingTop: insets.top + Spacing.two, backgroundColor: 'rgba(0,0,0,0.85)' }]}>
+        {/* Floating Zoom level indicator / reset pill */}
+        {canZoom && currentScaleDisplay > 1.02 && (
+          <TouchableOpacity
+            style={pvStyles.zoomPill}
+            onPress={() => resetZoom(true)}
+            activeOpacity={0.8}
+          >
+            <Text style={pvStyles.zoomPillText}>Zoom {currentScaleDisplay.toFixed(1)}x · Tap to Reset</Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Main Content Area with gestures */}
+        <Animated.View
+          style={[pvStyles.contentArea, { transform: [{ translateX: slideAnim }] }]}
+          {...panResponder.panHandlers}
+        >
+          {renderContent()}
+        </Animated.View>
+
+        {/* Top Header Bar */}
+        <Animated.View
+          style={[
+            pvStyles.topBar,
+            { paddingTop: insets.top + Spacing.two, backgroundColor: 'rgba(0,0,0,0.85)' },
+            { opacity: chromeOpacity, transform: [{ translateY: topBarTranslate }] },
+          ]}
+          pointerEvents={isFullscreen ? 'none' : 'auto'}
+        >
           <TouchableOpacity onPress={onClose} style={pvStyles.topBarBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <AppIcon androidName="close" iosName="xmark" color="#fff" size={22} />
           </TouchableOpacity>
@@ -630,59 +836,86 @@ const PreviewModal = React.memo(function PreviewModal({
             <Text style={pvStyles.topBarTitle} numberOfLines={1}>{fileName}</Text>
             {fileList.length > 1 && (
               <Text style={pvStyles.topBarCounter}>
-                {currentIndex + 1} / {fileList.length}
+                {activeIdx + 1} / {fileList.length}
               </Text>
             )}
           </View>
-          <TouchableOpacity
-            onPress={() => onDownload(file)}
-            style={[pvStyles.topBarBtn, pvStyles.downloadBtn]}
-          >
-            <AppIcon androidName="download" iosName="arrow.down.circle" color="#fff" size={20} />
-            <Text style={pvStyles.downloadBtnText}>Save</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Content area with swipe gesture */}
-        <Animated.View
-          style={[pvStyles.contentArea, { transform: [{ translateX: slideAnim }] }]}
-          {...(panResponder?.panHandlers ?? {})}
-        >
-          {renderContent()}
+          <View style={pvStyles.topBarRightActions}>
+            {/* Zoom Out */}
+            {canZoom && (
+              <TouchableOpacity onPress={zoomOut} style={pvStyles.topBarBtn}>
+                <AppIcon androidName="zoom_out" iosName="minus.magnifyingglass" color="#fff" size={18} />
+              </TouchableOpacity>
+            )}
+            {/* Zoom In */}
+            {canZoom && (
+              <TouchableOpacity onPress={zoomIn} style={pvStyles.topBarBtn}>
+                <AppIcon androidName="zoom_in" iosName="plus.magnifyingglass" color="#fff" size={18} />
+              </TouchableOpacity>
+            )}
+            {/* Fullscreen Toggle */}
+            <TouchableOpacity onPress={() => setIsFullscreen(v => !v)} style={pvStyles.topBarBtn}>
+              <AppIcon
+                androidName={isFullscreen ? 'fullscreen_exit' : 'fullscreen'}
+                iosName={isFullscreen ? 'arrow.down.right.and.arrow.up.left' : 'arrow.up.left.and.arrow.down.right'}
+                color="#fff"
+                size={20}
+              />
+            </TouchableOpacity>
+            {/* Save Button */}
+            <TouchableOpacity
+              onPress={() => onDownload(currentFile)}
+              style={[pvStyles.topBarBtn, pvStyles.downloadBtn]}
+            >
+              <AppIcon androidName="download" iosName="arrow.down.circle" color="#fff" size={20} />
+              <Text style={pvStyles.downloadBtnText}>Save</Text>
+            </TouchableOpacity>
+          </View>
         </Animated.View>
 
-        {/* Left / Right nav arrows — only when neighbours exist */}
+        {/* Left / Right Nav Arrows */}
         {hasPrev && (
-          <TouchableOpacity
-            style={pvStyles.navArrowLeft}
-            onPress={() => navigateTo(currentIndex - 1)}
-            hitSlop={{ top: 20, bottom: 20, left: 10, right: 10 }}
-          >
-            <AppIcon androidName="chevron_left" iosName="chevron.left" color="rgba(255,255,255,0.85)" size={28} />
-          </TouchableOpacity>
+          <Animated.View style={[pvStyles.navArrowLeft, { opacity: chromeOpacity }]} pointerEvents={isFullscreen ? 'none' : 'auto'}>
+            <TouchableOpacity
+              style={pvStyles.navArrowBtnInner}
+              onPress={() => animateToFile(activeIdx - 1)}
+              hitSlop={{ top: 20, bottom: 20, left: 10, right: 10 }}
+            >
+              <AppIcon androidName="chevron_left" iosName="chevron.left" color="rgba(255,255,255,0.85)" size={28} />
+            </TouchableOpacity>
+          </Animated.View>
         )}
         {hasNext && (
-          <TouchableOpacity
-            style={pvStyles.navArrowRight}
-            onPress={() => navigateTo(currentIndex + 1)}
-            hitSlop={{ top: 20, bottom: 20, left: 10, right: 10 }}
-          >
-            <AppIcon androidName="chevron_right" iosName="chevron.right" color="rgba(255,255,255,0.85)" size={28} />
-          </TouchableOpacity>
+          <Animated.View style={[pvStyles.navArrowRight, { opacity: chromeOpacity }]} pointerEvents={isFullscreen ? 'none' : 'auto'}>
+            <TouchableOpacity
+              style={pvStyles.navArrowBtnInner}
+              onPress={() => animateToFile(activeIdx + 1)}
+              hitSlop={{ top: 20, bottom: 20, left: 10, right: 10 }}
+            >
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color="rgba(255,255,255,0.85)" size={28} />
+            </TouchableOpacity>
+          </Animated.View>
         )}
 
-        {/* Bottom info strip */}
-        <View style={[pvStyles.bottomBar, { paddingBottom: insets.bottom + Spacing.two, backgroundColor: 'rgba(0,0,0,0.8)' }]}>
-          <Text style={pvStyles.bottomSize}>{formatSize(file.size)}</Text>
+        {/* Bottom Info Strip */}
+        <Animated.View
+          style={[
+            pvStyles.bottomBar,
+            { paddingBottom: insets.bottom + Spacing.two, backgroundColor: 'rgba(0,0,0,0.8)' },
+            { opacity: chromeOpacity, transform: [{ translateY: bottomBarTranslate }] },
+          ]}
+          pointerEvents="none"
+        >
+          <Text style={pvStyles.bottomSize}>{formatSize(currentFile.size)}</Text>
           <Text style={pvStyles.bottomDot}>·</Text>
           <Text style={pvStyles.bottomDate}>{uploadedDate}</Text>
-        </View>
+        </Animated.View>
       </View>
     </Modal>
   );
 });
 
-// ── Tiny metadata row ─────────────────────────────────────────────────────────
+// ── MetaRow ──────────────────────────────────────────────────────────────────
 function MetaRow({ label, value, colors, last }: { label: string; value: string; colors: AppColors; last?: boolean }) {
   return (
     <View style={[pvStyles.metaRow, !last && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.surfaceBorder }]}>
@@ -692,10 +925,11 @@ function MetaRow({ label, value, colors, last }: { label: string; value: string;
   );
 }
 
-// ── Video preview player ──────────────────────────────────────────────────────
-function VideoPreviewPlayer({ uri }: { uri: string }) {
+// ── Video Preview Player ──────────────────────────────────────────────────────
+function VideoPreviewPlayer({ uri, isFullscreen }: { uri: string; isFullscreen: boolean }) {
   const player = useVideoPlayer(uri, p => {
-    p.pause();
+    p.loop = true;
+    p.play();
   });
 
   return (
@@ -704,18 +938,17 @@ function VideoPreviewPlayer({ uri }: { uri: string }) {
         player={player}
         style={pvStyles.videoFull}
         contentFit="contain"
-        nativeControls
+        nativeControls={!isFullscreen}
       />
     </View>
   );
 }
 
-// ── Simple audio player ───────────────────────────────────────────────────────
+// ── Audio Player ─────────────────────────────────────────────────────────────
 function AudioPlayer({ uri, colors, fileName }: { uri: string; colors: AppColors; fileName: string }) {
   const player = useAudioPlayer(uri);
   const status = useAudioPlayerStatus(player);
 
-  // Clean up player on unmount
   useEffect(() => {
     return () => { player.remove(); };
   }, [player]);
@@ -745,7 +978,6 @@ function AudioPlayer({ uri, colors, fileName }: { uri: string; colors: AppColors
       </View>
       <Text style={pvStyles.audioFileName} numberOfLines={2}>{fileName}</Text>
 
-      {/* Progress bar */}
       <View style={pvStyles.audioProgressBg}>
         <View style={[pvStyles.audioProgressFill, { width: `${progress * 100}%`, backgroundColor: colors.primary }]} />
       </View>
@@ -754,7 +986,6 @@ function AudioPlayer({ uri, colors, fileName }: { uri: string; colors: AppColors
         <Text style={pvStyles.audioTime}>{formatSec(durationSec)}</Text>
       </View>
 
-      {/* Play/Pause */}
       <TouchableOpacity onPress={togglePlay} style={[pvStyles.audioPlayBtn, { backgroundColor: colors.primary }]}>
         <AppIcon
           androidName={status.playing ? 'pause' : 'play_arrow'}
@@ -833,7 +1064,6 @@ function SortBar({ field, dir, onChange, colors }: SortBarProps) {
 
 const sortStyles = StyleSheet.create({
   wrapper: {
-    // Ensure the sort bar always has a consistent height and doesn't stretch
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   row: {
@@ -858,7 +1088,7 @@ const sortStyles = StyleSheet.create({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Tree node renderer
+// Tree Node Renderer
 // ─────────────────────────────────────────────────────────────────────────────
 
 type TreeNodeViewProps = {
@@ -886,7 +1116,6 @@ const TreeNodeView = React.memo(function TreeNodeView({
 
     const handlePress = () => {
       if (selectionMode) {
-        // In selection mode: tap anywhere (including file row) selects/deselects
         onToggleNode(node);
       } else {
         node.file && onPreview(node.file);
@@ -895,20 +1124,16 @@ const TreeNodeView = React.memo(function TreeNodeView({
 
     const handleLongPress = () => {
       if (selectionMode) {
-        // In selection mode: long press previews the file
         node.file && onPreview(node.file);
       } else {
-        // Outside selection mode: long press enters selection mode
         onEnterSelectionMode(node);
       }
     };
 
     const handleCheckboxPress = () => {
       if (selectionMode) {
-        // Already in selection mode — just toggle
         onToggleNode(node);
       } else {
-        // Enter selection mode AND select this item
         onEnterSelectionMode(node);
       }
     };
@@ -921,7 +1146,6 @@ const TreeNodeView = React.memo(function TreeNodeView({
         delayLongPress={350}
         android_ripple={{ color: colors.primarySoft }}
       >
-        {/* Checkbox — tapping it always toggles selection */}
         <TouchableOpacity
           onPress={handleCheckboxPress}
           hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
@@ -945,7 +1169,6 @@ const TreeNodeView = React.memo(function TreeNodeView({
           </View>
         </View>
 
-        {/* Show preview hint only when NOT in selection mode */}
         {!selectionMode && (
           <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={14} />
         )}
@@ -953,7 +1176,7 @@ const TreeNodeView = React.memo(function TreeNodeView({
     );
   }
 
-  // ── Folder row ─────────────────────────────────────────────────────────
+  // Folder row
   const selState = folderSelectionState(node, selectedPaths);
   const isPartial = selState === 'partial';
   const isAllSelected = selState === 'all';
@@ -969,10 +1192,8 @@ const TreeNodeView = React.memo(function TreeNodeView({
           style={checkboxStyle}
           onPress={() => {
             if (selectionMode) {
-              // Already in selection mode: just toggle this folder
               onToggleNode(node);
             } else {
-              // First tap: enter selection mode and toggle (onEnterSelectionMode handles both)
               onEnterSelectionMode(node);
             }
           }}
@@ -1021,7 +1242,7 @@ function findNodeByKey(node: TreeNode, key: string): TreeNode | null {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main screen
+// Main Restore Screen Component
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function RestoreScreen() {
@@ -1029,13 +1250,33 @@ export default function RestoreScreen() {
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  // ── Source mode state ──────────────────────────────────────────────────────
+  // Source mode state
   const [sourceMode, setSourceMode] = useState<SourceMode>('phone');
   const [sharedSources, setSharedSources] = useState<SharedSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
   const [isLoadingSources, setIsLoadingSources] = useState(false);
 
-  // ── File list / tree state ─────────────────────────────────────────────────
+  // Server Config cache
+  const [serverConfig, setServerConfig] = useState<ServerConfig>(null);
+
+  const loadServerConfig = useCallback(async () => {
+    try {
+      const cfg = await getConfig();
+      setServerConfig(cfg);
+    } catch {
+      setServerConfig(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    getConfig()
+      .then(cfg => { if (active) setServerConfig(cfg); })
+      .catch(() => { if (active) setServerConfig(null); });
+    return () => { active = false; };
+  }, []);
+
+  // File list & tree state
   const [files, setFiles] = useState<RemoteFile[]>([]);
   const [tree, setTree] = useState<TreeNode | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
@@ -1053,23 +1294,9 @@ export default function RestoreScreen() {
 
   // Preview state
   const [previewFile, setPreviewFile] = useState<RemoteFile | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewIndex, setPreviewIndex] = useState<number>(0);
 
-  // Preview file cache: path -> local file URI. Persists across modal open/close.
-  const previewCacheRef = useRef<Map<string, string>>(new Map());
-
-  // Clear cache helper (deletes all cached preview files from disk)
-  const clearPreviewCache = useCallback(async () => {
-    const entries = Array.from(previewCacheRef.current.entries());
-    previewCacheRef.current.clear();
-    for (const [, uri] of entries) {
-      FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
-    }
-  }, []);
-
-
-  // ── Server status ──────────────────────────────────────────────────────────
+  // Server connection check
   const checkServer = useCallback(async () => {
     const ip = await getServerIp();
     if (!ip) { setServerStatus('unknown'); return; }
@@ -1079,24 +1306,24 @@ export default function RestoreScreen() {
     try {
       const result = await checkDeviceConnection({ signal: controller.signal });
       setServerStatus(result.connected ? 'connected' : 'disconnected');
+      loadServerConfig();
     } catch {
       setServerStatus('disconnected');
     } finally {
       clearTimeout(timeout);
     }
-  }, []);
+  }, [loadServerConfig]);
 
   useFocusEffect(useCallback(() => { checkServer(); }, [checkServer]));
 
   const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
 
-  // ── Load shared sources when switching to shared mode ──────────────────────
+  // Load shared sources
   const loadSharedSources = useCallback(async () => {
     setIsLoadingSources(true);
     try {
       const sources: SharedSource[] = await listSharedSources();
       setSharedSources(sources);
-      // Auto-select first source if none selected
       if (sources.length > 0 && !selectedSourceId) {
         setSelectedSourceId(sources[0].id);
       }
@@ -1109,7 +1336,6 @@ export default function RestoreScreen() {
 
   const handleModeChange = useCallback((mode: SourceMode) => {
     setSourceMode(mode);
-    // Clear file list when switching modes
     setFiles([]);
     setTree(null);
     setSelectedPaths(new Set());
@@ -1120,19 +1346,18 @@ export default function RestoreScreen() {
 
   const handleSourceSelect = useCallback((source: SharedSource) => {
     setSelectedSourceId(source.id);
-    // Clear file list so user explicitly re-fetches
     setFiles([]);
     setTree(null);
     setSelectedPaths(new Set());
   }, []);
 
-  // ── Sorted tree ────────────────────────────────────────────────────────────
+  // Sorted tree
   const sortedTree = useMemo(() => {
     if (!tree) return null;
     return sortTreeChildren(tree, sortField, sortDir);
   }, [tree, sortField, sortDir]);
 
-  // Flat ordered list of all files (for swipe navigation). Refreshed whenever sortedTree changes.
+  // Flat ordered list of previewable files
   const previewableFiles = useMemo<RemoteFile[]>(() => {
     const result: RemoteFile[] = [];
     function collect(node: TreeNode) {
@@ -1146,17 +1371,15 @@ export default function RestoreScreen() {
     return result;
   }, [sortedTree]);
 
-  // ── Fetch ──────────────────────────────────────────────────────────────────
+  // Fetch files from server
   const handleFetch = async () => {
-    // Guard early before showing the spinner
     if (sourceMode === 'shared' && !selectedSourceId) {
       Alert.alert('No Source', 'Please select a shared folder first.');
       return;
     }
-    // Clear preview cache when re-fetching so stale previews don’t persist
-    await clearPreviewCache();
     setIsFetching(true);
     try {
+      await loadServerConfig();
       let serverFiles: RemoteFile[];
       if (sourceMode === 'shared') {
         serverFiles = await listSharedFiles(selectedSourceId!);
@@ -1174,43 +1397,34 @@ export default function RestoreScreen() {
     }
   };
 
-  // ── Sort ───────────────────────────────────────────────────────────────────
+  // Sort handler
   const handleSortChange = useCallback((field: SortField, dir: SortDir) => {
     setSortField(field);
     setSortDir(dir);
   }, []);
 
-  // ── Preview ────────────────────────────────────────────────────────────────
-  const openPreview = useCallback(async (file: RemoteFile, index?: number) => {
-    let url: string;
-    if (sourceMode === 'shared' && selectedSourceId) {
-      url = await getSharedFilePreviewUrl(selectedSourceId, file.path);
-    } else {
-      url = await getFilePreviewUrl(file.path);
-    }
+  // Preview handlers
+  const openPreview = useCallback((file: RemoteFile, index?: number) => {
     const idx = index !== undefined ? index : previewableFiles.findIndex(f => f.path === file.path);
     setPreviewIndex(idx >= 0 ? idx : 0);
-    setPreviewUrl(url);
     setPreviewFile(file);
-  }, [sourceMode, selectedSourceId, previewableFiles]);
+  }, [previewableFiles]);
 
   const handlePreview = useCallback((file: RemoteFile) => {
     openPreview(file);
   }, [openPreview]);
 
-  // Navigate to prev/next file in preview
-  const handlePreviewNavigate = useCallback(async (newIndex: number) => {
+  const handlePreviewNavigate = useCallback((newIndex: number) => {
     if (newIndex < 0 || newIndex >= previewableFiles.length) return;
-    const nextFile = previewableFiles[newIndex];
-    openPreview(nextFile, newIndex);
-  }, [previewableFiles, openPreview]);
+    setPreviewIndex(newIndex);
+    setPreviewFile(previewableFiles[newIndex]);
+  }, [previewableFiles]);
 
   const closePreview = useCallback(() => {
     setPreviewFile(null);
-    setPreviewUrl(null);
   }, []);
 
-  // ── Expand / collapse ──────────────────────────────────────────────────────
+  // Expand / collapse folder nodes
   const handleToggleExpand = useCallback((nodeKey: string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setTree(prev => {
@@ -1222,8 +1436,7 @@ export default function RestoreScreen() {
     });
   }, []);
 
-  // ── Selection mode ─────────────────────────────────────────────────────────
-  // Enter selection mode and immediately toggle the given node
+  // Selection mode handlers
   const handleEnterSelectionMode = useCallback((node: TreeNode) => {
     setSelectionMode(true);
     const paths = collectFilePaths(node);
@@ -1257,7 +1470,7 @@ export default function RestoreScreen() {
     }
   };
 
-  // ── Download (selected) ────────────────────────────────────────────────────
+  // Download files
   const handleDownloadFiles = useCallback(async (pathSet: Set<string>) => {
     if (pathSet.size === 0) return;
     setIsDownloading(true);
@@ -1330,11 +1543,8 @@ export default function RestoreScreen() {
     setSelectedPaths(new Set());
   }, [files, sourceMode, selectedSourceId]);
 
-
-  // ── Download a single file triggered from the preview modal ───────────────
   const handleDownloadSingle = useCallback(async (file: RemoteFile) => {
     closePreview();
-    // Small delay so the modal animation completes before download begins
     setTimeout(() => handleDownloadFiles(new Set([file.path])), 300);
   }, [closePreview, handleDownloadFiles]);
 
@@ -1343,10 +1553,13 @@ export default function RestoreScreen() {
     [handleDownloadFiles, selectedPaths],
   );
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  const handleClearCache = useCallback(async () => {
+    await clearAllDiskCache();
+    Alert.alert('Cache Cleared', 'All temporary preview files and image caches have been cleared from disk.');
+  }, []);
+
   const rootChildren = sortedTree?.children ?? [];
 
-  // Determine fetch button disabled state
   const fetchDisabled = isFetching || isDownloading || isOffline ||
     (sourceMode === 'shared' && !selectedSourceId);
 
@@ -1365,7 +1578,7 @@ export default function RestoreScreen() {
         </View>
       )}
 
-      {/* Page header */}
+      {/* Page Header */}
       <View style={[styles.pageHeader, { paddingTop: !isDownloading ? insets.top + Spacing.five : Spacing.four }]}>
         <View>
           <Text style={styles.pageTitle}>Restore Files</Text>
@@ -1388,6 +1601,10 @@ export default function RestoreScreen() {
               </>
             )}
           </TouchableOpacity>
+          <TouchableOpacity onPress={handleClearCache} style={styles.actionBtn}>
+            <AppIcon androidName="delete_sweep" iosName="trash" color={colors.textSecondary} size={15} />
+            <Text style={[styles.actionBtnText, { color: colors.textSecondary }]}>Clean Cache</Text>
+          </TouchableOpacity>
           {files.length > 0 && (
             <TouchableOpacity onPress={selectAll} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isDownloading || isOffline}>
               <Text style={[styles.actionBtnText, { color: colors.primary }]}>
@@ -1398,7 +1615,7 @@ export default function RestoreScreen() {
         </View>
       </View>
 
-      {/* Source selector (always visible) */}
+      {/* Source Selector */}
       {!isDownloading && (
         <SourceSelector
           mode={sourceMode}
@@ -1411,12 +1628,12 @@ export default function RestoreScreen() {
         />
       )}
 
-      {/* Sort bar (only when files are loaded) */}
+      {/* Sort Bar */}
       {files.length > 0 && !isDownloading && (
         <SortBar field={sortField} dir={sortDir} onChange={handleSortChange} colors={colors} />
       )}
 
-      {/* Tap hint — changes based on selection mode */}
+      {/* Hint Bar */}
       {files.length > 0 && selectedPaths.size === 0 && (
         <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
           <AppIcon androidName="touch_app" iosName="hand.tap" color={colors.textMuted} size={13} />
@@ -1426,7 +1643,7 @@ export default function RestoreScreen() {
         </View>
       )}
 
-      {/* Selection info bar */}
+      {/* Selection Info Bar */}
       {selectedPaths.size > 0 && !isDownloading && (
         <View style={[styles.selectionBar, { borderColor: colors.surfaceBorder }]}>
           <AppIcon androidName="check_circle" iosName="checkmark.circle" color={colors.primary} size={16} />
@@ -1442,7 +1659,7 @@ export default function RestoreScreen() {
         </View>
       )}
 
-      {/* File tree */}
+      {/* File Tree List */}
       <FlatList
         data={rootChildren}
         keyExtractor={item => item.key}
@@ -1489,17 +1706,18 @@ export default function RestoreScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Preview modal — stays mounted across navigation; state resets via unified effect */}
+      {/* Preview Modal */}
       {previewFile && (
         <PreviewModal
           file={previewFile}
           fileList={previewableFiles}
           currentIndex={previewIndex}
+          sourceMode={sourceMode}
+          selectedSourceId={selectedSourceId}
+          serverConfig={serverConfig}
           onClose={closePreview}
           onNavigate={handlePreviewNavigate}
           onDownload={handleDownloadSingle}
-          previewUrl={previewUrl}
-          previewCache={previewCacheRef}
           colors={colors}
         />
       )}
@@ -1529,7 +1747,6 @@ const createStyles = (colors: AppColors) =>
     },
     actionBtnText: { fontSize: TextScale.xs, fontWeight: '700' },
 
-    // Hint bar
     hintBar: {
       flexDirection: 'row', alignItems: 'center', gap: 5,
       paddingHorizontal: Spacing.five, paddingVertical: 5,
@@ -1537,7 +1754,6 @@ const createStyles = (colors: AppColors) =>
     },
     hintText: { fontSize: TextScale.xs },
 
-    // Selection bar
     selectionBar: {
       flexDirection: 'row', alignItems: 'center',
       paddingHorizontal: Spacing.five, paddingVertical: Spacing.two,
@@ -1547,7 +1763,6 @@ const createStyles = (colors: AppColors) =>
     clearSelBtn: { paddingHorizontal: Spacing.two, paddingVertical: Spacing.one },
     clearSelText: { fontSize: TextScale.sm, fontWeight: '500' },
 
-    // Folder rows
     folderRow: {
       flexDirection: 'row', alignItems: 'center',
       paddingRight: Spacing.three, paddingVertical: Spacing.two, gap: Spacing.two,
@@ -1559,7 +1774,6 @@ const createStyles = (colors: AppColors) =>
     folderBadgeText: { fontSize: TextScale.xs, color: colors.textSecondary },
     folderBadgeSize: { fontSize: TextScale.xs, color: colors.textMuted },
 
-    // File rows
     fileRow: {
       flexDirection: 'row', alignItems: 'center',
       paddingRight: Spacing.three, paddingVertical: Spacing.two + 2, gap: Spacing.two,
@@ -1572,7 +1786,6 @@ const createStyles = (colors: AppColors) =>
     fileDot: { fontSize: TextScale.xs, color: colors.textMuted },
     fileDate: { fontSize: TextScale.xs, color: colors.textMuted },
 
-    // Checkboxes
     checkbox: {
       width: 20, height: 20, borderRadius: 5, borderWidth: 2,
       borderColor: colors.textSecondary, alignItems: 'center', justifyContent: 'center', flexShrink: 0,
@@ -1581,7 +1794,6 @@ const createStyles = (colors: AppColors) =>
     checkboxPartial: { backgroundColor: colors.primarySoft, borderColor: colors.primary },
     partialDot: { width: 8, height: 8, borderRadius: 2, backgroundColor: colors.primary },
 
-    // FAB
     fab: {
       position: 'absolute', alignSelf: 'center', flexDirection: 'row', alignItems: 'center',
       backgroundColor: colors.primary, paddingVertical: Spacing.three, paddingHorizontal: Spacing.six,
@@ -1590,7 +1802,6 @@ const createStyles = (colors: AppColors) =>
     fabText: { color: colors.white, fontWeight: '700', fontSize: TextScale.md },
     disabledBtn: { opacity: 0.4 },
 
-    // Empty state
     emptyContainer: {
       flex: 1, alignItems: 'center', justifyContent: 'center',
       paddingHorizontal: Spacing.seven, paddingTop: Spacing.nine, gap: Spacing.four,
@@ -1599,7 +1810,6 @@ const createStyles = (colors: AppColors) =>
     emptyTitle: { fontSize: TextScale.md, fontWeight: '800', color: colors.text, textAlign: 'center' },
     emptySubtitle: { fontSize: TextScale.sm, color: colors.textSecondary, textAlign: 'center', lineHeight: 22, fontWeight: '500' },
 
-    // Progress banner
     progressContainer: {
       backgroundColor: colors.surface, paddingHorizontal: Spacing.five,
       paddingBottom: Spacing.three, borderBottomWidth: 1, borderBottomColor: colors.surfaceBorder,
@@ -1611,12 +1821,13 @@ const createStyles = (colors: AppColors) =>
   });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Preview modal styles (dark-only, always on black bg)
+// Preview Modal Styles
 // ─────────────────────────────────────────────────────────────────────────────
 
 const pvStyles = StyleSheet.create({
-  root: { flex: 1 },
+  root: { flex: 1, position: 'relative' },
   topBar: {
+    position: 'absolute', top: 0, left: 0, right: 0,
     flexDirection: 'row', alignItems: 'center', gap: Spacing.two,
     paddingHorizontal: Spacing.four, paddingBottom: Spacing.three, zIndex: 10,
   },
@@ -1628,16 +1839,33 @@ const pvStyles = StyleSheet.create({
   topBarCounter: {
     color: 'rgba(255,255,255,0.5)', fontSize: TextScale.xs, textAlign: 'center', marginTop: 1,
   },
+  topBarRightActions: {
+    flexDirection: 'row', alignItems: 'center', gap: Spacing.one,
+  },
   topBarBtn: {
     padding: Spacing.two, borderRadius: Radius.md,
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(255,255,255,0.12)',
   },
   downloadBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: Spacing.three },
   downloadBtnText: { color: '#fff', fontSize: TextScale.sm, fontWeight: '600' },
 
-  contentArea: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  zoomPill: {
+    position: 'absolute', top: 90, alignSelf: 'center', zIndex: 15,
+    backgroundColor: 'rgba(0,0,0,0.75)', paddingHorizontal: Spacing.four, paddingVertical: Spacing.two,
+    borderRadius: Radius.full, borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
+  },
+  zoomPillText: { color: '#fff', fontSize: TextScale.xs, fontWeight: '600' },
 
-  // Navigation arrows
+  contentArea: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  zoomWrap: { justifyContent: 'center', alignItems: 'center' },
+  imgLoadingOverlay: {
+    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+    justifyContent: 'center', alignItems: 'center',
+  },
+
   navArrowLeft: {
     position: 'absolute',
     left: 8,
@@ -1664,8 +1892,10 @@ const pvStyles = StyleSheet.create({
     justifyContent: 'center',
     zIndex: 20,
   },
+  navArrowBtnInner: { width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' },
 
   bottomBar: {
+    position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 10,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
     paddingHorizontal: Spacing.five, paddingTop: Spacing.two, gap: 6,
   },
@@ -1678,12 +1908,11 @@ const pvStyles = StyleSheet.create({
   errorText: { fontSize: TextScale.base, fontWeight: '700' },
   errorSub: { fontSize: TextScale.sm, textAlign: 'center' },
 
-  imageFull: { width: SCREEN_W, height: SCREEN_H * 0.72 },
+  imageFull: { width: SCREEN_W, height: SCREEN_H },
 
-  videoContainer: { width: SCREEN_W, height: SCREEN_H * 0.65 },
+  videoContainer: { width: SCREEN_W, height: SCREEN_H },
   videoFull: { width: '100%', height: '100%' },
 
-  // Audio player
   audioPlayer: { alignItems: 'center', padding: Spacing.six, gap: Spacing.four, width: SCREEN_W },
   audioIconWrap: { width: 100, height: 100, borderRadius: 50, alignItems: 'center', justifyContent: 'center' },
   audioFileName: { color: '#fff', fontSize: TextScale.base, fontWeight: '600', textAlign: 'center', paddingHorizontal: Spacing.six },
@@ -1693,7 +1922,6 @@ const pvStyles = StyleSheet.create({
   audioTime: { color: 'rgba(255,255,255,0.6)', fontSize: TextScale.xs },
   audioPlayBtn: { width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center', marginTop: Spacing.two },
 
-  // Metadata card (other files)
   metaCard: { alignItems: 'center', padding: Spacing.six, gap: Spacing.four, width: SCREEN_W * 0.9 },
   metaIconWrap: { width: 96, height: 96, borderRadius: Radius.xxl, alignItems: 'center', justifyContent: 'center' },
   metaFileName: { fontSize: TextScale.base, fontWeight: '700', textAlign: 'center', color: '#fff' },
