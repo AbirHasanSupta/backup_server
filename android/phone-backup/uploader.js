@@ -20,9 +20,28 @@ function hasProperExtension(name) {
  * rejected" or similar internal strings.
  */
 function toUserFriendlyError(err) {
-  const raw = (err?.message || String(err || ''));
+  const raw = (err?.message || String(err || '')).trim();
 
-  // Native module rejection noise — never show this verbatim
+  // Content type / MIME type resolution errors
+  if (
+    raw.includes('guessContentTypeFromName') ||
+    raw.includes('guessContentType') ||
+    raw.includes('must not be null')
+  ) {
+    return 'File format error — unable to determine file type for upload';
+  }
+
+  // Null pointer / reference errors
+  if (
+    raw.includes('NullPointerException') ||
+    raw.includes('null reference') ||
+    raw.includes('cannot read property') ||
+    raw.includes('undefined is not')
+  ) {
+    return 'File error — unable to read file details';
+  }
+
+  // Native module rejection noise — never show technical class names or method calls
   if (
     raw.includes('ExponentFileSystem') ||
     raw.includes('uploadAsync') ||
@@ -30,13 +49,10 @@ function toUserFriendlyError(err) {
     raw.includes('NativeModule') ||
     raw.includes('Invariant Violation')
   ) {
-    // Try to extract a meaningful sub-message after the colon, e.g.
-    // "Call to function '…' has been rejected\nCaused by: java.io.FileNotFoundException: …"
     const caused = raw.match(/(?:Caused by|caused by)[:\s]+(.+?)(?:\n|$)/i);
     if (caused && caused[1]) {
-      return sanitizeJavaException(caused[1].trim());
+      return toUserFriendlyError({ message: caused[1] });
     }
-    // Fallback: file could not be read
     return 'File could not be uploaded (inaccessible or removed)';
   }
 
@@ -55,6 +71,11 @@ function toUserFriendlyError(err) {
   }
   if (raw.includes('IOException')) {
     return 'File read error — the file may be corrupted or in use';
+  }
+
+  // Catch-all for code-level/technical errors
+  if (/java\.|android\.|com\.|Exception|TypeError|ReferenceError|IllegalState|IllegalArgument|NullPointer|Method|Class/i.test(raw)) {
+    return 'File could not be uploaded — system error';
   }
 
   // Generic long messages: truncate to keep them readable
@@ -213,6 +234,7 @@ export async function uploadFile(item, onProgress, options = {}) {
     const uploadRaw = () => FileSystem.uploadAsync(rawUrl, cacheUri, {
       httpMethod: 'POST',
       uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+      mimeType: 'application/octet-stream',
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/octet-stream',
@@ -223,6 +245,7 @@ export async function uploadFile(item, onProgress, options = {}) {
       httpMethod: 'POST',
       uploadType: FileSystem.FileSystemUploadType.MULTIPART,
       fieldName: 'file',
+      mimeType: 'application/octet-stream',
       parameters: {
         relative_path: item.relativePath,
         modified_time: String(item.modifiedTime),

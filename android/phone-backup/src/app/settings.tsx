@@ -38,6 +38,8 @@ import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { clearAllDiskCache } from '@/utils/previewCacheManager';
+import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
 /**
  * Strip protocol prefix (https:// or http://) and trailing slashes from a server address.
@@ -182,7 +184,7 @@ export default function SettingsScreen() {
           checkServer();
         })
         .catch((err: any) => {
-          Alert.alert('Connection Failed', err?.message || 'Could not reach the server.');
+          Alert.alert('Connection Failed', sanitizeErrorMessage(err, 'Could not reach the desktop server. Check Wi-Fi and server status.'));
           checkServer();
         });
     } finally {
@@ -226,7 +228,7 @@ export default function SettingsScreen() {
         checkServer();
       })
       .catch((err: any) => {
-        Alert.alert('Connection Failed', err?.message || 'Could not reach the server.');
+        Alert.alert('Connection Failed', sanitizeErrorMessage(err, 'Could not reach the desktop server. Check Wi-Fi and server status.'));
         checkServer();
       });
   };
@@ -240,6 +242,15 @@ export default function SettingsScreen() {
   const handlePauseToggle = async (val: boolean) => {
     setSyncPausedState(val);
     await setSyncPaused(val);
+  };
+
+  const handleCleanCache = async () => {
+    try {
+      await clearAllDiskCache();
+      Alert.alert('Cache Cleared', 'All temporary preview files and image caches have been cleared from disk.');
+    } catch (err: any) {
+      Alert.alert('Error', sanitizeErrorMessage(err, 'Could not clear disk cache.'));
+    }
   };
 
   const handleRefreshAll = () => {
@@ -261,7 +272,7 @@ export default function SettingsScreen() {
                 `Cleared ${count} cached entries. ${result?.uploaded ?? 0} files uploaded.`
               );
             } catch (err: any) {
-              Alert.alert('Error', err?.message || 'Could not refresh backups');
+              Alert.alert('Error', sanitizeErrorMessage(err, 'Could not refresh backups. Check server status.'));
             }
           },
         },
@@ -441,6 +452,22 @@ export default function SettingsScreen() {
 
         <SectionHeader title="Data management" styles={styles} />
         <SettingsCard styles={styles}>
+          <TouchableOpacity
+            id="clean-cache-button"
+            style={styles.outlineBtn}
+            onPress={handleCleanCache}
+            accessibilityLabel="Clean disk cache"
+            accessibilityRole="button"
+          >
+            <AppIcon androidName="delete_sweep" iosName="trash" color={colors.primary} size={18} fallback="C" />
+            <Text style={styles.outlineBtnText}>Clean disk cache</Text>
+          </TouchableOpacity>
+          <Text style={styles.hintText}>
+            Removes temporary preview images and disk cache files to free up storage space.
+          </Text>
+
+          <View style={styles.divider} />
+
           <TouchableOpacity
             id="refresh-all-button"
             style={[styles.dangerBtn, isOffline && styles.disabledBtn]}

@@ -76,6 +76,42 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+function formatUserFriendlyError(msg: string): string {
+  if (!msg) return 'Upload error occurred';
+
+  const colonIdx = msg.indexOf(':');
+  let prefix = '';
+  let detail = msg;
+  if (colonIdx > 0 && colonIdx < 60) {
+    prefix = msg.slice(0, colonIdx + 1) + ' ';
+    detail = msg.slice(colonIdx + 1).trim();
+  }
+
+  if (
+    detail.includes('guessContentTypeFromName') ||
+    detail.includes('guessContentType') ||
+    detail.includes('must not be null')
+  ) {
+    detail = 'File format error — unable to determine file type';
+  } else if (
+    detail.includes('NullPointerException') ||
+    detail.includes('null reference') ||
+    detail.includes('cannot read property')
+  ) {
+    detail = 'File error — unable to process file details';
+  } else if (
+    detail.includes('ExponentFileSystem') ||
+    detail.includes('uploadAsync') ||
+    detail.includes('NativeModule') ||
+    detail.includes('Invariant Violation') ||
+    /java\.|android\.|com\.|Exception|TypeError|ReferenceError/i.test(detail)
+  ) {
+    detail = 'File could not be uploaded — system error';
+  }
+
+  return prefix + detail;
+}
+
 const OUTCOME_CONFIG: Record<SyncOutcome, { label: string; emoji: string; androidIcon: string; iosIcon: string }> = {
   completed:    { label: 'Completed',    emoji: '✅', androidIcon: 'check_circle', iosIcon: 'checkmark.circle.fill' },
   stopped:      { label: 'Stopped',      emoji: '⏹',  androidIcon: 'stop_circle',  iosIcon: 'stop.circle.fill'      },
@@ -203,7 +239,7 @@ export function HistorySessionCard({ session }: Props) {
                 {session.errorDetails.map((msg, i) => (
                   <View key={i} style={styles.errorRow}>
                     <AppIcon androidName="error_outline" iosName="exclamationmark.circle" color={colors.error} size={12} fallback="!" />
-                    <Text style={styles.errorText} numberOfLines={2}>{msg}</Text>
+                    <Text style={styles.errorText} numberOfLines={2}>{formatUserFriendlyError(msg)}</Text>
                   </View>
                 ))}
               </>

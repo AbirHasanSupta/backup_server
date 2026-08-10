@@ -1,56 +1,76 @@
-# Welcome to your Expo app 👋
+# Phone Backup - Android Client (v2.2.0)
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+React Native & Expo client app for the **Phone Backup Server**. Built with Expo SDK 57, React Native 0.86, TypeScript, and Expo Router.
 
-## Get started
+---
 
-1. Install dependencies
+## Features & App Structure
 
-   ```bash
-   npm install
-   ```
+- 📊 **Dashboard Screen (`src/app/index.tsx`)**:
+  - Live progress ring displaying backup state.
+  - Quick action buttons (Manual Sync, Server Discovery, Pairing).
+  - Storage statistics cards (Backed-up files count, transferred bytes, server connection state).
+  - Fast LAN server discovery modal (`serverDiscovery.js`).
 
-2. Start the app
+- 📥 **Restore & Download Screen (`src/app/restore.tsx`)**:
+  - Browse all files backed up on the server for this device.
+  - Directly restore files back into Android storage with progress updates.
+  - In-app media previewer (Images, Videos via `expo-video`, Audio via `expo-audio`).
+  - Access Shared PC directories configured on the desktop server (`/shared/list`).
 
-   ```bash
-   npx expo start
-   ```
+- 📜 **Sync History Screen (`src/app/history.tsx`)**:
+  - Session-by-session backup history list (Duration, files uploaded, bytes transferred, status).
+  - Sync session history management and clearing.
 
-In the output, you'll find options to open the app in a
+- 📁 **Folder & Filter Configuration (`src/app/folders.tsx`)**:
+  - Select device media folders to include/exclude.
+  - File extension filters (Images, Videos, Audio, Documents, Custom extensions).
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+- ⚙️ **Settings Screen (`src/app/settings.tsx`)**:
+  - Server connection settings (IP address, Port, API key, scoped Device Token).
+  - Background auto-sync interval (15m, 30m, 1h, 6h, 12h, 24h).
+  - Wi-Fi only sync enforcement toggle.
+  - WakeLock execution toggle (`wakeLock.js`).
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+---
 
-## Get a fresh project
+## Native Architecture & Background Engine
 
-When you're ready, run:
+- **Foreground Service Loop (`backgroundTask.js`)**: Powered by `react-native-background-actions`, ensuring continuous timer-based differential syncs even when the app is minimized or the screen is turned off.
+- **Android CPU WakeLock (`wakeLock.js`)**: Prevents CPU throttling or Wi-Fi radio sleep during active bulk uploads.
+- **Single Live Notification (`notificationService.js`)**: Real-time batch progress updates via `expo-notifications` without sending individual per-file notifications.
+- **Differential Engine (`uploader.js` & `scanner.js`)**: Walks Android media storage, generates relative paths & modified timestamps, and sends payload to `/files/check` before transferring missing files via `/upload` or `/upload/raw`.
 
+---
+
+## Development Setup
+
+### 1. Install Dependencies
 ```bash
-npm run reset-project
+npm install
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+### 2. Start Development Server
+```bash
+npx expo start
+```
 
-### Other setup steps
+### 3. Build Native Android Development Client / APK
+Note: The app requires native Android modules (`react-native-background-actions`, `expo-notifications`, `expo-network`) which are **not supported in standard Expo Go**. You must build a Development Client or APK:
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+```bash
+# Build development build via EAS
+eas build --profile development --platform android
 
-## Learn more
+# Or build standalone Preview APK
+eas build --profile preview --platform android
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+---
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+## Scripts
 
-## Join the community
+- `npm start`: Runs `expo start`
+- `npm run android`: Runs `expo run:android`
+- `npm run lint`: Runs `expo lint`
 
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.

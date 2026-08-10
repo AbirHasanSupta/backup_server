@@ -38,7 +38,26 @@ import { appendSyncSession } from './syncHistory';
  * traces) in the Expo / developer console only — not visible in the app UI.
  */
 function sanitizeErrorForUser(msg) {
-  const raw = msg || 'Unknown error';
+  const raw = (msg || 'Unknown error').trim();
+
+  // Content type / MIME type resolution errors
+  if (
+    raw.includes('guessContentTypeFromName') ||
+    raw.includes('guessContentType') ||
+    raw.includes('must not be null')
+  ) {
+    return 'File format error — unable to determine file type for upload';
+  }
+
+  // Null pointer / reference errors
+  if (
+    raw.includes('NullPointerException') ||
+    raw.includes('null reference') ||
+    raw.includes('cannot read property') ||
+    raw.includes('undefined is not')
+  ) {
+    return 'File error — unable to read file details';
+  }
 
   // Native ExponentFileSystem / NativeModule noise
   if (
@@ -50,7 +69,7 @@ function sanitizeErrorForUser(msg) {
   ) {
     const caused = raw.match(/(?:Caused by|caused by)[:\s]+(.+?)(?:\n|$)/i);
     if (caused && caused[1]) {
-      return caused[1].replace(/^[a-z][\w.]+Exception:\s*/i, '').trim().substring(0, 100) || 'File could not be uploaded';
+      return sanitizeErrorForUser(caused[1]);
     }
     return 'File could not be uploaded (inaccessible or removed)';
   }
@@ -62,11 +81,16 @@ function sanitizeErrorForUser(msg) {
   if (raw.includes('SecurityException') || raw.includes('EPERM') || raw.includes('EACCES')) {
     return 'Permission denied — check folder access in Settings';
   }
-  if (raw.includes('SocketException') || raw.includes('ConnectException') || raw.includes('ECONNREFUSED') || raw.includes('ETIMEDOUT')) {
+  if (raw.includes('SocketException') || raw.includes('ConnectException') || raw.includes('ECONNREFUSED') || raw.includes('ETIMEDOUT') || raw.includes('Network')) {
     return 'Network error — check Wi-Fi and server connection';
   }
   if (raw.includes('IOException')) {
     return 'File read error — the file may be corrupted or in use';
+  }
+
+  // Catch-all for code-level/technical errors
+  if (/java\.|android\.|com\.|Exception|TypeError|ReferenceError|IllegalState|IllegalArgument|NullPointer|Method|Class/i.test(raw)) {
+    return 'File could not be uploaded — system error';
   }
 
   // Truncate anything excessively long

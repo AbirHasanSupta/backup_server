@@ -84,6 +84,10 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
     if (err?.name === 'AbortError') {
       return { status: 'error', reason: 'Request timed out — server did not respond in time.' };
     }
-    return { status: 'error', reason: err?.message || 'Network error' };
+    const msg = (err?.message || String(err || '')).trim();
+    if (/NoRouteToHost|ConnectException|SocketException|ECONNREFUSED|Host unreachable|Network request failed/i.test(msg)) {
+      return { status: 'error', reason: 'Server unreachable — check that the desktop server is running and on the same Wi-Fi.' };
+    }
+    return { status: 'error', reason: msg || 'Could not connect to server' };
   }
 }

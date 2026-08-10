@@ -40,7 +40,8 @@ import {
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
-import { prunePreviewCache, clearAllDiskCache } from '@/utils/previewCacheManager';
+import { prunePreviewCache } from '@/utils/previewCacheManager';
+import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -478,7 +479,7 @@ const PreviewModal = React.memo(function PreviewModal({
 
   // Zoom parameters
   const ZOOM_MIN = 1;
-  const ZOOM_MAX = 4;
+  const ZOOM_MAX = 5;
   const DOUBLE_TAP_ZOOM = 2.5;
 
   const [scaleAnim] = useState(() => new Animated.Value(1));
@@ -599,10 +600,10 @@ const PreviewModal = React.memo(function PreviewModal({
     }).start();
   }, [isFullscreen, chromeAnim]);
 
-  const latestRef = useRef({ activeIdx, fileListLen: fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim });
+  const latestRef = useRef({ activeIdx, category, fileListLen: fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim });
   useEffect(() => {
-    latestRef.current = { activeIdx, fileListLen: fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim };
-  }, [activeIdx, fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim]);
+    latestRef.current = { activeIdx, category, fileListLen: fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim };
+  }, [activeIdx, category, fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim]);
 
   const getTouchDistance = (touches: { pageX: number; pageY: number }[]) => {
     const [a, b] = touches;
@@ -615,7 +616,13 @@ const PreviewModal = React.memo(function PreviewModal({
   const panResponder = useMemo(() => {
     // eslint-disable-next-line react-hooks/refs
     return PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponder: (evt) => {
+        const cur = latestRef.current;
+        if (cur.category === 'video' && scaleRef.current <= 1.02) {
+          return false;
+        }
+        return true;
+      },
       onMoveShouldSetPanResponder: (evt, gs) => {
         const touches = evt.nativeEvent.touches;
         const cur = latestRef.current;
@@ -640,10 +647,9 @@ const PreviewModal = React.memo(function PreviewModal({
         const cur = latestRef.current;
         if (cur.canZoom && touches.length === 2 && pinchStartRef.current) {
           const dist = getTouchDistance(touches);
-          const newScale = clamp(
-            pinchStartRef.current.scale * (dist / pinchStartRef.current.distance),
-            ZOOM_MIN, ZOOM_MAX,
-          );
+          // Elastic pinch scaling (0.8x to 5.5x during active pinch gesture)
+          const rawScale = pinchStartRef.current.scale * (dist / pinchStartRef.current.distance);
+          const newScale = clamp(rawScale, 0.8, 5.5);
           scaleRef.current = newScale;
           setCurrentScaleDisplay(newScale);
           cur.scaleAnim.setValue(newScale);
@@ -665,8 +671,10 @@ const PreviewModal = React.memo(function PreviewModal({
         if (cur.canZoom && (pinchStartRef.current || scaleRef.current > 1.02)) {
           pinchStartRef.current = null;
           if (touches.length === 0) {
-            if (scaleRef.current <= 1.02) {
+            if (scaleRef.current < 1.05) {
               resetZoom(true);
+            } else if (scaleRef.current > ZOOM_MAX) {
+              cur.setZoomTo(ZOOM_MAX);
             } else {
               panStartRef.current = { ...translateRef.current };
             }
@@ -926,7 +934,7 @@ function MetaRow({ label, value, colors, last }: { label: string; value: string;
 }
 
 // ── Video Preview Player ──────────────────────────────────────────────────────
-function VideoPreviewPlayer({ uri, isFullscreen }: { uri: string; isFullscreen: boolean }) {
+function VideoPreviewPlayer({ uri }: { uri: string; isFullscreen: boolean }) {
   const player = useVideoPlayer(uri, p => {
     p.loop = true;
     p.play();
@@ -938,7 +946,7 @@ function VideoPreviewPlayer({ uri, isFullscreen }: { uri: string; isFullscreen: 
         player={player}
         style={pvStyles.videoFull}
         contentFit="contain"
-        nativeControls={!isFullscreen}
+        nativeControls={true}
       />
     </View>
   );
@@ -1328,7 +1336,7 @@ export default function RestoreScreen() {
         setSelectedSourceId(sources[0].id);
       }
     } catch (e: any) {
-      Alert.alert('Shared Folders', `Could not load shared sources: ${e?.message ?? 'Unknown error'}`);
+      Alert.alert('Shared Folders', sanitizeErrorMessage(e, 'Server unreachable — check that the desktop server is running.'));
     } finally {
       setIsLoadingSources(false);
     }
@@ -1391,7 +1399,7 @@ export default function RestoreScreen() {
       setTree(newTree);
       setSelectedPaths(new Set());
     } catch (error: any) {
-      Alert.alert('Fetch Failed', error.message || 'Could not fetch files');
+      Alert.alert('Fetch Failed', sanitizeErrorMessage(error, 'Could not fetch files from server.'));
     } finally {
       setIsFetching(false);
     }
@@ -1553,11 +1561,6 @@ export default function RestoreScreen() {
     [handleDownloadFiles, selectedPaths],
   );
 
-  const handleClearCache = useCallback(async () => {
-    await clearAllDiskCache();
-    Alert.alert('Cache Cleared', 'All temporary preview files and image caches have been cleared from disk.');
-  }, []);
-
   const rootChildren = sortedTree?.children ?? [];
 
   const fetchDisabled = isFetching || isDownloading || isOffline ||
@@ -1601,12 +1604,9 @@ export default function RestoreScreen() {
               </>
             )}
           </TouchableOpacity>
-          <TouchableOpacity onPress={handleClearCache} style={styles.actionBtn}>
-            <AppIcon androidName="delete_sweep" iosName="trash" color={colors.textSecondary} size={15} />
-            <Text style={[styles.actionBtnText, { color: colors.textSecondary }]}>Clean Cache</Text>
-          </TouchableOpacity>
           {files.length > 0 && (
             <TouchableOpacity onPress={selectAll} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isDownloading || isOffline}>
+              <AppIcon androidName="select_all" iosName="checkmark.circle" color={colors.primary} size={16} />
               <Text style={[styles.actionBtnText, { color: colors.primary }]}>
                 {selectedPaths.size === files.length ? 'Deselect All' : 'Select All'}
               </Text>

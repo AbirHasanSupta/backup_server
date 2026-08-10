@@ -19,6 +19,7 @@ import { FileTypeSelector } from '@/components/FileTypeSelector';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { checkDeviceConnection } from '../../uploader';
+import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
 export default function FoldersScreen() {
   const insets = useSafeAreaInsets();
@@ -72,7 +73,7 @@ export default function FoldersScreen() {
       const updated = await addFolder(perm.directoryUri, name);
       setFolders(updated);
     } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Could not add folder');
+      Alert.alert('Error', sanitizeErrorMessage(err, 'Could not add folder. Check folder permissions.'));
     }
   };
 
@@ -96,7 +97,7 @@ export default function FoldersScreen() {
         `Finished backing up "${folder.name}". ${result?.uploaded ?? 0} files uploaded.`
       );
     } catch (err: any) {
-      Alert.alert('Error', err?.message || 'Could not refresh backup');
+      Alert.alert('Error', sanitizeErrorMessage(err, 'Could not refresh backup. Check server connection.'));
     } finally {
       setRefreshing(null);
     }
