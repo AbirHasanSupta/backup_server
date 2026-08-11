@@ -1,14 +1,10 @@
 import React, { useState, useMemo } from 'react';
-import { View, Text, StyleSheet, LayoutAnimation, UIManager, Platform } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
+import Animated, { FadeIn, FadeOut, LinearTransition } from 'react-native-reanimated';
 import { AppColors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
-
-// Enable LayoutAnimation on Android
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
 
 export type SyncOutcome = 'completed' | 'stopped' | 'force_stopped' | 'failed';
 
@@ -145,7 +141,6 @@ export function HistorySessionCard({ session }: Props) {
   const bg    = outcomeBg[outcomeKey];
 
   const toggle = () => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setExpanded((v) => !v);
   };
 
@@ -157,7 +152,10 @@ export function HistorySessionCard({ session }: Props) {
       scaleDown={0.98}
       accessibilityLabel={`Sync session ${cfg.label} at ${formatTime(session.startedAt)}`}
     >
-      <View style={[styles.card, { borderLeftColor: color }]}>
+      <Animated.View
+        layout={LinearTransition.duration(220)}
+        style={[styles.card, { borderLeftColor: color }]}
+      >
 
         {/* ── Header row ── */}
         <View style={styles.headerRow}>
@@ -214,7 +212,11 @@ export function HistorySessionCard({ session }: Props) {
 
         {/* ── Expandable detail ── */}
         {expanded && hasDetail && (
-          <View style={styles.expandSection}>
+          <Animated.View
+            entering={FadeIn.duration(180)}
+            exiting={FadeOut.duration(120)}
+            style={styles.expandSection}
+          >
             <View style={styles.expandDivider} />
 
             {session.uploadedFiles?.length > 0 && (
@@ -244,13 +246,13 @@ export function HistorySessionCard({ session }: Props) {
                 ))}
               </>
             )}
-          </View>
+          </Animated.View>
         )}
 
         {!expanded && hasDetail && (
           <Text style={styles.tapHint}>Tap to see details</Text>
         )}
-      </View>
+      </Animated.View>
     </AnimatedPressable>
   );
 }

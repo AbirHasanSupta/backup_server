@@ -41,8 +41,10 @@ export function SyncProgressRing({
   const pulse = useSharedValue(1);
   const sweep = useSharedValue(0);
   const glow = useSharedValue(0);
+  const activeSV = useSharedValue(isActive ? 1 : 0);
 
   useEffect(() => {
+    activeSV.value = withTiming(isActive ? 1 : 0, { duration: 200 });
     if (isActive && phase !== 'stopping') {
       pulse.value = withRepeat(
         withSequence(
@@ -70,7 +72,7 @@ export function SyncProgressRing({
       sweep.value = withTiming(0, { duration: 300 });
       glow.value = withTiming(0, { duration: 300 });
     }
-  }, [isActive, phase, pulse, sweep, glow]);
+  }, [isActive, phase, pulse, sweep, glow, activeSV]);
 
   const pulseStyle = useAnimatedStyle(() => ({
     transform: [{ scale: pulse.value }],
@@ -78,7 +80,7 @@ export function SyncProgressRing({
 
   const sweepStyle = useAnimatedStyle(() => ({
     transform: [{ rotate: `${sweep.value}deg` }],
-    opacity: isActive ? 1 : 0,
+    opacity: activeSV.value,
   }));
 
   const glowStyle = useAnimatedStyle(() => ({

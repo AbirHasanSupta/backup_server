@@ -53,6 +53,9 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
   const [manualUrl, setManualUrl] = useState('');
 
   const translateY = useSharedValue(0);
+  const dismiss = useCallback(() => {
+    onClose();
+  }, [onClose]);
 
   /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
   useEffect(() => {
@@ -61,21 +64,27 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
     }
   }, [visible, translateY]);
 
-  const panGesture = Gesture.Pan()
-    .onUpdate((e) => {
-      if (e.translationY > 0) {
-        translateY.value = e.translationY;
-      }
-    })
-    .onEnd((e) => {
-      if (e.translationY > DISMISS_THRESHOLD || e.velocityY > 500) {
-        translateY.value = withTiming(SCREEN_H, { duration: 250 }, () => {
-          runOnJS(onClose)();
-        });
-      } else {
-        translateY.value = withSpring(0, { damping: 20, stiffness: 300 });
-      }
-    });
+  const panGesture = useMemo(
+    () =>
+      Gesture.Pan()
+        .onUpdate((e) => {
+          if (e.translationY > 0) {
+            translateY.value = e.translationY;
+          }
+        })
+        .onEnd((e) => {
+          if (e.translationY > DISMISS_THRESHOLD || e.velocityY > 500) {
+            translateY.value = withTiming(SCREEN_H, { duration: 250 }, (finished) => {
+              if (finished) {
+                runOnJS(dismiss)();
+              }
+            });
+          } else {
+            translateY.value = withSpring(0, { damping: 20, stiffness: 300 });
+          }
+        }),
+    [dismiss, translateY]
+  );
   /* eslint-enable react-hooks/immutability */
 
   const sheetAnimStyle = useAnimatedStyle(() => ({
@@ -143,7 +152,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
   };
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} statusBarTranslucent>
       <Animated.View style={[styles.backdrop, backdropAnimStyle]}>
         <AnimatedPressable style={{ flex: 1 }} onPress={onClose} />
       </Animated.View>

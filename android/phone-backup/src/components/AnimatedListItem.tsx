@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { ViewStyle, StyleProp } from 'react-native';
 import Animated, {
   useSharedValue,
@@ -19,8 +19,11 @@ const STAGGER_PER_ITEM = 50;
 export function AnimatedListItem({ children, index, style }: AnimatedListItemProps) {
   const translateY = useSharedValue(20);
   const opacity = useSharedValue(0);
+  const hasAnimated = useRef(false);
 
   useEffect(() => {
+    if (hasAnimated.current) return;
+    hasAnimated.current = true;
     const delay = Math.min(index * STAGGER_PER_ITEM, MAX_STAGGER_DELAY);
     translateY.value = withDelay(delay, withSpring(0, { damping: 18, stiffness: 200 }));
     opacity.value = withDelay(delay, withSpring(1, { damping: 18, stiffness: 200 }));

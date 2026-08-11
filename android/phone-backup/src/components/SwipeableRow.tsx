@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback, useMemo } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import Animated, {
   useSharedValue,
@@ -47,36 +47,62 @@ export function SwipeableRow({
 }: SwipeableRowProps) {
   const translateX = useSharedValue(0);
   const contextX = useSharedValue(0);
+  const canSwipeLeft = !!onSwipeLeft;
+  const canSwipeRight = !!onSwipeRight;
 
-  const pan = Gesture.Pan()
-    .enabled(enabled && (!!onSwipeLeft || !!onSwipeRight))
-    .activeOffsetX([-15, 15])
-    .failOffsetY([-10, 10])
-    .onBegin(() => {
-      contextX.value = translateX.value;
-    })
-    .onUpdate((e) => {
-      let nextX = contextX.value + e.translationX;
-      if (!onSwipeRight) nextX = Math.min(nextX, 0);
-      if (!onSwipeLeft) nextX = Math.max(nextX, 0);
-      const max = ACTION_WIDTH + 20;
-      if (nextX > max) nextX = max + (nextX - max) * 0.2;
-      if (nextX < -max) nextX = -max + (nextX + max) * 0.2;
-      translateX.value = nextX;
-    })
-    .onEnd((e) => {
-      if (translateX.value < -SNAP_THRESHOLD && onSwipeLeft) {
-        translateX.value = withTiming(-ACTION_WIDTH, { duration: 200 });
-        runOnJS(onSwipeLeft)();
-        translateX.value = withSpring(0, SPRING_CONFIG);
-      } else if (translateX.value > SNAP_THRESHOLD && onSwipeRight) {
-        translateX.value = withTiming(ACTION_WIDTH, { duration: 200 });
-        runOnJS(onSwipeRight)();
-        translateX.value = withSpring(0, SPRING_CONFIG);
-      } else {
-        translateX.value = withSpring(0, SPRING_CONFIG);
-      }
-    });
+  const invokeLeft = useCallback(() => {
+    onSwipeLeft?.();
+  }, [onSwipeLeft]);
+
+  const invokeRight = useCallback(() => {
+    onSwipeRight?.();
+  }, [onSwipeRight]);
+
+  const pan = useMemo(
+    () =>
+      Gesture.Pan()
+        .enabled(enabled && (canSwipeLeft || canSwipeRight))
+        .activeOffsetX([-15, 15])
+        .failOffsetY([-10, 10])
+        .onBegin(() => {
+          contextX.value = translateX.value;
+        })
+        .onUpdate((e) => {
+          let nextX = contextX.value + e.translationX;
+          if (!canSwipeRight) nextX = Math.min(nextX, 0);
+          if (!canSwipeLeft) nextX = Math.max(nextX, 0);
+          const max = ACTION_WIDTH + 20;
+          if (nextX > max) nextX = max + (nextX - max) * 0.2;
+          if (nextX < -max) nextX = -max + (nextX + max) * 0.2;
+          translateX.value = nextX;
+        })
+        .onEnd(() => {
+          if (translateX.value < -SNAP_THRESHOLD && canSwipeLeft) {
+            translateX.value = withTiming(-ACTION_WIDTH, { duration: 180 }, (finished) => {
+              if (!finished) return;
+              runOnJS(invokeLeft)();
+              translateX.value = withSpring(0, SPRING_CONFIG);
+            });
+          } else if (translateX.value > SNAP_THRESHOLD && canSwipeRight) {
+            translateX.value = withTiming(ACTION_WIDTH, { duration: 180 }, (finished) => {
+              if (!finished) return;
+              runOnJS(invokeRight)();
+              translateX.value = withSpring(0, SPRING_CONFIG);
+            });
+          } else {
+            translateX.value = withSpring(0, SPRING_CONFIG);
+          }
+        }),
+    [
+      enabled,
+      canSwipeLeft,
+      canSwipeRight,
+      invokeLeft,
+      invokeRight,
+      translateX,
+      contextX,
+    ]
+  );
 
   const rowStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: translateX.value }],

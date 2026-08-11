@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -8,13 +8,8 @@ import {
   Alert,
   DeviceEventEmitter,
   RefreshControl,
-  NativeSyntheticEvent,
-  NativeScrollEvent,
 } from 'react-native';
 import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
   FadeIn,
   FadeInDown,
 } from 'react-native-reanimated';
@@ -43,6 +38,7 @@ import { StatCard } from '@/components/StatCard';
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 
 function formatRelativeTime(ts: number | null): string {
   if (!ts) return 'Never';
@@ -156,28 +152,9 @@ export default function HomeScreen() {
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
   const [serverLabel, setServerLabel] = useState('No server');
 
-  // Collapsible header
-  const headerTranslateY = useSharedValue(0);
-  const lastScrollY = useRef(0);
-
-  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
-  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const currentY = e.nativeEvent.contentOffset.y;
-    const diff = currentY - lastScrollY.current;
-    if (currentY <= 0) {
-      headerTranslateY.value = withTiming(0, { duration: 250 });
-    } else if (diff > 8 && currentY > HEADER_HEIGHT) {
-      headerTranslateY.value = withTiming(-HEADER_HEIGHT - insets.top, { duration: 300 });
-    } else if (diff < -8) {
-      headerTranslateY.value = withTiming(0, { duration: 250 });
-    }
-    lastScrollY.current = currentY;
-  }, [headerTranslateY, insets.top]);
-  /* eslint-enable react-hooks/immutability */
-
-  const headerAnimStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: headerTranslateY.value }],
-  }));
+  const { onScroll, headerAnimatedStyle, contentInsetStyle, onHeaderLayout } = useCollapsibleHeader({
+    headerHeight: HEADER_HEIGHT,
+  });
 
   const loadAll = useCallback(async () => {
     const [lt, ts, si, paused, ip, name] = await Promise.all([
@@ -472,7 +449,10 @@ export default function HomeScreen() {
     <View style={[styles.screen, { paddingTop: insets.top }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
-      <Animated.View style={[styles.header, headerAnimStyle, { zIndex: 10 }]}>
+      <Animated.View
+        onLayout={onHeaderLayout}
+        style={[styles.header, headerAnimatedStyle, { backgroundColor: colors.bg }]}
+      >
         <View style={styles.titleBlock}>
           <Text style={styles.kicker}>Private phone backup</Text>
           <Text style={styles.appTitle}>Everything safe, quietly.</Text>
@@ -486,6 +466,7 @@ export default function HomeScreen() {
         </AnimatedPressable>
       </Animated.View>
 
+      <Animated.View style={contentInsetStyle}>
       <ScrollView
         contentContainerStyle={[
           styles.scrollContent,
@@ -654,6 +635,7 @@ export default function HomeScreen() {
           </Animated.View>
         )}
       </ScrollView>
+      </Animated.View>
     </View>
   );
 }

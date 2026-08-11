@@ -1,12 +1,9 @@
-import React, { useState, useCallback, useMemo, useRef } from 'react';
-import { View, Text, FlatList, StyleSheet, StatusBar, Alert, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
+import React, { useState, useCallback, useMemo } from 'react';
+import { View, Text, FlatList, StyleSheet, StatusBar, Alert } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
   FadeInDown,
 } from 'react-native-reanimated';
 import {
@@ -26,6 +23,7 @@ import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { AnimatedListItem } from '@/components/AnimatedListItem';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 import { checkDeviceConnection } from '../../uploader';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
@@ -42,28 +40,9 @@ export default function FoldersScreen() {
 
   const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
 
-  // Collapsible header
-  const headerTranslateY = useSharedValue(0);
-  const lastScrollY = useRef(0);
-
-  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
-  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const currentY = e.nativeEvent.contentOffset.y;
-    const diff = currentY - lastScrollY.current;
-    if (currentY <= 0) {
-      headerTranslateY.value = withTiming(0, { duration: 250 });
-    } else if (diff > 8 && currentY > HEADER_HEIGHT) {
-      headerTranslateY.value = withTiming(-HEADER_HEIGHT - insets.top, { duration: 300 });
-    } else if (diff < -8) {
-      headerTranslateY.value = withTiming(0, { duration: 250 });
-    }
-    lastScrollY.current = currentY;
-  }, [headerTranslateY, insets.top]);
-  /* eslint-enable react-hooks/immutability */
-
-  const headerAnimStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: headerTranslateY.value }],
-  }));
+  const { onScroll, headerAnimatedStyle, contentInsetStyle, onHeaderLayout } = useCollapsibleHeader({
+    headerHeight: HEADER_HEIGHT,
+  });
 
   const checkServer = useCallback(async () => {
     const ip = await getServerIp();
@@ -91,8 +70,15 @@ export default function FoldersScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      loadData();
-      checkServer();
+      let alive = true;
+      (async () => {
+        await loadData();
+        if (!alive) return;
+        await checkServer();
+      })();
+      return () => {
+        alive = false;
+      };
     }, [loadData, checkServer])
   );
 
@@ -161,7 +147,10 @@ export default function FoldersScreen() {
     <View style={[styles.screen, { paddingTop: insets.top }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
-      <Animated.View style={[styles.header, headerAnimStyle, { zIndex: 10 }]}>
+      <Animated.View
+        onLayout={onHeaderLayout}
+        style={[styles.header, headerAnimatedStyle, { backgroundColor: colors.bg }]}
+      >
         <View style={styles.titleBlock}>
           <Text style={styles.kicker}>Backup sources</Text>
           <Text style={styles.title}>Folders</Text>
@@ -183,30 +172,33 @@ export default function FoldersScreen() {
         </AnimatedPressable>
       </Animated.View>
 
-      <Animated.View entering={FadeInDown.duration(300).delay(100)} style={styles.filterSection}>
-        <FileTypeSelector selected={selectedTypes} onChange={handleTypeChange} />
-      </Animated.View>
+      <Animated.View style={contentInsetStyle}>
+        <Animated.View entering={FadeInDown.duration(300).delay(100)} style={styles.filterSection}>
+          <FileTypeSelector selected={selectedTypes} onChange={handleTypeChange} />
+        </Animated.View>
 
-      <FlatList
-        data={folders}
-        keyExtractor={(item) => item.uri}
-        contentContainerStyle={[
-          styles.listContent,
-          folders.length === 0 && styles.listContentEmpty,
-          { paddingBottom: BottomTabInset + insets.bottom + 24 },
-        ]}
-        ListEmptyComponent={renderEmpty}
-        renderItem={({ item, index }) => (
-          <AnimatedListItem index={index}>
-            <View style={item.uri === refreshing ? styles.refreshingCard : undefined}>
-              <FolderCard folder={item} onRemove={handleRemove} onRefresh={handleRefresh} refreshDisabled={isOffline} />
-            </View>
-          </AnimatedListItem>
-        )}
-        onScroll={onScroll}
-        scrollEventThrottle={16}
-        showsVerticalScrollIndicator={false}
-      />
+        <FlatList
+          style={{ flex: 1 }}
+          data={folders}
+          keyExtractor={(item) => item.uri}
+          contentContainerStyle={[
+            styles.listContent,
+            folders.length === 0 && styles.listContentEmpty,
+            { paddingBottom: BottomTabInset + insets.bottom + 24 },
+          ]}
+          ListEmptyComponent={renderEmpty}
+          renderItem={({ item, index }) => (
+            <AnimatedListItem index={index}>
+              <View style={item.uri === refreshing ? styles.refreshingCard : undefined}>
+                <FolderCard folder={item} onRemove={handleRemove} onRefresh={handleRefresh} refreshDisabled={isOffline} />
+              </View>
+            </AnimatedListItem>
+          )}
+          onScroll={onScroll}
+          scrollEventThrottle={16}
+          showsVerticalScrollIndicator={false}
+        />
+      </Animated.View>
     </View>
   );
 }

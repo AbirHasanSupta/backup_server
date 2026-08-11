@@ -1,4 +1,4 @@
-import { useRef, useCallback } from 'react';
+import { useRef, useCallback, useEffect } from 'react';
 import {
   useSharedValue,
   useAnimatedStyle,
@@ -6,78 +6,125 @@ import {
   interpolate,
   Extrapolation,
 } from 'react-native-reanimated';
-import { NativeScrollEvent, NativeSyntheticEvent } from 'react-native';
+import {
+  LayoutChangeEvent,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+} from 'react-native';
 
 interface CollapsibleHeaderConfig {
+  /** Estimated header height used until onLayout measures the real one. */
   headerHeight: number;
   scrollThreshold?: number;
-  snapThreshold?: number;
 }
 
+/**
+ * Collapses the page header on scroll down and restores it on scroll up.
+ * Uses translateY for the header and a matching content inset so the blank
+ * header slot is reclaimed (transform alone leaves empty layout space).
+ */
 export function useCollapsibleHeader({
-  headerHeight,
-  scrollThreshold = 10,
-  snapThreshold = 0.5,
+  headerHeight: estimatedHeight,
+  scrollThreshold = 8,
 }: CollapsibleHeaderConfig) {
-  const scrollY = useSharedValue(0);
+  const heightSV = useSharedValue(Math.max(estimatedHeight, 1));
   const headerTranslateY = useSharedValue(0);
   const lastScrollY = useRef(0);
-  const isHeaderVisible = useRef(true);
+  const measuredRef = useRef(Math.max(estimatedHeight, 1));
+
+  useEffect(() => {
+    const next = Math.max(estimatedHeight, 1);
+    // Prefer live layout measurement; only fall back when estimate changes
+    // before the first onLayout (e.g. safe-area insets settle).
+    if (Math.abs(measuredRef.current - next) > 8) {
+      const wasCollapsed = headerTranslateY.value < -measuredRef.current * 0.5;
+      measuredRef.current = next;
+      heightSV.value = next;
+      if (wasCollapsed) {
+        headerTranslateY.value = -next;
+      }
+    }
+  }, [estimatedHeight, heightSV, headerTranslateY]);
+
+  const onHeaderLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      const h = Math.round(event.nativeEvent.layout.height);
+      if (h <= 0 || Math.abs(h - measuredRef.current) < 2) return;
+      const wasCollapsed = headerTranslateY.value < -measuredRef.current * 0.5;
+      measuredRef.current = h;
+      heightSV.value = h;
+      if (wasCollapsed) {
+        headerTranslateY.value = -h;
+      }
+    },
+    [headerTranslateY, heightSV]
+  );
+
+  const expandHeader = useCallback(() => {
+    headerTranslateY.value = withTiming(0, { duration: 200 });
+  }, [headerTranslateY]);
 
   /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const headerHeight = measuredRef.current;
       const currentY = event.nativeEvent.contentOffset.y;
       const diff = currentY - lastScrollY.current;
 
       if (currentY <= 0) {
         headerTranslateY.value = withTiming(0, { duration: 250 });
-        isHeaderVisible.current = true;
       } else if (diff > scrollThreshold && currentY > headerHeight) {
         headerTranslateY.value = withTiming(-headerHeight, { duration: 300 });
-        isHeaderVisible.current = false;
       } else if (diff < -scrollThreshold) {
         headerTranslateY.value = withTiming(0, { duration: 250 });
-        isHeaderVisible.current = true;
       }
 
       lastScrollY.current = currentY;
-      scrollY.value = currentY;
     },
-    [headerHeight, scrollThreshold, headerTranslateY, scrollY]
+    [scrollThreshold, headerTranslateY]
   );
   /* eslint-enable react-hooks/immutability */
 
-  const headerAnimatedStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: headerTranslateY.value }],
-  }));
-
-  const tabBarAnimatedStyle = useAnimatedStyle(() => {
-    const progress = interpolate(
-      headerTranslateY.value,
-      [-headerHeight, 0],
-      [1, 0],
-      Extrapolation.CLAMP
-    );
+  const headerAnimatedStyle = useAnimatedStyle(() => {
+    const headerHeight = Math.max(heightSV.value, 1);
+    const collapsed = headerTranslateY.value < -headerHeight * 0.5;
     return {
-      transform: [
-        {
-          translateY: interpolate(
-            progress,
-            [0, 1],
-            [0, 100],
-            Extrapolation.CLAMP
-          ),
-        },
-      ],
+      position: 'absolute' as const,
+      top: 0,
+      left: 0,
+      right: 0,
+      zIndex: 10,
+      transform: [{ translateY: headerTranslateY.value }],
+      opacity: interpolate(
+        headerTranslateY.value,
+        [-headerHeight, -headerHeight * 0.6, 0],
+        [0, 0.4, 1],
+        Extrapolation.CLAMP
+      ),
+      pointerEvents: collapsed ? ('none' as const) : ('auto' as const),
+    };
+  });
+
+  /** Apply to a flex wrapper around the scrollable content. */
+  const contentInsetStyle = useAnimatedStyle(() => {
+    const headerHeight = Math.max(heightSV.value, 1);
+    return {
+      flex: 1,
+      paddingTop: interpolate(
+        headerTranslateY.value,
+        [-headerHeight, 0],
+        [0, headerHeight],
+        Extrapolation.CLAMP
+      ),
     };
   });
 
   return {
-    scrollY,
     headerTranslateY,
     headerAnimatedStyle,
-    tabBarAnimatedStyle,
+    contentInsetStyle,
     onScroll,
+    onHeaderLayout,
+    expandHeader,
   };
 }

@@ -21,8 +21,8 @@ export function StatCard({ icon, iosIcon, label, value, tint, dimColor, onPress 
   const accentColor = tint || colors.primary;
   const bgColor = dimColor || colors.primarySoft;
 
-  return (
-    <AnimatedPressable style={styles.card} onPress={onPress} scaleDown={0.95}>
+  const content = (
+    <>
       <View style={[styles.iconWrap, { backgroundColor: bgColor }]}>
         <AppIcon androidName={icon} iosName={iosIcon} color={accentColor} size={21} fallback="*" />
       </View>
@@ -32,6 +32,16 @@ export function StatCard({ icon, iosIcon, label, value, tint, dimColor, onPress 
       <Text style={styles.label} numberOfLines={1}>
         {label}
       </Text>
+    </>
+  );
+
+  if (!onPress) {
+    return <View style={styles.card}>{content}</View>;
+  }
+
+  return (
+    <AnimatedPressable style={styles.card} onPress={onPress} scaleDown={0.95}>
+      {content}
     </AnimatedPressable>
   );
 }

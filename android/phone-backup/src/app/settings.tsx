@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -8,16 +8,11 @@ import {
   StatusBar,
   Alert,
   Switch,
-  NativeSyntheticEvent,
-  NativeScrollEvent,
 } from 'react-native';
 import Constants from 'expo-constants';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
   FadeInDown,
 } from 'react-native-reanimated';
 import {
@@ -46,6 +41,7 @@ import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 import { clearAllDiskCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
@@ -90,28 +86,9 @@ export default function SettingsScreen() {
   type ServerStatus = 'connected' | 'disconnected' | 'unknown' | 'checking';
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
 
-  // Collapsible header
-  const headerTranslateY = useSharedValue(0);
-  const lastScrollY = useRef(0);
-
-  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
-  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const currentY = e.nativeEvent.contentOffset.y;
-    const diff = currentY - lastScrollY.current;
-    if (currentY <= 0) {
-      headerTranslateY.value = withTiming(0, { duration: 250 });
-    } else if (diff > 8 && currentY > HEADER_HEIGHT) {
-      headerTranslateY.value = withTiming(-HEADER_HEIGHT - insets.top, { duration: 300 });
-    } else if (diff < -8) {
-      headerTranslateY.value = withTiming(0, { duration: 250 });
-    }
-    lastScrollY.current = currentY;
-  }, [headerTranslateY, insets.top]);
-  /* eslint-enable react-hooks/immutability */
-
-  const headerAnimStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: headerTranslateY.value }],
-  }));
+  const { onScroll, headerAnimatedStyle, contentInsetStyle, onHeaderLayout } = useCollapsibleHeader({
+    headerHeight: HEADER_HEIGHT,
+  });
 
   const checkServer = useCallback(async () => {
     const ip = await getServerIp();
@@ -306,12 +283,16 @@ export default function SettingsScreen() {
     <View style={[styles.screen, { paddingTop: insets.top }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
-      <Animated.View style={[styles.header, headerAnimStyle, { zIndex: 10, backgroundColor: colors.bg }]}>
+      <Animated.View
+        onLayout={onHeaderLayout}
+        style={[styles.header, headerAnimatedStyle, { backgroundColor: colors.bg }]}
+      >
         <Text style={styles.kicker}>Preferences</Text>
         <Text style={styles.title}>Settings</Text>
         <Text style={styles.subtitle}>Connect the desktop server and tune backup behavior.</Text>
       </Animated.View>
 
+      <Animated.View style={contentInsetStyle}>
       <ScrollView
         contentContainerStyle={[
           styles.scrollContent,
@@ -537,6 +518,7 @@ export default function SettingsScreen() {
           </SettingsCard>
         </Animated.View>
       </ScrollView>
+      </Animated.View>
 
       <ServerDiscoverySheet
         visible={discoveryVisible}

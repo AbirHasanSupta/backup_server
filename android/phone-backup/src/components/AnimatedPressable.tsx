@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useCallback, useMemo } from 'react';
 import { ViewStyle, StyleProp } from 'react-native';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withSpring,
   interpolate,
+  runOnJS,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 
@@ -37,32 +38,46 @@ export function AnimatedPressable({
 }: AnimatedPressableProps) {
   const pressed = useSharedValue(0);
 
-  const tap = Gesture.Tap()
-    .enabled(!disabled)
-    .onBegin(() => {
-      pressed.value = withSpring(1, SPRING_CONFIG);
-    })
-    .onEnd(() => {
-      if (onPress) onPress();
-    })
-    .onFinalize(() => {
-      pressed.value = withSpring(0, SPRING_CONFIG);
-    });
+  const invokePress = useCallback(() => {
+    onPress?.();
+  }, [onPress]);
 
-  const longPress = Gesture.LongPress()
-    .enabled(!disabled && !!onLongPress)
-    .minDuration(delayLongPress)
-    .onStart(() => {
-      pressed.value = withSpring(1, SPRING_CONFIG);
-      if (onLongPress) onLongPress();
-    })
-    .onFinalize(() => {
-      pressed.value = withSpring(0, SPRING_CONFIG);
-    });
+  const invokeLongPress = useCallback(() => {
+    onLongPress?.();
+  }, [onLongPress]);
 
-  const gesture = onLongPress
-    ? Gesture.Race(longPress, tap)
-    : tap;
+  const gesture = useMemo(() => {
+    const tap = Gesture.Tap()
+      .enabled(!disabled)
+      .hitSlop(hitSlop)
+      .onBegin(() => {
+        pressed.value = withSpring(1, SPRING_CONFIG);
+      })
+      .onEnd(() => {
+        runOnJS(invokePress)();
+      })
+      .onFinalize(() => {
+        pressed.value = withSpring(0, SPRING_CONFIG);
+      });
+
+    if (!onLongPress) {
+      return tap;
+    }
+
+    const longPress = Gesture.LongPress()
+      .enabled(!disabled)
+      .hitSlop(hitSlop)
+      .minDuration(delayLongPress)
+      .onStart(() => {
+        pressed.value = withSpring(1, SPRING_CONFIG);
+        runOnJS(invokeLongPress)();
+      })
+      .onFinalize(() => {
+        pressed.value = withSpring(0, SPRING_CONFIG);
+      });
+
+    return Gesture.Race(longPress, tap);
+  }, [disabled, delayLongPress, hitSlop, invokePress, invokeLongPress, onLongPress, pressed]);
 
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [

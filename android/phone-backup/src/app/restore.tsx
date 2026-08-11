@@ -8,9 +8,6 @@ import {
   TouchableOpacity,
   StatusBar,
   ActivityIndicator,
-  LayoutAnimation,
-  UIManager,
-  Platform,
   Modal,
   ScrollView,
   Dimensions,
@@ -18,14 +15,8 @@ import {
   PanResponder,
   Animated,
   Easing,
-  NativeSyntheticEvent,
-  NativeScrollEvent,
 } from 'react-native';
-import ReAnimated, {
-  useSharedValue as useReSharedValue,
-  useAnimatedStyle as useReAnimatedStyle,
-  withTiming as reWithTiming,
-} from 'react-native-reanimated';
+import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView, type VideoSource } from 'expo-video';
 import { useEvent } from 'expo';
@@ -38,6 +29,7 @@ import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 import {
   listServerFiles,
   downloadFile,
@@ -53,10 +45,6 @@ import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
 import { prunePreviewCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
-
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
@@ -540,8 +528,30 @@ const PreviewModal = React.memo(function PreviewModal({
   const pinchStartRef = useRef<{ distance: number; scale: number } | null>(null);
   const lastTapRef = useRef(0);
   const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scaleDisplayRafRef = useRef<number | null>(null);
 
   const [currentScaleDisplay, setCurrentScaleDisplay] = useState(1);
+
+  useEffect(() => {
+    return () => {
+      if (tapTimerRef.current) {
+        clearTimeout(tapTimerRef.current);
+        tapTimerRef.current = null;
+      }
+      if (scaleDisplayRafRef.current != null) {
+        cancelAnimationFrame(scaleDisplayRafRef.current);
+        scaleDisplayRafRef.current = null;
+      }
+    };
+  }, []);
+
+  const scheduleScaleDisplay = useCallback((nextScale: number) => {
+    if (scaleDisplayRafRef.current != null) return;
+    scaleDisplayRafRef.current = requestAnimationFrame(() => {
+      scaleDisplayRafRef.current = null;
+      setCurrentScaleDisplay(nextScale);
+    });
+  }, []);
 
   const resetZoom = useCallback((animated: boolean) => {
     scaleRef.current = 1;
@@ -701,7 +711,7 @@ const PreviewModal = React.memo(function PreviewModal({
           const rawScale = pinchStartRef.current.scale * (dist / pinchStartRef.current.distance);
           const newScale = clamp(rawScale, 0.8, 5.5);
           scaleRef.current = newScale;
-          setCurrentScaleDisplay(newScale);
+          scheduleScaleDisplay(newScale);
           cur.scaleAnim.setValue(newScale);
         } else if (cur.canZoom && scaleRef.current > 1.02) {
           const maxX = (SCREEN_W * (scaleRef.current - 1)) / 2;
@@ -724,7 +734,7 @@ const PreviewModal = React.memo(function PreviewModal({
           pinchStartRef.current = null;
           if (touches.length === 0) {
             if (scaleRef.current < 1.05) {
-              resetZoom(true);
+              cur.resetZoom(true);
             } else if (scaleRef.current > ZOOM_MAX) {
               cur.setZoomTo(ZOOM_MAX);
             } else {
@@ -1035,6 +1045,7 @@ function VideoPreviewPlayer({
   const PREVIEW_TRANSCODE_MIN_BYTES = 40 * 1024 * 1024;
   const shouldUpgrade = previewUri !== originalUri && fileSize >= PREVIEW_TRANSCODE_MIN_BYTES;
   const upgradedRef = useRef(false);
+  const upgradeScheduledRef = useRef(false);
   const upgradeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const source = useMemo<VideoSource>(() => ({
@@ -1060,6 +1071,7 @@ function VideoPreviewPlayer({
 
   useEffect(() => {
     upgradedRef.current = false;
+    upgradeScheduledRef.current = false;
     if (upgradeTimerRef.current) {
       clearTimeout(upgradeTimerRef.current);
       upgradeTimerRef.current = null;
@@ -1075,13 +1087,18 @@ function VideoPreviewPlayer({
   }, [isActive, player]);
 
   useEffect(() => {
-    if (!shouldUpgrade || upgradedRef.current || status !== 'readyToPlay' || !isActive) {
+    if (
+      !shouldUpgrade ||
+      upgradedRef.current ||
+      upgradeScheduledRef.current ||
+      status !== 'readyToPlay' ||
+      !isActive
+    ) {
       return;
     }
 
     let cancelled = false;
-    // Prevent scheduling multiple upgrades while the player re-emits readyToPlay.
-    upgradedRef.current = true;
+    upgradeScheduledRef.current = true;
     const timer = setTimeout(async () => {
       if (cancelled || upgradedRef.current) return;
       const position = player.currentTime;
@@ -1093,13 +1110,15 @@ function VideoPreviewPlayer({
           contentType: 'progressive',
         });
         if (cancelled) return;
+        upgradedRef.current = true;
         player.currentTime = position;
         if (wasPlaying) {
           player.play();
         }
       } catch {
-        // If upgrade fails, allow another attempt later.
+        // Allow another attempt later.
         upgradedRef.current = false;
+        upgradeScheduledRef.current = false;
       }
     }, 1500);
     upgradeTimerRef.current = timer;
@@ -1109,6 +1128,9 @@ function VideoPreviewPlayer({
       clearTimeout(timer);
       if (upgradeTimerRef.current === timer) {
         upgradeTimerRef.current = null;
+      }
+      if (!upgradedRef.current) {
+        upgradeScheduledRef.current = false;
       }
     };
   }, [shouldUpgrade, status, isActive, originalUri, player]);
@@ -1474,7 +1496,7 @@ function findNodeByKey(node: TreeNode, key: string): TreeNode | null {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function RestoreScreen() {
-  const { colors } = useAppTheme();
+  const { colors, isDark } = useAppTheme();
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -1525,49 +1547,50 @@ export default function RestoreScreen() {
   const [previewIndex, setPreviewIndex] = useState<number>(0);
   const [warmPreviewFile, setWarmPreviewFile] = useState<RemoteFile | null>(null);
 
-  // Collapsible header
-  const headerTranslateY = useReSharedValue(0);
-  const lastScrollYRef = useRef(0);
-  const HEADER_H = 100;
+  const headerHeight = insets.top + Spacing.five + 88;
+  const {
+    onScroll: onListScroll,
+    headerAnimatedStyle,
+    contentInsetStyle,
+    onHeaderLayout,
+    expandHeader,
+  } = useCollapsibleHeader({
+    headerHeight,
+  });
 
-  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
-  const onListScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const currentY = e.nativeEvent.contentOffset.y;
-    const diff = currentY - lastScrollYRef.current;
-    if (currentY <= 0) {
-      headerTranslateY.value = reWithTiming(0, { duration: 250 });
-    } else if (diff > 8 && currentY > HEADER_H) {
-      headerTranslateY.value = reWithTiming(-HEADER_H - insets.top, { duration: 300 });
-    } else if (diff < -8) {
-      headerTranslateY.value = reWithTiming(0, { duration: 250 });
+  useEffect(() => {
+    if (isDownloading) {
+      expandHeader();
     }
-    lastScrollYRef.current = currentY;
-  }, [headerTranslateY, insets.top]);
-  /* eslint-enable react-hooks/immutability */
-
-  const headerAnimStyle = useReAnimatedStyle(() => ({
-    transform: [{ translateY: headerTranslateY.value }],
-  }));
+  }, [isDownloading, expandHeader]);
 
   // Server connection check
-  const checkServer = useCallback(async () => {
+  const checkServer = useCallback(async (alive?: () => boolean) => {
+    const stillAlive = alive ?? (() => true);
     const ip = await getServerIp();
+    if (!stillAlive()) return;
     if (!ip) { setServerStatus('unknown'); return; }
     setServerStatus('checking');
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
     try {
       const result = await checkDeviceConnection({ signal: controller.signal });
+      if (!stillAlive()) return;
       setServerStatus(result.connected ? 'connected' : 'disconnected');
       loadServerConfig();
     } catch {
+      if (!stillAlive()) return;
       setServerStatus('disconnected');
     } finally {
       clearTimeout(timeout);
     }
   }, [loadServerConfig]);
 
-  useFocusEffect(useCallback(() => { checkServer(); }, [checkServer]));
+  useFocusEffect(useCallback(() => {
+    let alive = true;
+    checkServer(() => alive);
+    return () => { alive = false; };
+  }, [checkServer]));
 
   const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
 
@@ -1700,7 +1723,6 @@ export default function RestoreScreen() {
 
   // Expand / collapse folder nodes
   const handleToggleExpand = useCallback((nodeKey: string) => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setTree(prev => {
       if (!prev) return prev;
       const cloned = deepCloneTree(prev);
@@ -1841,7 +1863,7 @@ export default function RestoreScreen() {
 
   return (
     <View style={[styles.root, { backgroundColor: colors.bg }]}>
-      <StatusBar barStyle={colors.bg === '#0B1220' ? 'light-content' : 'dark-content'} />
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
 
       {/* Download progress banner */}
       {isDownloading && downloadProgress && (
@@ -1854,8 +1876,18 @@ export default function RestoreScreen() {
         </View>
       )}
 
-      {/* Page Header */}
-      <ReAnimated.View style={[styles.pageHeader, { paddingTop: !isDownloading ? insets.top + Spacing.five : Spacing.four, backgroundColor: colors.bg, zIndex: 10 }, headerAnimStyle]}>
+      {/* Page Header — absolute+collapsible when browsing; in-flow under banner while downloading */}
+      <ReAnimated.View
+        onLayout={isDownloading ? undefined : onHeaderLayout}
+        style={[
+          styles.pageHeader,
+          {
+            paddingTop: isDownloading ? Spacing.four : insets.top + Spacing.five,
+            backgroundColor: colors.bg,
+          },
+          !isDownloading && headerAnimatedStyle,
+        ]}
+      >
         <View>
           <Text style={styles.pageTitle}>Restore Files</Text>
           <Text style={styles.pageSubtitle}>
@@ -1889,6 +1921,7 @@ export default function RestoreScreen() {
         </View>
       </ReAnimated.View>
 
+      <ReAnimated.View style={isDownloading ? { flex: 1 } : contentInsetStyle}>
       {/* Source Selector */}
       {!isDownloading && (
         <SourceSelector
@@ -1935,6 +1968,7 @@ export default function RestoreScreen() {
 
       {/* File Tree List */}
       <FlatList
+        style={{ flex: 1 }}
         data={rootChildren}
         keyExtractor={item => item.key}
         renderItem={({ item }) => (
@@ -1970,6 +2004,7 @@ export default function RestoreScreen() {
           ) : null
         }
       />
+      </ReAnimated.View>
 
       {/* Download FAB */}
       {selectedPaths.size > 0 && !isDownloading && (

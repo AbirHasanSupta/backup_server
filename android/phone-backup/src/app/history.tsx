@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -7,13 +7,8 @@ import {
   RefreshControl,
   Alert,
   StatusBar,
-  NativeSyntheticEvent,
-  NativeScrollEvent,
 } from 'react-native';
 import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
   FadeInDown,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -26,6 +21,7 @@ import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { AnimatedListItem } from '@/components/AnimatedListItem';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 
 function formatDuration(ms: number): string {
   const totalSecs = Math.floor(ms / 1000);
@@ -122,8 +118,6 @@ function ListHeader({ styles, colors, sessionCount, summary, onClear }: ListHead
   );
 }
 
-const HEADER_HEIGHT = 100;
-
 export default function HistoryScreen() {
   const { colors, isDark } = useAppTheme();
   const insets = useSafeAreaInsets();
@@ -132,28 +126,10 @@ export default function HistoryScreen() {
   const [sessions, setSessions] = useState<SyncSession[]>([]);
   const [refreshing, setRefreshing] = useState(false);
 
-  // Collapsible header
-  const headerTranslateY = useSharedValue(0);
-  const lastScrollY = useRef(0);
-
-  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
-  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const currentY = e.nativeEvent.contentOffset.y;
-    const diff = currentY - lastScrollY.current;
-    if (currentY <= 0) {
-      headerTranslateY.value = withTiming(0, { duration: 250 });
-    } else if (diff > 8 && currentY > HEADER_HEIGHT) {
-      headerTranslateY.value = withTiming(-HEADER_HEIGHT - insets.top, { duration: 300 });
-    } else if (diff < -8) {
-      headerTranslateY.value = withTiming(0, { duration: 250 });
-    }
-    lastScrollY.current = currentY;
-  }, [headerTranslateY, insets.top]);
-  /* eslint-enable react-hooks/immutability */
-
-  const headerAnimStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: headerTranslateY.value }],
-  }));
+  const headerHeight = insets.top + Spacing.five + 88;
+  const { onScroll, headerAnimatedStyle, contentInsetStyle, onHeaderLayout } = useCollapsibleHeader({
+    headerHeight,
+  });
 
   const load = useCallback(async () => {
     const data = await getSyncHistory();
@@ -202,7 +178,10 @@ export default function HistoryScreen() {
     <View style={[styles.root, { backgroundColor: colors.bg }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
-      <Animated.View style={[styles.pageHeader, { paddingTop: insets.top + Spacing.five }, headerAnimStyle, { zIndex: 10, backgroundColor: colors.bg }]}>
+      <Animated.View
+        onLayout={onHeaderLayout}
+        style={[styles.pageHeader, { paddingTop: insets.top + Spacing.five }, headerAnimatedStyle, { backgroundColor: colors.bg }]}
+      >
         <View>
           <Text style={styles.pageTitle}>Sync History</Text>
           <Text style={styles.pageSubtitle}>
@@ -224,40 +203,43 @@ export default function HistoryScreen() {
         )}
       </Animated.View>
 
-      <FlatList<SyncSession>
-        data={sessions}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item, index }) => (
-          <AnimatedListItem index={index}>
-            <HistorySessionCard session={item} />
-          </AnimatedListItem>
-        )}
-        ListHeaderComponent={
-          <ListHeader
-            styles={styles}
-            colors={colors}
-            sessionCount={sessions.length}
-            summary={summary}
-            onClear={handleClear}
-          />
-        }
-        ListEmptyComponent={<EmptyState styles={styles} colors={colors} />}
-        contentContainerStyle={[
-          styles.listContent,
-          { paddingBottom: BottomTabInset + Spacing.five },
-        ]}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor={colors.primary}
-            colors={[colors.primary]}
-          />
-        }
-        onScroll={onScroll}
-        scrollEventThrottle={16}
-        showsVerticalScrollIndicator={false}
-      />
+      <Animated.View style={contentInsetStyle}>
+        <FlatList<SyncSession>
+          style={{ flex: 1 }}
+          data={sessions}
+          keyExtractor={(item) => item.id}
+          renderItem={({ item, index }) => (
+            <AnimatedListItem index={index}>
+              <HistorySessionCard session={item} />
+            </AnimatedListItem>
+          )}
+          ListHeaderComponent={
+            <ListHeader
+              styles={styles}
+              colors={colors}
+              sessionCount={sessions.length}
+              summary={summary}
+              onClear={handleClear}
+            />
+          }
+          ListEmptyComponent={<EmptyState styles={styles} colors={colors} />}
+          contentContainerStyle={[
+            styles.listContent,
+            { paddingBottom: BottomTabInset + Spacing.five },
+          ]}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+            />
+          }
+          onScroll={onScroll}
+          scrollEventThrottle={16}
+          showsVerticalScrollIndicator={false}
+        />
+      </Animated.View>
     </View>
   );
 }
