@@ -2,12 +2,19 @@ import { Tabs } from 'expo-router';
 import { useEffect, useMemo } from 'react';
 import { Platform, View, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import * as MediaLibrary from 'expo-media-library';
 import { registerBackgroundTask } from '../../backgroundTask';
 import { setupNotifications } from '../../notificationService';
 import { AppColors, Radius, Shadows, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { AppThemeProvider, useAppTheme } from '@/hooks/use-app-theme';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+  interpolateColor,
+} from 'react-native-reanimated';
 
 type TabIconProps = {
   androidName: string;
@@ -18,8 +25,19 @@ type TabIconProps = {
 };
 
 function TabIcon({ androidName, iosName, focused, colors, styles }: TabIconProps) {
+  const scale = useSharedValue(focused ? 1 : 0);
+
+  useEffect(() => {
+    scale.value = withSpring(focused ? 1 : 0, { damping: 14, stiffness: 350, mass: 0.6 });
+  }, [focused, scale]);
+
+  const iconAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: 0.9 + scale.value * 0.1 }],
+    backgroundColor: interpolateColor(scale.value, [0, 1], ['transparent', colors.primarySoft]),
+  }));
+
   return (
-    <View style={[styles.iconWrapper, focused && styles.iconWrapperFocused]}>
+    <Animated.View style={[styles.iconWrapper, iconAnimStyle]}>
       <AppIcon
         androidName={androidName}
         iosName={iosName}
@@ -27,15 +45,17 @@ function TabIcon({ androidName, iosName, focused, colors, styles }: TabIconProps
         color={focused ? colors.primary : colors.textSecondary}
         fallback="*"
       />
-    </View>
+    </Animated.View>
   );
 }
 
 export default function RootLayout() {
   return (
-    <AppThemeProvider>
-      <RootLayoutContent />
-    </AppThemeProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <AppThemeProvider>
+        <RootLayoutContent />
+      </AppThemeProvider>
+    </GestureHandlerRootView>
   );
 }
 
@@ -158,9 +178,6 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     width: 42,
     height: 32,
     borderRadius: Radius.full,
-  },
-  iconWrapperFocused: {
-    backgroundColor: colors.primarySoft,
   },
   tabLabel: {
     fontSize: TextScale.xs,

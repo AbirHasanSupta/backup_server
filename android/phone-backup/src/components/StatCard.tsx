@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
+import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 
 interface Props {
@@ -11,16 +12,17 @@ interface Props {
   value: string;
   tint?: string;
   dimColor?: string;
+  onPress?: () => void;
 }
 
-export function StatCard({ icon, iosIcon, label, value, tint, dimColor }: Props) {
+export function StatCard({ icon, iosIcon, label, value, tint, dimColor, onPress }: Props) {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const accentColor = tint || colors.primary;
   const bgColor = dimColor || colors.primarySoft;
 
   return (
-    <View style={styles.card}>
+    <AnimatedPressable style={styles.card} onPress={onPress} scaleDown={0.95}>
       <View style={[styles.iconWrap, { backgroundColor: bgColor }]}>
         <AppIcon androidName={icon} iosName={iosIcon} color={accentColor} size={21} fallback="*" />
       </View>
@@ -30,7 +32,7 @@ export function StatCard({ icon, iosIcon, label, value, tint, dimColor }: Props)
       <Text style={styles.label} numberOfLines={1}>
         {label}
       </Text>
-    </View>
+    </AnimatedPressable>
   );
 }
 

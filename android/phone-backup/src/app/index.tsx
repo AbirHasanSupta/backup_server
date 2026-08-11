@@ -1,14 +1,23 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   View,
   Text,
-  TouchableOpacity,
   ScrollView,
   StyleSheet,
   StatusBar,
   Alert,
   DeviceEventEmitter,
+  RefreshControl,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
 } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  FadeIn,
+  FadeInDown,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import {
@@ -32,6 +41,7 @@ import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '
 import { SyncProgressRing, SyncPhase } from '@/components/SyncProgressRing';
 import { StatCard } from '@/components/StatCard';
 import { AppIcon } from '@/components/AppIcon';
+import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 
 function formatRelativeTime(ts: number | null): string {
@@ -116,6 +126,8 @@ function applyProgressUpdate(
 
 type ServerStatus = 'connected' | 'disconnected' | 'removed' | 'unknown' | 'checking';
 
+const HEADER_HEIGHT = 140;
+
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useAppTheme();
@@ -135,15 +147,37 @@ export default function HomeScreen() {
   const [syncInterval, setSyncIntervalState] = useState(15);
   const [syncPaused, setSyncPausedState] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
-  // Tracks when the user first tapped the "Stopping" button for double-tap detection.
   const [forceStopPressedAt, setForceStopPressedAt] = useState<number | null>(null);
   const [, setRelativeTimeTick] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // How fast the user must double-tap "Stopping" to trigger a force-stop.
   const DOUBLE_TAP_WINDOW_MS = 1200;
 
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
   const [serverLabel, setServerLabel] = useState('No server');
+
+  // Collapsible header
+  const headerTranslateY = useSharedValue(0);
+  const lastScrollY = useRef(0);
+
+  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
+  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const currentY = e.nativeEvent.contentOffset.y;
+    const diff = currentY - lastScrollY.current;
+    if (currentY <= 0) {
+      headerTranslateY.value = withTiming(0, { duration: 250 });
+    } else if (diff > 8 && currentY > HEADER_HEIGHT) {
+      headerTranslateY.value = withTiming(-HEADER_HEIGHT - insets.top, { duration: 300 });
+    } else if (diff < -8) {
+      headerTranslateY.value = withTiming(0, { duration: 250 });
+    }
+    lastScrollY.current = currentY;
+  }, [headerTranslateY, insets.top]);
+  /* eslint-enable react-hooks/immutability */
+
+  const headerAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: headerTranslateY.value }],
+  }));
 
   const loadAll = useCallback(async () => {
     const [lt, ts, si, paused, ip, name] = await Promise.all([
@@ -189,12 +223,7 @@ export default function HomeScreen() {
     }
 
     setSyncing(true);
-    // Functional update: once stopping is true it must never flicker back to
-    // false because of a stale snapshot arriving slightly after the user pressed
-    // Stop. Only onCompleted / onFailed are authoritative resets.
     setStopRequested((prev) => prev || !!snapshot.stopping);
-    // Don't reset forceStopPressedAt here — we want to preserve the double-tap
-    // window even if a state snapshot comes in between two taps.
 
     const detail = {
       ...(snapshot.detail || {}),
@@ -263,9 +292,6 @@ export default function HomeScreen() {
       detail?: any;
     }) => {
       setSyncing(true);
-      // Functional update: once the user has pressed Stop, no in-flight progress
-      // event is allowed to flip stopRequested back to false. Only sync completion
-      // events (onCompleted / onFailed) are authoritative resets.
       if (detail?.stopping) setStopRequested(true);
       applyProgressUpdate(current, tot, detail, {
         setPhase,
@@ -337,17 +363,14 @@ export default function HomeScreen() {
   const handleSync = async () => {
     const snapshot = await getCurrentSyncState().catch(() => null);
 
-    // ── Case 1: A sync is currently active (syncing or stopping) ─────────────
     if (syncing || snapshot?.active) {
       if (snapshot?.active) applySyncSnapshot(snapshot);
 
-      // Sub-case A: Already in graceful-stop state → handle double-tap for force-stop
       if (stopRequested || snapshot?.stopping) {
         const now = Date.now();
         const isDoubleTap = forceStopPressedAt !== null && (now - forceStopPressedAt) < DOUBLE_TAP_WINDOW_MS;
 
         if (isDoubleTap) {
-          // ── Double-tap confirmed: force-stop ────────────────────────────────
           setForceStopPressedAt(null);
           setStopRequested(false);
           setSyncing(false);
@@ -355,14 +378,11 @@ export default function HomeScreen() {
           setStatusMessage('Backup force-stopped');
           await forceStopCurrentSync();
         } else {
-          // ── First tap on "Stopping" button: record time, show hint ──────────
           setForceStopPressedAt(now);
-          // The hint is shown in the button label below
         }
         return;
       }
 
-      // Sub-case B: Actively syncing — request graceful stop
       const changed = await stopCurrentSync();
       if (changed) {
         setStopRequested(true);
@@ -373,7 +393,6 @@ export default function HomeScreen() {
       return;
     }
 
-    // ── Case 2: Not syncing — start a new sync ────────────────────────────────
     const ip = await getServerIp();
     if (!ip) {
       Alert.alert(
@@ -421,6 +440,12 @@ export default function HomeScreen() {
     } catch {}
   };
 
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await loadAll();
+    setRefreshing(false);
+  }, [loadAll]);
+
   const statusColors: Record<ServerStatus, string> = {
     connected: colors.success,
     disconnected: colors.error,
@@ -441,26 +466,25 @@ export default function HomeScreen() {
 
   const serverColor = statusColors[serverStatus];
 
-  // Buttons that require a server connection are disabled when fully offline
   const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown' || serverStatus === 'removed';
 
   return (
     <View style={[styles.screen, { paddingTop: insets.top }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
-      <View style={styles.header}>
+      <Animated.View style={[styles.header, headerAnimStyle, { zIndex: 10 }]}>
         <View style={styles.titleBlock}>
           <Text style={styles.kicker}>Private phone backup</Text>
           <Text style={styles.appTitle}>Everything safe, quietly.</Text>
           <Text style={styles.appSubtitle}>Your folders sync to your own computer.</Text>
         </View>
-        <View style={[styles.serverPill, { borderColor: serverColor }]}>
+        <AnimatedPressable style={[styles.serverPill, { borderColor: serverColor }]} onPress={loadAll}>
           <View style={[styles.statusDot, { backgroundColor: serverColor }]} />
           <Text style={[styles.serverPillText, { color: serverColor }]} numberOfLines={1}>
             {statusLabels[serverStatus]}
           </Text>
-        </View>
-      </View>
+        </AnimatedPressable>
+      </Animated.View>
 
       <ScrollView
         contentContainerStyle={[
@@ -468,8 +492,18 @@ export default function HomeScreen() {
           { paddingBottom: BottomTabInset + insets.bottom + 34 },
         ]}
         showsVerticalScrollIndicator={false}
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={colors.primary}
+            colors={[colors.primary]}
+          />
+        }
       >
-        <View style={styles.heroPanel}>
+        <Animated.View entering={FadeInDown.duration(400).delay(100)} style={styles.heroPanel}>
           <SyncProgressRing
             isActive={syncing}
             progress={progress}
@@ -486,9 +520,9 @@ export default function HomeScreen() {
               <Text style={styles.pausedText}>Auto sync paused</Text>
             </View>
           )}
-        </View>
+        </Animated.View>
 
-        <View style={styles.statsRow}>
+        <Animated.View entering={FadeInDown.duration(400).delay(200)} style={styles.statsRow}>
           <StatCard
             icon="inventory_2"
             iosIcon="archivebox"
@@ -513,71 +547,73 @@ export default function HomeScreen() {
             tint={syncPaused ? colors.textMuted : colors.warning}
             dimColor={colors.warningSoft}
           />
-        </View>
+        </Animated.View>
 
-        <TouchableOpacity
-          id="sync-now-button"
-          style={[
-            styles.syncBtn,
-            syncing && !stopRequested && styles.syncBtnStop,
-            stopRequested && !forceStopPressedAt && styles.syncBtnStopping,
-            stopRequested && !!forceStopPressedAt && styles.syncBtnForceHint,
-            isOffline && !syncing && styles.disabledBtn,
-          ]}
-          onPress={handleSync}
-          disabled={isOffline && !syncing}
-          accessibilityLabel={
-            syncing
-              ? stopRequested
-                ? forceStopPressedAt
-                  ? 'Tap again to force stop'
-                  : 'Stopping sync — tap again to force stop'
-                : 'Stop sync'
-              : 'Sync now'
-          }
-          accessibilityRole="button"
-        >
-          {syncing ? (
-            stopRequested ? (
-              <View style={styles.syncBtnInner}>
-                <AppIcon
-                  androidName={forceStopPressedAt ? 'warning' : 'hourglass_top'}
-                  iosName={forceStopPressedAt ? 'exclamationmark.triangle.fill' : 'hourglass'}
-                  color={colors.white}
-                  size={20}
-                  fallback="!"
-                />
-                <View>
-                  <Text style={styles.syncBtnText}>
-                    {forceStopPressedAt ? 'Tap again to force stop' : 'Stopping…'}
-                  </Text>
-                  {!forceStopPressedAt && (
-                    <Text style={styles.syncBtnHint}>Double-tap to force stop</Text>
-                  )}
+        <Animated.View entering={FadeInDown.duration(400).delay(300)}>
+          <AnimatedPressable
+            id="sync-now-button"
+            style={[
+              styles.syncBtn,
+              syncing && !stopRequested && styles.syncBtnStop,
+              stopRequested && !forceStopPressedAt && styles.syncBtnStopping,
+              stopRequested && !!forceStopPressedAt && styles.syncBtnForceHint,
+              isOffline && !syncing && styles.disabledBtn,
+            ]}
+            onPress={handleSync}
+            disabled={isOffline && !syncing}
+            scaleDown={0.96}
+            accessibilityLabel={
+              syncing
+                ? stopRequested
+                  ? forceStopPressedAt
+                    ? 'Tap again to force stop'
+                    : 'Stopping sync — tap again to force stop'
+                  : 'Stop sync'
+                : 'Sync now'
+            }
+          >
+            {syncing ? (
+              stopRequested ? (
+                <View style={styles.syncBtnInner}>
+                  <AppIcon
+                    androidName={forceStopPressedAt ? 'warning' : 'hourglass_top'}
+                    iosName={forceStopPressedAt ? 'exclamationmark.triangle.fill' : 'hourglass'}
+                    color={colors.white}
+                    size={20}
+                    fallback="!"
+                  />
+                  <View>
+                    <Text style={styles.syncBtnText}>
+                      {forceStopPressedAt ? 'Tap again to force stop' : 'Stopping…'}
+                    </Text>
+                    {!forceStopPressedAt && (
+                      <Text style={styles.syncBtnHint}>Double-tap to force stop</Text>
+                    )}
+                  </View>
                 </View>
-              </View>
+              ) : (
+                <View style={styles.syncBtnInner}>
+                  <AppIcon
+                    androidName="stop"
+                    iosName="stop.fill"
+                    color={colors.white}
+                    size={20}
+                    fallback="S"
+                  />
+                  <Text style={styles.syncBtnText}>Stop Sync</Text>
+                </View>
+              )
             ) : (
               <View style={styles.syncBtnInner}>
-                <AppIcon
-                  androidName="stop"
-                  iosName="stop.fill"
-                  color={colors.white}
-                  size={20}
-                  fallback="S"
-                />
-                <Text style={styles.syncBtnText}>Stop Sync</Text>
+                <AppIcon androidName="cloud_upload" iosName="icloud.and.arrow.up" color={colors.white} size={20} fallback="UP" />
+                <Text style={styles.syncBtnText}>Sync Now</Text>
               </View>
-            )
-          ) : (
-            <View style={styles.syncBtnInner}>
-              <AppIcon androidName="cloud_upload" iosName="icloud.and.arrow.up" color={colors.white} size={20} fallback="UP" />
-              <Text style={styles.syncBtnText}>Sync Now</Text>
-            </View>
-          )}
-        </TouchableOpacity>
+            )}
+          </AnimatedPressable>
+        </Animated.View>
 
         {serverStatus === 'unknown' && (
-          <View style={styles.noticeCard}>
+          <Animated.View entering={FadeIn.duration(300)} style={styles.noticeCard}>
             <View style={styles.noticeIcon}>
               <AppIcon androidName="wifi_off" iosName="wifi.slash" color={colors.warning} size={20} fallback="!" />
             </View>
@@ -587,11 +623,11 @@ export default function HomeScreen() {
                 Open Settings to enter your server IP, or use Discover to find it automatically.
               </Text>
             </View>
-          </View>
+          </Animated.View>
         )}
 
         {serverStatus === 'disconnected' && (
-          <View style={[styles.noticeCard, styles.errorCard]}>
+          <Animated.View entering={FadeIn.duration(300)} style={[styles.noticeCard, styles.errorCard]}>
             <View style={[styles.noticeIcon, styles.errorIcon]}>
               <AppIcon androidName="error" iosName="exclamationmark.triangle" color={colors.error} size={20} fallback="!" />
             </View>
@@ -601,11 +637,11 @@ export default function HomeScreen() {
                 Make sure the desktop app is running and both devices are on the same Wi-Fi network.
               </Text>
             </View>
-          </View>
+          </Animated.View>
         )}
 
         {serverStatus === 'removed' && (
-          <View style={[styles.noticeCard, styles.errorCard]}>
+          <Animated.View entering={FadeIn.duration(300)} style={[styles.noticeCard, styles.errorCard]}>
             <View style={[styles.noticeIcon, styles.errorIcon]}>
               <AppIcon androidName="link_off" iosName="link.badge.minus" color={colors.error} size={20} fallback="!" />
             </View>
@@ -615,7 +651,7 @@ export default function HomeScreen() {
                 This phone was removed from the desktop app. Open Settings to connect again.
               </Text>
             </View>
-          </View>
+          </Animated.View>
         )}
       </ScrollView>
     </View>
@@ -632,6 +668,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     paddingTop: Spacing.four,
     paddingBottom: Spacing.five,
     gap: Spacing.four,
+    backgroundColor: colors.bg,
   },
   titleBlock: {
     gap: Spacing.one,
@@ -728,14 +765,12 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   syncBtnStop: {
     backgroundColor: colors.error,
   },
-  // Graceful-stop state: amber/warning background
   syncBtnStopping: {
     backgroundColor: colors.warning,
     opacity: 1,
   },
-  // First tap registered — highlight to signal "ready for second tap"
   syncBtnForceHint: {
-    backgroundColor: '#C2410C', // deep orange — distinct from warning amber
+    backgroundColor: '#C2410C',
     opacity: 1,
   },
   syncBtnInner: {

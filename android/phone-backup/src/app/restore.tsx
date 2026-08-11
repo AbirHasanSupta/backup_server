@@ -18,7 +18,14 @@ import {
   PanResponder,
   Animated,
   Easing,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
 } from 'react-native';
+import ReAnimated, {
+  useSharedValue as useReSharedValue,
+  useAnimatedStyle as useReAnimatedStyle,
+  withTiming as reWithTiming,
+} from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView, type VideoSource } from 'expo-video';
 import { useEvent } from 'expo';
@@ -29,6 +36,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
+import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import {
   listServerFiles,
@@ -1318,6 +1326,10 @@ const TreeNodeView = React.memo(function TreeNodeView({
     const category = getFileCategory(node.name);
     const catMeta = categoryMeta(category);
 
+    // Modern interaction model (matches Google Photos / Files):
+    //  - Tap always opens preview (or toggles selection if in selection mode)
+    //  - Long-press always starts/toggles selection
+    //  - Checkbox always toggles selection directly
     const handlePress = () => {
       if (selectionMode) {
         onToggleNode(node);
@@ -1328,7 +1340,7 @@ const TreeNodeView = React.memo(function TreeNodeView({
 
     const handleLongPress = () => {
       if (selectionMode) {
-        node.file && onPreview(node.file);
+        onToggleNode(node);
       } else {
         onEnterSelectionMode(node);
       }
@@ -1344,7 +1356,7 @@ const TreeNodeView = React.memo(function TreeNodeView({
 
     return (
       <Pressable
-        style={[styles.fileRow, { paddingLeft: indent + Spacing.four }]}
+        style={[styles.fileRow, { paddingLeft: indent + Spacing.four }, isSelected && styles.fileRowSelected]}
         onPress={handlePress}
         onPressIn={() => {
           if (node.file) {
@@ -1352,22 +1364,26 @@ const TreeNodeView = React.memo(function TreeNodeView({
           }
         }}
         onLongPress={handleLongPress}
-        delayLongPress={350}
+        delayLongPress={400}
         android_ripple={{ color: colors.primarySoft }}
       >
-        <TouchableOpacity
-          onPress={handleCheckboxPress}
-          hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
-          activeOpacity={0.7}
-        >
-          <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
-            {isSelected ? (
-              <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />
-            ) : null}
+        {selectionMode ? (
+          <TouchableOpacity
+            onPress={handleCheckboxPress}
+            hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
+            activeOpacity={0.7}
+          >
+            <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
+              {isSelected ? (
+                <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />
+              ) : null}
+            </View>
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.fileIconWrap}>
+            <AppIcon androidName={catMeta.icon} iosName={catMeta.iosIcon} color={colors.primary} size={18} />
           </View>
-        </TouchableOpacity>
-
-        <AppIcon androidName={catMeta.icon} iosName={catMeta.iosIcon} color={colors.textMuted} size={16} />
+        )}
 
         <View style={styles.fileInfo}>
           <Text style={styles.fileName} numberOfLines={1}>{node.name}</Text>
@@ -1378,9 +1394,12 @@ const TreeNodeView = React.memo(function TreeNodeView({
           </View>
         </View>
 
-        {!selectionMode && (
-          <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={14} />
-        )}
+        <AppIcon
+          androidName={selectionMode ? (isSelected ? 'check_circle' : 'radio_button_unchecked') : 'chevron_right'}
+          iosName={selectionMode ? (isSelected ? 'checkmark.circle.fill' : 'circle') : 'chevron.right'}
+          color={selectionMode ? (isSelected ? colors.primary : colors.textMuted) : colors.textMuted}
+          size={selectionMode ? 20 : 14}
+        />
       </Pressable>
     );
   }
@@ -1505,6 +1524,30 @@ export default function RestoreScreen() {
   const [previewFile, setPreviewFile] = useState<RemoteFile | null>(null);
   const [previewIndex, setPreviewIndex] = useState<number>(0);
   const [warmPreviewFile, setWarmPreviewFile] = useState<RemoteFile | null>(null);
+
+  // Collapsible header
+  const headerTranslateY = useReSharedValue(0);
+  const lastScrollYRef = useRef(0);
+  const HEADER_H = 100;
+
+  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
+  const onListScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const currentY = e.nativeEvent.contentOffset.y;
+    const diff = currentY - lastScrollYRef.current;
+    if (currentY <= 0) {
+      headerTranslateY.value = reWithTiming(0, { duration: 250 });
+    } else if (diff > 8 && currentY > HEADER_H) {
+      headerTranslateY.value = reWithTiming(-HEADER_H - insets.top, { duration: 300 });
+    } else if (diff < -8) {
+      headerTranslateY.value = reWithTiming(0, { duration: 250 });
+    }
+    lastScrollYRef.current = currentY;
+  }, [headerTranslateY, insets.top]);
+  /* eslint-enable react-hooks/immutability */
+
+  const headerAnimStyle = useReAnimatedStyle(() => ({
+    transform: [{ translateY: headerTranslateY.value }],
+  }));
 
   // Server connection check
   const checkServer = useCallback(async () => {
@@ -1687,6 +1730,7 @@ export default function RestoreScreen() {
       const allSelected = paths.every(p => next.has(p));
       if (allSelected) paths.forEach(p => next.delete(p));
       else paths.forEach(p => next.add(p));
+      if (next.size === 0) setSelectionMode(false);
       return next;
     });
   }, []);
@@ -1811,7 +1855,7 @@ export default function RestoreScreen() {
       )}
 
       {/* Page Header */}
-      <View style={[styles.pageHeader, { paddingTop: !isDownloading ? insets.top + Spacing.five : Spacing.four }]}>
+      <ReAnimated.View style={[styles.pageHeader, { paddingTop: !isDownloading ? insets.top + Spacing.five : Spacing.four, backgroundColor: colors.bg, zIndex: 10 }, headerAnimStyle]}>
         <View>
           <Text style={styles.pageTitle}>Restore Files</Text>
           <Text style={styles.pageSubtitle}>
@@ -1819,10 +1863,11 @@ export default function RestoreScreen() {
           </Text>
         </View>
         <View style={styles.headerButtons}>
-          <TouchableOpacity
+          <AnimatedPressable
             onPress={handleFetch}
             style={[styles.actionBtn, fetchDisabled && styles.disabledBtn]}
             disabled={fetchDisabled}
+            scaleDown={0.92}
           >
             {isFetching ? (
               <ActivityIndicator size="small" color={colors.primary} />
@@ -1832,17 +1877,17 @@ export default function RestoreScreen() {
                 <Text style={[styles.actionBtnText, { color: colors.primary }]}>Fetch</Text>
               </>
             )}
-          </TouchableOpacity>
+          </AnimatedPressable>
           {files.length > 0 && (
-            <TouchableOpacity onPress={selectAll} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isDownloading || isOffline}>
+            <AnimatedPressable onPress={selectAll} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isDownloading || isOffline} scaleDown={0.92}>
               <AppIcon androidName="select_all" iosName="checkmark.circle" color={colors.primary} size={16} />
               <Text style={[styles.actionBtnText, { color: colors.primary }]}>
                 {selectedPaths.size === files.length ? 'Deselect All' : 'Select All'}
               </Text>
-            </TouchableOpacity>
+            </AnimatedPressable>
           )}
         </View>
-      </View>
+      </ReAnimated.View>
 
       {/* Source Selector */}
       {!isDownloading && (
@@ -1863,11 +1908,11 @@ export default function RestoreScreen() {
       )}
 
       {/* Hint Bar */}
-      {files.length > 0 && selectedPaths.size === 0 && (
+      {files.length > 0 && selectedPaths.size === 0 && !selectionMode && (
         <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
           <AppIcon androidName="touch_app" iosName="hand.tap" color={colors.textMuted} size={13} />
           <Text style={[styles.hintText, { color: colors.textMuted }]}>
-            {selectionMode ? 'Tap to select · Long press for preview' : 'Tap to preview · Hold to select'}
+            Tap to preview · long press to select
           </Text>
         </View>
       )}
@@ -1907,6 +1952,8 @@ export default function RestoreScreen() {
         )}
         contentContainerStyle={[styles.listContent, { paddingBottom: BottomTabInset + Spacing.eight }]}
         showsVerticalScrollIndicator={false}
+        onScroll={onListScroll}
+        scrollEventThrottle={16}
         ListEmptyComponent={
           !isFetching ? (
             <View style={styles.emptyContainer}>
@@ -1926,14 +1973,15 @@ export default function RestoreScreen() {
 
       {/* Download FAB */}
       {selectedPaths.size > 0 && !isDownloading && (
-        <TouchableOpacity
+        <AnimatedPressable
           style={[styles.fab, { bottom: BottomTabInset + Spacing.four }, isOffline && styles.disabledBtn]}
           onPress={handleDownload}
           disabled={isOffline}
+          scaleDown={0.94}
         >
           <AppIcon androidName="download" iosName="arrow.down.circle" color={colors.white} size={22} />
           <Text style={styles.fabText}>Download {selectedPaths.size} {selectedPaths.size === 1 ? 'File' : 'Files'}</Text>
-        </TouchableOpacity>
+        </AnimatedPressable>
       )}
 
       {/* Preview Modal */}
@@ -2009,6 +2057,15 @@ const createStyles = (colors: AppColors) =>
       flexDirection: 'row', alignItems: 'center',
       paddingRight: Spacing.three, paddingVertical: Spacing.two + 2, gap: Spacing.two,
       borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.surfaceBorder,
+      borderRadius: Radius.sm,
+    },
+    fileRowSelected: {
+      backgroundColor: colors.primarySoft,
+    },
+    fileIconWrap: {
+      width: 32, height: 32, borderRadius: Radius.md,
+      backgroundColor: colors.surfaceSoft,
+      alignItems: 'center', justifyContent: 'center',
     },
     fileInfo: { flex: 1 },
     fileName: { fontSize: TextScale.sm, color: colors.text, fontWeight: '500' },

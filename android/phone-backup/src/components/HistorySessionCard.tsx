@@ -1,7 +1,8 @@
 import React, { useState, useMemo } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, LayoutAnimation, UIManager, Platform } from 'react-native';
+import { View, Text, StyleSheet, LayoutAnimation, UIManager, Platform } from 'react-native';
 import { AppColors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
+import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 
 // Enable LayoutAnimation on Android
@@ -151,10 +152,9 @@ export function HistorySessionCard({ session }: Props) {
   const hasDetail = session.uploadedFiles?.length > 0 || session.errorDetails?.length > 0;
 
   return (
-    <TouchableOpacity
-      activeOpacity={0.85}
+    <AnimatedPressable
       onPress={toggle}
-      accessibilityRole="button"
+      scaleDown={0.98}
       accessibilityLabel={`Sync session ${cfg.label} at ${formatTime(session.startedAt)}`}
     >
       <View style={[styles.card, { borderLeftColor: color }]}>
@@ -251,7 +251,7 @@ export function HistorySessionCard({ session }: Props) {
           <Text style={styles.tapHint}>Tap to see details</Text>
         )}
       </View>
-    </TouchableOpacity>
+    </AnimatedPressable>
   );
 }
 

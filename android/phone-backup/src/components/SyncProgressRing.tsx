@@ -40,27 +40,37 @@ export function SyncProgressRing({
   const styles = useMemo(() => createStyles(colors), [colors]);
   const pulse = useSharedValue(1);
   const sweep = useSharedValue(0);
+  const glow = useSharedValue(0);
 
   useEffect(() => {
     if (isActive && phase !== 'stopping') {
       pulse.value = withRepeat(
         withSequence(
-          withTiming(1.04, { duration: 950, easing: Easing.inOut(Easing.ease) }),
-          withTiming(1, { duration: 950, easing: Easing.inOut(Easing.ease) })
+          withTiming(1.06, { duration: 800, easing: Easing.inOut(Easing.ease) }),
+          withTiming(1, { duration: 800, easing: Easing.inOut(Easing.ease) })
         ),
         -1,
         true
       );
       sweep.value = withRepeat(
-        withTiming(360, { duration: 1600, easing: Easing.linear }),
+        withTiming(360, { duration: 1400, easing: Easing.linear }),
         -1,
         false
+      );
+      glow.value = withRepeat(
+        withSequence(
+          withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
+          withTiming(0.4, { duration: 1200, easing: Easing.inOut(Easing.ease) })
+        ),
+        -1,
+        true
       );
     } else {
       pulse.value = withTiming(1, { duration: 300 });
       sweep.value = withTiming(0, { duration: 300 });
+      glow.value = withTiming(0, { duration: 300 });
     }
-  }, [isActive, phase, pulse, sweep]);
+  }, [isActive, phase, pulse, sweep, glow]);
 
   const pulseStyle = useAnimatedStyle(() => ({
     transform: [{ scale: pulse.value }],
@@ -69,6 +79,11 @@ export function SyncProgressRing({
   const sweepStyle = useAnimatedStyle(() => ({
     transform: [{ rotate: `${sweep.value}deg` }],
     opacity: isActive ? 1 : 0,
+  }));
+
+  const glowStyle = useAnimatedStyle(() => ({
+    opacity: glow.value * 0.3,
+    transform: [{ scale: 1 + glow.value * 0.08 }],
   }));
 
   const progressPct = Math.max(0, Math.min(100, Math.round(progress)));
@@ -84,6 +99,7 @@ export function SyncProgressRing({
 
   return (
     <View style={styles.container}>
+      {isActive && <Animated.View style={[styles.outerGlow, glowStyle]} />}
       <Animated.View style={[styles.halo, pulseStyle]} />
       <Animated.View style={[styles.sweep, sweepStyle]} />
       <View style={styles.ring}>
@@ -122,6 +138,13 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     height: RING_SIZE,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  outerGlow: {
+    position: 'absolute',
+    width: RING_SIZE + 20,
+    height: RING_SIZE + 20,
+    borderRadius: (RING_SIZE + 20) / 2,
+    backgroundColor: colors.primaryGlow,
   },
   halo: {
     position: 'absolute',

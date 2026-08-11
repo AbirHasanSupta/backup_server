@@ -1,8 +1,14 @@
-import React, { useState, useCallback, useMemo } from 'react';
-import { View, Text, TouchableOpacity, FlatList, StyleSheet, StatusBar, Alert } from 'react-native';
+import React, { useState, useCallback, useMemo, useRef } from 'react';
+import { View, Text, FlatList, StyleSheet, StatusBar, Alert, NativeSyntheticEvent, NativeScrollEvent } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  FadeInDown,
+} from 'react-native-reanimated';
 import {
   getFolders,
   addFolder,
@@ -17,9 +23,13 @@ import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '
 import { FolderCard, Folder } from '@/components/FolderCard';
 import { FileTypeSelector } from '@/components/FileTypeSelector';
 import { AppIcon } from '@/components/AppIcon';
+import { AnimatedPressable } from '@/components/AnimatedPressable';
+import { AnimatedListItem } from '@/components/AnimatedListItem';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { checkDeviceConnection } from '../../uploader';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
+
+const HEADER_HEIGHT = 120;
 
 export default function FoldersScreen() {
   const insets = useSafeAreaInsets();
@@ -30,8 +40,30 @@ export default function FoldersScreen() {
   const [selectedTypes, setSelectedTypes] = useState<string[]>(['all']);
   const [refreshing, setRefreshing] = useState<string | null>(null);
 
-  // Server status for disabling folder refresh when offline
   const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
+
+  // Collapsible header
+  const headerTranslateY = useSharedValue(0);
+  const lastScrollY = useRef(0);
+
+  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
+  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const currentY = e.nativeEvent.contentOffset.y;
+    const diff = currentY - lastScrollY.current;
+    if (currentY <= 0) {
+      headerTranslateY.value = withTiming(0, { duration: 250 });
+    } else if (diff > 8 && currentY > HEADER_HEIGHT) {
+      headerTranslateY.value = withTiming(-HEADER_HEIGHT - insets.top, { duration: 300 });
+    } else if (diff < -8) {
+      headerTranslateY.value = withTiming(0, { duration: 250 });
+    }
+    lastScrollY.current = currentY;
+  }, [headerTranslateY, insets.top]);
+  /* eslint-enable react-hooks/immutability */
+
+  const headerAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: headerTranslateY.value }],
+  }));
 
   const checkServer = useCallback(async () => {
     const ip = await getServerIp();
@@ -117,10 +149,11 @@ export default function FoldersScreen() {
       <Text style={styles.emptyBody}>
         Add a folder once and Phone Backup will keep it protected automatically.
       </Text>
-      <TouchableOpacity style={styles.emptyButton} onPress={handleAddFolder} accessibilityRole="button">
+      <Text style={styles.emptyGesture}>Swipe left on a folder to remove, right to refresh</Text>
+      <AnimatedPressable style={styles.emptyButton} onPress={handleAddFolder} scaleDown={0.95}>
         <AppIcon androidName="add" iosName="plus" color={colors.white} size={18} fallback="+" />
         <Text style={styles.emptyButtonText}>Add folder</Text>
-      </TouchableOpacity>
+      </AnimatedPressable>
     </View>
   );
 
@@ -128,7 +161,7 @@ export default function FoldersScreen() {
     <View style={[styles.screen, { paddingTop: insets.top }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
-      <View style={styles.header}>
+      <Animated.View style={[styles.header, headerAnimStyle, { zIndex: 10 }]}>
         <View style={styles.titleBlock}>
           <Text style={styles.kicker}>Backup sources</Text>
           <Text style={styles.title}>Folders</Text>
@@ -138,21 +171,21 @@ export default function FoldersScreen() {
               : 'Pick folders to protect'}
           </Text>
         </View>
-        <TouchableOpacity
+        <AnimatedPressable
           id="add-folder-button"
           style={styles.addBtn}
           onPress={handleAddFolder}
+          scaleDown={0.92}
           accessibilityLabel="Add folder"
-          accessibilityRole="button"
         >
           <AppIcon androidName="add" iosName="plus" color={colors.white} size={18} fallback="+" />
           <Text style={styles.addBtnText}>Add</Text>
-        </TouchableOpacity>
-      </View>
+        </AnimatedPressable>
+      </Animated.View>
 
-      <View style={styles.filterSection}>
+      <Animated.View entering={FadeInDown.duration(300).delay(100)} style={styles.filterSection}>
         <FileTypeSelector selected={selectedTypes} onChange={handleTypeChange} />
-      </View>
+      </Animated.View>
 
       <FlatList
         data={folders}
@@ -163,11 +196,15 @@ export default function FoldersScreen() {
           { paddingBottom: BottomTabInset + insets.bottom + 24 },
         ]}
         ListEmptyComponent={renderEmpty}
-        renderItem={({ item }) => (
-          <View style={item.uri === refreshing ? styles.refreshing : undefined}>
-            <FolderCard folder={item} onRemove={handleRemove} onRefresh={handleRefresh} refreshDisabled={isOffline} />
-          </View>
+        renderItem={({ item, index }) => (
+          <AnimatedListItem index={index}>
+            <View style={item.uri === refreshing ? styles.refreshingCard : undefined}>
+              <FolderCard folder={item} onRemove={handleRemove} onRefresh={handleRefresh} refreshDisabled={isOffline} />
+            </View>
+          </AnimatedListItem>
         )}
+        onScroll={onScroll}
+        scrollEventThrottle={16}
         showsVerticalScrollIndicator={false}
       />
     </View>
@@ -187,6 +224,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     paddingHorizontal: Spacing.six,
     paddingTop: Spacing.four,
     paddingBottom: Spacing.four,
+    backgroundColor: colors.bg,
   },
   titleBlock: {
     flex: 1,
@@ -270,6 +308,13 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     lineHeight: 22,
     fontWeight: '600',
   },
+  emptyGesture: {
+    fontSize: TextScale.xs,
+    color: colors.textMuted,
+    textAlign: 'center',
+    fontWeight: '600',
+    fontStyle: 'italic',
+  },
   emptyButton: {
     marginTop: Spacing.two,
     flexDirection: 'row',
@@ -285,7 +330,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     fontSize: TextScale.base,
     fontWeight: '900',
   },
-  refreshing: {
+  refreshingCard: {
     opacity: 0.45,
   },
 });

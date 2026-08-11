@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -6,9 +6,16 @@ import {
   StyleSheet,
   RefreshControl,
   Alert,
-  TouchableOpacity,
   StatusBar,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
 } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  FadeInDown,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { getSyncHistory, clearSyncHistory } from '../../syncHistory';
@@ -16,9 +23,9 @@ import type { SyncSession } from '@/components/HistorySessionCard';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { HistorySessionCard } from '@/components/HistorySessionCard';
 import { AppIcon } from '@/components/AppIcon';
+import { AnimatedPressable } from '@/components/AnimatedPressable';
+import { AnimatedListItem } from '@/components/AnimatedListItem';
 import { useAppTheme } from '@/hooks/use-app-theme';
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatDuration(ms: number): string {
   const totalSecs = Math.floor(ms / 1000);
@@ -48,8 +55,6 @@ function formatDuration(ms: number): string {
   return mo > 0 ? `${years}y ${mo}mo` : `${years}y`;
 }
 
-// ── Sub-components (outside render to satisfy react-hooks/static-components) ──
-
 interface EmptyStateProps {
   styles: ReturnType<typeof createStyles>;
   colors: AppColors;
@@ -59,7 +64,7 @@ function EmptyState({ styles, colors }: EmptyStateProps) {
   return (
     <View style={styles.emptyContainer}>
       <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft }]}>
-        <AppIcon androidName="history" iosName="clock.arrow.circlepath" color={colors.primary} size={36} fallback="⏳" />
+        <AppIcon androidName="history" iosName="clock.arrow.circlepath" color={colors.primary} size={36} fallback="H" />
       </View>
       <Text style={styles.emptyTitle}>No sync history yet</Text>
       <Text style={styles.emptySubtitle}>
@@ -73,40 +78,16 @@ function EmptyState({ styles, colors }: EmptyStateProps) {
 interface ListHeaderProps {
   styles: ReturnType<typeof createStyles>;
   colors: AppColors;
-  insetTop: number;
   sessionCount: number;
   summary: { totalUploaded: number; totalErrors: number; totalDurationMs: number } | null;
   onClear: () => void;
 }
 
-function ListHeader({ styles, colors, insetTop, sessionCount, summary, onClear }: ListHeaderProps) {
+function ListHeader({ styles, colors, sessionCount, summary, onClear }: ListHeaderProps) {
   return (
     <>
-      {/* Page header */}
-      <View style={[styles.pageHeader, { paddingTop: insetTop + Spacing.five }]}>
-        <View>
-          <Text style={styles.pageTitle}>Sync History</Text>
-          <Text style={styles.pageSubtitle}>
-            {sessionCount > 0
-              ? `${sessionCount} session${sessionCount === 1 ? '' : 's'} recorded`
-              : 'Your backup audit trail'}
-          </Text>
-        </View>
-        {sessionCount > 0 && (
-          <TouchableOpacity
-            onPress={onClear}
-            style={styles.clearBtn}
-            accessibilityLabel="Clear sync history"
-          >
-            <AppIcon androidName="delete_sweep" iosName="trash" color={colors.error} size={16} fallback="🗑" />
-            <Text style={[styles.clearBtnText, { color: colors.error }]}>Clear</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-
-      {/* Summary banner */}
       {summary && (
-        <View style={styles.summaryBanner}>
+        <Animated.View entering={FadeInDown.duration(350).delay(100)} style={styles.summaryBanner}>
           <SummaryChip
             icon="cloud_done"
             iosIcon="checkmark.icloud"
@@ -133,7 +114,7 @@ function ListHeader({ styles, colors, insetTop, sessionCount, summary, onClear }
             color={summary.totalErrors > 0 ? colors.error : colors.textMuted}
             colors={colors}
           />
-        </View>
+        </Animated.View>
       )}
 
       <View style={styles.listPad} />
@@ -141,15 +122,38 @@ function ListHeader({ styles, colors, insetTop, sessionCount, summary, onClear }
   );
 }
 
-// ── Screen ────────────────────────────────────────────────────────────────────
+const HEADER_HEIGHT = 100;
 
 export default function HistoryScreen() {
-  const { colors } = useAppTheme();
+  const { colors, isDark } = useAppTheme();
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   const [sessions, setSessions] = useState<SyncSession[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+
+  // Collapsible header
+  const headerTranslateY = useSharedValue(0);
+  const lastScrollY = useRef(0);
+
+  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
+  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const currentY = e.nativeEvent.contentOffset.y;
+    const diff = currentY - lastScrollY.current;
+    if (currentY <= 0) {
+      headerTranslateY.value = withTiming(0, { duration: 250 });
+    } else if (diff > 8 && currentY > HEADER_HEIGHT) {
+      headerTranslateY.value = withTiming(-HEADER_HEIGHT - insets.top, { duration: 300 });
+    } else if (diff < -8) {
+      headerTranslateY.value = withTiming(0, { duration: 250 });
+    }
+    lastScrollY.current = currentY;
+  }, [headerTranslateY, insets.top]);
+  /* eslint-enable react-hooks/immutability */
+
+  const headerAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: headerTranslateY.value }],
+  }));
 
   const load = useCallback(async () => {
     const data = await getSyncHistory();
@@ -196,16 +200,42 @@ export default function HistoryScreen() {
 
   return (
     <View style={[styles.root, { backgroundColor: colors.bg }]}>
-      <StatusBar barStyle={colors.bg === '#0B1220' ? 'light-content' : 'dark-content'} />
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
+
+      <Animated.View style={[styles.pageHeader, { paddingTop: insets.top + Spacing.five }, headerAnimStyle, { zIndex: 10, backgroundColor: colors.bg }]}>
+        <View>
+          <Text style={styles.pageTitle}>Sync History</Text>
+          <Text style={styles.pageSubtitle}>
+            {sessions.length > 0
+              ? `${sessions.length} session${sessions.length === 1 ? '' : 's'} recorded`
+              : 'Your backup audit trail'}
+          </Text>
+        </View>
+        {sessions.length > 0 && (
+          <AnimatedPressable
+            onPress={handleClear}
+            style={styles.clearBtn}
+            scaleDown={0.9}
+            accessibilityLabel="Clear sync history"
+          >
+            <AppIcon androidName="delete_sweep" iosName="trash" color={colors.error} size={16} fallback="X" />
+            <Text style={[styles.clearBtnText, { color: colors.error }]}>Clear</Text>
+          </AnimatedPressable>
+        )}
+      </Animated.View>
+
       <FlatList<SyncSession>
         data={sessions}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => <HistorySessionCard session={item} />}
+        renderItem={({ item, index }) => (
+          <AnimatedListItem index={index}>
+            <HistorySessionCard session={item} />
+          </AnimatedListItem>
+        )}
         ListHeaderComponent={
           <ListHeader
             styles={styles}
             colors={colors}
-            insetTop={insets.top}
             sessionCount={sessions.length}
             summary={summary}
             onClear={handleClear}
@@ -224,13 +254,14 @@ export default function HistoryScreen() {
             colors={[colors.primary]}
           />
         }
+        onScroll={onScroll}
+        scrollEventThrottle={16}
         showsVerticalScrollIndicator={false}
       />
     </View>
   );
 }
 
-// ── Summary chip ──────────────────────────────────────────────────────────────
 function SummaryChip({
   icon, iosIcon, value, label, color, colors,
 }: {
@@ -239,14 +270,13 @@ function SummaryChip({
 }) {
   return (
     <View style={{ alignItems: 'center', flex: 1, gap: 3 }}>
-      <AppIcon androidName={icon} iosName={iosIcon} color={color} size={18} fallback="·" />
+      <AppIcon androidName={icon} iosName={iosIcon} color={color} size={18} fallback="." />
       <Text style={{ fontSize: TextScale.md, fontWeight: '800', color }}>{value}</Text>
       <Text style={{ fontSize: TextScale.xs, color: colors.textMuted, fontWeight: '500' }}>{label}</Text>
     </View>
   );
 }
 
-// ── Styles ────────────────────────────────────────────────────────────────────
 const createStyles = (colors: AppColors) => StyleSheet.create({
   root: {
     flex: 1,
@@ -259,6 +289,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
+    paddingHorizontal: Spacing.five,
     paddingBottom: Spacing.four,
   },
   pageTitle: {

@@ -1,8 +1,9 @@
 import React, { useMemo } from 'react';
-import { View, Text, TouchableOpacity, ScrollView, StyleSheet } from 'react-native';
+import { View, Text, ScrollView, StyleSheet } from 'react-native';
 import { AppColors, Radius, Spacing, TextScale } from '@/constants/theme';
 import { FILE_TYPE_LABELS } from '../../settings';
 import { AppIcon } from '@/components/AppIcon';
+import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 
 const FILE_TYPE_ICONS: Record<string, { android: string; ios: string; fallback: string }> = {
@@ -61,12 +62,11 @@ export function FileTypeSelector({ selected, onChange }: Props) {
           const active = type === 'all' ? isAll : !isAll && selected.includes(type);
           const icon = FILE_TYPE_ICONS[type];
           return (
-            <TouchableOpacity
+            <AnimatedPressable
               key={type}
               style={[styles.pill, active && styles.pillActive]}
               onPress={() => toggle(type)}
-              accessibilityRole="checkbox"
-              accessibilityState={{ checked: active }}
+              scaleDown={0.9}
               accessibilityLabel={FILE_TYPE_LABELS[type]}
             >
               <AppIcon
@@ -79,7 +79,7 @@ export function FileTypeSelector({ selected, onChange }: Props) {
               <Text style={[styles.pillText, active && styles.pillTextActive]}>
                 {FILE_TYPE_LABELS[type]}
               </Text>
-            </TouchableOpacity>
+            </AnimatedPressable>
           );
         })}
       </ScrollView>

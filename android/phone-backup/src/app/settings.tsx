@@ -1,18 +1,25 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useRef } from 'react';
 import {
   View,
   Text,
-  TouchableOpacity,
   TextInput,
   ScrollView,
   StyleSheet,
   StatusBar,
   Alert,
   Switch,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
 } from 'react-native';
 import Constants from 'expo-constants';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  FadeInDown,
+} from 'react-native-reanimated';
 import {
   getServerIp,
   setServerIp,
@@ -37,20 +44,15 @@ import { checkDeviceConnection } from '../../uploader';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
 import { AppIcon } from '@/components/AppIcon';
+import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { clearAllDiskCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
-/**
- * Strip protocol prefix (https:// or http://) and trailing slashes from a server address.
- * Users may paste a full URL; we store only the raw hostname/IP.
- */
 function normalizeServerAddress(input: string): string {
   let addr = input.trim();
   addr = addr.replace(/^https?:\/\//i, '');
-  // Remove trailing slash(es)
   addr = addr.replace(/\/+$/, '');
-  // Strip any URL path (e.g., "192.168.1.5:8000/ping" → "192.168.1.5:8000")
   const slashIdx = addr.indexOf('/');
   if (slashIdx > 0) {
     addr = addr.slice(0, slashIdx);
@@ -70,6 +72,8 @@ function FieldLabel({ text, styles }: { text: string; styles: ReturnType<typeof 
   return <Text style={styles.fieldLabel}>{text}</Text>;
 }
 
+const HEADER_HEIGHT = 100;
+
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const { colors, isDark, mode, setMode } = useAppTheme();
@@ -83,9 +87,31 @@ export default function SettingsScreen() {
   const [savingServer, setSavingServer] = useState(false);
   const [discoveryVisible, setDiscoveryVisible] = useState(false);
 
-  // Server status for disabling connection-dependent buttons
   type ServerStatus = 'connected' | 'disconnected' | 'unknown' | 'checking';
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
+
+  // Collapsible header
+  const headerTranslateY = useSharedValue(0);
+  const lastScrollY = useRef(0);
+
+  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
+  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const currentY = e.nativeEvent.contentOffset.y;
+    const diff = currentY - lastScrollY.current;
+    if (currentY <= 0) {
+      headerTranslateY.value = withTiming(0, { duration: 250 });
+    } else if (diff > 8 && currentY > HEADER_HEIGHT) {
+      headerTranslateY.value = withTiming(-HEADER_HEIGHT - insets.top, { duration: 300 });
+    } else if (diff < -8) {
+      headerTranslateY.value = withTiming(0, { duration: 250 });
+    }
+    lastScrollY.current = currentY;
+  }, [headerTranslateY, insets.top]);
+  /* eslint-enable react-hooks/immutability */
+
+  const headerAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: headerTranslateY.value }],
+  }));
 
   const checkServer = useCallback(async () => {
     const ip = await getServerIp();
@@ -133,12 +159,9 @@ export default function SettingsScreen() {
       return;
     }
 
-    // Normalize: strip https://, http://, trailing slashes
     let cleanIp = normalizeServerAddress(serverIp);
     let portNum = Number.parseInt(serverPort, 10);
 
-    // If the user pasted something like "192.168.1.5:9000" in the IP field,
-    // extract the port automatically.
     const colonIdx = cleanIp.lastIndexOf(':');
     if (colonIdx > 0) {
       const maybPort = cleanIp.slice(colonIdx + 1);
@@ -154,7 +177,6 @@ export default function SettingsScreen() {
       return;
     }
 
-    // Update displayed value with normalized address
     setServerIpState(cleanIp);
 
     setSavingServer(true);
@@ -164,9 +186,9 @@ export default function SettingsScreen() {
         setServerIp(cleanIp),
         setServerPort(portNum),
         setApiKey(key),
-        setServerName(''),           // Clear name so Home shows the new IP
-        setDeviceToken(''),          // New server, need new token
-        setServerCertFingerprint(''), // New server, new certificate
+        setServerName(''),
+        setDeviceToken(''),
+        setServerCertFingerprint(''),
       ]);
 
       Alert.alert('Saved', 'Server settings saved. Connecting…');
@@ -284,11 +306,11 @@ export default function SettingsScreen() {
     <View style={[styles.screen, { paddingTop: insets.top }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
-      <View style={styles.header}>
+      <Animated.View style={[styles.header, headerAnimStyle, { zIndex: 10, backgroundColor: colors.bg }]}>
         <Text style={styles.kicker}>Preferences</Text>
         <Text style={styles.title}>Settings</Text>
         <Text style={styles.subtitle}>Connect the desktop server and tune backup behavior.</Text>
-      </View>
+      </Animated.View>
 
       <ScrollView
         contentContainerStyle={[
@@ -297,212 +319,223 @@ export default function SettingsScreen() {
         ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        onScroll={onScroll}
+        scrollEventThrottle={16}
       >
-        <SectionHeader title="Server connection" styles={styles} />
-        <SettingsCard styles={styles}>
-          <FieldLabel text="Server IP address" styles={styles} />
-          <TextInput
-            id="server-ip-input"
-            style={styles.textInput}
-            value={serverIp}
-            onChangeText={setServerIpState}
-            placeholder="192.168.1.100 or http://myserver"
-            placeholderTextColor={colors.textMuted}
-            keyboardType="url"
-            autoCapitalize="none"
-            autoCorrect={false}
-            returnKeyType="next"
-          />
-
-          <FieldLabel text="Port" styles={styles} />
-          <TextInput
-            id="server-port-input"
-            style={styles.textInput}
-            value={serverPort}
-            onChangeText={setServerPortState}
-            placeholder="8000"
-            placeholderTextColor={colors.textMuted}
-            keyboardType="numeric"
-            returnKeyType="next"
-          />
-
-          <FieldLabel text="API key" styles={styles} />
-          <TextInput
-            id="api-key-input"
-            style={styles.textInput}
-            value={apiKey}
-            onChangeText={setApiKeyState}
-            placeholder="Your secret key"
-            placeholderTextColor={colors.textMuted}
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
-            returnKeyType="done"
-          />
-
-          <View style={styles.buttonRow}>
-            <TouchableOpacity
-              id="discover-servers-button"
-              style={styles.outlineBtn}
-              onPress={() => setDiscoveryVisible(true)}
-              accessibilityLabel="Discover servers on network"
-              accessibilityRole="button"
-            >
-              <AppIcon androidName="search" iosName="magnifyingglass" color={colors.primary} size={18} fallback="S" />
-              <Text style={styles.outlineBtnText}>Discover</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              id="save-server-button"
-              style={[styles.primaryBtn, savingServer && { opacity: 0.65 }]}
-              onPress={handleSaveServer}
-              disabled={savingServer}
-              accessibilityLabel="Save server settings"
-              accessibilityRole="button"
-            >
-              <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={18} fallback="OK" />
-              <Text style={styles.primaryBtnText}>{savingServer ? 'Saving' : 'Save'}</Text>
-            </TouchableOpacity>
-          </View>
-        </SettingsCard>
-
-        <SectionHeader title="Appearance" styles={styles} />
-        <SettingsCard styles={styles}>
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleIcon}>
-              <AppIcon
-                androidName={isDark ? 'dark_mode' : 'light_mode'}
-                iosName={isDark ? 'moon.fill' : 'sun.max.fill'}
-                color={isDark ? colors.primaryLight : colors.warning}
-                size={20}
-                fallback={isDark ? 'D' : 'L'}
-              />
-            </View>
-            <View style={styles.toggleInfo}>
-              <Text style={styles.toggleLabel}>Dark mode</Text>
-              <Text style={styles.toggleSub}>
-                {isDark ? 'Using the darker app theme.' : 'Using the light app theme.'}
-              </Text>
-            </View>
-            <Switch
-              value={mode === 'dark'}
-              onValueChange={(val) => setMode(val ? 'dark' : 'light')}
-              trackColor={{ false: colors.surfaceBorder, true: colors.primarySoft }}
-              thumbColor={isDark ? colors.primary : colors.textMuted}
-              accessibilityLabel="Toggle dark mode"
+        <Animated.View entering={FadeInDown.duration(300).delay(100)}>
+          <SectionHeader title="Server connection" styles={styles} />
+          <SettingsCard styles={styles}>
+            <FieldLabel text="Server IP address" styles={styles} />
+            <TextInput
+              id="server-ip-input"
+              style={styles.textInput}
+              value={serverIp}
+              onChangeText={setServerIpState}
+              placeholder="192.168.1.100 or http://myserver"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="url"
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="next"
             />
-          </View>
-        </SettingsCard>
 
-        <SectionHeader title="Sync schedule" styles={styles} />
-        <SettingsCard styles={styles}>
-          <View style={styles.toggleRow}>
-            <View style={styles.toggleIcon}>
-              <AppIcon
-                androidName={syncPaused ? 'pause' : 'sync'}
-                iosName={syncPaused ? 'pause.fill' : 'arrow.triangle.2.circlepath'}
-                color={syncPaused ? colors.warning : colors.primary}
-                size={20}
-                fallback={syncPaused ? 'P' : 'S'}
-              />
-            </View>
-            <View style={styles.toggleInfo}>
-              <Text style={styles.toggleLabel}>Auto sync</Text>
-              <Text style={styles.toggleSub}>
-                {syncPaused ? 'Paused. Manual Sync Now still works.' : 'Runs automatically in the background.'}
-              </Text>
-            </View>
-            <Switch
-              value={!syncPaused}
-              onValueChange={(val) => handlePauseToggle(!val)}
-              trackColor={{ false: colors.surfaceBorder, true: colors.primarySoft }}
-              thumbColor={!syncPaused ? colors.primary : colors.textMuted}
-              accessibilityLabel="Toggle auto sync"
+            <FieldLabel text="Port" styles={styles} />
+            <TextInput
+              id="server-port-input"
+              style={styles.textInput}
+              value={serverPort}
+              onChangeText={setServerPortState}
+              placeholder="8000"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="numeric"
+              returnKeyType="next"
             />
-          </View>
 
-          {!syncPaused && (
-            <>
-              <View style={styles.divider} />
-              <FieldLabel text="Sync every" styles={styles} />
-              <View style={styles.presetGrid}>
-                {SYNC_INTERVAL_PRESETS.map((p) => {
-                  const active = syncInterval === p.value;
-                  return (
-                    <TouchableOpacity
-                      key={p.value}
-                      style={[styles.presetChip, active && styles.presetChipActive]}
-                      onPress={() => handleIntervalChange(p.value)}
-                      accessibilityLabel={`Set sync interval to ${p.label}`}
-                      accessibilityRole="radio"
-                      accessibilityState={{ checked: active }}
-                    >
-                      <Text style={[styles.presetText, active && styles.presetTextActive]}>
-                        {p.label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
+            <FieldLabel text="API key" styles={styles} />
+            <TextInput
+              id="api-key-input"
+              style={styles.textInput}
+              value={apiKey}
+              onChangeText={setApiKeyState}
+              placeholder="Your secret key"
+              placeholderTextColor={colors.textMuted}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="done"
+            />
+
+            <View style={styles.buttonRow}>
+              <AnimatedPressable
+                id="discover-servers-button"
+                style={styles.outlineBtn}
+                onPress={() => setDiscoveryVisible(true)}
+                scaleDown={0.95}
+                accessibilityLabel="Discover servers on network"
+              >
+                <AppIcon androidName="search" iosName="magnifyingglass" color={colors.primary} size={18} fallback="S" />
+                <Text style={styles.outlineBtnText}>Discover</Text>
+              </AnimatedPressable>
+              <AnimatedPressable
+                id="save-server-button"
+                style={[styles.primaryBtn, savingServer && { opacity: 0.65 }]}
+                onPress={handleSaveServer}
+                disabled={savingServer}
+                scaleDown={0.95}
+                accessibilityLabel="Save server settings"
+              >
+                <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={18} fallback="OK" />
+                <Text style={styles.primaryBtnText}>{savingServer ? 'Saving' : 'Save'}</Text>
+              </AnimatedPressable>
+            </View>
+          </SettingsCard>
+        </Animated.View>
+
+        <Animated.View entering={FadeInDown.duration(300).delay(200)}>
+          <SectionHeader title="Appearance" styles={styles} />
+          <SettingsCard styles={styles}>
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleIcon}>
+                <AppIcon
+                  androidName={isDark ? 'dark_mode' : 'light_mode'}
+                  iosName={isDark ? 'moon.fill' : 'sun.max.fill'}
+                  color={isDark ? colors.primaryLight : colors.warning}
+                  size={20}
+                  fallback={isDark ? 'D' : 'L'}
+                />
               </View>
-              <Text style={styles.hintText}>
-                Android may delay background work to preserve battery, especially when the phone is idle.
-              </Text>
-            </>
-          )}
-        </SettingsCard>
+              <View style={styles.toggleInfo}>
+                <Text style={styles.toggleLabel}>Dark mode</Text>
+                <Text style={styles.toggleSub}>
+                  {isDark ? 'Using the darker app theme.' : 'Using the light app theme.'}
+                </Text>
+              </View>
+              <Switch
+                value={mode === 'dark'}
+                onValueChange={(val) => setMode(val ? 'dark' : 'light')}
+                trackColor={{ false: colors.surfaceBorder, true: colors.primarySoft }}
+                thumbColor={isDark ? colors.primary : colors.textMuted}
+                accessibilityLabel="Toggle dark mode"
+              />
+            </View>
+          </SettingsCard>
+        </Animated.View>
 
-        <SectionHeader title="Data management" styles={styles} />
-        <SettingsCard styles={styles}>
-          <TouchableOpacity
-            id="clean-cache-button"
-            style={styles.outlineBtn}
-            onPress={handleCleanCache}
-            accessibilityLabel="Clean disk cache"
-            accessibilityRole="button"
-          >
-            <AppIcon androidName="delete_sweep" iosName="trash" color={colors.primary} size={18} fallback="C" />
-            <Text style={styles.outlineBtnText}>Clean disk cache</Text>
-          </TouchableOpacity>
-          <Text style={styles.hintText}>
-            Removes temporary preview images and disk cache files to free up storage space.
-          </Text>
+        <Animated.View entering={FadeInDown.duration(300).delay(300)}>
+          <SectionHeader title="Sync schedule" styles={styles} />
+          <SettingsCard styles={styles}>
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleIcon}>
+                <AppIcon
+                  androidName={syncPaused ? 'pause' : 'sync'}
+                  iosName={syncPaused ? 'pause.fill' : 'arrow.triangle.2.circlepath'}
+                  color={syncPaused ? colors.warning : colors.primary}
+                  size={20}
+                  fallback={syncPaused ? 'P' : 'S'}
+                />
+              </View>
+              <View style={styles.toggleInfo}>
+                <Text style={styles.toggleLabel}>Auto sync</Text>
+                <Text style={styles.toggleSub}>
+                  {syncPaused ? 'Paused. Manual Sync Now still works.' : 'Runs automatically in the background.'}
+                </Text>
+              </View>
+              <Switch
+                value={!syncPaused}
+                onValueChange={(val) => handlePauseToggle(!val)}
+                trackColor={{ false: colors.surfaceBorder, true: colors.primarySoft }}
+                thumbColor={!syncPaused ? colors.primary : colors.textMuted}
+                accessibilityLabel="Toggle auto sync"
+              />
+            </View>
 
-          <View style={styles.divider} />
+            {!syncPaused && (
+              <>
+                <View style={styles.divider} />
+                <FieldLabel text="Sync every" styles={styles} />
+                <View style={styles.presetGrid}>
+                  {SYNC_INTERVAL_PRESETS.map((p) => {
+                    const active = syncInterval === p.value;
+                    return (
+                      <AnimatedPressable
+                        key={p.value}
+                        style={[styles.presetChip, active && styles.presetChipActive]}
+                        onPress={() => handleIntervalChange(p.value)}
+                        scaleDown={0.9}
+                        accessibilityLabel={`Set sync interval to ${p.label}`}
+                      >
+                        <Text style={[styles.presetText, active && styles.presetTextActive]}>
+                          {p.label}
+                        </Text>
+                      </AnimatedPressable>
+                    );
+                  })}
+                </View>
+                <Text style={styles.hintText}>
+                  Android may delay background work to preserve battery, especially when the phone is idle.
+                </Text>
+              </>
+            )}
+          </SettingsCard>
+        </Animated.View>
 
-          <TouchableOpacity
-            id="refresh-all-button"
-            style={[styles.dangerBtn, isOffline && styles.disabledBtn]}
-            onPress={handleRefreshAll}
-            disabled={isOffline}
-            accessibilityLabel="Refresh all backups"
-            accessibilityRole="button"
-          >
-            <AppIcon androidName="restart_alt" iosName="arrow.clockwise" color={isOffline ? colors.textMuted : colors.error} size={18} fallback="R" />
-            <Text style={[styles.dangerBtnText, isOffline && { color: colors.textMuted }]}>Refresh all backups</Text>
-          </TouchableOpacity>
-          <Text style={styles.hintText}>
-            {isOffline
-              ? 'Connect to a server first to use this feature.'
-              : 'Use this when files are missing on the server. Existing cache entries are cleared, then files upload again.'}
-          </Text>
-        </SettingsCard>
+        <Animated.View entering={FadeInDown.duration(300).delay(400)}>
+          <SectionHeader title="Data management" styles={styles} />
+          <SettingsCard styles={styles}>
+            <AnimatedPressable
+              id="clean-cache-button"
+              style={styles.outlineBtn}
+              onPress={handleCleanCache}
+              scaleDown={0.95}
+              accessibilityLabel="Clean disk cache"
+            >
+              <AppIcon androidName="delete_sweep" iosName="trash" color={colors.primary} size={18} fallback="C" />
+              <Text style={styles.outlineBtnText}>Clean disk cache</Text>
+            </AnimatedPressable>
+            <Text style={styles.hintText}>
+              Removes temporary preview images and disk cache files to free up storage space.
+            </Text>
 
-        <SectionHeader title="About" styles={styles} />
-        <SettingsCard styles={styles}>
-          <View style={styles.aboutRow}>
-            <Text style={styles.aboutLabel}>App version</Text>
-            <Text style={styles.aboutValue}>{Constants.expoConfig?.version ?? '2.4.0'}</Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.aboutRow}>
-            <Text style={styles.aboutLabel}>Server stack</Text>
-            <Text style={styles.aboutValue}>Python + FastAPI</Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.aboutRow}>
-            <Text style={styles.aboutLabel}>Framework</Text>
-            <Text style={styles.aboutValue}>Expo SDK 57</Text>
-          </View>
-        </SettingsCard>
+            <View style={styles.divider} />
+
+            <AnimatedPressable
+              id="refresh-all-button"
+              style={[styles.dangerBtn, isOffline && styles.disabledBtn]}
+              onPress={handleRefreshAll}
+              disabled={isOffline}
+              scaleDown={0.95}
+              accessibilityLabel="Refresh all backups"
+            >
+              <AppIcon androidName="restart_alt" iosName="arrow.clockwise" color={isOffline ? colors.textMuted : colors.error} size={18} fallback="R" />
+              <Text style={[styles.dangerBtnText, isOffline && { color: colors.textMuted }]}>Refresh all backups</Text>
+            </AnimatedPressable>
+            <Text style={styles.hintText}>
+              {isOffline
+                ? 'Connect to a server first to use this feature.'
+                : 'Use this when files are missing on the server. Existing cache entries are cleared, then files upload again.'}
+            </Text>
+          </SettingsCard>
+        </Animated.View>
+
+        <Animated.View entering={FadeInDown.duration(300).delay(500)}>
+          <SectionHeader title="About" styles={styles} />
+          <SettingsCard styles={styles}>
+            <View style={styles.aboutRow}>
+              <Text style={styles.aboutLabel}>App version</Text>
+              <Text style={styles.aboutValue}>{Constants.expoConfig?.version ?? '2.4.0'}</Text>
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.aboutRow}>
+              <Text style={styles.aboutLabel}>Server stack</Text>
+              <Text style={styles.aboutValue}>Python + FastAPI</Text>
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.aboutRow}>
+              <Text style={styles.aboutLabel}>Framework</Text>
+              <Text style={styles.aboutValue}>Expo SDK 57</Text>
+            </View>
+          </SettingsCard>
+        </Animated.View>
       </ScrollView>
 
       <ServerDiscoverySheet

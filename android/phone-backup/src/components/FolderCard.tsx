@@ -1,7 +1,9 @@
 import React, { useMemo } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Alert } from 'react-native';
+import { View, Text, StyleSheet, Alert } from 'react-native';
 import { AppColors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
+import { AnimatedPressable } from '@/components/AnimatedPressable';
+import { SwipeableRow } from '@/components/SwipeableRow';
 import { useAppTheme } from '@/hooks/use-app-theme';
 
 export interface Folder {
@@ -44,42 +46,55 @@ export function FolderCard({ folder, onRemove, onRefresh, refreshDisabled }: Pro
   };
 
   return (
-    <View style={styles.card}>
-      <View style={styles.iconContainer}>
-        <AppIcon androidName="folder" iosName="folder" color={colors.primary} size={24} fallback="F" />
-      </View>
+    <SwipeableRow
+      onSwipeLeft={handleRemove}
+      onSwipeRight={refreshDisabled ? undefined : handleRefresh}
+      rightIcon="delete"
+      rightIosIcon="trash"
+      rightColor={colors.error}
+      rightLabel="Remove"
+      leftIcon="sync"
+      leftIosIcon="arrow.triangle.2.circlepath"
+      leftColor={colors.primary}
+      leftLabel="Refresh"
+    >
+      <View style={styles.card}>
+        <View style={styles.iconContainer}>
+          <AppIcon androidName="folder" iosName="folder" color={colors.primary} size={24} fallback="F" />
+        </View>
 
-      <View style={styles.info}>
-        <Text style={styles.name} numberOfLines={1}>
-          {folder.name}
-        </Text>
-        <Text style={styles.meta} numberOfLines={1}>
-          {folder.addedAt
-            ? `Added ${new Date(folder.addedAt).toLocaleDateString()}`
-            : 'Ready for automatic backup'}
-        </Text>
-      </View>
+        <View style={styles.info}>
+          <Text style={styles.name} numberOfLines={1}>
+            {folder.name}
+          </Text>
+          <Text style={styles.meta} numberOfLines={1}>
+            {folder.addedAt
+              ? `Added ${new Date(folder.addedAt).toLocaleDateString()}`
+              : 'Ready for automatic backup'}
+          </Text>
+        </View>
 
-      <View style={styles.actions}>
-        <TouchableOpacity
-          style={[styles.actionBtn, styles.refreshBtn, refreshDisabled && { opacity: 0.35 }]}
-          onPress={handleRefresh}
-          disabled={refreshDisabled}
-          accessibilityLabel={`Refresh backup for ${folder.name}`}
-          accessibilityRole="button"
-        >
-          <AppIcon androidName="sync" iosName="arrow.triangle.2.circlepath" color={refreshDisabled ? colors.textMuted : colors.primary} size={18} fallback="R" />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionBtn, styles.removeBtn]}
-          onPress={handleRemove}
-          accessibilityLabel={`Remove ${folder.name}`}
-          accessibilityRole="button"
-        >
-          <AppIcon androidName="close" iosName="xmark" color={colors.error} size={18} fallback="X" />
-        </TouchableOpacity>
+        <View style={styles.actions}>
+          <AnimatedPressable
+            style={[styles.actionBtn, styles.refreshBtn, refreshDisabled && { opacity: 0.35 }]}
+            onPress={handleRefresh}
+            disabled={refreshDisabled}
+            scaleDown={0.85}
+            accessibilityLabel={`Refresh backup for ${folder.name}`}
+          >
+            <AppIcon androidName="sync" iosName="arrow.triangle.2.circlepath" color={refreshDisabled ? colors.textMuted : colors.primary} size={18} fallback="R" />
+          </AnimatedPressable>
+          <AnimatedPressable
+            style={[styles.actionBtn, styles.removeBtn]}
+            onPress={handleRemove}
+            scaleDown={0.85}
+            accessibilityLabel={`Remove ${folder.name}`}
+          >
+            <AppIcon androidName="close" iosName="xmark" color={colors.error} size={18} fallback="X" />
+          </AnimatedPressable>
+        </View>
       </View>
-    </View>
+    </SwipeableRow>
   );
 }
 
@@ -92,7 +107,6 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.surfaceBorder,
     padding: Spacing.four,
-    marginBottom: Spacing.three,
     gap: Spacing.three,
     ...Shadows.card,
   },
