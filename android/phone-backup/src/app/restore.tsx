@@ -38,6 +38,8 @@ import {
   downloadSharedFile,
   getConfig,
   buildPreviewUrl,
+  buildVideoPreviewUrl,
+  warmVideoPreviews,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
@@ -444,15 +446,48 @@ const PreviewModal = React.memo(function PreviewModal({
     return buildPreviewUrl(serverConfig, f.path, sourceMode, selectedSourceId);
   }, [serverConfig, sourceMode, selectedSourceId]);
 
+  const getVideoPreviewUrlForFile = useCallback((f: RemoteFile | null): string => {
+    if (!f || !serverConfig) return '';
+    return buildVideoPreviewUrl(serverConfig, f.path, sourceMode, selectedSourceId);
+  }, [serverConfig, sourceMode, selectedSourceId]);
+
   const previewUrl = useMemo(() => getUrlForFile(currentFile), [getUrlForFile, currentFile]);
   const prevFile = fileList[activeIdx - 1] ?? null;
   const nextFile = fileList[activeIdx + 1] ?? null;
-  const prevPreviewUrl = useMemo(() => getUrlForFile(prevFile), [getUrlForFile, prevFile]);
-  const nextPreviewUrl = useMemo(() => getUrlForFile(nextFile), [getUrlForFile, nextFile]);
+  const prevVideoPreviewUrl = useMemo(() => getVideoPreviewUrlForFile(prevFile), [getVideoPreviewUrlForFile, prevFile]);
+  const nextVideoPreviewUrl = useMemo(() => getVideoPreviewUrlForFile(nextFile), [getVideoPreviewUrlForFile, nextFile]);
 
   // Loading state for images
   const [imgLoading, setImgLoading] = useState(category === 'image');
   const [transition, setTransition] = useState<TransitionState | null>(null);
+
+  // Session-level de-dupe so we don't repeatedly warm the same video.
+  const warmedPreviewPathsRef = useRef<Set<string>>(new Set());
+
+  // Warm current/adjacent videos when the user navigates via swipe.
+  useEffect(() => {
+    if (sourceMode === 'shared' && !selectedSourceId) return;
+
+    const candidates = [
+      fileList[activeIdx],
+      fileList[activeIdx - 1],
+      fileList[activeIdx + 1],
+    ].filter(Boolean) as RemoteFile[];
+
+    const newlyWarm = candidates
+      .filter(f => getFileCategory(f.path) === 'video')
+      .filter(f => !warmedPreviewPathsRef.current.has(f.path))
+      .slice(0, 3);
+
+    if (newlyWarm.length === 0) return;
+
+    newlyWarm.forEach(f => warmedPreviewPathsRef.current.add(f.path));
+    void warmVideoPreviews(
+      newlyWarm.map(f => f.path),
+      sourceMode,
+      sourceMode === 'shared' ? selectedSourceId : null,
+    ).catch(() => undefined);
+  }, [activeIdx, fileList, sourceMode, selectedSourceId]);
 
   // ── Swipe navigation animation ──────────────────────────────────────────────
   const [slideAnim] = useState(() => new Animated.Value(0));
@@ -786,7 +821,12 @@ const PreviewModal = React.memo(function PreviewModal({
             { transform: [{ scale: scaleAnim }, { translateX: translateXAnim }, { translateY: translateYAnim }] },
           ]}
         >
-          <VideoPreviewPlayer uri={targetUrl} isActive={!transition} />
+          <VideoPreviewPlayer
+            previewUri={getVideoPreviewUrlForFile(targetFile)}
+            originalUri={targetUrl}
+            fileSize={targetFile.size}
+            isActive={!transition}
+          />
         </Animated.View>
       );
     }
@@ -864,8 +904,8 @@ const PreviewModal = React.memo(function PreviewModal({
           )}
         </View>
 
-        <VideoPreviewPreloader uri={prevFile && getFileCategory(prevFile.path) === 'video' ? prevPreviewUrl : ''} />
-        <VideoPreviewPreloader uri={nextFile && getFileCategory(nextFile.path) === 'video' ? nextPreviewUrl : ''} />
+        <VideoPreviewPreloader uri={prevFile && getFileCategory(prevFile.path) === 'video' ? prevVideoPreviewUrl : ''} />
+        <VideoPreviewPreloader uri={nextFile && getFileCategory(nextFile.path) === 'video' ? nextVideoPreviewUrl : ''} />
 
         {/* Top Header Bar */}
         <Animated.View
@@ -973,12 +1013,27 @@ function MetaRow({ label, value, colors, last }: { label: string; value: string;
 }
 
 // ── Video Preview Player ──────────────────────────────────────────────────────
-function VideoPreviewPlayer({ uri, isActive = true }: { uri: string; isActive?: boolean }) {
+function VideoPreviewPlayer({
+  previewUri,
+  originalUri,
+  fileSize,
+  isActive = true,
+}: {
+  previewUri: string;
+  originalUri: string;
+  fileSize: number;
+  isActive?: boolean;
+}) {
+  const PREVIEW_TRANSCODE_MIN_BYTES = 40 * 1024 * 1024;
+  const shouldUpgrade = previewUri !== originalUri && fileSize >= PREVIEW_TRANSCODE_MIN_BYTES;
+  const upgradedRef = useRef(false);
+  const upgradeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const source = useMemo<VideoSource>(() => ({
-    uri,
+    uri: previewUri,
     useCaching: true,
     contentType: 'progressive',
-  }), [uri]);
+  }), [previewUri]);
 
   const player = useVideoPlayer(source, p => {
     p.loop = true;
@@ -996,12 +1051,59 @@ function VideoPreviewPlayer({ uri, isActive = true }: { uri: string; isActive?: 
   const isBuffering = status !== 'readyToPlay' && status !== 'error';
 
   useEffect(() => {
+    upgradedRef.current = false;
+    if (upgradeTimerRef.current) {
+      clearTimeout(upgradeTimerRef.current);
+      upgradeTimerRef.current = null;
+    }
+  }, [previewUri, originalUri]);
+
+  useEffect(() => {
     if (isActive) {
       player.play();
     } else {
       player.pause();
     }
   }, [isActive, player]);
+
+  useEffect(() => {
+    if (!shouldUpgrade || upgradedRef.current || status !== 'readyToPlay' || !isActive) {
+      return;
+    }
+
+    let cancelled = false;
+    // Prevent scheduling multiple upgrades while the player re-emits readyToPlay.
+    upgradedRef.current = true;
+    const timer = setTimeout(async () => {
+      if (cancelled || upgradedRef.current) return;
+      const position = player.currentTime;
+      const wasPlaying = player.playing;
+      try {
+        await player.replaceAsync({
+          uri: originalUri,
+          useCaching: true,
+          contentType: 'progressive',
+        });
+        if (cancelled) return;
+        player.currentTime = position;
+        if (wasPlaying) {
+          player.play();
+        }
+      } catch {
+        // If upgrade fails, allow another attempt later.
+        upgradedRef.current = false;
+      }
+    }, 1500);
+    upgradeTimerRef.current = timer;
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      if (upgradeTimerRef.current === timer) {
+        upgradeTimerRef.current = null;
+      }
+    };
+  }, [shouldUpgrade, status, isActive, originalUri, player]);
 
   useEffect(() => {
     return () => {
@@ -1495,6 +1597,20 @@ export default function RestoreScreen() {
         serverFiles = await listServerFiles();
       }
       setFiles(serverFiles);
+
+      // After a successful fetch, warm a few of the largest video previews in the background.
+      // This reduces the first-open wait time dramatically for big files.
+      const warmCandidates = serverFiles
+        .filter(f => getFileCategory(f.path) === 'video')
+        .sort((a, b) => (b.size ?? 0) - (a.size ?? 0))
+        .slice(0, 6)
+        .map(f => f.path);
+      void warmVideoPreviews(
+        warmCandidates,
+        sourceMode,
+        sourceMode === 'shared' ? selectedSourceId : null,
+      ).catch(() => undefined);
+
       const newTree = buildTree(serverFiles);
       setTree(newTree);
       setSelectedPaths(new Set());
@@ -1673,7 +1789,7 @@ export default function RestoreScreen() {
     if (!warmPreviewFile || !serverConfig || getFileCategory(warmPreviewFile.path) !== 'video') {
       return '';
     }
-    return buildPreviewUrl(serverConfig, warmPreviewFile.path, sourceMode, selectedSourceId);
+    return buildVideoPreviewUrl(serverConfig, warmPreviewFile.path, sourceMode, selectedSourceId);
   }, [warmPreviewFile, serverConfig, sourceMode, selectedSourceId]);
 
   const fetchDisabled = isFetching || isDownloading || isOffline ||

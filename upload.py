@@ -3,10 +3,11 @@ from email.utils import formatdate
 import os
 import re
 import socket
+import subprocess
 import time
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header
+from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -34,10 +35,11 @@ from database import (
 )
 from state import add_log, get_current_activity, pending_connections, set_current_activity
 from storage import file_exists, save_fileobj, save_upload_stream, full_path_for
+from video_preview import get_video_preview_path, is_video_path
 
 router = APIRouter()
 
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -629,6 +631,104 @@ async def download_file(
     return _file_range_response(path, request)
 
 
+@router.get("/files/preview")
+async def preview_file(
+        relative_path: str,
+        device_id: str,
+        request: Request,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    path = full_path_for(relative_path, device_id=device_id)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    if not is_video_path(path):
+        raise HTTPException(status_code=400, detail="Preview is only available for video files")
+
+    try:
+        preview_path = await asyncio.to_thread(get_video_preview_path, path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    except subprocess.CalledProcessError:
+        raise HTTPException(status_code=500, detail="Failed to generate video preview")
+
+    return _file_range_response(preview_path, request)
+
+
+class WarmPreviewsRequest(BaseModel):
+    relative_paths: list[str]
+
+
+@router.post("/shared/{source_id}/warm_previews")
+async def warm_shared_preview_files(
+        source_id: str,
+        body: WarmPreviewsRequest,
+        background_tasks: BackgroundTasks,
+        device_id: str | None = None,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    """
+    Schedule background preview generation for shared video files.
+    """
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+
+    entry = _find_shared_dir(source_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Shared source not found")
+    if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
+        raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
+
+    root = os.path.abspath(entry["path"])
+    scheduled = 0
+    for rel in (body.relative_paths or [])[:10]:
+        safe_rel = os.path.normpath(rel.replace("\\", "/"))
+        full_path = os.path.abspath(os.path.join(root, safe_rel))
+        if os.path.commonpath([root, full_path]) != root:
+            continue
+        if not os.path.isfile(full_path):
+            continue
+        if not is_video_path(full_path):
+            continue
+        scheduled += 1
+        background_tasks.add_task(get_video_preview_path, full_path)
+
+    return {"ok": True, "scheduled": scheduled}
+
+
+@router.post("/files/warm_previews")
+async def warm_preview_files(
+        body: WarmPreviewsRequest,
+        device_id: str,
+        background_tasks: BackgroundTasks,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    """
+    Schedule background preview generation for the provided relative video paths.
+    Returns immediately (doesn't block on ffmpeg).
+    """
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+
+    scheduled = 0
+    for rel in (body.relative_paths or [])[:10]:
+        try:
+            path = full_path_for(rel, device_id=device_id)
+        except Exception:
+            continue
+        if not os.path.isfile(path):
+            continue
+        if not is_video_path(path):
+            continue
+        scheduled += 1
+        background_tasks.add_task(get_video_preview_path, path)
+
+    return {"ok": True, "scheduled": scheduled}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Sync session history
 # ──────────────────────────────────────────────────────────────────────────────
@@ -853,3 +953,44 @@ async def download_shared_file(
         raise HTTPException(status_code=404, detail="File not found")
 
     return _file_range_response(full_path, request)
+
+
+@router.get("/shared/{source_id}/preview")
+async def preview_shared_file(
+        source_id: str,
+        relative_path: str,
+        request: Request,
+        device_id: str | None = None,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+
+    entry = _find_shared_dir(source_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Shared source not found")
+    if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
+        raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
+
+    root = os.path.abspath(entry["path"])
+    if not os.path.isdir(root):
+        raise HTTPException(status_code=404, detail="Shared directory not found on server")
+
+    safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
+    full_path = os.path.abspath(os.path.join(root, safe_rel))
+    if os.path.commonpath([root, full_path]) != root:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    if not is_video_path(full_path):
+        raise HTTPException(status_code=400, detail="Preview is only available for video files")
+
+    try:
+        preview_path = await asyncio.to_thread(get_video_preview_path, full_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    except subprocess.CalledProcessError:
+        raise HTTPException(status_code=500, detail="Failed to generate video preview")
+
+    return _file_range_response(preview_path, request)

@@ -16,6 +16,37 @@ export function buildPreviewUrl(config, relativePath, sourceMode, sourceId) {
   return `http://${config.ip}:${config.port}/files/download?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
 }
 
+export function buildVideoPreviewUrl(config, relativePath, sourceMode, sourceId) {
+  if (!config || !config.ip || !config.port) return '';
+  if (sourceMode === 'shared' && sourceId) {
+    return `http://${config.ip}:${config.port}/shared/${encodeURIComponent(sourceId)}/preview?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+  }
+  return `http://${config.ip}:${config.port}/files/preview?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+}
+
+export async function warmVideoPreviews(relativePaths, sourceMode, sourceId) {
+  if (!relativePaths || relativePaths.length === 0) return { ok: true, scheduled: 0 };
+  const { ip, port, key, deviceId } = await getConfig();
+
+  const basePath = (sourceMode === 'shared' && sourceId)
+    ? `/shared/${encodeURIComponent(sourceId)}/warm_previews`
+    : `/files/warm_previews`;
+
+  const url = `http://${ip}:${port}${basePath}?device_id=${encodeURIComponent(deviceId)}&token=${encodeURIComponent(key)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ relative_paths: relativePaths }),
+  });
+
+  // Endpoint schedules work in background and should return quickly.
+  try {
+    return await res.json();
+  } catch {
+    return { ok: res.ok, scheduled: 0 };
+  }
+}
+
 /**
  * Fetch the list of backed-up files for this device from the server.
  * @returns {Promise<Array<{path: string, size: number, modified_time: number, sha256: string, uploaded_time: number}>>}
