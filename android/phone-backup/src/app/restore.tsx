@@ -20,7 +20,8 @@ import {
   Easing,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { useVideoPlayer, VideoView } from 'expo-video';
+import { useVideoPlayer, VideoView, type VideoSource } from 'expo-video';
+import { useEvent } from 'expo';
 import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
@@ -419,21 +420,19 @@ type PreviewModalProps = {
   colors: AppColors;
 };
 
+type TransitionState = {
+  toIndex: number;
+};
+
 const PreviewModal = React.memo(function PreviewModal({
   file, fileList, currentIndex, sourceMode, selectedSourceId, serverConfig,
   onClose, onNavigate, onDownload, colors,
 }: PreviewModalProps) {
   const insets = useSafeAreaInsets();
 
-  // Internal active file index state
-  const [activeIdx, setActiveIdx] = useState<number>(currentIndex);
-  
-  // Derived state synchronization
-  const [prevIndexProp, setPrevIndexProp] = useState(currentIndex);
-  if (currentIndex !== prevIndexProp) {
-    setPrevIndexProp(currentIndex);
-    setActiveIdx(currentIndex);
-  }
+  // Keep a local override only while this modal is driving navigation.
+  const [internalActiveIdx, setInternalActiveIdx] = useState<number | null>(null);
+  const activeIdx = internalActiveIdx ?? currentIndex;
 
   const currentFile = fileList[activeIdx] ?? file;
   const category = currentFile ? getFileCategory(currentFile.path) : 'other';
@@ -446,12 +445,18 @@ const PreviewModal = React.memo(function PreviewModal({
   }, [serverConfig, sourceMode, selectedSourceId]);
 
   const previewUrl = useMemo(() => getUrlForFile(currentFile), [getUrlForFile, currentFile]);
+  const prevFile = fileList[activeIdx - 1] ?? null;
+  const nextFile = fileList[activeIdx + 1] ?? null;
+  const prevPreviewUrl = useMemo(() => getUrlForFile(prevFile), [getUrlForFile, prevFile]);
+  const nextPreviewUrl = useMemo(() => getUrlForFile(nextFile), [getUrlForFile, nextFile]);
 
   // Loading state for images
   const [imgLoading, setImgLoading] = useState(category === 'image');
+  const [transition, setTransition] = useState<TransitionState | null>(null);
 
   // ── Swipe navigation animation ──────────────────────────────────────────────
   const [slideAnim] = useState(() => new Animated.Value(0));
+  const [incomingSlideAnim] = useState(() => new Animated.Value(0));
   const [isAnimating, setIsAnimating] = useState(false);
 
   // Automatically prune disk cache to last 10 preview items
@@ -464,7 +469,7 @@ const PreviewModal = React.memo(function PreviewModal({
     const nextFile = fileList[activeIdx + 1];
     const prevFile = fileList[activeIdx - 1];
     [nextFile, prevFile].forEach(f => {
-      if (f && getFileCategory(f.path) === 'image') {
+      if (f && (getFileCategory(f.path) === 'image')) {
         const url = getUrlForFile(f);
         if (url) {
           Image.prefetch(url);
@@ -555,40 +560,42 @@ const PreviewModal = React.memo(function PreviewModal({
     setIsAnimating(true);
 
     const isNext = targetIndex > activeIdx;
-    const slideOutVal = isNext ? -SCREEN_W : SCREEN_W;
-    const slideInVal = isNext ? SCREEN_W : -SCREEN_W;
+    const direction: 1 | -1 = isNext ? 1 : -1;
+    const slideOutVal = direction === 1 ? -SCREEN_W : SCREEN_W;
+    const slideInStartVal = direction === 1 ? SCREEN_W : -SCREEN_W;
 
     const fromVal = startDx !== undefined ? startDx : 0;
     slideAnim.setValue(fromVal);
+    incomingSlideAnim.setValue(slideInStartVal + fromVal);
+    setTransition({ toIndex: targetIndex });
 
-    // 1. Slide out current file
-    Animated.timing(slideAnim, {
-      toValue: slideOutVal,
-      duration: 160,
-      easing: Easing.out(Easing.quad),
-      useNativeDriver: true,
-    }).start(() => {
-      // 2. Position new file off-screen and update active index
-      slideAnim.setValue(slideInVal);
-      setActiveIdx(targetIndex);
+    Animated.parallel([
+      Animated.timing(slideAnim, {
+        toValue: slideOutVal,
+        duration: 210,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(incomingSlideAnim, {
+        toValue: 0,
+        duration: 210,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      setInternalActiveIdx(targetIndex);
       onNavigate(targetIndex);
+      setTransition(null);
+      setIsAnimating(false);
+      slideAnim.setValue(0);
+      incomingSlideAnim.setValue(0);
       scaleAnim.setValue(1);
       translateXAnim.setValue(0);
       translateYAnim.setValue(0);
       scaleRef.current = 1;
       translateRef.current = { x: 0, y: 0 };
-
-      // 3. Slide in to center smoothly
-      Animated.timing(slideAnim, {
-        toValue: 0,
-        duration: 160,
-        easing: Easing.out(Easing.quad),
-        useNativeDriver: true,
-      }).start(() => {
-        setIsAnimating(false);
-      });
     });
-  }, [isAnimating, fileList.length, activeIdx, slideAnim, onNavigate, scaleAnim, translateXAnim, translateYAnim]);
+  }, [isAnimating, fileList.length, activeIdx, slideAnim, incomingSlideAnim, onNavigate, scaleAnim, translateXAnim, translateYAnim]);
 
   // ── Fullscreen mode (tap content to hide/show chrome) ──────────────────────
   useEffect(() => {
@@ -600,10 +607,10 @@ const PreviewModal = React.memo(function PreviewModal({
     }).start();
   }, [isFullscreen, chromeAnim]);
 
-  const latestRef = useRef({ activeIdx, category, fileListLen: fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim });
+  const latestRef = useRef({ activeIdx, category, fileListLen: fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim, isAnimating });
   useEffect(() => {
-    latestRef.current = { activeIdx, category, fileListLen: fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim };
-  }, [activeIdx, category, fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim]);
+    latestRef.current = { activeIdx, category, fileListLen: fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim, isAnimating };
+  }, [activeIdx, category, fileList.length, animateToFile, hasNext, hasPrev, canZoom, resetZoom, setZoomTo, slideAnim, scaleAnim, translateXAnim, translateYAnim, isAnimating]);
 
   const getTouchDistance = (touches: { pageX: number; pageY: number }[]) => {
     const [a, b] = touches;
@@ -662,7 +669,9 @@ const PreviewModal = React.memo(function PreviewModal({
           cur.translateXAnim.setValue(nx);
           cur.translateYAnim.setValue(ny);
         } else {
-          cur.slideAnim.setValue(gs.dx);
+          if (!cur.isAnimating) {
+            cur.slideAnim.setValue(gs.dx);
+          }
         }
       },
       onPanResponderRelease: (evt, gs) => {
@@ -720,30 +729,37 @@ const PreviewModal = React.memo(function PreviewModal({
 
   if (!currentFile) return null;
 
-  const cat = categoryMeta(category);
   const uploadedDate = formatDate(currentFile.uploaded_time ?? currentFile.modified_time);
-  const modDate = formatDate(currentFile.modified_time);
 
-  const renderContent = () => {
-    if (!previewUrl) {
+  const renderContentForFile = (targetFile: RemoteFile | null, targetUrl: string, keyPrefix: string) => {
+    if (!targetFile) return null;
+
+    const targetCategory = getFileCategory(targetFile.path);
+    const targetFileName = targetFile.path.split(/[/\\]/).pop() ?? targetFile.path;
+    const targetCat = categoryMeta(targetCategory);
+    const targetUploadedDate = formatDate(targetFile.uploaded_time ?? targetFile.modified_time);
+    const targetModDate = formatDate(targetFile.modified_time);
+
+    if (!targetUrl) {
       return (
-        <View style={pvStyles.centeredBox}>
+        <View key={`${keyPrefix}-loading`} style={pvStyles.centeredBox}>
           <ActivityIndicator size="large" color={colors.primary} />
           <Text style={[pvStyles.loadingText, { color: colors.textSecondary }]}>Loading server preview…</Text>
         </View>
       );
     }
 
-    if (category === 'image') {
+    if (targetCategory === 'image') {
       return (
         <Animated.View
+          key={`${keyPrefix}-image`}
           style={[
             pvStyles.zoomWrap,
             { transform: [{ scale: scaleAnim }, { translateX: translateXAnim }, { translateY: translateYAnim }] },
           ]}
         >
           <Image
-            source={{ uri: previewUrl }}
+            source={{ uri: targetUrl }}
             style={pvStyles.imageFull}
             contentFit="contain"
             cachePolicy="memory-disk"
@@ -761,37 +777,38 @@ const PreviewModal = React.memo(function PreviewModal({
       );
     }
 
-    if (category === 'video') {
+    if (targetCategory === 'video') {
       return (
         <Animated.View
+          key={`${keyPrefix}-video`}
           style={[
             pvStyles.zoomWrap,
             { transform: [{ scale: scaleAnim }, { translateX: translateXAnim }, { translateY: translateYAnim }] },
           ]}
         >
-          <VideoPreviewPlayer uri={previewUrl} isFullscreen={isFullscreen} />
+          <VideoPreviewPlayer uri={targetUrl} isActive={!transition} />
         </Animated.View>
       );
     }
 
-    if (category === 'audio') {
+    if (targetCategory === 'audio') {
       return (
-        <AudioPlayer uri={previewUrl} colors={colors} fileName={fileName} />
+        <AudioPlayer uri={targetUrl} colors={colors} fileName={targetFileName} />
       );
     }
 
     // Other — Metadata card
     return (
-      <View style={pvStyles.metaCard}>
+      <View key={`${keyPrefix}-meta`} style={pvStyles.metaCard}>
         <View style={[pvStyles.metaIconWrap, { backgroundColor: colors.primarySoft }]}>
-          <AppIcon androidName={cat.icon} iosName={cat.iosIcon} color={colors.primary} size={48} />
+          <AppIcon androidName={targetCat.icon} iosName={targetCat.iosIcon} color={colors.primary} size={48} />
         </View>
-        <Text style={[pvStyles.metaFileName, { color: colors.text }]}>{fileName}</Text>
+        <Text style={[pvStyles.metaFileName, { color: colors.text }]}>{targetFileName}</Text>
         <View style={[pvStyles.metaTable, { borderColor: colors.surfaceBorder }]}>
-          <MetaRow label="Size" value={formatSize(currentFile.size)} colors={colors} />
-          <MetaRow label="Uploaded" value={uploadedDate} colors={colors} />
-          <MetaRow label="Modified" value={modDate} colors={colors} />
-          <MetaRow label="Type" value={getExt(fileName).toUpperCase() || '—'} colors={colors} last />
+          <MetaRow label="Size" value={formatSize(targetFile.size)} colors={colors} />
+          <MetaRow label="Uploaded" value={targetUploadedDate} colors={colors} />
+          <MetaRow label="Modified" value={targetModDate} colors={colors} />
+          <MetaRow label="Type" value={getExt(targetFileName).toUpperCase() || '—'} colors={colors} last />
         </View>
         <Text style={[pvStyles.metaNote, { color: colors.textMuted }]}>
           This file type cannot be previewed. Download it to open on your device.
@@ -799,6 +816,9 @@ const PreviewModal = React.memo(function PreviewModal({
       </View>
     );
   };
+
+  const transitionTargetFile = transition ? fileList[transition.toIndex] ?? null : null;
+  const transitionTargetUrl = transitionTargetFile ? getUrlForFile(transitionTargetFile) : '';
 
   const chromeOpacity = chromeAnim.interpolate({ inputRange: [0, 1], outputRange: [1, 0] });
   const topBarTranslate = chromeAnim.interpolate({ inputRange: [0, 1], outputRange: [0, -70] });
@@ -821,12 +841,31 @@ const PreviewModal = React.memo(function PreviewModal({
         )}
 
         {/* Main Content Area with gestures */}
-        <Animated.View
-          style={[pvStyles.contentArea, { transform: [{ translateX: slideAnim }] }]}
-          {...panResponder.panHandlers}
-        >
-          {renderContent()}
-        </Animated.View>
+        <View style={pvStyles.contentArea} {...panResponder.panHandlers}>
+          {transition ? (
+            <>
+              <Animated.View
+                style={[pvStyles.transitionLayer, { transform: [{ translateX: slideAnim }] }]}
+                pointerEvents="none"
+              >
+                {renderContentForFile(currentFile, previewUrl, 'current')}
+              </Animated.View>
+              <Animated.View
+                style={[pvStyles.transitionLayer, { transform: [{ translateX: incomingSlideAnim }] }]}
+                pointerEvents="none"
+              >
+                {renderContentForFile(transitionTargetFile, transitionTargetUrl, 'incoming')}
+              </Animated.View>
+            </>
+          ) : (
+            <Animated.View style={{ transform: [{ translateX: slideAnim }] }}>
+              {renderContentForFile(currentFile, previewUrl, 'active')}
+            </Animated.View>
+          )}
+        </View>
+
+        <VideoPreviewPreloader uri={prevFile && getFileCategory(prevFile.path) === 'video' ? prevPreviewUrl : ''} />
+        <VideoPreviewPreloader uri={nextFile && getFileCategory(nextFile.path) === 'video' ? nextPreviewUrl : ''} />
 
         {/* Top Header Bar */}
         <Animated.View
@@ -934,11 +973,41 @@ function MetaRow({ label, value, colors, last }: { label: string; value: string;
 }
 
 // ── Video Preview Player ──────────────────────────────────────────────────────
-function VideoPreviewPlayer({ uri }: { uri: string; isFullscreen: boolean }) {
-  const player = useVideoPlayer(uri, p => {
+function VideoPreviewPlayer({ uri, isActive = true }: { uri: string; isActive?: boolean }) {
+  const source = useMemo<VideoSource>(() => ({
+    uri,
+    useCaching: true,
+    contentType: 'progressive',
+  }), [uri]);
+
+  const player = useVideoPlayer(source, p => {
     p.loop = true;
-    p.play();
+    p.bufferOptions = {
+      preferredForwardBufferDuration: 1.5,
+      minBufferForPlayback: 0.15,
+      prioritizeTimeOverSizeThreshold: true,
+    };
+    if (isActive) {
+      p.play();
+    }
   });
+
+  const { status } = useEvent(player, 'statusChange', { status: player.status });
+  const isBuffering = status !== 'readyToPlay' && status !== 'error';
+
+  useEffect(() => {
+    if (isActive) {
+      player.play();
+    } else {
+      player.pause();
+    }
+  }, [isActive, player]);
+
+  useEffect(() => {
+    return () => {
+      player.pause();
+    };
+  }, [player]);
 
   return (
     <View style={pvStyles.videoContainer}>
@@ -947,9 +1016,33 @@ function VideoPreviewPlayer({ uri }: { uri: string; isFullscreen: boolean }) {
         style={pvStyles.videoFull}
         contentFit="contain"
         nativeControls={true}
+        surfaceType="textureView"
       />
+      {isBuffering && (
+        <View style={pvStyles.imgLoadingOverlay} pointerEvents="none">
+          <ActivityIndicator size="large" color="#fff" />
+          <Text style={pvStyles.videoLoadingText}>Buffering video…</Text>
+        </View>
+      )}
     </View>
   );
+}
+
+function VideoPreviewPreloader({ uri }: { uri: string }) {
+  const source = useMemo<VideoSource | null>(() => (
+    uri ? { uri, useCaching: true, contentType: 'progressive' } : null
+  ), [uri]);
+
+  useVideoPlayer(source, player => {
+    player.loop = true;
+    player.bufferOptions = {
+      preferredForwardBufferDuration: 1.5,
+      minBufferForPlayback: 0.15,
+      prioritizeTimeOverSizeThreshold: true,
+    };
+  });
+
+  return null;
 }
 
 // ── Audio Player ─────────────────────────────────────────────────────────────
@@ -1107,13 +1200,14 @@ type TreeNodeViewProps = {
   onToggleNode: (node: TreeNode) => void;
   onToggleExpand: (nodeKey: string) => void;
   onPreview: (file: RemoteFile) => void;
+  onWarmPreview: (file: RemoteFile) => void;
   onEnterSelectionMode: (node: TreeNode) => void;
   styles: ReturnType<typeof createStyles>;
   colors: AppColors;
 };
 
 const TreeNodeView = React.memo(function TreeNodeView({
-  node, depth, selectedPaths, selectionMode, onToggleNode, onToggleExpand, onPreview, onEnterSelectionMode, styles, colors,
+  node, depth, selectedPaths, selectionMode, onToggleNode, onToggleExpand, onPreview, onWarmPreview, onEnterSelectionMode, styles, colors,
 }: TreeNodeViewProps) {
   const indent = depth * 16;
 
@@ -1150,6 +1244,11 @@ const TreeNodeView = React.memo(function TreeNodeView({
       <Pressable
         style={[styles.fileRow, { paddingLeft: indent + Spacing.four }]}
         onPress={handlePress}
+        onPressIn={() => {
+          if (node.file) {
+            onWarmPreview(node.file);
+          }
+        }}
         onLongPress={handleLongPress}
         delayLongPress={350}
         android_ripple={{ color: colors.primarySoft }}
@@ -1224,7 +1323,7 @@ const TreeNodeView = React.memo(function TreeNodeView({
           key={child.key} node={child} depth={depth + 1}
           selectedPaths={selectedPaths} selectionMode={selectionMode}
           onToggleNode={onToggleNode} onEnterSelectionMode={onEnterSelectionMode}
-          onToggleExpand={onToggleExpand} onPreview={onPreview}
+          onToggleExpand={onToggleExpand} onPreview={onPreview} onWarmPreview={onWarmPreview}
           styles={styles} colors={colors}
         />
       ))}
@@ -1303,6 +1402,7 @@ export default function RestoreScreen() {
   // Preview state
   const [previewFile, setPreviewFile] = useState<RemoteFile | null>(null);
   const [previewIndex, setPreviewIndex] = useState<number>(0);
+  const [warmPreviewFile, setWarmPreviewFile] = useState<RemoteFile | null>(null);
 
   // Server connection check
   const checkServer = useCallback(async () => {
@@ -1419,8 +1519,15 @@ export default function RestoreScreen() {
   }, [previewableFiles]);
 
   const handlePreview = useCallback((file: RemoteFile) => {
+    setWarmPreviewFile(file);
     openPreview(file);
   }, [openPreview]);
+
+  const handleWarmPreview = useCallback((file: RemoteFile) => {
+    if (getFileCategory(file.path) === 'video') {
+      setWarmPreviewFile(file);
+    }
+  }, []);
 
   const handlePreviewNavigate = useCallback((newIndex: number) => {
     if (newIndex < 0 || newIndex >= previewableFiles.length) return;
@@ -1562,6 +1669,12 @@ export default function RestoreScreen() {
   );
 
   const rootChildren = sortedTree?.children ?? [];
+  const warmPreviewUrl = useMemo(() => {
+    if (!warmPreviewFile || !serverConfig || getFileCategory(warmPreviewFile.path) !== 'video') {
+      return '';
+    }
+    return buildPreviewUrl(serverConfig, warmPreviewFile.path, sourceMode, selectedSourceId);
+  }, [warmPreviewFile, serverConfig, sourceMode, selectedSourceId]);
 
   const fetchDisabled = isFetching || isDownloading || isOffline ||
     (sourceMode === 'shared' && !selectedSourceId);
@@ -1672,6 +1785,7 @@ export default function RestoreScreen() {
             onEnterSelectionMode={handleEnterSelectionMode}
             onToggleExpand={handleToggleExpand}
             onPreview={handlePreview}
+            onWarmPreview={handleWarmPreview}
             styles={styles} colors={colors}
           />
         )}
@@ -1707,6 +1821,7 @@ export default function RestoreScreen() {
       )}
 
       {/* Preview Modal */}
+      <VideoPreviewPreloader uri={warmPreviewUrl} />
       {previewFile && (
         <PreviewModal
           file={previewFile}
@@ -1860,10 +1975,20 @@ const pvStyles = StyleSheet.create({
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
     justifyContent: 'center', alignItems: 'center',
   },
+  transitionLayer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   zoomWrap: { justifyContent: 'center', alignItems: 'center' },
   imgLoadingOverlay: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
     justifyContent: 'center', alignItems: 'center',
+    gap: Spacing.three,
   },
 
   navArrowLeft: {
@@ -1912,6 +2037,7 @@ const pvStyles = StyleSheet.create({
 
   videoContainer: { width: SCREEN_W, height: SCREEN_H },
   videoFull: { width: '100%', height: '100%' },
+  videoLoadingText: { color: '#fff', fontSize: TextScale.sm, fontWeight: '600' },
 
   audioPlayer: { alignItems: 'center', padding: Spacing.six, gap: Spacing.four, width: SCREEN_W },
   audioIconWrap: { width: 100, height: 100, borderRadius: 50, alignItems: 'center', justifyContent: 'center' },

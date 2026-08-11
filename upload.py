@@ -1,5 +1,7 @@
 import asyncio
+from email.utils import formatdate
 import os
+import re
 import socket
 import time
 import uuid
@@ -510,11 +512,109 @@ _MIME_MAP = {
     ".opus": "audio/opus", ".wma": "audio/x-ms-wma",
 }
 
+_RANGE_RE = re.compile(r"^(\d*)-(\d*)$")
+_STREAM_CHUNK = 1024 * 1024
+
+
+def _parse_range(range_header: str, file_size: int) -> tuple[int, int] | None:
+    if not range_header.startswith("bytes="):
+        return None
+    spec = range_header[len("bytes="):].split(",")[0].strip()
+    match = _RANGE_RE.match(spec)
+    if not match:
+        return None
+    start_str, end_str = match.groups()
+    if start_str == "" and end_str == "":
+        return None
+    if start_str == "":
+        suffix_len = int(end_str)
+        if suffix_len <= 0:
+            return None
+        start = max(file_size - suffix_len, 0)
+        end = file_size - 1
+    else:
+        start = int(start_str)
+        end = int(end_str) if end_str != "" else file_size - 1
+        end = min(end, file_size - 1)
+    return (start, end)
+
+
+def _stream_cache_headers(path: str, file_size: int) -> dict[str, str]:
+    stat = os.stat(path)
+    return {
+        "Content-Length": str(file_size),
+        "Accept-Ranges": "bytes",
+        # Let clients reuse recently streamed media segments instead of forcing a
+        # revalidation on every preview open.
+        "Cache-Control": "private, max-age=300",
+        "ETag": f'W/"{int(stat.st_mtime)}-{file_size}"',
+        "Last-Modified": formatdate(stat.st_mtime, usegmt=True),
+    }
+
+
+def _file_range_response(path: str, request: Request) -> StreamingResponse:
+    file_size = os.path.getsize(path)
+    ext = os.path.splitext(path)[1].lower()
+    mime = _MIME_MAP.get(ext, "application/octet-stream")
+    filename = os.path.basename(path)
+    range_header = request.headers.get("range")
+    base_headers = _stream_cache_headers(path, file_size)
+
+    parsed = _parse_range(range_header, file_size) if (file_size > 0 and range_header) else None
+
+    if parsed is not None:
+        start, end = parsed
+        if start > end or start >= file_size or start < 0:
+            raise HTTPException(
+                status_code=416,
+                detail="Requested range not satisfiable",
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
+        chunk_size = end - start + 1
+
+        def ranged_stream():
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = chunk_size
+                while remaining > 0:
+                    chunk = f.read(min(_STREAM_CHUNK, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        return StreamingResponse(
+            ranged_stream(),
+            status_code=206,
+            media_type=mime,
+            headers={
+                "Content-Disposition": f'inline; filename="{filename}"',
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                **base_headers,
+                "Content-Length": str(chunk_size),
+            },
+        )
+
+    def full_stream():
+        with open(path, "rb") as f:
+            while chunk := f.read(_STREAM_CHUNK):
+                yield chunk
+
+    return StreamingResponse(
+        full_stream(),
+        media_type=mime,
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"',
+            **base_headers,
+        },
+    )
+
 
 @router.get("/files/download")
 async def download_file(
         relative_path: str,
         device_id: str,
+        request: Request,
         authorization: str = Header(None),
         token: str = None,
 ):
@@ -526,25 +626,7 @@ async def download_file(
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
 
-    ext = os.path.splitext(path)[1].lower()
-    mime = _MIME_MAP.get(ext, "application/octet-stream")
-
-    file_size = os.path.getsize(path)
-
-    def stream():
-        with open(path, "rb") as f:
-            while chunk := f.read(1024 * 1024):
-                yield chunk
-
-    filename = os.path.basename(path)
-    return StreamingResponse(
-        stream(),
-        media_type=mime,
-        headers={
-            "Content-Disposition": f'inline; filename="{filename}"',
-            "Content-Length": str(file_size),
-        },
-    )
+    return _file_range_response(path, request)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -740,6 +822,7 @@ async def list_shared_files(
 async def download_shared_file(
         source_id: str,
         relative_path: str,
+        request: Request,
         device_id: str | None = None,
         authorization: str = Header(None),
         token: str = None,
@@ -769,21 +852,4 @@ async def download_shared_file(
     if not os.path.isfile(full_path):
         raise HTTPException(status_code=404, detail="File not found")
 
-    ext = os.path.splitext(full_path)[1].lower()
-    mime = _MIME_MAP.get(ext, "application/octet-stream")
-    file_size = os.path.getsize(full_path)
-
-    def _stream():
-        with open(full_path, "rb") as fh:
-            while chunk := fh.read(1024 * 1024):
-                yield chunk
-
-    filename = os.path.basename(full_path)
-    return StreamingResponse(
-        _stream(),
-        media_type=mime,
-        headers={
-            "Content-Disposition": f'inline; filename="{filename}"',
-            "Content-Length": str(file_size),
-        },
-    )
+    return _file_range_response(full_path, request)
