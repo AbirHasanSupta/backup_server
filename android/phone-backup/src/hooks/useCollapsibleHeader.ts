@@ -15,6 +15,8 @@ import {
 interface CollapsibleHeaderConfig {
   /** Estimated header height used until onLayout measures the real one. */
   headerHeight: number;
+  /** Height of the system status-bar inset that must remain unobstructed. */
+  topInset?: number;
   scrollThreshold?: number;
 }
 
@@ -25,8 +27,10 @@ interface CollapsibleHeaderConfig {
  */
 export function useCollapsibleHeader({
   headerHeight: estimatedHeight,
+  topInset = 0,
   scrollThreshold = 8,
 }: CollapsibleHeaderConfig) {
+  const safeTopInset = Math.max(topInset, 0);
   const heightSV = useSharedValue(Math.max(estimatedHeight, 1));
   const headerTranslateY = useSharedValue(0);
   const lastScrollY = useRef(0);
@@ -90,7 +94,9 @@ export function useCollapsibleHeader({
     const collapsed = headerTranslateY.value < -headerHeight * 0.5;
     return {
       position: 'absolute' as const,
-      top: 0,
+      // These pages run edge-to-edge on Android. Keep the header below the
+      // system status bar while it is visible and while it is animated.
+      top: safeTopInset,
       left: 0,
       right: 0,
       zIndex: 10,
@@ -113,7 +119,7 @@ export function useCollapsibleHeader({
       paddingTop: interpolate(
         headerTranslateY.value,
         [-headerHeight, 0],
-        [0, headerHeight],
+        [safeTopInset, safeTopInset + headerHeight],
         Extrapolation.CLAMP
       ),
     };

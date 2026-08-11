@@ -15,12 +15,11 @@ import {
   PanResponder,
   Animated,
   Easing,
+  Linking,
 } from 'react-native';
 import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
-import { useVideoPlayer, VideoView, type VideoSource } from 'expo-video';
 import { useEvent } from 'expo';
-import { useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -49,6 +48,29 @@ import { sanitizeErrorMessage } from '@/utils/errorUtils';
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
 const getCurrentTimestamp = (): number => Date.now();
+
+type ExpoVideoModule = typeof import('expo-video');
+type VideoSource = import('expo-video').VideoSource;
+type ExpoAudioModule = typeof import('expo-audio');
+
+// This project can be run by an already-installed development client. Such a
+// client may predate expo-video/expo-audio, so importing either module at the
+// top level would crash the complete Restore route before it can render.
+let expoVideoModule: ExpoVideoModule | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- optional native module
+  expoVideoModule = require('expo-video') as ExpoVideoModule;
+} catch {
+  console.warn('[Media] ExpoVideo is unavailable; using the external-player fallback.');
+}
+
+let expoAudioModule: ExpoAudioModule | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports -- optional native module
+  expoAudioModule = require('expo-audio') as ExpoAudioModule;
+} catch {
+  console.warn('[Media] ExpoAudio is unavailable; using the external-player fallback.');
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -816,7 +838,9 @@ const PreviewModal = React.memo(function PreviewModal({
             style={pvStyles.imageFull}
             contentFit="contain"
             cachePolicy="memory-disk"
-            transition={150}
+            // Adjacent images are prefetched. A second fade after the swipe
+            // completes reads as a one-frame blink, so show cached pixels directly.
+            transition={0}
             onLoadStart={() => setImgLoading(true)}
             onLoad={() => setImgLoading(false)}
             onError={() => setImgLoading(false)}
@@ -1031,17 +1055,27 @@ function MetaRow({ label, value, colors, last }: { label: string; value: string;
 }
 
 // ── Video Preview Player ──────────────────────────────────────────────────────
-function VideoPreviewPlayer({
-  previewUri,
-  originalUri,
-  fileSize,
-  isActive = true,
-}: {
+type VideoPreviewPlayerProps = {
   previewUri: string;
   originalUri: string;
   fileSize: number;
   isActive?: boolean;
-}) {
+};
+
+function VideoPreviewPlayer(props: VideoPreviewPlayerProps) {
+  if (!expoVideoModule) {
+    return <ExternalMediaPlayer uri={props.previewUri || props.originalUri} mediaType="video" />;
+  }
+  return <NativeVideoPreviewPlayer {...props} videoModule={expoVideoModule} />;
+}
+
+function NativeVideoPreviewPlayer({
+  previewUri,
+  originalUri,
+  fileSize,
+  isActive = true,
+  videoModule,
+}: VideoPreviewPlayerProps & { videoModule: ExpoVideoModule }) {
   const PREVIEW_TRANSCODE_MIN_BYTES = 40 * 1024 * 1024;
   const shouldUpgrade = previewUri !== originalUri && fileSize >= PREVIEW_TRANSCODE_MIN_BYTES;
   const upgradedRef = useRef(false);
@@ -1054,7 +1088,7 @@ function VideoPreviewPlayer({
     contentType: 'progressive',
   }), [previewUri]);
 
-  const player = useVideoPlayer(source, p => {
+  const player = videoModule.useVideoPlayer(source, p => {
     p.loop = true;
     p.bufferOptions = {
       preferredForwardBufferDuration: 1.5,
@@ -1135,15 +1169,9 @@ function VideoPreviewPlayer({
     };
   }, [shouldUpgrade, status, isActive, originalUri, player]);
 
-  useEffect(() => {
-    return () => {
-      player.pause();
-    };
-  }, [player]);
-
   return (
     <View style={pvStyles.videoContainer}>
-      <VideoView
+      <videoModule.VideoView
         player={player}
         style={pvStyles.videoFull}
         contentFit="contain"
@@ -1161,11 +1189,16 @@ function VideoPreviewPlayer({
 }
 
 function VideoPreviewPreloader({ uri }: { uri: string }) {
+  if (!expoVideoModule || !uri) return null;
+  return <NativeVideoPreviewPreloader uri={uri} videoModule={expoVideoModule} />;
+}
+
+function NativeVideoPreviewPreloader({ uri, videoModule }: { uri: string; videoModule: ExpoVideoModule }) {
   const source = useMemo<VideoSource | null>(() => (
-    uri ? { uri, useCaching: true, contentType: 'progressive' } : null
+    { uri, useCaching: true, contentType: 'progressive' }
   ), [uri]);
 
-  useVideoPlayer(source, player => {
+  videoModule.useVideoPlayer(source, player => {
     player.loop = true;
     player.bufferOptions = {
       preferredForwardBufferDuration: 1.5,
@@ -1177,10 +1210,76 @@ function VideoPreviewPreloader({ uri }: { uri: string }) {
   return null;
 }
 
+function ExternalMediaPlayer({ uri, mediaType }: { uri: string; mediaType: 'video' | 'audio' }) {
+  const [opening, setOpening] = useState(false);
+
+  const openExternalPlayer = useCallback(async () => {
+    if (!uri || opening) return;
+    setOpening(true);
+    try {
+      await Linking.openURL(uri);
+    } catch {
+      Alert.alert(
+        `Unable to open ${mediaType}`,
+        'No installed app could open this media file. Install or update a media player, then try again.',
+      );
+    } finally {
+      setOpening(false);
+    }
+  }, [mediaType, opening, uri]);
+
+  return (
+    <View style={pvStyles.externalMediaPlayer}>
+      <View style={pvStyles.externalMediaIcon}>
+        <AppIcon
+          androidName={mediaType === 'video' ? 'videocam' : 'music_note'}
+          iosName={mediaType === 'video' ? 'video' : 'music.note'}
+          color="#fff"
+          size={46}
+        />
+      </View>
+      <Text style={pvStyles.externalMediaTitle}>Open {mediaType} player</Text>
+      <Text style={pvStyles.externalMediaBody}>
+        Playback will continue in an installed media app.
+      </Text>
+      <TouchableOpacity
+        style={pvStyles.externalMediaButton}
+        onPress={openExternalPlayer}
+        disabled={!uri || opening}
+        activeOpacity={0.8}
+      >
+        {opening ? (
+          <ActivityIndicator size="small" color="#fff" />
+        ) : (
+          <AppIcon androidName="open_in_new" iosName="arrow.up.forward.app" color="#fff" size={18} />
+        )}
+        <Text style={pvStyles.externalMediaButtonText}>{opening ? 'Opening…' : `Open ${mediaType}`}</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 // ── Audio Player ─────────────────────────────────────────────────────────────
 function AudioPlayer({ uri, colors, fileName }: { uri: string; colors: AppColors; fileName: string }) {
-  const player = useAudioPlayer(uri);
-  const status = useAudioPlayerStatus(player);
+  if (!expoAudioModule) {
+    return <ExternalMediaPlayer uri={uri} mediaType="audio" />;
+  }
+  return <NativeAudioPlayer uri={uri} colors={colors} fileName={fileName} audioModule={expoAudioModule} />;
+}
+
+function NativeAudioPlayer({
+  uri,
+  colors,
+  fileName,
+  audioModule,
+}: {
+  uri: string;
+  colors: AppColors;
+  fileName: string;
+  audioModule: ExpoAudioModule;
+}) {
+  const player = audioModule.useAudioPlayer(uri);
+  const status = audioModule.useAudioPlayerStatus(player);
 
   useEffect(() => {
     return () => { player.remove(); };
@@ -1547,7 +1646,7 @@ export default function RestoreScreen() {
   const [previewIndex, setPreviewIndex] = useState<number>(0);
   const [warmPreviewFile, setWarmPreviewFile] = useState<RemoteFile | null>(null);
 
-  const headerHeight = insets.top + Spacing.five + 88;
+  const headerHeight = Spacing.five + 88;
   const {
     onScroll: onListScroll,
     headerAnimatedStyle,
@@ -1556,6 +1655,7 @@ export default function RestoreScreen() {
     expandHeader,
   } = useCollapsibleHeader({
     headerHeight,
+    topInset: insets.top,
   });
 
   useEffect(() => {
@@ -1882,7 +1982,7 @@ export default function RestoreScreen() {
         style={[
           styles.pageHeader,
           {
-            paddingTop: isDownloading ? Spacing.four : insets.top + Spacing.five,
+            paddingTop: isDownloading ? Spacing.four : Spacing.five,
             backgroundColor: colors.bg,
           },
           !isDownloading && headerAnimatedStyle,
@@ -2246,6 +2346,33 @@ const pvStyles = StyleSheet.create({
   videoContainer: { width: SCREEN_W, height: SCREEN_H },
   videoFull: { width: '100%', height: '100%' },
   videoLoadingText: { color: '#fff', fontSize: TextScale.sm, fontWeight: '600' },
+  externalMediaPlayer: {
+    width: SCREEN_W,
+    alignItems: 'center',
+    paddingHorizontal: Spacing.seven,
+    gap: Spacing.three,
+  },
+  externalMediaIcon: {
+    width: 88,
+    height: 88,
+    borderRadius: Radius.xxl,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+  },
+  externalMediaTitle: { color: '#fff', fontSize: TextScale.md, fontWeight: '800' },
+  externalMediaBody: { color: 'rgba(255,255,255,0.7)', fontSize: TextScale.sm, textAlign: 'center' },
+  externalMediaButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    marginTop: Spacing.one,
+    paddingHorizontal: Spacing.five,
+    paddingVertical: Spacing.three,
+    borderRadius: Radius.full,
+    backgroundColor: '#2678E8',
+  },
+  externalMediaButtonText: { color: '#fff', fontSize: TextScale.sm, fontWeight: '800' },
 
   audioPlayer: { alignItems: 'center', padding: Spacing.six, gap: Spacing.four, width: SCREEN_W },
   audioIconWrap: { width: 100, height: 100, borderRadius: 50, alignItems: 'center', justifyContent: 'center' },

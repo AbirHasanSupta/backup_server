@@ -42,6 +42,7 @@ export default function FoldersScreen() {
 
   const { onScroll, headerAnimatedStyle, contentInsetStyle, onHeaderLayout } = useCollapsibleHeader({
     headerHeight: HEADER_HEIGHT,
+    topInset: insets.top,
   });
 
   const checkServer = useCallback(async () => {
@@ -144,7 +145,7 @@ export default function FoldersScreen() {
   );
 
   return (
-    <View style={[styles.screen, { paddingTop: insets.top }]}>
+    <View style={styles.screen}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
       <Animated.View

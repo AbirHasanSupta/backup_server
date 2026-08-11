@@ -126,9 +126,10 @@ export default function HistoryScreen() {
   const [sessions, setSessions] = useState<SyncSession[]>([]);
   const [refreshing, setRefreshing] = useState(false);
 
-  const headerHeight = insets.top + Spacing.five + 88;
+  const headerHeight = Spacing.five + 88;
   const { onScroll, headerAnimatedStyle, contentInsetStyle, onHeaderLayout } = useCollapsibleHeader({
     headerHeight,
+    topInset: insets.top,
   });
 
   const load = useCallback(async () => {
@@ -180,7 +181,7 @@ export default function HistoryScreen() {
 
       <Animated.View
         onLayout={onHeaderLayout}
-        style={[styles.pageHeader, { paddingTop: insets.top + Spacing.five }, headerAnimatedStyle, { backgroundColor: colors.bg }]}
+        style={[styles.pageHeader, { paddingTop: Spacing.five }, headerAnimatedStyle, { backgroundColor: colors.bg }]}
       >
         <View>
           <Text style={styles.pageTitle}>Sync History</Text>

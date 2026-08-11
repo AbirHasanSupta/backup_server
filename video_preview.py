@@ -2,6 +2,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import threading
 
 from config import APP_DATA_DIR
@@ -40,18 +41,37 @@ def _lock_for(key: str) -> threading.Lock:
 
 
 def _ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return _ffmpeg_path() is not None
+
+
+def _ffmpeg_path() -> str | None:
+    """Prefer the ffmpeg binary bundled with the desktop application."""
+    executable = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    if bundle_dir:
+        bundled_path = os.path.join(bundle_dir, executable)
+        if os.path.isfile(bundled_path):
+            return bundled_path
+    return shutil.which("ffmpeg")
 
 
 def _transcode_preview(source_path: str, output_path: str) -> None:
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    temp_path = f"{output_path}.part"
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
+    # ffmpeg infers the muxer from the output suffix. `preview.mp4.part` has
+    # no recognised muxer, so large-video preview generation always fails.
+    temp_path = f"{output_path}.part.mp4"
+    for stale_path in (temp_path, f"{output_path}.part"):
+        if os.path.exists(stale_path):
+            os.remove(stale_path)
+
+    ffmpeg_path = _ffmpeg_path()
+    if not ffmpeg_path:
+        raise FileNotFoundError("ffmpeg executable not found")
 
     cmd = [
-        "ffmpeg",
+        ffmpeg_path,
         "-y",
+        "-nostdin",
         "-hide_banner",
         "-loglevel",
         "error",
@@ -75,7 +95,16 @@ def _transcode_preview(source_path: str, output_path: str) -> None:
         "0",
         temp_path,
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    run_options: dict[str, object] = {
+        "check": True,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.PIPE,
+    }
+    # A windowed desktop build must not flash a console when it launches ffmpeg.
+    if os.name == "nt":
+        run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+    subprocess.run(cmd, **run_options)
     os.replace(temp_path, output_path)
 
 

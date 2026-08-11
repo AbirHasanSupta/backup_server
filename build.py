@@ -132,6 +132,14 @@ def main() -> None:
     for src in add_data_files:
         cmd += ["--add-data", f"{ROOT / src}{sep}."]
 
+    # Large-video previews need ffmpeg. Include it when available so the
+    # distributed desktop app does not rely on a machine-wide PATH entry.
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        cmd += ["--add-binary", f"{ffmpeg_path}{sep}."]
+    else:
+        print("[WARN] ffmpeg was not found; large-video previews will use the original file.")
+
     cmd.append(str(ROOT / "desktop_app.py"))
 
     run(*cmd)
