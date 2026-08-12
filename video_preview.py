@@ -2,7 +2,8 @@
 
 The preview URL is deliberately always playable immediately: a cache miss streams
 the original file with HTTP range support while an optimized MP4 is built in the
-background.  A later open of the same unchanged file uses the cached MP4.
+background only when the source actually needs one.  Already progressive,
+Android-compatible MP4-family files stay on their original path permanently.
 
 This avoids making playback depend on a full FFmpeg job, which can take tens of
 seconds for a large video.  It also makes the aggressive client-side preloads
@@ -60,7 +61,12 @@ PREVIEW_CACHE_DIR = _configured_cache_dir()
 _ensure_cache_dir(PREVIEW_CACHE_DIR)
 _cache_dir_guard = threading.RLock()
 _retired_cache_dirs: set[str] = set()
-_CACHE_OUTPUT_RE = re.compile(r"^[0-9a-f]{64}\.mp4$")
+# The versioned filename lets us identify output created by the current
+# strategy without ever treating an arbitrary MP4 in a user-selected cache
+# directory as ours.  The previous release used a bare SHA-256 filename.
+PREVIEW_CACHE_VERSION = 3
+_CACHE_OUTPUT_RE = re.compile(rf"^v{PREVIEW_CACHE_VERSION}-[0-9a-f]{{64}}\.mp4$")
+_LEGACY_CACHE_OUTPUT_RE = re.compile(r"^[0-9a-f]{64}\.mp4$")
 
 VIDEO_EXTENSIONS = {
     ".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv", ".flv", ".ts", ".mts",
@@ -72,9 +78,9 @@ PREVIEW_TRANSCODE_MIN_BYTES = 40 * 1024 * 1024
 
 # Versioning prevents a cache made by an older encoding strategy from being
 # mistaken for a current one.  Old entries are reclaimed by the LRU pruner.
-PREVIEW_CACHE_VERSION = 2
 DEFAULT_PREVIEW_CACHE_MAX_BYTES = 8 * 1024 * 1024 * 1024
 MAX_PENDING_PREVIEW_JOBS = 24
+ACTIVE_PREVIEW_INTENT_TTL_SECONDS = 8.0
 
 
 @dataclass(frozen=True)
@@ -84,31 +90,104 @@ class _PreviewJob:
     cache_key: str
 
 
+class _ActivePreviewIntentTracker:
+    """Correlate an Android active-video hint with its actual preview request.
+
+    The Android protocol predates this server optimization and sends one warm
+    request containing ``[current, previous, next]``.  The player instances all
+    use the same GET URL, so a GET alone cannot reveal whether it is playing or
+    merely preloading.  The first warm-path is therefore treated as a brief
+    intent token; only its matching GET may generate a server cache.
+    """
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._intents: dict[tuple[str, str], float] = {}
+        self._recent_gets: dict[tuple[str, str], float] = {}
+
+    @staticmethod
+    def _key(scope: str, source_path: str) -> tuple[str, str]:
+        return scope, os.path.abspath(source_path)
+
+    def _prune_locked(self, now: float) -> None:
+        expiry = now - ACTIVE_PREVIEW_INTENT_TTL_SECONDS
+        self._intents = {key: until for key, until in self._intents.items() if until > now}
+        self._recent_gets = {key: seen for key, seen in self._recent_gets.items() if seen > expiry}
+
+    def arm(self, scope: str, source_path: str) -> bool:
+        """Record an active-video intent and return True if its GET came first."""
+        now = time.monotonic()
+        key = self._key(scope, source_path)
+        with self._guard:
+            self._prune_locked(now)
+            if key in self._recent_gets:
+                self._recent_gets.pop(key, None)
+                return True
+            self._intents[key] = now + ACTIVE_PREVIEW_INTENT_TTL_SECONDS
+            return False
+
+    def consume_if_armed(self, scope: str, source_path: str) -> bool:
+        """Return True exactly once for the active item's matching GET."""
+        now = time.monotonic()
+        key = self._key(scope, source_path)
+        with self._guard:
+            self._prune_locked(now)
+            if key in self._intents:
+                self._intents.pop(key, None)
+                return True
+            self._recent_gets[key] = now
+            return False
+
+    def clear(self) -> None:
+        with self._guard:
+            self._intents.clear()
+            self._recent_gets.clear()
+
+
 def is_video_path(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS
 
 
-def _cache_key(source_path: str) -> str:
+def _cache_key_for_version(source_path: str, version: int) -> str:
     stat = os.stat(source_path)
     digest = hashlib.sha256(
-        f"v{PREVIEW_CACHE_VERSION}:{os.path.abspath(source_path)}:{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8"),
+        f"v{version}:{os.path.abspath(source_path)}:{stat.st_mtime_ns}:{stat.st_size}".encode("utf-8"),
     ).hexdigest()
     return digest
 
 
+def _cache_key(source_path: str) -> str:
+    return _cache_key_for_version(source_path, PREVIEW_CACHE_VERSION)
+
+
 def _cache_path_for(source_path: str) -> tuple[str, str]:
     key = _cache_key(source_path)
-    return key, os.path.join(PREVIEW_CACHE_DIR, f"{key}.mp4")
+    return key, os.path.join(PREVIEW_CACHE_DIR, f"v{PREVIEW_CACHE_VERSION}-{key}.mp4")
+
+
+def _legacy_cache_paths_for(source_path: str) -> tuple[str, ...]:
+    """Locate only the cache-file names created by the immediately prior release."""
+    return (
+        os.path.join(PREVIEW_CACHE_DIR, f"{_cache_key_for_version(source_path, 2)}.mp4"),
+    )
 
 
 def _is_complete_cache_file(name: str) -> bool:
     return bool(_CACHE_OUTPUT_RE.fullmatch(name))
 
 
+def _is_legacy_cache_file(name: str) -> bool:
+    return bool(_LEGACY_CACHE_OUTPUT_RE.fullmatch(name))
+
+
 def _is_preview_artifact(name: str) -> bool:
     # Completed cache entries have a deterministic SHA-256 name.  The staging
     # files are created only by this module and include ".part" in the name.
-    return _is_complete_cache_file(name) or (name.endswith(".mp4") and ".part" in name)
+    return (
+        _is_complete_cache_file(name)
+        or _is_legacy_cache_file(name)
+        or (name.endswith(".mp4") and ".part" in name)
+    )
 
 
 def _safe_remove(path: str) -> None:
@@ -120,6 +199,35 @@ def _safe_remove(path: str) -> None:
         # A live FFmpeg process can hold a temporary file open on Windows.  The
         # worker will remove its output once it notices a clear-cache request.
         pass
+
+
+def _remove_legacy_cache_artifacts(directory: str) -> tuple[int, int]:
+    """Discard cache files from the pre-v3 strategy, never user media files."""
+    removed_files = removed_bytes = 0
+    try:
+        entries = tuple(os.scandir(directory))
+    except OSError:
+        return removed_files, removed_bytes
+    for entry in entries:
+        if not entry.is_file() or not _is_legacy_cache_file(entry.name):
+            continue
+        try:
+            size = entry.stat().st_size
+            os.remove(entry.path)
+            removed_files += 1
+            removed_bytes += size
+        except OSError:
+            pass
+    return removed_files, removed_bytes
+
+
+def _discard_cache_for_direct_source(source_path: str) -> None:
+    """Remove redundant cache copies once a source is verified direct-safe."""
+    key, cache_path = _cache_path_for(source_path)
+    _preview_scheduler.cancel(key)
+    _safe_remove(cache_path)
+    for legacy_path in _legacy_cache_paths_for(source_path):
+        _safe_remove(legacy_path)
 
 
 def _try_remove_empty_cache_dir(directory: str) -> bool:
@@ -167,6 +275,10 @@ def relocate_video_preview_cache(new_directory: str) -> dict[str, int | bool | s
 
     target_dir = _normalize_cache_dir(new_directory)
     _ensure_cache_dir(target_dir)
+    # v2 entries can be full-size fast-start rewrites.  They are intentionally
+    # not migrated into the new strategy, which prevents old duplicates from
+    # following a user to a newly selected cache folder.
+    _remove_legacy_cache_artifacts(target_dir)
     with _cache_dir_guard:
         old_dir = PREVIEW_CACHE_DIR
         if os.path.normcase(old_dir) == os.path.normcase(target_dir):
@@ -273,6 +385,7 @@ def _ffprobe_path() -> str | None:
 
 
 def _is_preview_candidate(source_path: str) -> bool:
+    """Cheap admission test that never puts codec probing on the HTTP path."""
     return (
         is_video_path(source_path)
         and os.path.isfile(source_path)
@@ -281,9 +394,14 @@ def _is_preview_candidate(source_path: str) -> bool:
     )
 
 
+_ffmpeg_process_guard = threading.Lock()
+_active_ffmpeg_process: subprocess.Popen | None = None
+
+
 def _run_ffmpeg(command: list[str]) -> None:
+    """Run the one cache FFmpeg job while allowing deterministic shutdown."""
+    global _active_ffmpeg_process
     run_options: dict[str, object] = {
-        "check": True,
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.PIPE,
@@ -291,21 +409,50 @@ def _run_ffmpeg(command: list[str]) -> None:
     # A windowed desktop build must not flash a console when it launches FFmpeg.
     if os.name == "nt":
         run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
-    subprocess.run(command, **run_options)
+    process = subprocess.Popen(command, **run_options)
+    with _ffmpeg_process_guard:
+        _active_ffmpeg_process = process
+    try:
+        _, stderr = process.communicate()
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command, stderr=stderr)
+    finally:
+        with _ffmpeg_process_guard:
+            if _active_ffmpeg_process is process:
+                _active_ffmpeg_process = None
 
 
-def _can_faststart_remux(source_path: str) -> bool:
-    """Return True only for codec combinations broadly playable by Android.
-
-    Rewriting an H.264/AAC MP4 with ``+faststart`` is a fast, lossless operation
-    that moves its index to the front.  Other codec combinations retain the
-    compatibility-focused H.264/AAC encode path below.
-    """
-    if os.path.splitext(source_path)[1].lower() not in {".mp4", ".mov", ".m4v", ".3gp"}:
+def _terminate_active_ffmpeg() -> bool:
+    """Stop the cache-only FFmpeg child so shutdown leaves no locked artifact."""
+    with _ffmpeg_process_guard:
+        process = _active_ffmpeg_process
+    if not process or process.poll() is not None:
         return False
+    try:
+        process.terminate()
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
+    except OSError:
+        return False
+    return True
+
+
+_MP4_LIKE_EXTENSIONS = {".mp4", ".mov", ".m4v", ".3gp"}
+_MAX_MP4_TOP_LEVEL_ATOMS = 256
+
+
+def _probe_streams(source_path: str) -> list[dict[str, object]] | None:
+    """Read just enough stream metadata to decide whether Android can play it.
+
+    The result intentionally remains conservative.  A false negative merely
+    builds a compact fallback preview; a false positive could leave the client
+    with a video it cannot decode.
+    """
     ffprobe_path = _ffprobe_path()
     if not ffprobe_path:
-        return False
+        return None
     try:
         run_options: dict[str, object] = {
             "check": True,
@@ -319,18 +466,95 @@ def _can_faststart_remux(source_path: str) -> bool:
             run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
         result = subprocess.run(
             [
-                ffprobe_path, "-v", "error", "-show_entries", "stream=codec_type,codec_name",
-                "-of", "json", source_path,
+                ffprobe_path,
+                "-v", "error",
+                "-show_entries", "stream=codec_type,codec_name,pix_fmt,width,height",
+                "-of", "json",
+                source_path,
             ],
             **run_options,
         )
         streams = json.loads(result.stdout).get("streams", [])
+        return streams if isinstance(streams, list) else None
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return False
+        return None
 
-    video_codecs = [s.get("codec_name") for s in streams if s.get("codec_type") == "video"]
-    audio_codecs = [s.get("codec_name") for s in streams if s.get("codec_type") == "audio"]
-    return video_codecs == ["h264"] and all(codec in {"aac", "mp3"} for codec in audio_codecs)
+
+def _has_front_loaded_mp4_index(source_path: str) -> bool:
+    """Determine whether an ISO-BMFF file has its playback index before media.
+
+    This parses only top-level atom headers via seeks—never reads the video
+    payload.  A ``moov`` atom before the first ``mdat`` makes regular MP4/MOV
+    files progressive/fast-start and safe to stream from their original path.
+    """
+    try:
+        file_size = os.path.getsize(source_path)
+        offset = 0
+        with open(source_path, "rb") as source:
+            for _ in range(_MAX_MP4_TOP_LEVEL_ATOMS):
+                if offset + 8 > file_size:
+                    return False
+                source.seek(offset)
+                header = source.read(16)
+                if len(header) < 8:
+                    return False
+                atom_size = int.from_bytes(header[:4], "big")
+                atom_type = header[4:8]
+                header_size = 8
+                if atom_size == 1:
+                    if len(header) < 16:
+                        return False
+                    atom_size = int.from_bytes(header[8:16], "big")
+                    header_size = 16
+                elif atom_size == 0:
+                    # This atom extends to EOF.  There cannot be an index
+                    # after it, and an index within an mdat is not usable.
+                    return atom_type == b"moov"
+
+                if atom_size < header_size or offset + atom_size > file_size:
+                    return False
+                if atom_type == b"moov":
+                    return True
+                if atom_type == b"mdat":
+                    return False
+                offset += atom_size
+    except OSError:
+        return False
+    return False
+
+
+def _is_android_direct_compatible(source_path: str) -> bool:
+    """Return True for a conservative, directly playable MP4-family source."""
+    if os.path.splitext(source_path)[1].lower() not in _MP4_LIKE_EXTENSIONS:
+        return False
+    streams = _probe_streams(source_path)
+    if not streams:
+        return False
+    video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
+    audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    if len(video_streams) != 1:
+        return False
+    video = video_streams[0]
+    # yuv420p H.264 plus AAC/MP3 are the broad Android baseline.  The same
+    # codec test is used for a lossless remux when the index is at the end.
+    if video.get("codec_name") != "h264" or video.get("pix_fmt") not in {"yuv420p", "yuvj420p"}:
+        return False
+    return all(stream.get("codec_name") in {"aac", "mp3"} for stream in audio_streams)
+
+
+def _is_direct_streamable(source_path: str) -> bool:
+    """True when the original needs neither transcoding nor a fast-start copy."""
+    return _is_android_direct_compatible(source_path) and _has_front_loaded_mp4_index(source_path)
+
+
+def _can_faststart_remux(source_path: str) -> bool:
+    """Return True only for codec combinations broadly playable by Android.
+
+    Rewriting an H.264/AAC MP4 with ``+faststart`` is a fast, lossless operation
+    that moves its index to the front.  Other codec combinations retain the
+    compatibility-focused H.264/AAC encode path below.
+    """
+    return _is_android_direct_compatible(source_path) and not _has_front_loaded_mp4_index(source_path)
 
 
 def _faststart_remux(source_path: str, output_path: str) -> None:
@@ -383,7 +607,7 @@ def _transcode_preview(source_path: str, output_path: str) -> None:
 
 
 def _build_preview(source_path: str, output_path: str) -> None:
-    """Prefer a lossless fast-start rewrite, then fall back to a compatible encode."""
+    """Make the only cache cases: index relocation or compatible transcode."""
     if _can_faststart_remux(source_path):
         try:
             _faststart_remux(source_path, output_path)
@@ -504,6 +728,30 @@ class _PreviewScheduler:
                 self._discard_keys.add(self._running_job.cache_key)
             return removed
 
+    def cancel(self, cache_key: str) -> int:
+        """Cancel a queued job, or discard an active job's eventual output."""
+        with self._condition:
+            removed = 0
+            retained_priority: deque[_PreviewJob] = deque()
+            for job in self._priority_jobs:
+                if job.cache_key == cache_key:
+                    removed += 1
+                else:
+                    retained_priority.append(job)
+            retained_warm: deque[_PreviewJob] = deque()
+            for job in self._warm_jobs:
+                if job.cache_key == cache_key:
+                    removed += 1
+                else:
+                    retained_warm.append(job)
+            self._priority_jobs = retained_priority
+            self._warm_jobs = retained_warm
+            if self._running_job and self._running_job.cache_key == cache_key:
+                self._discard_keys.add(cache_key)
+            else:
+                self._known_keys.discard(cache_key)
+            return removed
+
     def _take_next_job(self) -> _PreviewJob:
         with self._condition:
             while not self._priority_jobs and not self._warm_jobs:
@@ -530,6 +778,13 @@ class _PreviewScheduler:
                 if _cache_key(job.source_path) != job.cache_key:
                     self.submit(job.source_path, priority=True)
                     continue
+                if _is_direct_streamable(job.source_path):
+                    # Its original MP4 is already compatible and has its index
+                    # up front, so any generated copy would only duplicate
+                    # bytes.  This probe runs exclusively on the background
+                    # worker, never before the HTTP preview response.
+                    _discard_cache_for_direct_source(job.source_path)
+                    continue
                 if not _ready_cache_path(job.source_path):
                     _build_preview(job.source_path, job.cache_path)
                     _touch_cache_file(job.cache_path)
@@ -547,6 +802,15 @@ class _PreviewScheduler:
 
 
 _preview_scheduler = _PreviewScheduler()
+_active_preview_intents = _ActivePreviewIntentTracker()
+
+# v2 used unversioned names and could contain full-size lossless remuxes.  They
+# cannot be selected by v3 and would be dead disk usage, so reclaim them once
+# when this module starts.  The strict filename match preserves any unrelated
+# user media in a folder they selected as the cache location.
+_legacy_files, _legacy_bytes = _remove_legacy_cache_artifacts(PREVIEW_CACHE_DIR)
+if _legacy_files:
+    add_log(f"Removed {_legacy_files} obsolete video preview cache file(s) ({_legacy_bytes} bytes)")
 
 
 def schedule_video_preview(source_path: str, *, priority: bool = False) -> str:
@@ -554,12 +818,29 @@ def schedule_video_preview(source_path: str, *, priority: bool = False) -> str:
     return _preview_scheduler.submit(source_path, priority=priority)
 
 
-def get_video_preview_path(source_path: str) -> str:
-    """Return a playable file now and optimize a large-video cache asynchronously.
+def arm_active_video_preview(scope: str, source_path: str) -> bool:
+    """Arm exactly one current-video preview from a warm request.
 
-    The cache is used immediately if available.  On a miss, returning the source
-    lets the existing range-streaming endpoint start playback in milliseconds;
-    FFmpeg never sits on the request critical path.
+    If its GET already arrived, queue the cache immediately.  Otherwise the
+    next matching GET consumes this one-shot intent and queues it.
+    """
+    if _active_preview_intents.arm(scope, source_path):
+        return schedule_video_preview(source_path, priority=True) == "queued"
+    return False
+
+
+def preview_request_is_active(scope: str, source_path: str) -> bool:
+    """Consume a matching current-video intent for a preview GET request."""
+    return _active_preview_intents.consume_if_armed(scope, source_path)
+
+
+def get_video_preview_path(source_path: str, *, schedule_missing: bool = True) -> str:
+    """Return a playable file now and optimize only when it is actually needed.
+
+    The cache is used immediately for source formats that need a fast-start
+    remux or a compatibility transcode.  On a miss, returning the source lets
+    the existing range-streaming endpoint start playback in milliseconds;
+    FFmpeg/FFprobe never sits on the request critical path.
     """
     if not os.path.isfile(source_path):
         raise FileNotFoundError(source_path)
@@ -568,7 +849,8 @@ def get_video_preview_path(source_path: str) -> str:
     ready = _ready_cache_path(source_path)
     if ready:
         return ready[1]
-    schedule_video_preview(source_path, priority=True)
+    if schedule_missing:
+        schedule_video_preview(source_path, priority=True)
     return source_path
 
 
@@ -596,13 +878,22 @@ def get_video_preview_cache_stats() -> dict[str, int | str | None]:
 def clear_video_preview_cache() -> dict[str, int | bool]:
     """Clear cached previews and cancel queued work safely.
 
-    A conversion already running is allowed to finish rather than killing a
-    process mid-write; its output is discarded by the worker as soon as it ends.
+    The only process interrupted is the server's private FFmpeg cache worker;
+    video playback itself streams directly and is unaffected.  Stopping the
+    worker lets this function remove every generated cache artifact now.
     """
+    _active_preview_intents.clear()
     cancelled_jobs = _preview_scheduler.clear_pending()
+    terminated_process = _terminate_active_ffmpeg()
     removed_files = removed_bytes = 0
-    try:
-        for entry in os.scandir(PREVIEW_CACHE_DIR):
+    with _cache_dir_guard:
+        cache_dirs = (PREVIEW_CACHE_DIR, *_retired_cache_dirs)
+    for cache_dir in cache_dirs:
+        try:
+            entries = tuple(os.scandir(cache_dir))
+        except OSError:
+            continue
+        for entry in entries:
             if not entry.is_file():
                 continue
             # Cache outputs and interrupted FFmpeg staging files are the full
@@ -617,11 +908,10 @@ def clear_video_preview_cache() -> dict[str, int | bool]:
                 removed_bytes += size
             except OSError:
                 pass
-    except OSError:
-        pass
+    _cleanup_retired_cache_dirs()
     return {
         "files": removed_files,
         "bytes": removed_bytes,
         "cancelled_jobs": cancelled_jobs,
-        "running_job_will_be_discarded": _preview_scheduler.snapshot()["running"] is not None,
+        "terminated_active_conversion": terminated_process,
     }

@@ -132,8 +132,9 @@ def main() -> None:
     for src in add_data_files:
         cmd += ["--add-data", f"{ROOT / src}{sep}."]
 
-    # Large-video previews need ffmpeg; ffprobe lets compatible H.264/AAC files
-    # use a much faster lossless fast-start rewrite instead of re-encoding.
+    # Large-video previews need ffmpeg.  ffprobe lets the server detect already
+    # progressive H.264/AAC sources and skip cache creation altogether; only
+    # videos that need it use a fast-start rewrite or compatibility transcode.
     # Include both when available so the desktop app does not rely on PATH.
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path:

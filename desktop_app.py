@@ -1353,8 +1353,8 @@ class BackupServerApp(ctk.CTk):
             self,
             "Clean Video Preview Cache",
             "Remove all server-generated video previews?\n\n"
-            "Your original backups are not affected. A preview currently being created "
-            "will be discarded when it finishes.",
+            "Your original backups are not affected. An active cache conversion "
+            "will be stopped so every generated preview is removed now.",
         ):
             return
 
@@ -1370,8 +1370,8 @@ class BackupServerApp(ctk.CTk):
                 message = f"Removed {result['files']} cached preview file(s) ({removed})."
                 if result.get("cancelled_jobs"):
                     message += f" Cancelled {result['cancelled_jobs']} queued conversion(s)."
-                if result.get("running_job_will_be_discarded"):
-                    message += " The active conversion will be discarded when it completes."
+                if result.get("terminated_active_conversion"):
+                    message += " Stopped the active cache conversion."
             except Exception as exc:
                 message = f"Could not clean the video preview cache: {exc}"
 
@@ -2313,6 +2313,21 @@ class BackupServerApp(ctk.CTk):
     def _on_close(self):
         if messagebox.askyesno("Quit", "Stop the backup server and quit?"):
             self._stop_server()
+            # Preview files are session-only.  Clear them before the Tk process
+            # exits so a private FFmpeg cache job cannot leave a completed or
+            # partial artifact behind on the next launch.
+            try:
+                from video_preview import clear_video_preview_cache
+                result = clear_video_preview_cache()
+                if result["files"] or result["cancelled_jobs"] or result["terminated_active_conversion"]:
+                    add_log(
+                        "Cleared video preview cache on exit: "
+                        f"{result['files']} file(s), {result['bytes']} bytes."
+                    )
+            except Exception as exc:
+                # Closing the desktop app must never be blocked by a cache
+                # directory that has become unavailable or externally locked.
+                add_log(f"Could not clear video preview cache on exit: {exc}")
             self._dot.stop()
             self.after(600, self.destroy)
 
