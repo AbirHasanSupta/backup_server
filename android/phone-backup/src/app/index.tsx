@@ -367,6 +367,13 @@ export default function HomeScreen() {
         setForceStopPressedAt(null);
         setPhase('stopping');
         setStatusMessage('Finishing current file, then stopping…');
+      } else {
+        const latest = await getCurrentSyncState().catch(() => null);
+        if (latest?.stopping || latest?.stopRequested) {
+          setStopRequested(true);
+          setPhase('stopping');
+          setStatusMessage('Finishing current file, then stopping…');
+        }
       }
       return;
     }

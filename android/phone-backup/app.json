@@ -3,7 +3,7 @@
     "name": "Phone Backup",
     "slug": "phone-backup",
     "scheme": "phonebackup",
-    "version": "3.0.0",
+    "version": "3.0.1",
     "plugins": [
       "expo-media-library",
       "expo-task-manager",
@@ -50,12 +50,15 @@
         "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
       ],
       "package": "com.abirsupta.phonebackup",
-      "versionCode": 8
+      "versionCode": 9
     },
     "extra": {
       "eas": {
         "projectId": "34a3ecdc-92d8-4a6c-a350-87e39a6a636e"
       }
+    },
+    "ios": {
+      "bundleIdentifier": "com.abirsupta.phonebackup"
     }
   }
 }

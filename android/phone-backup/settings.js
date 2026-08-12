@@ -20,6 +20,7 @@ const KEYS = {
   SCAN_SNAPSHOT:  'scan_snapshot_v1',
   DEVICE_TOKEN:   'device_token',
   CERT_FINGERPRINT: 'server_cert_fp',
+  AUTO_SYNC_SUPPRESSED_UNTIL: 'auto_sync_suppressed_until',
 };
 
 function safeJsonParse(raw, fallback) {
@@ -223,6 +224,9 @@ export async function setSyncInterval(minutes) {
 export async function getSyncPaused()     { return (await AsyncStorage.getItem(KEYS.SYNC_PAUSED)) === 'true'; }
 export async function setSyncPaused(val)  {
   await AsyncStorage.setItem(KEYS.SYNC_PAUSED, val ? 'true' : 'false');
+  if (val) {
+    await AsyncStorage.setItem(KEYS.LAST_SYNC_TIME, String(Date.now()));
+  }
   DeviceEventEmitter.emit('settings-updated');
 }
 
@@ -238,6 +242,24 @@ export async function setSyncRuntimeState(state) {
 }
 export async function clearSyncRuntimeState() {
   await AsyncStorage.multiRemove([KEYS.SYNC_RUNTIME_STATE]);
+}
+
+// Used to prevent the next *automatic* sync run from immediately restarting right
+// after the user requests a stop (especially across app relaunch / force-stop).
+export async function getAutoSyncSuppressedUntil() {
+  const raw = await AsyncStorage.getItem(KEYS.AUTO_SYNC_SUPPRESSED_UNTIL);
+  const ts = parseStoredInteger(raw, 0);
+  return ts > Date.now() ? ts : null;
+}
+
+export async function setAutoSyncSuppressedUntil(ts) {
+  await AsyncStorage.setItem(KEYS.AUTO_SYNC_SUPPRESSED_UNTIL, String(Math.max(0, ts || 0)));
+  DeviceEventEmitter.emit('settings-updated');
+}
+
+export async function clearAutoSyncSuppressedUntil() {
+  await AsyncStorage.multiRemove([KEYS.AUTO_SYNC_SUPPRESSED_UNTIL]).catch(() => {});
+  DeviceEventEmitter.emit('settings-updated');
 }
 
 export async function getThemeMode() {

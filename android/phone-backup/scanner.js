@@ -172,6 +172,11 @@ function addFile(uri, relativePath, name, result, shouldInclude, reportActivity,
 }
 
 async function walk(uri, base, result, shouldInclude, reportActivity, counters, metadataScheduler, knownItems = null, snapshotCache = null, options = {}) {
+  if (options.shouldStop?.()) {
+    options.stopped = true;
+    return;
+  }
+
   let items = knownItems;
   try {
     if (!items) {
@@ -184,6 +189,11 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
   }
 
   async function processItem(itemUri) {
+    if (options.shouldStop?.()) {
+      options.stopped = true;
+      return;
+    }
+
     const name = getSafName(itemUri);
     const newBase = `${base}/${name}`;
 
@@ -213,6 +223,10 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
   }
 
   for (let i = 0; i < items.length; i += SCAN_BATCH_SIZE) {
+    if (options.shouldStop?.()) {
+      options.stopped = true;
+      return;
+    }
     await Promise.all(items.slice(i, i + SCAN_BATCH_SIZE).map(processItem));
   }
 }
@@ -224,6 +238,7 @@ export async function scan(onActivity, targetFolderUri, snapshotCache = null, op
   ]);
   const shouldInclude = createFileMatcher(selectedTypes);
   const reportActivity = createScanReporter(onActivity);
+  const scanOptions = { ...options, stopped: false };
 
   const foldersToScan = targetFolderUri
     ? folders.filter((f) => f.uri === targetFolderUri)
@@ -233,10 +248,17 @@ export async function scan(onActivity, targetFolderUri, snapshotCache = null, op
   const counters = { files: 0, snapshotHits: 0, skippedFromSnapshot: 0 };
   const metadataScheduler = createMetadataScheduler(reportActivity);
   for (const folder of foldersToScan) {
+    if (scanOptions.shouldStop?.()) {
+      scanOptions.stopped = true;
+      break;
+    }
     reportActivity({ phase: 'scanning', currentFile: folder.name, files: counters.files }, true);
-    await walk(folder.uri, folder.name, result, shouldInclude, reportActivity, counters, metadataScheduler, null, snapshotCache, options);
+    await walk(folder.uri, folder.name, result, shouldInclude, reportActivity, counters, metadataScheduler, null, snapshotCache, scanOptions);
+    if (scanOptions.stopped) break;
   }
-  await metadataScheduler.drain();
+  if (!scanOptions.stopped) {
+    await metadataScheduler.drain();
+  }
   reportActivity({
     phase: 'scanning',
     currentFile: '',
@@ -245,5 +267,6 @@ export async function scan(onActivity, targetFolderUri, snapshotCache = null, op
   }, true);
   result.snapshotHits = counters.snapshotHits;
   result.skippedFromSnapshot = counters.skippedFromSnapshot;
+  result.stopped = !!scanOptions.stopped;
   return result;
 }
