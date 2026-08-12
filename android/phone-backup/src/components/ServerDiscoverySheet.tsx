@@ -156,106 +156,108 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
       <Animated.View style={[styles.backdrop, backdropAnimStyle]}>
         <AnimatedPressable style={{ flex: 1 }} onPress={onClose} />
       </Animated.View>
-      <GestureDetector gesture={panGesture}>
-        <Animated.View style={[styles.sheet, sheetAnimStyle]}>
-          <View style={styles.handle} />
+      <Animated.View style={[styles.sheet, sheetAnimStyle]}>
+        <GestureDetector gesture={panGesture}>
+          <View style={styles.dragArea}>
+            <View style={styles.handle} />
+          </View>
+        </GestureDetector>
 
-          <View style={styles.header}>
-            <View>
-              <Text style={styles.title}>Find your server</Text>
-              <Text style={styles.subtitle}>Scan your local network for Phone Backup Server.</Text>
-            </View>
-            <AnimatedPressable onPress={onClose} style={styles.closeBtn} scaleDown={0.85} accessibilityLabel="Close discovery">
-              <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={18} fallback="X" />
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.title}>Find your server</Text>
+            <Text style={styles.subtitle}>Scan your local network for Phone Backup Server.</Text>
+          </View>
+          <AnimatedPressable onPress={onClose} style={styles.closeBtn} scaleDown={0.85} accessibilityLabel="Close discovery">
+            <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={18} fallback="X" />
+          </AnimatedPressable>
+        </View>
+
+        {scanning && (
+          <View style={styles.progressTrack}>
+            <Animated.View style={[styles.progressFill, { width: `${progress}%` }]} />
+          </View>
+        )}
+
+        <AnimatedPressable
+          style={[styles.scanBtn, scanning && styles.scanBtnDisabled]}
+          onPress={startScan}
+          disabled={scanning}
+          scaleDown={0.96}
+          accessibilityLabel="Scan for servers"
+        >
+          {scanning ? (
+            <ActivityIndicator color={colors.white} size="small" />
+          ) : (
+            <>
+              <AppIcon androidName="search" iosName="magnifyingglass" color={colors.white} size={18} fallback="S" />
+              <Text style={styles.scanBtnText}>{servers.length > 0 ? 'Scan again' : 'Start scan'}</Text>
+            </>
+          )}
+        </AnimatedPressable>
+
+        {error && !scanning && (
+          <View style={styles.errorBox}>
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        )}
+
+        {servers.length > 0 && (
+          <FlatList
+            data={servers}
+            keyExtractor={(item) => item.ip}
+            style={styles.list}
+            renderItem={({ item }) => (
+              <AnimatedPressable
+                style={styles.serverItem}
+                onPress={() => handleSelect(item)}
+                scaleDown={0.97}
+                accessibilityLabel={`Connect to ${item.name} at ${item.ip}`}
+              >
+                <View style={styles.serverIcon}>
+                  <AppIcon androidName="desktop_windows" iosName="desktopcomputer" color={colors.primary} size={24} fallback="PC" />
+                </View>
+                <View style={styles.serverInfo}>
+                  <Text style={styles.serverName}>{item.name}</Text>
+                  <Text style={styles.serverMeta}>
+                    {item.ip}:{item.port} - v{item.version}
+                  </Text>
+                </View>
+                <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.primary} size={20} fallback=">" />
+              </AnimatedPressable>
+            )}
+          />
+        )}
+
+        <View style={styles.manualSection}>
+          <Text style={styles.manualLabel}>Or enter address manually</Text>
+          <View style={styles.manualRow}>
+            <TextInput
+              style={styles.manualInput}
+              value={manualUrl}
+              onChangeText={setManualUrl}
+              placeholder="http://192.168.1.100:8000"
+              placeholderTextColor={colors.textMuted}
+              keyboardType="url"
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="go"
+              onSubmitEditing={handleManualConnect}
+            />
+            <AnimatedPressable
+              style={[styles.manualConnectBtn, !manualUrl.trim() && { opacity: 0.5 }]}
+              onPress={handleManualConnect}
+              disabled={!manualUrl.trim()}
+              scaleDown={0.9}
+              accessibilityLabel="Connect to manually entered server"
+            >
+              <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.white} size={18} fallback=">" />
             </AnimatedPressable>
           </View>
+        </View>
 
-          {scanning && (
-            <View style={styles.progressTrack}>
-              <Animated.View style={[styles.progressFill, { width: `${progress}%` }]} />
-            </View>
-          )}
-
-          <AnimatedPressable
-            style={[styles.scanBtn, scanning && styles.scanBtnDisabled]}
-            onPress={startScan}
-            disabled={scanning}
-            scaleDown={0.96}
-            accessibilityLabel="Scan for servers"
-          >
-            {scanning ? (
-              <ActivityIndicator color={colors.white} size="small" />
-            ) : (
-              <>
-                <AppIcon androidName="search" iosName="magnifyingglass" color={colors.white} size={18} fallback="S" />
-                <Text style={styles.scanBtnText}>{servers.length > 0 ? 'Scan again' : 'Start scan'}</Text>
-              </>
-            )}
-          </AnimatedPressable>
-
-          {error && !scanning && (
-            <View style={styles.errorBox}>
-              <Text style={styles.errorText}>{error}</Text>
-            </View>
-          )}
-
-          {servers.length > 0 && (
-            <FlatList
-              data={servers}
-              keyExtractor={(item) => item.ip}
-              style={styles.list}
-              renderItem={({ item }) => (
-                <AnimatedPressable
-                  style={styles.serverItem}
-                  onPress={() => handleSelect(item)}
-                  scaleDown={0.97}
-                  accessibilityLabel={`Connect to ${item.name} at ${item.ip}`}
-                >
-                  <View style={styles.serverIcon}>
-                    <AppIcon androidName="desktop_windows" iosName="desktopcomputer" color={colors.primary} size={24} fallback="PC" />
-                  </View>
-                  <View style={styles.serverInfo}>
-                    <Text style={styles.serverName}>{item.name}</Text>
-                    <Text style={styles.serverMeta}>
-                      {item.ip}:{item.port} - v{item.version}
-                    </Text>
-                  </View>
-                  <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.primary} size={20} fallback=">" />
-                </AnimatedPressable>
-              )}
-            />
-          )}
-
-          <View style={styles.manualSection}>
-            <Text style={styles.manualLabel}>Or enter address manually</Text>
-            <View style={styles.manualRow}>
-              <TextInput
-                style={styles.manualInput}
-                value={manualUrl}
-                onChangeText={setManualUrl}
-                placeholder="http://192.168.1.100:8000"
-                placeholderTextColor={colors.textMuted}
-                keyboardType="url"
-                autoCapitalize="none"
-                autoCorrect={false}
-                returnKeyType="go"
-                onSubmitEditing={handleManualConnect}
-              />
-              <AnimatedPressable
-                style={[styles.manualConnectBtn, !manualUrl.trim() && { opacity: 0.5 }]}
-                onPress={handleManualConnect}
-                disabled={!manualUrl.trim()}
-                scaleDown={0.9}
-                accessibilityLabel="Connect to manually entered server"
-              >
-                <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.white} size={18} fallback=">" />
-              </AnimatedPressable>
-            </View>
-          </View>
-
-          <Text style={styles.hint}>Swipe down to dismiss. Enter IP, hostname, or full URL with port.</Text>
-        </Animated.View>
-      </GestureDetector>
+        <Text style={styles.hint}>Drag the handle down to dismiss. Enter IP, hostname, or full URL with port.</Text>
+      </Animated.View>
     </Modal>
   );
 }
@@ -276,13 +278,18 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     borderTopWidth: 1,
     borderColor: colors.surfaceBorder,
   },
+  dragArea: {
+    height: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Spacing.five,
+  },
   handle: {
     width: 42,
     height: 5,
     borderRadius: Radius.full,
     backgroundColor: colors.surfaceBorder,
     alignSelf: 'center',
-    marginBottom: Spacing.five,
   },
   header: {
     flexDirection: 'row',
