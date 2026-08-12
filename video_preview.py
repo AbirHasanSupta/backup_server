@@ -63,10 +63,11 @@ _cache_dir_guard = threading.RLock()
 _retired_cache_dirs: set[str] = set()
 # The versioned filename lets us identify output created by the current
 # strategy without ever treating an arbitrary MP4 in a user-selected cache
-# directory as ours.  The previous release used a bare SHA-256 filename.
-PREVIEW_CACHE_VERSION = 3
+# directory as ours.  v3 could contain full-size fast-start rewrites, so the
+# direct-streaming policy uses a new generation and removes those old entries.
+PREVIEW_CACHE_VERSION = 4
 _CACHE_OUTPUT_RE = re.compile(rf"^v{PREVIEW_CACHE_VERSION}-[0-9a-f]{{64}}\.mp4$")
-_LEGACY_CACHE_OUTPUT_RE = re.compile(r"^[0-9a-f]{64}\.mp4$")
+_LEGACY_CACHE_OUTPUT_RE = re.compile(r"^(?:[0-9a-f]{64}|v3-[0-9a-f]{64})\.mp4$")
 
 VIDEO_EXTENSIONS = {
     ".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv", ".flv", ".ts", ".mts",
@@ -166,9 +167,10 @@ def _cache_path_for(source_path: str) -> tuple[str, str]:
 
 
 def _legacy_cache_paths_for(source_path: str) -> tuple[str, ...]:
-    """Locate only the cache-file names created by the immediately prior release."""
+    """Locate cache-file names from strategies superseded by direct streaming."""
     return (
         os.path.join(PREVIEW_CACHE_DIR, f"{_cache_key_for_version(source_path, 2)}.mp4"),
+        os.path.join(PREVIEW_CACHE_DIR, f"v3-{_cache_key_for_version(source_path, 3)}.mp4"),
     )
 
 
@@ -440,7 +442,6 @@ def _terminate_active_ffmpeg() -> bool:
 
 
 _MP4_LIKE_EXTENSIONS = {".mp4", ".mov", ".m4v", ".3gp"}
-_MAX_MP4_TOP_LEVEL_ATOMS = 256
 
 
 def _probe_streams(source_path: str) -> list[dict[str, object]] | None:
@@ -480,49 +481,6 @@ def _probe_streams(source_path: str) -> list[dict[str, object]] | None:
         return None
 
 
-def _has_front_loaded_mp4_index(source_path: str) -> bool:
-    """Determine whether an ISO-BMFF file has its playback index before media.
-
-    This parses only top-level atom headers via seeks—never reads the video
-    payload.  A ``moov`` atom before the first ``mdat`` makes regular MP4/MOV
-    files progressive/fast-start and safe to stream from their original path.
-    """
-    try:
-        file_size = os.path.getsize(source_path)
-        offset = 0
-        with open(source_path, "rb") as source:
-            for _ in range(_MAX_MP4_TOP_LEVEL_ATOMS):
-                if offset + 8 > file_size:
-                    return False
-                source.seek(offset)
-                header = source.read(16)
-                if len(header) < 8:
-                    return False
-                atom_size = int.from_bytes(header[:4], "big")
-                atom_type = header[4:8]
-                header_size = 8
-                if atom_size == 1:
-                    if len(header) < 16:
-                        return False
-                    atom_size = int.from_bytes(header[8:16], "big")
-                    header_size = 16
-                elif atom_size == 0:
-                    # This atom extends to EOF.  There cannot be an index
-                    # after it, and an index within an mdat is not usable.
-                    return atom_type == b"moov"
-
-                if atom_size < header_size or offset + atom_size > file_size:
-                    return False
-                if atom_type == b"moov":
-                    return True
-                if atom_type == b"mdat":
-                    return False
-                offset += atom_size
-    except OSError:
-        return False
-    return False
-
-
 def _is_android_direct_compatible(source_path: str) -> bool:
     """Return True for a conservative, directly playable MP4-family source."""
     if os.path.splitext(source_path)[1].lower() not in _MP4_LIKE_EXTENSIONS:
@@ -535,45 +493,15 @@ def _is_android_direct_compatible(source_path: str) -> bool:
     if len(video_streams) != 1:
         return False
     video = video_streams[0]
-    # yuv420p H.264 plus AAC/MP3 are the broad Android baseline.  The same
-    # codec test is used for a lossless remux when the index is at the end.
+    # yuv420p H.264 plus AAC/MP3 are the broad Android baseline.
     if video.get("codec_name") != "h264" or video.get("pix_fmt") not in {"yuv420p", "yuvj420p"}:
         return False
     return all(stream.get("codec_name") in {"aac", "mp3"} for stream in audio_streams)
 
 
 def _is_direct_streamable(source_path: str) -> bool:
-    """True when the original needs neither transcoding nor a fast-start copy."""
-    return _is_android_direct_compatible(source_path) and _has_front_loaded_mp4_index(source_path)
-
-
-def _can_faststart_remux(source_path: str) -> bool:
-    """Return True only for codec combinations broadly playable by Android.
-
-    Rewriting an H.264/AAC MP4 with ``+faststart`` is a fast, lossless operation
-    that moves its index to the front.  Other codec combinations retain the
-    compatibility-focused H.264/AAC encode path below.
-    """
-    return _is_android_direct_compatible(source_path) and not _has_front_loaded_mp4_index(source_path)
-
-
-def _faststart_remux(source_path: str, output_path: str) -> None:
-    ffmpeg_path = _ffmpeg_path()
-    if not ffmpeg_path:
-        raise FileNotFoundError("ffmpeg executable not found")
-    temp_path = f"{output_path}.copy.part.mp4"
-    _safe_remove(temp_path)
-    try:
-        _run_ffmpeg([
-            ffmpeg_path, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-i", source_path,
-            "-map", "0:v:0", "-map", "0:a?",
-            "-c", "copy", "-movflags", "+faststart",
-            temp_path,
-        ])
-        os.replace(temp_path, output_path)
-    finally:
-        _safe_remove(temp_path)
+    """Return whether the source meets the server's direct-play codec policy."""
+    return _is_android_direct_compatible(source_path)
 
 
 def _transcode_preview(source_path: str, output_path: str) -> None:
@@ -607,13 +535,7 @@ def _transcode_preview(source_path: str, output_path: str) -> None:
 
 
 def _build_preview(source_path: str, output_path: str) -> None:
-    """Make the only cache cases: index relocation or compatible transcode."""
-    if _can_faststart_remux(source_path):
-        try:
-            _faststart_remux(source_path, output_path)
-            return
-        except (OSError, subprocess.SubprocessError):
-            _safe_remove(output_path)
+    """Create a fallback only when the original is not Android-compatible."""
     _transcode_preview(source_path, output_path)
 
 
@@ -779,10 +701,10 @@ class _PreviewScheduler:
                     self.submit(job.source_path, priority=True)
                     continue
                 if _is_direct_streamable(job.source_path):
-                    # Its original MP4 is already compatible and has its index
-                    # up front, so any generated copy would only duplicate
-                    # bytes.  This probe runs exclusively on the background
-                    # worker, never before the HTTP preview response.
+                    # Its original MP4 meets the direct-play policy, so a
+                    # cached copy would only duplicate it.  This probe runs
+                    # only on the background worker, never before the HTTP
+                    # response.
                     _discard_cache_for_direct_source(job.source_path)
                     continue
                 if not _ready_cache_path(job.source_path):
@@ -804,10 +726,10 @@ class _PreviewScheduler:
 _preview_scheduler = _PreviewScheduler()
 _active_preview_intents = _ActivePreviewIntentTracker()
 
-# v2 used unversioned names and could contain full-size lossless remuxes.  They
-# cannot be selected by v3 and would be dead disk usage, so reclaim them once
-# when this module starts.  The strict filename match preserves any unrelated
-# user media in a folder they selected as the cache location.
+# v2 used unversioned names and v3 could contain full-size fast-start rewrites.
+# Neither can be selected by v4, so reclaim them once when this module starts.
+# The strict filename match preserves unrelated user media in a selected cache
+# folder.
 _legacy_files, _legacy_bytes = _remove_legacy_cache_artifacts(PREVIEW_CACHE_DIR)
 if _legacy_files:
     add_log(f"Removed {_legacy_files} obsolete video preview cache file(s) ({_legacy_bytes} bytes)")
@@ -837,10 +759,10 @@ def preview_request_is_active(scope: str, source_path: str) -> bool:
 def get_video_preview_path(source_path: str, *, schedule_missing: bool = True) -> str:
     """Return a playable file now and optimize only when it is actually needed.
 
-    The cache is used immediately for source formats that need a fast-start
-    remux or a compatibility transcode.  On a miss, returning the source lets
-    the existing range-streaming endpoint start playback in milliseconds;
-    FFmpeg/FFprobe never sits on the request critical path.
+    The cache is used immediately for source formats that need compatibility
+    transcoding.  On a miss, returning the source lets the existing
+    range-streaming endpoint start playback in milliseconds; FFmpeg/FFprobe
+    never sits on the request critical path.
     """
     if not os.path.isfile(source_path):
         raise FileNotFoundError(source_path)
