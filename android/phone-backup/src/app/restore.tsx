@@ -1692,7 +1692,7 @@ export default function RestoreScreen() {
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [isFetching, setIsFetching] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState<{ current: number; total: number; fileName: string } | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<{ current: number; total: number; fileName: string; bytesWritten: number; bytesTotal: number } | null>(null);
   const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
 
   // Sort state
@@ -1944,7 +1944,7 @@ export default function RestoreScreen() {
 
       index++;
       const displayName = path.split(/[/\\]/).pop() ?? path;
-      setDownloadProgress({ current: index, total: pathSet.size, fileName: displayName });
+      setDownloadProgress({ current: index, total: pathSet.size, fileName: displayName, bytesWritten: 0, bytesTotal: fileInfo.size || 0 });
 
       try {
         if (!FileSystem.cacheDirectory) { failed++; continue; }
@@ -1953,12 +1953,16 @@ export default function RestoreScreen() {
         const ext = localPath.split('.').pop()?.toLowerCase() ?? '';
         const isMedia = isMediaExtension(ext);
 
+        const onFileProgress = (written: number, total: number) => {
+          setDownloadProgress(prev => prev ? { ...prev, bytesWritten: written, bytesTotal: total > 0 ? total : prev.bytesTotal } : prev);
+        };
+
         if (isMedia && canSaveToGallery) {
           const tmpUri = FileSystem.cacheDirectory + 'restore_tmp_' + Date.now() + '_' + displayName;
           if (sourceMode === 'shared' && selectedSourceId) {
-            await downloadSharedFile(selectedSourceId, path, tmpUri);
+            await downloadSharedFile(selectedSourceId, path, tmpUri, onFileProgress);
           } else {
-            await downloadFile(path, tmpUri);
+            await downloadFile(path, tmpUri, onFileProgress);
           }
           try {
             await MediaLibrary.saveToLibraryAsync(tmpUri);
@@ -1979,9 +1983,9 @@ export default function RestoreScreen() {
         if (existingInfo.exists && (existingInfo as any).size === fileInfo.size) { skipped++; continue; }
 
         if (sourceMode === 'shared' && selectedSourceId) {
-          await downloadSharedFile(selectedSourceId, path, destUri);
+          await downloadSharedFile(selectedSourceId, path, destUri, onFileProgress);
         } else {
-          await downloadFile(path, destUri);
+          await downloadFile(path, destUri, onFileProgress);
         }
         saved++;
       } catch (e) {
@@ -2034,6 +2038,16 @@ export default function RestoreScreen() {
           <View style={styles.progressBarBg}>
             <View style={[styles.progressBarFill, { width: `${(downloadProgress.current / downloadProgress.total) * 100}%` }]} />
           </View>
+          {downloadProgress.bytesTotal > 0 && (
+            <View style={styles.fileProgressRow}>
+              <View style={[styles.progressBarBg, { flex: 1 }]}>
+                <View style={[styles.progressBarFill, styles.fileProgressBar, { width: `${Math.min((downloadProgress.bytesWritten / downloadProgress.bytesTotal) * 100, 100)}%` }]} />
+              </View>
+              <Text style={styles.fileProgressText}>
+                {Math.round((downloadProgress.bytesWritten / downloadProgress.bytesTotal) * 100)}%
+              </Text>
+            </View>
+          )}
         </View>
       )}
 
@@ -2302,6 +2316,9 @@ const createStyles = (colors: AppColors) =>
     progressSubtext: { fontSize: TextScale.xs, color: colors.textSecondary, marginBottom: Spacing.two },
     progressBarBg: { height: 6, backgroundColor: colors.surfaceBorder, borderRadius: Radius.full, overflow: 'hidden' },
     progressBarFill: { height: '100%', backgroundColor: colors.primary },
+    fileProgressRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, marginTop: Spacing.one },
+    fileProgressBar: { opacity: 0.7 },
+    fileProgressText: { fontSize: TextScale.xs, fontWeight: '600', color: colors.textSecondary, minWidth: 36, textAlign: 'right' },
   });
 
 // ─────────────────────────────────────────────────────────────────────────────
