@@ -42,6 +42,13 @@ _DEFAULTS = {
     "THEME_MODE": "light",
     "SSL_CERT": os.path.join(APP_DATA_DIR, "cert.pem"),
     "SSL_KEY": os.path.join(APP_DATA_DIR, "key.pem"),
+    # A dedicated directory containing only generated, server-side video
+    # previews.  Users can relocate it from desktop Settings.
+    "VIDEO_PREVIEW_CACHE_DIR": os.path.join(APP_DATA_DIR, "video_preview_cache"),
+    # Optimized video copies are LRU-evicted at this size.  Keeping the limit
+    # finite prevents a busy Restore screen from silently consuming a disk.
+    # Set to 0 in server_config.json to disable automatic eviction.
+    "VIDEO_PREVIEW_CACHE_MAX_BYTES": 8 * 1024 * 1024 * 1024,
     # List of dicts: [{id: str, label: str, path: str}, ...]
     # IDs are stable slugs like "shared_0", "shared_1", etc.
     "SHARED_DIRS": [],

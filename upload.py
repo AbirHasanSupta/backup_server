@@ -7,7 +7,7 @@ import subprocess
 import time
 import uuid
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -35,11 +35,11 @@ from database import (
 )
 from state import add_log, get_current_activity, pending_connections, set_current_activity
 from storage import file_exists, save_fileobj, save_upload_stream, full_path_for
-from video_preview import get_video_preview_path, is_video_path
+from video_preview import get_video_preview_path, is_video_path, schedule_video_preview
 
 router = APIRouter()
 
-APP_VERSION = "2.4.1"
+APP_VERSION = "3.0.1"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -541,26 +541,31 @@ def _parse_range(range_header: str, file_size: int) -> tuple[int, int] | None:
     return (start, end)
 
 
-def _stream_cache_headers(path: str, file_size: int) -> dict[str, str]:
+def _stream_cache_headers(path: str, file_size: int, cache_control: str | None = None) -> dict[str, str]:
     stat = os.stat(path)
     return {
         "Content-Length": str(file_size),
         "Accept-Ranges": "bytes",
-        # Let clients reuse recently streamed media segments instead of forcing a
-        # revalidation on every preview open.
-        "Cache-Control": "private, max-age=300",
+        # Let clients reuse recently streamed media segments unless the caller
+        # is serving a temporary source-file preview representation.
+        "Cache-Control": cache_control or "private, max-age=300",
         "ETag": f'W/"{int(stat.st_mtime)}-{file_size}"',
         "Last-Modified": formatdate(stat.st_mtime, usegmt=True),
     }
 
 
-def _file_range_response(path: str, request: Request) -> StreamingResponse:
+def _file_range_response(
+        path: str,
+        request: Request,
+        *,
+        cache_control: str | None = None,
+) -> StreamingResponse:
     file_size = os.path.getsize(path)
     ext = os.path.splitext(path)[1].lower()
     mime = _MIME_MAP.get(ext, "application/octet-stream")
     filename = os.path.basename(path)
     range_header = request.headers.get("range")
-    base_headers = _stream_cache_headers(path, file_size)
+    base_headers = _stream_cache_headers(path, file_size, cache_control)
 
     parsed = _parse_range(range_header, file_size) if (file_size > 0 and range_header) else None
 
@@ -648,13 +653,20 @@ async def preview_file(
         raise HTTPException(status_code=400, detail="Preview is only available for video files")
 
     try:
-        preview_path = await asyncio.to_thread(get_video_preview_path, path)
+        # Never wait for an FFmpeg conversion here.  On a cache miss this
+        # returns the original path immediately and queues one optimized copy;
+        # range streaming can therefore begin as soon as the client connects.
+        preview_path = get_video_preview_path(path)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="File not found")
     except subprocess.CalledProcessError:
         raise HTTPException(status_code=500, detail="Failed to generate video preview")
 
-    return _file_range_response(preview_path, request)
+    # This URL initially represents the original source, then the optimized
+    # cache once ready.  Revalidate only that temporary response so a later
+    # open can pick up the optimized representation at the same URL.
+    cache_control = "private, no-cache" if preview_path == path else None
+    return _file_range_response(preview_path, request, cache_control=cache_control)
 
 
 class WarmPreviewsRequest(BaseModel):
@@ -665,7 +677,6 @@ class WarmPreviewsRequest(BaseModel):
 async def warm_shared_preview_files(
         source_id: str,
         body: WarmPreviewsRequest,
-        background_tasks: BackgroundTasks,
         device_id: str | None = None,
         authorization: str = Header(None),
         token: str = None,
@@ -692,8 +703,11 @@ async def warm_shared_preview_files(
             continue
         if not is_video_path(full_path):
             continue
-        scheduled += 1
-        background_tasks.add_task(get_video_preview_path, full_path)
+        # Low-priority, de-duplicated queue work.  In particular, this keeps
+        # the Restore screen's adjacent-video preloads from launching many
+        # parallel FFmpeg jobs or delaying an actively opened video.
+        if schedule_video_preview(full_path, priority=False) == "queued":
+            scheduled += 1
 
     return {"ok": True, "scheduled": scheduled}
 
@@ -702,7 +716,6 @@ async def warm_shared_preview_files(
 async def warm_preview_files(
         body: WarmPreviewsRequest,
         device_id: str,
-        background_tasks: BackgroundTasks,
         authorization: str = Header(None),
         token: str = None,
 ):
@@ -723,8 +736,8 @@ async def warm_preview_files(
             continue
         if not is_video_path(path):
             continue
-        scheduled += 1
-        background_tasks.add_task(get_video_preview_path, path)
+        if schedule_video_preview(path, priority=False) == "queued":
+            scheduled += 1
 
     return {"ok": True, "scheduled": scheduled}
 
@@ -987,10 +1000,11 @@ async def preview_shared_file(
         raise HTTPException(status_code=400, detail="Preview is only available for video files")
 
     try:
-        preview_path = await asyncio.to_thread(get_video_preview_path, full_path)
+        preview_path = get_video_preview_path(full_path)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="File not found")
     except subprocess.CalledProcessError:
         raise HTTPException(status_code=500, detail="Failed to generate video preview")
 
-    return _file_range_response(preview_path, request)
+    cache_control = "private, no-cache" if preview_path == full_path else None
+    return _file_range_response(preview_path, request, cache_control=cache_control)

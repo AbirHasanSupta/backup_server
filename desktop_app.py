@@ -346,10 +346,11 @@ class BreathingDot(ctk.CTkCanvas):
 
 class BackupServerApp(ctk.CTk):
 
-    PAGES      = ["dashboard", "devices", "settings", "logs", "history"]
+    PAGES      = ["dashboard", "devices", "shared_folders", "settings", "logs", "history"]
     PAGE_ICONS = {
         "dashboard": "󰕇",   # fallback to text if font missing
         "devices":   "󰄛",
+        "shared_folders": "󰉋",
         "settings":  "󰒓",
         "logs":      "󰉩",
         "history":   "H",
@@ -357,6 +358,7 @@ class BackupServerApp(ctk.CTk):
     PAGE_LABELS = {
         "dashboard": "Dashboard",
         "devices":   "Devices",
+        "shared_folders": "Shared Folders",
         "settings":  "Settings",
         "logs":      "Logs",
         "history":   "Sync History",
@@ -364,6 +366,7 @@ class BackupServerApp(ctk.CTk):
     PAGE_EMOJI = {
         "dashboard": "D",
         "devices":   "P",
+        "shared_folders": "F",
         "settings":  "S",
         "logs":      "L",
         "history":   "H",
@@ -403,6 +406,7 @@ class BackupServerApp(ctk.CTk):
         self._server_start_time: float | None = None
         self._device_card_widgets: dict[str, dict] = {}
         self._theme_rebuild_after_id: str | None = None
+        self._shared_dirs: list[dict] = list(load_config().get("SHARED_DIRS", []))
 
         # Build layout
         self._setup_grid()
@@ -627,6 +631,7 @@ class BackupServerApp(ctk.CTk):
         self._pages: dict[str, ctk.CTkFrame] = {
             "dashboard": self._build_dashboard(container),
             "devices":   self._build_devices(container),
+            "shared_folders": self._build_shared_folders(container),
             "settings":  self._build_settings(container),
             "logs":      self._build_logs(container),
             "history":   self._build_history(container),
@@ -1153,6 +1158,60 @@ class BackupServerApp(ctk.CTk):
             command=self._browse_root,
         ).pack(side="left")
 
+        # ── VIDEO PREVIEW CACHE ──────────────────────────────────────────
+        cache_card = settings_card("Video Preview Cache")
+        try:
+            from video_preview import get_video_preview_cache_dir
+            active_cache_dir = get_video_preview_cache_dir()
+        except Exception:
+            active_cache_dir = cfg.get("VIDEO_PREVIEW_CACHE_DIR", os.path.join(os.path.dirname(__file__), "video_preview_cache"))
+
+        cache_path_row = ctk.CTkFrame(cache_card, fg_color="transparent")
+        cache_path_row.pack(fill="x", padx=18, pady=(16, 0))
+        ctk.CTkLabel(
+            cache_path_row, text="Preview cache folder",
+            font=FONT_BODY, text_color=C_TEXT,
+        ).pack(anchor="w")
+        cache_path_input_row = ctk.CTkFrame(cache_card, fg_color="transparent")
+        cache_path_input_row.pack(fill="x", padx=18, pady=(6, 0))
+        self._e_preview_cache_dir = ctk.CTkEntry(
+            cache_path_input_row, height=42, fg_color=C_ELEVATED,
+            border_color=C_BORDER, border_width=1, text_color=C_TEXT,
+            corner_radius=12,
+        )
+        self._e_preview_cache_dir.insert(0, active_cache_dir)
+        self._e_preview_cache_dir.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(
+            cache_path_input_row, text="Browse", width=92, height=38,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
+            text_color=C_ACCENT, border_width=1, border_color=C_BORDER,
+            corner_radius=12, font=FONT_BODY,
+            command=self._browse_preview_cache_dir,
+        ).pack(side="right", padx=(10, 0))
+
+        cache_row = ctk.CTkFrame(cache_card, fg_color="transparent")
+        cache_row.pack(fill="x", padx=18, pady=(14, 18))
+        cache_copy = ctk.CTkFrame(cache_row, fg_color="transparent")
+        cache_copy.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            cache_copy, text="Optimized video previews",
+            font=FONT_BODY, text_color=C_TEXT,
+        ).pack(anchor="w")
+        self._preview_cache_status_var = tk.StringVar(value="Checking cache…")
+        ctk.CTkLabel(
+            cache_copy, textvariable=self._preview_cache_status_var,
+            font=FONT_SMALL, text_color=C_MUTED, wraplength=330, justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+        self._preview_cache_clear_button = ctk.CTkButton(
+            cache_row, text="Clean Cache", width=122, height=38,
+            fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
+            text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
+            corner_radius=12, font=FONT_BODY,
+            command=self._clear_video_preview_cache,
+        )
+        self._preview_cache_clear_button.pack(side="right", padx=(12, 0))
+        self.after(100, self._refresh_video_preview_cache_status)
+
         # ── SECURITY ──────────────────────────────────────────────────────
         sec_card = settings_card("Security")
         self._e_key = labeled_entry(sec_card, "API Key  (must match Android app)",
@@ -1176,39 +1235,6 @@ class BackupServerApp(ctk.CTk):
         ).pack(side="left", padx=12)
 
 
-        # ── SHARED FOLDERS ────────────────────────────────────────────────
-        sfd_card = settings_card("Shared Folders")
-
-        # Info hint
-        hint_row = ctk.CTkFrame(sfd_card, fg_color="transparent")
-        hint_row.pack(fill="x", padx=18, pady=(14, 0))
-        ctk.CTkLabel(
-            hint_row,
-            text="📂  Pick any folder on this PC. It will appear in the Android Restore tab under\n"
-                 "'Shared Folders', allowing you to browse and download its files on your phone.",
-            font=FONT_SMALL, text_color=C_MUTED,
-            justify="left", wraplength=520,
-        ).pack(anchor="w")
-
-        # Scroll list for current shared folders
-        self._shared_dirs_list_frame = ctk.CTkFrame(sfd_card, fg_color="transparent")
-        self._shared_dirs_list_frame.pack(fill="x", padx=18, pady=(10, 0))
-
-        # Add-folder button row
-        add_btn_row = ctk.CTkFrame(sfd_card, fg_color="transparent")
-        add_btn_row.pack(fill="x", padx=18, pady=(10, 14))
-        ctk.CTkButton(
-            add_btn_row, text="+ Add Folder", width=150, height=38,
-            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
-            text_color=C_ACCENT, border_width=1, border_color=C_BORDER,
-            corner_radius=12, font=FONT_BODY,
-            command=self._add_shared_folder,
-        ).pack(side="left")
-
-        # Initialise list from current config
-        self._shared_dirs: list[dict] = list(cfg.get("SHARED_DIRS", []))
-        self._refresh_shared_dirs_list()
-
         # ── Save button ───────────────────────────────────────────────────
         ctk.CTkButton(
             scroll, text="Save and Restart Server", height=50,
@@ -1226,6 +1252,56 @@ class BackupServerApp(ctk.CTk):
 
         return frame
 
+    # ─── Page: Shared Folders ────────────────────────────────────────────────
+
+    def _build_shared_folders(self, parent) -> ctk.CTkFrame:
+        """Build the folder-sharing and per-device access management panel."""
+        frame = ctk.CTkFrame(parent, fg_color=C_BG)
+
+        self._page_header(
+            frame,
+            "Shared Folders",
+            "Choose folders and the devices allowed to restore them",
+        )
+        self._divider(frame)
+
+        scroll = ctk.CTkScrollableFrame(frame, fg_color="transparent", label_text="")
+        scroll.pack(fill="both", expand=True, padx=22, pady=(6, 16))
+
+        card = ctk.CTkFrame(
+            scroll, fg_color=C_SURFACE,
+            corner_radius=18, border_width=1, border_color=C_BORDER,
+        )
+        card.pack(fill="x", padx=8, pady=(20, 4))
+
+        hint_row = ctk.CTkFrame(card, fg_color="transparent")
+        hint_row.pack(fill="x", padx=18, pady=(16, 0))
+        ctk.CTkLabel(
+            hint_row,
+            text=(
+                "📂  Add any folder on this PC. It will appear in the Android Restore tab, "
+                "where selected devices can browse and download its files."
+            ),
+            font=FONT_SMALL, text_color=C_MUTED,
+            justify="left", wraplength=560,
+        ).pack(anchor="w")
+
+        self._shared_dirs_list_frame = ctk.CTkFrame(card, fg_color="transparent")
+        self._shared_dirs_list_frame.pack(fill="x", padx=18, pady=(12, 0))
+
+        add_btn_row = ctk.CTkFrame(card, fg_color="transparent")
+        add_btn_row.pack(fill="x", padx=18, pady=(10, 16))
+        ctk.CTkButton(
+            add_btn_row, text="+ Add Folder", width=150, height=38,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
+            text_color=C_ACCENT, border_width=1, border_color=C_BORDER,
+            corner_radius=12, font=FONT_BODY,
+            command=self._add_shared_folder,
+        ).pack(side="left")
+
+        self._refresh_shared_dirs_list()
+        return frame
+
 
     def _browse_root(self):
         folder = filedialog.askdirectory(title="Select Backup Root Folder")
@@ -1233,10 +1309,86 @@ class BackupServerApp(ctk.CTk):
             self._e_root.delete(0, "end")
             self._e_root.insert(0, folder)
 
+    def _browse_preview_cache_dir(self):
+        current_dir = self._e_preview_cache_dir.get().strip()
+        folder = filedialog.askdirectory(
+            title="Select Dedicated Video Preview Cache Folder",
+            initialdir=current_dir if os.path.isdir(current_dir) else None,
+        )
+        if folder:
+            self._e_preview_cache_dir.delete(0, "end")
+            self._e_preview_cache_dir.insert(0, folder)
+
+    @staticmethod
+    def _format_cache_bytes(size_bytes: int) -> str:
+        units = ("B", "KB", "MB", "GB", "TB")
+        value = float(max(0, size_bytes))
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+            value /= 1024
+        return "0 B"
+
+    def _refresh_video_preview_cache_status(self):
+        status_var = getattr(self, "_preview_cache_status_var", None)
+        if status_var is None:
+            return
+        try:
+            from video_preview import get_video_preview_cache_stats
+            stats = get_video_preview_cache_stats()
+            cached = f"{stats['files']} cached file{'s' if stats['files'] != 1 else ''} · {self._format_cache_bytes(int(stats['bytes']))}"
+            limit = int(stats["limit_bytes"])
+            limit_text = "unlimited" if limit == 0 else self._format_cache_bytes(limit)
+            activity = ""
+            if stats.get("running"):
+                activity = f" · optimizing {stats['running']}"
+            elif stats.get("queued"):
+                activity = f" · {stats['queued']} queued"
+            status_var.set(f"{cached} (limit {limit_text}){activity}")
+        except Exception:
+            status_var.set("Preview cache is unavailable until the server starts.")
+
+    def _clear_video_preview_cache(self):
+        if not confirm_dialog(
+            self,
+            "Clean Video Preview Cache",
+            "Remove all server-generated video previews?\n\n"
+            "Your original backups are not affected. A preview currently being created "
+            "will be discarded when it finishes.",
+        ):
+            return
+
+        button = getattr(self, "_preview_cache_clear_button", None)
+        if button:
+            button.configure(state="disabled", text="Cleaning…")
+
+        def _clean():
+            try:
+                from video_preview import clear_video_preview_cache
+                result = clear_video_preview_cache()
+                removed = self._format_cache_bytes(int(result["bytes"]))
+                message = f"Removed {result['files']} cached preview file(s) ({removed})."
+                if result.get("cancelled_jobs"):
+                    message += f" Cancelled {result['cancelled_jobs']} queued conversion(s)."
+                if result.get("running_job_will_be_discarded"):
+                    message += " The active conversion will be discarded when it completes."
+            except Exception as exc:
+                message = f"Could not clean the video preview cache: {exc}"
+
+            def _finish():
+                if button and button.winfo_exists():
+                    button.configure(state="normal", text="Clean Cache")
+                self._refresh_video_preview_cache_status()
+                messagebox.showinfo("Video Preview Cache", message)
+
+            self.after(0, _finish)
+
+        threading.Thread(target=_clean, name="clear-video-preview-cache", daemon=True).start()
+
     # ── Shared Folders helpers ─────────────────────────────────────────
 
     def _refresh_shared_dirs_list(self):
-        """Re-render the list of shared folder entries in the settings card."""
+        """Re-render the list of shared folder entries in the dedicated panel."""
         for w in self._shared_dirs_list_frame.winfo_children():
             w.destroy()
 
@@ -1277,6 +1429,7 @@ class BackupServerApp(ctk.CTk):
                 if i < len(self._shared_dirs):
                     self._shared_dirs[i]["label"] = var.get()
             lbl_var.trace_add("write", lambda *_, fn=_on_label_change: fn())
+            lbl_entry.bind("<FocusOut>", lambda _event: self._save_shared_dirs_to_config())
 
             # Path label (truncated)
             path_text = entry.get("path", "")
@@ -1378,6 +1531,20 @@ class BackupServerApp(ctk.CTk):
             messagebox.showerror("Invalid Port", "Port must be a number.")
             return
 
+        preview_cache_dir_value = self._e_preview_cache_dir.get().strip()
+        if not preview_cache_dir_value:
+            messagebox.showerror("Invalid Preview Cache Folder", "Choose a folder for generated video previews.")
+            return
+        preview_cache_dir = os.path.abspath(os.path.expanduser(preview_cache_dir_value))
+        if os.path.exists(preview_cache_dir) and not os.path.isdir(preview_cache_dir):
+            messagebox.showerror("Invalid Preview Cache Folder", "The preview cache path must be a folder.")
+            return
+        try:
+            os.makedirs(preview_cache_dir, exist_ok=True)
+        except OSError as exc:
+            messagebox.showerror("Preview Cache Folder", f"Cannot create or access that folder:\n{exc}")
+            return
+
         cfg = {
             "HOST":             self._e_host.get().strip() or "0.0.0.0",
             "PORT":             port,
@@ -1385,11 +1552,45 @@ class BackupServerApp(ctk.CTk):
             "API_KEY":          self._e_key.get().strip() or "YOUR_SECRET_KEY",
             "REQUIRE_APPROVAL": bool(self._sw_approval.get()),
             "THEME_MODE":       "dark" if bool(self._sw_dark_mode.get()) else "light",
+            "VIDEO_PREVIEW_CACHE_DIR": preview_cache_dir,
             "SHARED_DIRS":      list(self._shared_dirs),
         }
         save_config(cfg)
+
+        try:
+            from video_preview import get_video_preview_cache_dir
+            previous_cache_dir = get_video_preview_cache_dir()
+        except Exception:
+            previous_cache_dir = preview_cache_dir
+
+        if os.path.normcase(os.path.abspath(previous_cache_dir)) != os.path.normcase(preview_cache_dir):
+            self._relocate_video_preview_cache_async(preview_cache_dir)
         add_log("Settings saved - restarting server")
         self._restart_server()
+
+    def _relocate_video_preview_cache_async(self, destination: str):
+        """Move generated previews without freezing the desktop Settings page."""
+        def _move():
+            try:
+                from video_preview import relocate_video_preview_cache
+                result = relocate_video_preview_cache(destination)
+                add_log(
+                    "Video preview cache moved: "
+                    f"{result['moved_files']} file(s), {self._format_cache_bytes(int(result['moved_bytes']))}"
+                )
+                if result.get("failed_files"):
+                    add_log(
+                        f"Video preview cache move left {result['failed_files']} locked file(s) in the old folder; "
+                        "they will be cleaned when available."
+                    )
+                if result.get("cancelled_jobs"):
+                    add_log(f"Cancelled {result['cancelled_jobs']} queued video preview conversion(s) during cache move.")
+            except Exception as exc:
+                add_log(f"Video preview cache move failed: {exc}")
+            finally:
+                self.after(0, self._refresh_video_preview_cache_status)
+
+        threading.Thread(target=_move, name="move-video-preview-cache", daemon=True).start()
 
     def _apply_theme_from_settings(self):
         mode = "dark" if bool(self._sw_dark_mode.get()) else "light"
@@ -1843,6 +2044,8 @@ class BackupServerApp(ctk.CTk):
             self._refresh_dashboard()
         elif page == "devices":
             self._refresh_devices()
+        elif page == "shared_folders":
+            self._refresh_shared_dirs_list()
         elif page == "settings":
             self._refresh_settings()
         elif page == "logs":
@@ -1880,6 +2083,8 @@ class BackupServerApp(ctk.CTk):
             self._refresh_logs()
         elif self._current_page == "history":
             self._refresh_history()
+        elif self._current_page == "settings":
+            self._refresh_video_preview_cache_status()
         self.after(2000, self._auto_refresh)
 
     # ─── Server control ───────────────────────────────────────────────────────

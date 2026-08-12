@@ -132,11 +132,17 @@ def main() -> None:
     for src in add_data_files:
         cmd += ["--add-data", f"{ROOT / src}{sep}."]
 
-    # Large-video previews need ffmpeg. Include it when available so the
-    # distributed desktop app does not rely on a machine-wide PATH entry.
+    # Large-video previews need ffmpeg; ffprobe lets compatible H.264/AAC files
+    # use a much faster lossless fast-start rewrite instead of re-encoding.
+    # Include both when available so the desktop app does not rely on PATH.
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path:
         cmd += ["--add-binary", f"{ffmpeg_path}{sep}."]
+        ffprobe_path = shutil.which("ffprobe")
+        if ffprobe_path:
+            cmd += ["--add-binary", f"{ffprobe_path}{sep}."]
+        else:
+            print("[WARN] ffprobe was not found; previews will use the compatible encode path.")
     else:
         print("[WARN] ffmpeg was not found; large-video previews will use the original file.")
 
