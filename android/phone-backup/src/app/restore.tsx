@@ -72,6 +72,15 @@ try {
   console.warn('[Media] ExpoAudio is unavailable; using the external-player fallback.');
 }
 
+/** Guard native player controls — never throw into RN from teardown races. */
+function safeMediaCall(fn: () => void): void {
+  try {
+    fn();
+  } catch (err) {
+    console.warn('[Media] Player control failed:', err);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -478,6 +487,10 @@ const PreviewModal = React.memo(function PreviewModal({
   // Loading state for images
   const [imgLoading, setImgLoading] = useState(category === 'image');
   const [transition, setTransition] = useState<TransitionState | null>(null);
+  // Pause native players while still mounted, then unmount — avoids the
+  // close/swipe crash from controlling a player mid-teardown.
+  const [isDismissing, setIsDismissing] = useState(false);
+  const mediaActive = !transition && !isDismissing;
 
   // Session-level de-dupe so we don't repeatedly warm the same video.
   const warmedPreviewPathsRef = useRef<Set<string>>(new Set());
@@ -631,7 +644,7 @@ const PreviewModal = React.memo(function PreviewModal({
 
   // Smooth slide navigation helper
   const animateToFile = useCallback((targetIndex: number, startDx?: number) => {
-    if (isAnimating || targetIndex < 0 || targetIndex >= fileList.length || targetIndex === activeIdx) return;
+    if (isDismissing || isAnimating || targetIndex < 0 || targetIndex >= fileList.length || targetIndex === activeIdx) return;
     setIsAnimating(true);
 
     const isNext = targetIndex > activeIdx;
@@ -670,7 +683,21 @@ const PreviewModal = React.memo(function PreviewModal({
       scaleRef.current = 1;
       translateRef.current = { x: 0, y: 0 };
     });
-  }, [isAnimating, fileList.length, activeIdx, slideAnim, incomingSlideAnim, onNavigate, scaleAnim, translateXAnim, translateYAnim]);
+  }, [isDismissing, isAnimating, fileList.length, activeIdx, slideAnim, incomingSlideAnim, onNavigate, scaleAnim, translateXAnim, translateYAnim]);
+
+  const handleClose = useCallback(() => {
+    if (isDismissing) return;
+    setIsDismissing(true);
+  }, [isDismissing]);
+
+  useEffect(() => {
+    if (!isDismissing) return;
+    // After players observe isActive=false and pause, unmount the modal.
+    const timer = setTimeout(() => {
+      onClose();
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [isDismissing, onClose]);
 
   // ── Fullscreen mode (tap content to hide/show chrome) ──────────────────────
   useEffect(() => {
@@ -867,7 +894,7 @@ const PreviewModal = React.memo(function PreviewModal({
             previewUri={getVideoPreviewUrlForFile(targetFile)}
             originalUri={targetUrl}
             fileSize={targetFile.size}
-            isActive={!transition}
+            isActive={mediaActive}
           />
         </Animated.View>
       );
@@ -875,7 +902,13 @@ const PreviewModal = React.memo(function PreviewModal({
 
     if (targetCategory === 'audio') {
       return (
-        <AudioPlayer uri={targetUrl} colors={colors} fileName={targetFileName} />
+        <AudioPlayer
+          key={`${keyPrefix}-audio`}
+          uri={targetUrl}
+          colors={colors}
+          fileName={targetFileName}
+          isActive={mediaActive}
+        />
       );
     }
 
@@ -907,7 +940,7 @@ const PreviewModal = React.memo(function PreviewModal({
   const bottomBarTranslate = chromeAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 70] });
 
   return (
-    <Modal visible animationType="slide" transparent={false} onRequestClose={onClose} statusBarTranslucent>
+    <Modal visible animationType="slide" transparent={false} onRequestClose={handleClose} statusBarTranslucent>
       <View style={[pvStyles.root, { backgroundColor: '#000' }]}>
         <StatusBar barStyle="light-content" backgroundColor="#000" hidden={isFullscreen} />
 
@@ -958,7 +991,7 @@ const PreviewModal = React.memo(function PreviewModal({
           ]}
           pointerEvents={isFullscreen ? 'none' : 'auto'}
         >
-          <TouchableOpacity onPress={onClose} style={pvStyles.topBarBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <TouchableOpacity onPress={handleClose} style={pvStyles.topBarBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <AppIcon androidName="close" iosName="xmark" color="#fff" size={22} />
           </TouchableOpacity>
           <View style={pvStyles.topBarCenter}>
@@ -1113,10 +1146,12 @@ function NativeVideoPreviewPlayer({
   }, [previewUri, originalUri]);
 
   useEffect(() => {
+    // Never call pause/play from an unmount cleanup — tearing down the native
+    // player while invoking controls races and can kill the whole app.
     if (isActive) {
-      player.play();
+      safeMediaCall(() => player.play());
     } else {
-      player.pause();
+      safeMediaCall(() => player.pause());
     }
   }, [isActive, player]);
 
@@ -1147,7 +1182,7 @@ function NativeVideoPreviewPlayer({
         upgradedRef.current = true;
         player.currentTime = position;
         if (wasPlaying) {
-          player.play();
+          safeMediaCall(() => player.play());
         }
       } catch {
         // Allow another attempt later.
@@ -1260,36 +1295,62 @@ function ExternalMediaPlayer({ uri, mediaType }: { uri: string; mediaType: 'vide
 }
 
 // ── Audio Player ─────────────────────────────────────────────────────────────
-function AudioPlayer({ uri, colors, fileName }: { uri: string; colors: AppColors; fileName: string }) {
+function AudioPlayer({
+  uri,
+  colors,
+  fileName,
+  isActive = true,
+}: {
+  uri: string;
+  colors: AppColors;
+  fileName: string;
+  isActive?: boolean;
+}) {
   if (!expoAudioModule) {
     return <ExternalMediaPlayer uri={uri} mediaType="audio" />;
   }
-  return <NativeAudioPlayer uri={uri} colors={colors} fileName={fileName} audioModule={expoAudioModule} />;
+  return (
+    <NativeAudioPlayer
+      uri={uri}
+      colors={colors}
+      fileName={fileName}
+      isActive={isActive}
+      audioModule={expoAudioModule}
+    />
+  );
 }
 
 function NativeAudioPlayer({
   uri,
   colors,
   fileName,
+  isActive = true,
   audioModule,
 }: {
   uri: string;
   colors: AppColors;
   fileName: string;
+  isActive?: boolean;
   audioModule: ExpoAudioModule;
 }) {
+  // useAudioPlayer already releases via useReleasingSharedObject on unmount.
+  // Calling player.remove() here double-frees the native object and crashes
+  // the app when closing or swiping away from audio — same class of bug as the
+  // old video pause-on-unmount teardown.
   const player = audioModule.useAudioPlayer(uri);
   const status = audioModule.useAudioPlayerStatus(player);
 
   useEffect(() => {
-    return () => { player.remove(); };
-  }, [player]);
+    if (!isActive) {
+      safeMediaCall(() => player.pause());
+    }
+  }, [isActive, player]);
 
   const togglePlay = () => {
     if (status.playing) {
-      player.pause();
+      safeMediaCall(() => player.pause());
     } else {
-      player.play();
+      safeMediaCall(() => player.play());
     }
   };
 
