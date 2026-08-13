@@ -35,7 +35,6 @@ A self-hosted, high-performance photo, video, and file backup & restore ecosyste
 ├── storage.py              Disk storage management, per-device paths, SHA-256 verification
 ├── state.py                Thread-safe in-memory state, live log buffers & approval queue
 ├── config.py               Configuration manager (server_config.json loader/saver & themes)
-├── ssl_utils.py            X.509 TLS certificate generator & fingerprint calculator
 ├── build.py / build.bat    PyInstaller build script packaging into standalone Windows EXE
 ├── requirements.txt        Python dependencies (fastapi, uvicorn, customtkinter, cryptography, etc.)
 └── android/phone-backup/   Expo Android App (see details below)

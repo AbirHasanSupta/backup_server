@@ -4,4 +4,3 @@ python-multipart
 customtkinter
 pyinstaller
 pillow
-cryptography
