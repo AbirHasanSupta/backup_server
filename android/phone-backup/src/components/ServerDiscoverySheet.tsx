@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   Modal,
   View,
@@ -8,6 +8,10 @@ import {
   ActivityIndicator,
   TextInput,
   Dimensions,
+  Pressable,
+  KeyboardAvoidingView,
+  Platform,
+  Alert,
 } from 'react-native';
 import Animated, {
   useSharedValue,
@@ -18,13 +22,15 @@ import Animated, {
   interpolate,
   Extrapolation,
 } from 'react-native-reanimated';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, Radius, Shadows, Spacing, TextScale } from '@/constants/theme';
 import { discoverServers } from '../../serverDiscovery';
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { setServerCertFingerprint } from '../../settings';
+import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
 const { height: SCREEN_H } = Dimensions.get('window');
 const DISMISS_THRESHOLD = 120;
@@ -43,14 +49,65 @@ interface Props {
   onClose: () => void;
 }
 
+function parseManualAddress(rawInput: string): { ip: string; port: number } | null {
+  const raw = rawInput.trim();
+  if (!raw) return null;
+
+  let addr = raw.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  const slashIdx = addr.indexOf('/');
+  if (slashIdx > 0) addr = addr.slice(0, slashIdx);
+
+  // Bracketed IPv6: [fe80::1]:8000 or [fe80::1]
+  if (addr.startsWith('[')) {
+    const end = addr.indexOf(']');
+    if (end > 1) {
+      const ip = addr.slice(1, end);
+      let port = 8000;
+      const rest = addr.slice(end + 1);
+      if (rest.startsWith(':')) {
+        const maybePort = rest.slice(1);
+        if (/^\d+$/.test(maybePort)) {
+          const parsed = Number.parseInt(maybePort, 10);
+          if (parsed >= 1 && parsed <= 65535) port = parsed;
+          else return null;
+        } else if (rest.length > 1) {
+          return null;
+        }
+      }
+      return ip ? { ip, port } : null;
+    }
+  }
+
+  let ip = addr;
+  let port = 8000;
+  const colonIdx = addr.lastIndexOf(':');
+  if (colonIdx > 0) {
+    const maybePort = addr.slice(colonIdx + 1);
+    if (/^\d+$/.test(maybePort)) {
+      const parsed = Number.parseInt(maybePort, 10);
+      if (parsed >= 1 && parsed <= 65535) {
+        port = parsed;
+        ip = addr.slice(0, colonIdx);
+      }
+    }
+  }
+
+  return ip ? { ip, port } : null;
+}
+
 export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
   const { colors } = useAppTheme();
+  const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [servers, setServers] = useState<Server[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [manualUrl, setManualUrl] = useState('');
+  const [selecting, setSelecting] = useState(false);
+  const scanGeneration = useRef(0);
+  const mountedRef = useRef(true);
+  const selectingRef = useRef(false);
 
   const translateY = useSharedValue(0);
   const dismiss = useCallback(() => {
@@ -59,14 +116,23 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
 
   /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
   useEffect(() => {
+    mountedRef.current = true;
+    selectingRef.current = false;
     if (visible) {
       translateY.value = 0;
     }
+    return () => {
+      mountedRef.current = false;
+      selectingRef.current = false;
+      // Invalidate in-flight scan callbacks on close/unmount.
+      scanGeneration.current += 1;
+    };
   }, [visible, translateY]);
 
   const panGesture = useMemo(
     () =>
       Gesture.Pan()
+        .enabled(!selecting)
         .onUpdate((e) => {
           if (e.translationY > 0) {
             translateY.value = e.translationY;
@@ -83,7 +149,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
             translateY.value = withSpring(0, { damping: 20, stiffness: 300 });
           }
         }),
-    [dismiss, translateY]
+    [dismiss, translateY, selecting]
   );
   /* eslint-enable react-hooks/immutability */
 
@@ -96,6 +162,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
   }));
 
   const startScan = useCallback(async () => {
+    const generation = ++scanGeneration.current;
     setScanning(true);
     setServers([]);
     setError(null);
@@ -103,176 +170,229 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
 
     try {
       const found = await discoverServers((pct: number, current: Server[]) => {
+        if (generation !== scanGeneration.current || !mountedRef.current) return;
         setProgress(pct);
         setServers([...current]);
       });
+      if (generation !== scanGeneration.current || !mountedRef.current) return;
       setServers(found);
       if (found.length === 0) {
         setError('No backup servers were found on this network.');
       }
     } catch (err: any) {
+      if (generation !== scanGeneration.current || !mountedRef.current) return;
       setError(err?.message || 'Scan failed. Check your Wi-Fi connection.');
     } finally {
-      setScanning(false);
-      setProgress(100);
+      if (generation === scanGeneration.current && mountedRef.current) {
+        setScanning(false);
+        setProgress(100);
+      }
     }
   }, []);
 
-  const handleSelect = async (server: Server) => {
-    if (server.certFingerprint) {
-      await setServerCertFingerprint(server.certFingerprint);
-    }
-    onSelect(server);
-    onClose();
-  };
-
-  const handleManualConnect = () => {
-    const raw = manualUrl.trim();
-    if (!raw) return;
-    let addr = raw.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-    const slashIdx = addr.indexOf('/');
-    if (slashIdx > 0) addr = addr.slice(0, slashIdx);
-    let ip = addr;
-    let port = 8000;
-    const colonIdx = addr.lastIndexOf(':');
-    if (colonIdx > 0) {
-      const maybePort = addr.slice(colonIdx + 1);
-      if (/^\d+$/.test(maybePort)) {
-        const parsed = Number.parseInt(maybePort, 10);
-        if (parsed >= 1 && parsed <= 65535) {
-          port = parsed;
-          ip = addr.slice(0, colonIdx);
-        }
+  const handleSelect = useCallback(async (server: Server) => {
+    if (selectingRef.current) return;
+    selectingRef.current = true;
+    setSelecting(true);
+    try {
+      if (server.certFingerprint) {
+        await setServerCertFingerprint(server.certFingerprint);
       }
+      onSelect(server);
+      onClose();
+    } catch (err: any) {
+      selectingRef.current = false;
+      if (!mountedRef.current) return;
+      Alert.alert('Connection Failed', sanitizeErrorMessage(err, 'Could not save the selected server.'));
+      setSelecting(false);
     }
-    if (!ip) return;
-    onSelect({ ip, port, name: ip, version: '?' });
+  }, [onSelect, onClose]);
+
+  const handleManualConnect = useCallback(() => {
+    if (selectingRef.current) return;
+    const parsed = parseManualAddress(manualUrl);
+    if (!parsed) {
+      Alert.alert('Invalid address', 'Enter an IP, hostname, or URL like 192.168.1.100:8000');
+      return;
+    }
+    selectingRef.current = true;
+    setSelecting(true);
+    onSelect({ ip: parsed.ip, port: parsed.port, name: parsed.ip, version: '?' });
     setManualUrl('');
     onClose();
-  };
+  }, [manualUrl, onSelect, onClose]);
+
+  const busy = scanning || selecting;
+
+  const handleRequestClose = useCallback(() => {
+    if (selecting) return;
+    onClose();
+  }, [selecting, onClose]);
 
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} statusBarTranslucent>
-      <Animated.View style={[styles.backdrop, backdropAnimStyle]}>
-        <AnimatedPressable style={{ flex: 1 }} onPress={onClose} />
-      </Animated.View>
-      <Animated.View style={[styles.sheet, sheetAnimStyle]}>
-        <GestureDetector gesture={panGesture}>
-          <View style={styles.dragArea}>
-            <View style={styles.handle} />
-          </View>
-        </GestureDetector>
-
-        <View style={styles.header}>
-          <View>
-            <Text style={styles.title}>Find your server</Text>
-            <Text style={styles.subtitle}>Scan your local network for Phone Backup Server.</Text>
-          </View>
-          <AnimatedPressable onPress={onClose} style={styles.closeBtn} scaleDown={0.85} accessibilityLabel="Close discovery">
-            <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={18} fallback="X" />
-          </AnimatedPressable>
-        </View>
-
-        {scanning && (
-          <View style={styles.progressTrack}>
-            <Animated.View style={[styles.progressFill, { width: `${progress}%` }]} />
-          </View>
-        )}
-
-        <AnimatedPressable
-          style={[styles.scanBtn, scanning && styles.scanBtnDisabled]}
-          onPress={startScan}
-          disabled={scanning}
-          scaleDown={0.96}
-          accessibilityLabel="Scan for servers"
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={handleRequestClose} statusBarTranslucent>
+      {/* RNGH gestures do not work inside RN Modal unless re-rooted here. */}
+      <GestureHandlerRootView style={styles.modalRoot}>
+        <KeyboardAvoidingView
+          style={styles.modalRoot}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         >
-          {scanning ? (
-            <ActivityIndicator color={colors.white} size="small" />
-          ) : (
-            <>
-              <AppIcon androidName="search" iosName="magnifyingglass" color={colors.white} size={18} fallback="S" />
-              <Text style={styles.scanBtnText}>{servers.length > 0 ? 'Scan again' : 'Start scan'}</Text>
-            </>
-          )}
-        </AnimatedPressable>
-
-        {error && !scanning && (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>{error}</Text>
-          </View>
-        )}
-
-        {servers.length > 0 && (
-          <FlatList
-            data={servers}
-            keyExtractor={(item) => item.ip}
-            style={styles.list}
-            renderItem={({ item }) => (
-              <AnimatedPressable
-                style={styles.serverItem}
-                onPress={() => handleSelect(item)}
-                scaleDown={0.97}
-                accessibilityLabel={`Connect to ${item.name} at ${item.ip}`}
-              >
-                <View style={styles.serverIcon}>
-                  <AppIcon androidName="desktop_windows" iosName="desktopcomputer" color={colors.primary} size={24} fallback="PC" />
-                </View>
-                <View style={styles.serverInfo}>
-                  <Text style={styles.serverName}>{item.name}</Text>
-                  <Text style={styles.serverMeta}>
-                    {item.ip}:{item.port} - v{item.version}
-                  </Text>
-                </View>
-                <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.primary} size={20} fallback=">" />
-              </AnimatedPressable>
-            )}
-          />
-        )}
-
-        <View style={styles.manualSection}>
-          <Text style={styles.manualLabel}>Or enter address manually</Text>
-          <View style={styles.manualRow}>
-            <TextInput
-              style={styles.manualInput}
-              value={manualUrl}
-              onChangeText={setManualUrl}
-              placeholder="http://192.168.1.100:8000"
-              placeholderTextColor={colors.textMuted}
-              keyboardType="url"
-              autoCapitalize="none"
-              autoCorrect={false}
-              returnKeyType="go"
-              onSubmitEditing={handleManualConnect}
+          <Animated.View style={[styles.backdrop, backdropAnimStyle]} pointerEvents="box-none">
+            <Pressable
+              style={StyleSheet.absoluteFill}
+              onPress={handleRequestClose}
+              disabled={selecting}
+              accessibilityLabel="Dismiss discovery"
             />
-            <AnimatedPressable
-              style={[styles.manualConnectBtn, !manualUrl.trim() && { opacity: 0.5 }]}
-              onPress={handleManualConnect}
-              disabled={!manualUrl.trim()}
-              scaleDown={0.9}
-              accessibilityLabel="Connect to manually entered server"
-            >
-              <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.white} size={18} fallback=">" />
-            </AnimatedPressable>
-          </View>
-        </View>
+          </Animated.View>
 
-        <Text style={styles.hint}>Drag the handle down to dismiss. Enter IP, hostname, or full URL with port.</Text>
-      </Animated.View>
+          <Animated.View
+            style={[
+              styles.sheet,
+              sheetAnimStyle,
+              { paddingBottom: Math.max(insets.bottom, Spacing.five) + Spacing.two },
+            ]}
+          >
+            <GestureDetector gesture={panGesture}>
+              <View style={styles.dragArea}>
+                <View style={styles.handle} />
+              </View>
+            </GestureDetector>
+
+            <View style={styles.header}>
+              <View style={styles.headerText}>
+                <Text style={styles.title}>Find your server</Text>
+                <Text style={styles.subtitle}>Scan your local network for Phone Backup Server.</Text>
+              </View>
+              <AnimatedPressable
+                onPress={handleRequestClose}
+                style={styles.closeBtn}
+                scaleDown={0.85}
+                disabled={selecting}
+                accessibilityLabel="Close discovery"
+              >
+                <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={18} fallback="X" />
+              </AnimatedPressable>
+            </View>
+
+            {scanning && (
+              <View style={styles.progressTrack}>
+                <View style={[styles.progressFill, { width: `${progress}%` }]} />
+              </View>
+            )}
+
+            <AnimatedPressable
+              style={[styles.scanBtn, busy && styles.scanBtnDisabled]}
+              onPress={startScan}
+              disabled={busy}
+              scaleDown={0.96}
+              accessibilityLabel="Scan for servers"
+            >
+              {scanning ? (
+                <ActivityIndicator color={colors.white} size="small" />
+              ) : (
+                <>
+                  <AppIcon androidName="search" iosName="magnifyingglass" color={colors.white} size={18} fallback="S" />
+                  <Text style={styles.scanBtnText}>{servers.length > 0 ? 'Scan again' : 'Start scan'}</Text>
+                </>
+              )}
+            </AnimatedPressable>
+
+            {error && !scanning && (
+              <View style={styles.errorBox}>
+                <Text style={styles.errorText}>{error}</Text>
+              </View>
+            )}
+
+            {servers.length > 0 && (
+              <FlatList
+                data={servers}
+                keyExtractor={(item) => `${item.ip}:${item.port}`}
+                style={styles.list}
+                keyboardShouldPersistTaps="handled"
+                renderItem={({ item }) => (
+                  <AnimatedPressable
+                    style={[styles.serverItem, selecting && { opacity: 0.6 }]}
+                    onPress={() => handleSelect(item)}
+                    disabled={busy}
+                    scaleDown={0.97}
+                    accessibilityLabel={`Connect to ${item.name} at ${item.ip}`}
+                  >
+                    <View style={styles.serverIcon}>
+                      <AppIcon androidName="desktop_windows" iosName="desktopcomputer" color={colors.primary} size={24} fallback="PC" />
+                    </View>
+                    <View style={styles.serverInfo}>
+                      <Text style={styles.serverName}>{item.name}</Text>
+                      <Text style={styles.serverMeta}>
+                        {item.ip}:{item.port} - v{item.version}
+                      </Text>
+                    </View>
+                    {selecting ? (
+                      <ActivityIndicator size="small" color={colors.primary} />
+                    ) : (
+                      <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.primary} size={20} fallback=">" />
+                    )}
+                  </AnimatedPressable>
+                )}
+              />
+            )}
+
+            <View style={styles.manualSection}>
+              <Text style={styles.manualLabel}>Or enter address manually</Text>
+              <View style={styles.manualRow}>
+                <TextInput
+                  style={styles.manualInput}
+                  value={manualUrl}
+                  onChangeText={setManualUrl}
+                  placeholder="http://192.168.1.100:8000"
+                  placeholderTextColor={colors.textMuted}
+                  keyboardType="url"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  returnKeyType="go"
+                  editable={!busy}
+                  onSubmitEditing={handleManualConnect}
+                />
+                <AnimatedPressable
+                  style={[styles.manualConnectBtn, (!manualUrl.trim() || busy) && { opacity: 0.5 }]}
+                  onPress={handleManualConnect}
+                  disabled={!manualUrl.trim() || busy}
+                  scaleDown={0.9}
+                  accessibilityLabel="Connect to manually entered server"
+                >
+                  <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.white} size={18} fallback=">" />
+                </AnimatedPressable>
+              </View>
+            </View>
+
+            <Text style={styles.hint}>Drag the handle down to dismiss. Enter IP, hostname, or full URL with port.</Text>
+          </Animated.View>
+        </KeyboardAvoidingView>
+      </GestureHandlerRootView>
     </Modal>
   );
 }
 
 const createStyles = (colors: AppColors) => StyleSheet.create({
-  backdrop: {
+  modalRoot: {
     flex: 1,
+    justifyContent: 'flex-end',
+  },
+  backdrop: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
     backgroundColor: 'rgba(16, 32, 51, 0.42)',
   },
   sheet: {
+    zIndex: 2,
+    elevation: 8,
     backgroundColor: colors.surface,
     borderTopLeftRadius: Radius.xxl,
     borderTopRightRadius: Radius.xxl,
     padding: Spacing.six,
-    paddingBottom: Spacing.seven,
     minHeight: 390,
     maxHeight: '82%',
     borderTopWidth: 1,
@@ -297,6 +417,9 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     alignItems: 'flex-start',
     gap: Spacing.four,
     marginBottom: Spacing.five,
+  },
+  headerText: {
+    flex: 1,
   },
   title: {
     fontSize: TextScale.lg,

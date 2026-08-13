@@ -274,13 +274,14 @@ type SourceSelectorProps = {
   sharedSources: SharedSource[];
   selectedSourceId: string | null;
   isLoadingSources: boolean;
+  isOffline: boolean;
   onModeChange: (mode: SourceMode) => void;
   onSourceSelect: (source: SharedSource) => void;
   colors: AppColors;
 };
 
 function SourceSelector({
-  mode, sharedSources, selectedSourceId, isLoadingSources,
+  mode, sharedSources, selectedSourceId, isLoadingSources, isOffline,
   onModeChange, onSourceSelect, colors,
 }: SourceSelectorProps) {
   const [showSourceMenu, setShowSourceMenu] = useState(false);
@@ -322,7 +323,11 @@ function SourceSelector({
 
       {mode === 'shared' && (
         <View style={srcStyles.sourceRow}>
-          {isLoadingSources ? (
+          {isOffline ? (
+            <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
+              Connect to a server to load shared folders.
+            </Text>
+          ) : isLoadingSources ? (
             <View style={srcStyles.sourceLoadingRow}>
               <ActivityIndicator size="small" color={colors.primary} />
               <Text style={[srcStyles.sourceLoadingText, { color: colors.textSecondary }]}>
@@ -1694,6 +1699,9 @@ export default function RestoreScreen() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<{ current: number; total: number; fileName: string; bytesWritten: number; bytesTotal: number } | null>(null);
   const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
+  const downloadActiveRef = useRef(false);
+  const downloadSingleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const restoreMountedRef = useRef(true);
 
   // Sort state
   const [sortField, setSortField] = useState<SortField>('date');
@@ -1720,32 +1728,96 @@ export default function RestoreScreen() {
   });
 
   useEffect(() => {
-    if (isDownloading) {
-      expandHeader();
-    }
+    // Keep the collapsible header expanded around downloads so it does not
+    // reappear collapsed (empty gap) when the progress banner unmounts.
+    expandHeader();
   }, [isDownloading, expandHeader]);
+
+  useEffect(() => {
+    restoreMountedRef.current = true;
+    return () => {
+      restoreMountedRef.current = false;
+      downloadActiveRef.current = false;
+      if (downloadSingleTimerRef.current) {
+        clearTimeout(downloadSingleTimerRef.current);
+        downloadSingleTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const sourceModeRef = useRef(sourceMode);
+  const sharedSourcesGen = useRef(0);
+  useEffect(() => {
+    sourceModeRef.current = sourceMode;
+  }, [sourceMode]);
+
+  // Load shared sources — invoke when not offline (connected or checking)
+  const loadSharedSources = useCallback(async () => {
+    const generation = ++sharedSourcesGen.current;
+    setIsLoadingSources(true);
+    try {
+      const sources: SharedSource[] = await listSharedSources();
+      if (generation !== sharedSourcesGen.current || !restoreMountedRef.current) return;
+      if (sourceModeRef.current !== 'shared') return;
+      setSharedSources(sources);
+      setSelectedSourceId(prev => {
+        if (sources.length === 0) return null;
+        if (!prev) return sources[0].id;
+        if (!sources.some(s => s.id === prev)) return sources[0].id;
+        return prev;
+      });
+    } catch (e: any) {
+      if (generation !== sharedSourcesGen.current || !restoreMountedRef.current) return;
+      if (sourceModeRef.current === 'shared') {
+        Alert.alert('Shared Folders', sanitizeErrorMessage(e, 'Server unreachable — check that the desktop server is running.'));
+      }
+      setSharedSources([]);
+      setSelectedSourceId(null);
+    } finally {
+      if (generation === sharedSourcesGen.current && restoreMountedRef.current) {
+        setIsLoadingSources(false);
+      }
+    }
+  }, []);
 
   // Server connection check
   const checkServer = useCallback(async (alive?: () => boolean) => {
     const stillAlive = alive ?? (() => true);
     const ip = await getServerIp();
     if (!stillAlive()) return;
-    if (!ip) { setServerStatus('unknown'); return; }
-    setServerStatus('checking');
+    if (!ip) {
+      sharedSourcesGen.current += 1;
+      setIsLoadingSources(false);
+      setServerStatus('unknown');
+      return;
+    }
+    // Keep showing connected while re-probing to avoid offline UI flash.
+    setServerStatus(prev => (prev === 'connected' ? prev : 'checking'));
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
     try {
       const result = await checkDeviceConnection({ signal: controller.signal });
       if (!stillAlive()) return;
-      setServerStatus(result.connected ? 'connected' : 'disconnected');
-      loadServerConfig();
+      if (result.connected) {
+        setServerStatus('connected');
+        loadServerConfig();
+        if (sourceModeRef.current === 'shared') {
+          void loadSharedSources();
+        }
+      } else {
+        sharedSourcesGen.current += 1;
+        setIsLoadingSources(false);
+        setServerStatus('disconnected');
+      }
     } catch {
       if (!stillAlive()) return;
+      sharedSourcesGen.current += 1;
+      setIsLoadingSources(false);
       setServerStatus('disconnected');
     } finally {
       clearTimeout(timeout);
     }
-  }, [loadServerConfig]);
+  }, [loadServerConfig, loadSharedSources]);
 
   useFocusEffect(useCallback(() => {
     let alive = true;
@@ -1753,33 +1825,28 @@ export default function RestoreScreen() {
     return () => { alive = false; };
   }, [checkServer]));
 
+  // True offline only — "checking" stays fully interactive like before.
   const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
 
-  // Load shared sources
-  const loadSharedSources = useCallback(async () => {
-    setIsLoadingSources(true);
-    try {
-      const sources: SharedSource[] = await listSharedSources();
-      setSharedSources(sources);
-      if (sources.length > 0 && !selectedSourceId) {
-        setSelectedSourceId(sources[0].id);
-      }
-    } catch (e: any) {
-      Alert.alert('Shared Folders', sanitizeErrorMessage(e, 'Server unreachable — check that the desktop server is running.'));
-    } finally {
-      setIsLoadingSources(false);
-    }
-  }, [selectedSourceId]);
-
   const handleModeChange = useCallback((mode: SourceMode) => {
+    if (mode === sourceModeRef.current) return;
     setSourceMode(mode);
     setFiles([]);
     setTree(null);
     setSelectedPaths(new Set());
-    if (mode === 'shared') {
-      loadSharedSources();
+    setSelectionMode(false);
+    if (mode !== 'shared') {
+      sharedSourcesGen.current += 1;
+      setIsLoadingSources(false);
+      setSharedSources([]);
+      setSelectedSourceId(null);
+      return;
     }
-  }, [loadSharedSources]);
+    // Load whenever we are not offline (connected or checking).
+    if (serverStatus !== 'disconnected' && serverStatus !== 'unknown') {
+      void loadSharedSources();
+    }
+  }, [loadSharedSources, serverStatus]);
 
   const handleSourceSelect = useCallback((source: SharedSource) => {
     setSelectedSourceId(source.id);
@@ -1810,6 +1877,7 @@ export default function RestoreScreen() {
 
   // Fetch files from server
   const handleFetch = async () => {
+    if (isOffline || isFetching || isDownloading) return;
     if (sourceMode === 'shared' && !selectedSourceId) {
       Alert.alert('No Source', 'Please select a shared folder first.');
       return;
@@ -1930,84 +1998,174 @@ export default function RestoreScreen() {
 
   // Download files
   const handleDownloadFiles = useCallback(async (pathSet: Set<string>) => {
-    if (pathSet.size === 0) return;
+    if (pathSet.size === 0 || downloadActiveRef.current) return;
+    if (serverStatus === 'disconnected' || serverStatus === 'unknown') {
+      Alert.alert('Offline', 'Connect to a server before downloading files.');
+      return;
+    }
+    downloadActiveRef.current = true;
+    const total = pathSet.size;
+    // Set progress immediately so the banner mounts with isDownloading and
+    // the layout never flips between "downloading chrome" and an empty gap.
+    setDownloadProgress({
+      current: 0,
+      total,
+      fileName: 'Preparing…',
+      bytesWritten: 0,
+      bytesTotal: 0,
+    });
     setIsDownloading(true);
 
-    const { status } = await MediaLibrary.requestPermissionsAsync();
-    const canSaveToGallery = status === 'granted';
+    let saved = 0;
+    let skipped = 0;
+    let failed = 0;
 
-    let index = 0, saved = 0, skipped = 0, failed = 0;
+    const publishProgress = (
+      current: number,
+      fileName: string,
+      bytesWritten: number,
+      bytesTotal: number,
+    ) => {
+      if (!downloadActiveRef.current) return;
+      setDownloadProgress({ current, total, fileName, bytesWritten, bytesTotal });
+    };
 
-    for (const path of pathSet) {
-      const fileInfo = files.find(f => f.path === path);
-      if (!fileInfo) continue;
+    try {
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (!downloadActiveRef.current) return;
+      const canSaveToGallery = status === 'granted';
 
-      index++;
-      const displayName = path.split(/[/\\]/).pop() ?? path;
-      setDownloadProgress({ current: index, total: pathSet.size, fileName: displayName, bytesWritten: 0, bytesTotal: fileInfo.size || 0 });
+      let completed = 0;
 
-      try {
-        if (!FileSystem.cacheDirectory) { failed++; continue; }
+      for (const path of pathSet) {
+        if (!downloadActiveRef.current) return;
 
-        const localPath = sanitizeRelativePath(path);
-        const ext = localPath.split('.').pop()?.toLowerCase() ?? '';
-        const isMedia = isMediaExtension(ext);
-
-        const onFileProgress = (written: number, total: number) => {
-          setDownloadProgress(prev => prev ? { ...prev, bytesWritten: written, bytesTotal: total > 0 ? total : prev.bytesTotal } : prev);
-        };
-
-        if (isMedia && canSaveToGallery) {
-          const tmpUri = FileSystem.cacheDirectory + 'restore_tmp_' + Date.now() + '_' + displayName;
-          if (sourceMode === 'shared' && selectedSourceId) {
-            await downloadSharedFile(selectedSourceId, path, tmpUri, onFileProgress);
-          } else {
-            await downloadFile(path, tmpUri, onFileProgress);
-          }
-          try {
-            await MediaLibrary.saveToLibraryAsync(tmpUri);
-            saved++;
-          } finally {
-            await FileSystem.deleteAsync(tmpUri, { idempotent: true });
-          }
+        const fileInfo = files.find(f => f.path === path);
+        if (!fileInfo) {
+          completed++;
+          failed++;
+          publishProgress(completed, path.split(/[/\\]/).pop() ?? path, 0, 0);
           continue;
         }
 
-        if (!FileSystem.documentDirectory) { failed++; continue; }
-        const destUri = FileSystem.documentDirectory + localPath;
-        const folderUri = destUri.substring(0, destUri.lastIndexOf('/'));
-        const folderInfo = await FileSystem.getInfoAsync(folderUri);
-        if (!folderInfo.exists) await FileSystem.makeDirectoryAsync(folderUri, { intermediates: true });
+        const displayName = path.split(/[/\\]/).pop() ?? path;
+        const knownSize = fileInfo.size || 0;
+        publishProgress(completed, displayName, 0, knownSize);
 
-        const existingInfo = await FileSystem.getInfoAsync(destUri);
-        if (existingInfo.exists && (existingInfo as any).size === fileInfo.size) { skipped++; continue; }
+        try {
+          if (!FileSystem.cacheDirectory) {
+            failed++;
+            completed++;
+            publishProgress(completed, displayName, 0, 0);
+            continue;
+          }
 
-        if (sourceMode === 'shared' && selectedSourceId) {
-          await downloadSharedFile(selectedSourceId, path, destUri, onFileProgress);
-        } else {
-          await downloadFile(path, destUri, onFileProgress);
+          const localPath = sanitizeRelativePath(path);
+          const ext = localPath.split('.').pop()?.toLowerCase() ?? '';
+          const isMedia = isMediaExtension(ext);
+
+          const onFileProgress = (written: number, totalBytes: number) => {
+            if (!downloadActiveRef.current) return;
+            setDownloadProgress(prev =>
+              prev
+                ? {
+                    ...prev,
+                    bytesWritten: written,
+                    bytesTotal: totalBytes > 0 ? totalBytes : prev.bytesTotal,
+                  }
+                : prev,
+            );
+          };
+
+          if (isMedia && canSaveToGallery) {
+            const tmpUri = FileSystem.cacheDirectory + 'restore_tmp_' + Date.now() + '_' + displayName;
+            if (sourceMode === 'shared' && selectedSourceId) {
+              await downloadSharedFile(selectedSourceId, path, tmpUri, onFileProgress);
+            } else {
+              await downloadFile(path, tmpUri, onFileProgress);
+            }
+            if (!downloadActiveRef.current) {
+              await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => undefined);
+              return;
+            }
+            try {
+              await MediaLibrary.saveToLibraryAsync(tmpUri);
+              saved++;
+            } finally {
+              await FileSystem.deleteAsync(tmpUri, { idempotent: true });
+            }
+            completed++;
+            publishProgress(completed, displayName, 0, 0);
+            continue;
+          }
+
+          if (!FileSystem.documentDirectory) {
+            failed++;
+            completed++;
+            publishProgress(completed, displayName, 0, 0);
+            continue;
+          }
+          const destUri = FileSystem.documentDirectory + localPath;
+          const folderUri = destUri.substring(0, destUri.lastIndexOf('/'));
+          const folderInfo = await FileSystem.getInfoAsync(folderUri);
+          if (!folderInfo.exists) await FileSystem.makeDirectoryAsync(folderUri, { intermediates: true });
+
+          const existingInfo = await FileSystem.getInfoAsync(destUri);
+          if (existingInfo.exists && (existingInfo as any).size === fileInfo.size) {
+            skipped++;
+            completed++;
+            publishProgress(completed, displayName, 0, 0);
+            continue;
+          }
+
+          if (sourceMode === 'shared' && selectedSourceId) {
+            await downloadSharedFile(selectedSourceId, path, destUri, onFileProgress);
+          } else {
+            await downloadFile(path, destUri, onFileProgress);
+          }
+          if (!downloadActiveRef.current) return;
+          saved++;
+          completed++;
+          publishProgress(completed, displayName, 0, 0);
+        } catch (e) {
+          console.warn(`Failed to restore ${path}:`, e);
+          failed++;
+          completed++;
+          publishProgress(completed, displayName, 0, 0);
         }
-        saved++;
-      } catch (e) {
-        console.warn(`Failed to restore ${path}:`, e);
-        failed++;
+      }
+
+      if (!downloadActiveRef.current) return;
+
+      const parts: string[] = [];
+      if (saved > 0) parts.push(`${saved} saved to gallery / storage`);
+      if (skipped > 0) parts.push(`${skipped} already present`);
+      if (failed > 0) parts.push(`${failed} failed`);
+      Alert.alert('Restore Complete', parts.join('\n') || 'Nothing was downloaded.');
+      setSelectedPaths(new Set());
+      setSelectionMode(false);
+    } catch (e) {
+      if (!downloadActiveRef.current || !restoreMountedRef.current) return;
+      console.warn('Restore download aborted:', e);
+      Alert.alert('Restore Failed', sanitizeErrorMessage(e, 'Could not complete the download.'));
+    } finally {
+      downloadActiveRef.current = false;
+      if (restoreMountedRef.current) {
+        setIsDownloading(false);
+        setDownloadProgress(null);
       }
     }
-
-    setIsDownloading(false);
-    setDownloadProgress(null);
-
-    const parts: string[] = [];
-    if (saved > 0) parts.push(`${saved} saved to gallery / storage`);
-    if (skipped > 0) parts.push(`${skipped} already present`);
-    if (failed > 0) parts.push(`${failed} failed`);
-    Alert.alert('Restore Complete', parts.join('\n') || 'Nothing was downloaded.');
-    setSelectedPaths(new Set());
-  }, [files, sourceMode, selectedSourceId]);
+  }, [files, sourceMode, selectedSourceId, serverStatus]);
 
   const handleDownloadSingle = useCallback(async (file: RemoteFile) => {
     closePreview();
-    setTimeout(() => handleDownloadFiles(new Set([file.path])), 300);
+    if (downloadSingleTimerRef.current) {
+      clearTimeout(downloadSingleTimerRef.current);
+    }
+    downloadSingleTimerRef.current = setTimeout(() => {
+      downloadSingleTimerRef.current = null;
+      void handleDownloadFiles(new Set([file.path]));
+    }, 300);
   }, [closePreview, handleDownloadFiles]);
 
   const handleDownload = useCallback(
@@ -2026,75 +2184,87 @@ export default function RestoreScreen() {
   const fetchDisabled = isFetching || isDownloading || isOffline ||
     (sourceMode === 'shared' && !selectedSourceId);
 
+  // Single overall progress: finished files + current file byte fraction.
+  const downloadPercent = useMemo(() => {
+    if (!downloadProgress || downloadProgress.total <= 0) return 0;
+    if (downloadProgress.fileName === 'Preparing…') return 0;
+    const fileFraction =
+      downloadProgress.bytesTotal > 0
+        ? Math.min(downloadProgress.bytesWritten / downloadProgress.bytesTotal, 1)
+        : 0;
+    const overall = (downloadProgress.current + fileFraction) / downloadProgress.total;
+    return Math.max(0, Math.min(Math.round(overall * 100), 100));
+  }, [downloadProgress]);
+
+  const isPreparingDownload = downloadProgress?.fileName === 'Preparing…';
+
   return (
     <View style={[styles.root, { backgroundColor: colors.bg }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
 
-      {/* Download progress banner */}
-      {isDownloading && downloadProgress && (
+      {/* Download progress banner — replaces page header while restoring */}
+      {isDownloading && downloadProgress ? (
         <View style={[styles.progressContainer, { paddingTop: insets.top + Spacing.two }]}>
-          <Text style={styles.progressText}>Downloading {downloadProgress.current} / {downloadProgress.total}</Text>
-          <Text style={styles.progressSubtext} numberOfLines={1}>{downloadProgress.fileName}</Text>
-          <View style={styles.progressBarBg}>
-            <View style={[styles.progressBarFill, { width: `${(downloadProgress.current / downloadProgress.total) * 100}%` }]} />
-          </View>
-          {downloadProgress.bytesTotal > 0 && (
-            <View style={styles.fileProgressRow}>
-              <View style={[styles.progressBarBg, { flex: 1 }]}>
-                <View style={[styles.progressBarFill, styles.fileProgressBar, { width: `${Math.min((downloadProgress.bytesWritten / downloadProgress.bytesTotal) * 100, 100)}%` }]} />
-              </View>
-              <Text style={styles.fileProgressText}>
-                {Math.round((downloadProgress.bytesWritten / downloadProgress.bytesTotal) * 100)}%
-              </Text>
-            </View>
-          )}
-        </View>
-      )}
-
-      {/* Page Header — absolute+collapsible when browsing; in-flow under banner while downloading */}
-      <ReAnimated.View
-        onLayout={isDownloading ? undefined : onHeaderLayout}
-        style={[
-          styles.pageHeader,
-          {
-            paddingTop: isDownloading ? Spacing.four : Spacing.five,
-            backgroundColor: colors.bg,
-          },
-          !isDownloading && headerAnimatedStyle,
-        ]}
-      >
-        <View>
-          <Text style={styles.pageTitle}>Restore Files</Text>
-          <Text style={styles.pageSubtitle}>
-            {files.length > 0 ? `${files.length} files on server` : 'Download files from server'}
+          <Text style={styles.progressText}>
+            {isPreparingDownload
+              ? 'Preparing download…'
+              : `Downloading ${Math.min(downloadProgress.current + 1, downloadProgress.total)} / ${downloadProgress.total}`}
           </Text>
+          <Text style={styles.progressSubtext} numberOfLines={1}>
+            {isPreparingDownload ? 'Waiting for permission…' : downloadProgress.fileName}
+          </Text>
+          <View style={styles.progressBarBg}>
+            <View style={[styles.progressBarFill, { width: `${downloadPercent}%` }]} />
+          </View>
+          <Text style={styles.progressPercentText}>{downloadPercent}%</Text>
         </View>
-        <View style={styles.headerButtons}>
-          <AnimatedPressable
-            onPress={handleFetch}
-            style={[styles.actionBtn, fetchDisabled && styles.disabledBtn]}
-            disabled={fetchDisabled}
-            scaleDown={0.92}
-          >
-            {isFetching ? (
-              <ActivityIndicator size="small" color={colors.primary} />
-            ) : (
-              <>
-                <AppIcon androidName="sync" iosName="arrow.triangle.2.circlepath" color={colors.primary} size={16} />
-                <Text style={[styles.actionBtnText, { color: colors.primary }]}>Fetch</Text>
-              </>
-            )}
-          </AnimatedPressable>
-          {files.length > 0 && (
-            <AnimatedPressable onPress={selectAll} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isDownloading || isOffline} scaleDown={0.92}>
-              <AppIcon androidName="select_all" iosName="checkmark.circle" color={colors.primary} size={16} />
-              <Text style={[styles.actionBtnText, { color: colors.primary }]}>
-                {selectedPaths.size === files.length ? 'Deselect All' : 'Select All'}
-              </Text>
+      ) : (
+        /* Page Header — absolute+collapsible when browsing */
+        <ReAnimated.View
+          onLayout={onHeaderLayout}
+          style={[
+            styles.pageHeader,
+            {
+              paddingTop: Spacing.five,
+              backgroundColor: colors.bg,
+            },
+            headerAnimatedStyle,
+          ]}
+        >
+          <View>
+            <Text style={styles.pageTitle}>Restore Files</Text>
+            <Text style={styles.pageSubtitle}>
+              {files.length > 0 ? `${files.length} files on server` : 'Download files from server'}
+            </Text>
+          </View>
+          <View style={styles.headerButtons}>
+            <AnimatedPressable
+              onPress={handleFetch}
+              style={[styles.actionBtn, fetchDisabled && styles.disabledBtn]}
+              disabled={fetchDisabled}
+              scaleDown={0.92}
+              accessibilityLabel="Fetch files from server"
+            >
+              {isFetching ? (
+                <ActivityIndicator size="small" color={colors.primary} />
+              ) : (
+                <>
+                  <AppIcon androidName="sync" iosName="arrow.triangle.2.circlepath" color={fetchDisabled ? colors.textMuted : colors.primary} size={16} />
+                  <Text style={[styles.actionBtnText, { color: fetchDisabled ? colors.textMuted : colors.primary }]}>Fetch</Text>
+                </>
+              )}
             </AnimatedPressable>
-          )}
-        </View>
-      </ReAnimated.View>
+            {files.length > 0 && (
+              <AnimatedPressable onPress={selectAll} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isDownloading || isOffline} scaleDown={0.92}>
+                <AppIcon androidName="select_all" iosName="checkmark.circle" color={isOffline ? colors.textMuted : colors.primary} size={16} />
+                <Text style={[styles.actionBtnText, { color: isOffline ? colors.textMuted : colors.primary }]}>
+                  {selectedPaths.size === files.length ? 'Deselect All' : 'Select All'}
+                </Text>
+              </AnimatedPressable>
+            )}
+          </View>
+        </ReAnimated.View>
+      )}
 
       <ReAnimated.View style={isDownloading ? { flex: 1 } : contentInsetStyle}>
       {/* Source Selector */}
@@ -2104,6 +2274,7 @@ export default function RestoreScreen() {
           sharedSources={sharedSources}
           selectedSourceId={selectedSourceId}
           isLoadingSources={isLoadingSources}
+          isOffline={isOffline}
           onModeChange={handleModeChange}
           onSourceSelect={handleSourceSelect}
           colors={colors}
@@ -2116,7 +2287,7 @@ export default function RestoreScreen() {
       )}
 
       {/* Hint Bar */}
-      {files.length > 0 && selectedPaths.size === 0 && !selectionMode && (
+      {files.length > 0 && selectedPaths.size === 0 && !selectionMode && !isDownloading && (
         <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
           <AppIcon androidName="touch_app" iosName="hand.tap" color={colors.textMuted} size={13} />
           <Text style={[styles.hintText, { color: colors.textMuted }]}>
@@ -2161,7 +2332,7 @@ export default function RestoreScreen() {
         )}
         contentContainerStyle={[styles.listContent, { paddingBottom: BottomTabInset + Spacing.eight }]}
         showsVerticalScrollIndicator={false}
-        onScroll={onListScroll}
+        onScroll={isDownloading ? undefined : onListScroll}
         scrollEventThrottle={16}
         ListEmptyComponent={
           !isFetching ? (
@@ -2315,10 +2486,11 @@ const createStyles = (colors: AppColors) =>
     progressText: { fontSize: TextScale.sm, fontWeight: '700', color: colors.text, marginBottom: Spacing.one },
     progressSubtext: { fontSize: TextScale.xs, color: colors.textSecondary, marginBottom: Spacing.two },
     progressBarBg: { height: 6, backgroundColor: colors.surfaceBorder, borderRadius: Radius.full, overflow: 'hidden' },
-    progressBarFill: { height: '100%', backgroundColor: colors.primary },
-    fileProgressRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, marginTop: Spacing.one },
-    fileProgressBar: { opacity: 0.7 },
-    fileProgressText: { fontSize: TextScale.xs, fontWeight: '600', color: colors.textSecondary, minWidth: 36, textAlign: 'right' },
+    progressBarFill: { height: '100%', backgroundColor: colors.primary, borderRadius: Radius.full },
+    progressPercentText: {
+      fontSize: TextScale.xs, fontWeight: '600', color: colors.textSecondary,
+      marginTop: Spacing.one, textAlign: 'right',
+    },
   });
 
 // ─────────────────────────────────────────────────────────────────────────────

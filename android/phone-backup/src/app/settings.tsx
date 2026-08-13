@@ -521,11 +521,13 @@ export default function SettingsScreen() {
       </ScrollView>
       </Animated.View>
 
-      <ServerDiscoverySheet
-        visible={discoveryVisible}
-        onSelect={handleServerSelected}
-        onClose={() => setDiscoveryVisible(false)}
-      />
+      {discoveryVisible ? (
+        <ServerDiscoverySheet
+          visible
+          onSelect={handleServerSelected}
+          onClose={() => setDiscoveryVisible(false)}
+        />
+      ) : null}
     </View>
   );
 }

@@ -178,7 +178,8 @@ export default function HomeScreen() {
       return;
     }
 
-    setServerStatus('checking');
+    // Keep connected status visible while re-probing to avoid Sync Now flicker.
+    setServerStatus(prev => (prev === 'connected' ? prev : 'checking'));
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
     try {
@@ -378,6 +379,15 @@ export default function HomeScreen() {
       return;
     }
 
+    // New syncs require connectivity; allow stop/force-stop while an active sync runs.
+    if (
+      serverStatus === 'disconnected' ||
+      serverStatus === 'unknown' ||
+      serverStatus === 'removed'
+    ) {
+      return;
+    }
+
     const ip = await getServerIp();
     if (!ip) {
       Alert.alert(
@@ -558,7 +568,9 @@ export default function HomeScreen() {
                     ? 'Tap again to force stop'
                     : 'Stopping sync — tap again to force stop'
                   : 'Stop sync'
-                : 'Sync now'
+                : isOffline
+                  ? 'Sync unavailable while offline'
+                  : 'Sync now'
             }
           >
             {syncing ? (
