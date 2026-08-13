@@ -9,7 +9,6 @@ import {
   StatusBar,
   ActivityIndicator,
   Modal,
-  ScrollView,
   Dimensions,
   Pressable,
   PanResponder,
@@ -22,6 +21,7 @@ import { Image } from 'expo-image';
 import { useEvent } from 'expo';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
@@ -113,8 +113,29 @@ type TreeNode = {
 
 type SortField = 'name' | 'date' | 'type' | 'size';
 type SortDir   = 'asc' | 'desc';
+type SortPreference = { field: SortField; dir: SortDir };
 
 type FileCategory = 'image' | 'video' | 'audio' | 'other';
+
+const RESTORE_SORT_PREFERENCE_KEY = 'restore_sort_preference_v1';
+
+function parseSortPreference(raw: string | null): SortPreference | null {
+  if (!raw) return null;
+  try {
+    const preference: unknown = JSON.parse(raw);
+    if (
+      typeof preference === 'object' &&
+      preference !== null &&
+      ['name', 'date', 'type', 'size'].includes((preference as SortPreference).field) &&
+      ['asc', 'desc'].includes((preference as SortPreference).dir)
+    ) {
+      return preference as SortPreference;
+    }
+  } catch {
+    // Ignore malformed preferences and use the date default instead.
+  }
+  return null;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // File-type helpers
@@ -275,23 +296,37 @@ type SourceSelectorProps = {
   selectedSourceId: string | null;
   isLoadingSources: boolean;
   isOffline: boolean;
+  sortEnabled: boolean;
+  sortField: SortField;
+  sortDir: SortDir;
   onModeChange: (mode: SourceMode) => void;
   onSourceSelect: (source: SharedSource) => void;
+  onSortChange: (field: SortField, dir: SortDir) => void;
   colors: AppColors;
 };
 
 function SourceSelector({
   mode, sharedSources, selectedSourceId, isLoadingSources, isOffline,
-  onModeChange, onSourceSelect, colors,
+  sortEnabled, sortField, sortDir, onModeChange, onSourceSelect, onSortChange, colors,
 }: SourceSelectorProps) {
   const [showSourceMenu, setShowSourceMenu] = useState(false);
+  const [showSortMenu, setShowSortMenu] = useState(false);
   const selectedSource = sharedSources.find(s => s.id === selectedSourceId);
+
+  const handleSortSelect = (field: SortField) => {
+    onSortChange(field, field === sortField && sortDir === 'asc' ? 'desc' : 'asc');
+    setShowSortMenu(false);
+  };
 
   return (
     <View style={[srcStyles.container, { backgroundColor: colors.surface, borderBottomColor: colors.surfaceBorder }]}>
       <View style={srcStyles.pillRow}>
         <TouchableOpacity
-          onPress={() => onModeChange('phone')}
+          onPress={() => {
+            setShowSourceMenu(false);
+            setShowSortMenu(false);
+            onModeChange('phone');
+          }}
           style={[
             srcStyles.pill,
             { borderColor: mode === 'phone' ? colors.primary : colors.surfaceBorder,
@@ -306,7 +341,10 @@ function SourceSelector({
         </TouchableOpacity>
 
         <TouchableOpacity
-          onPress={() => onModeChange('shared')}
+          onPress={() => {
+            setShowSortMenu(false);
+            onModeChange('shared');
+          }}
           style={[
             srcStyles.pill,
             { borderColor: mode === 'shared' ? colors.primary : colors.surfaceBorder,
@@ -319,7 +357,63 @@ function SourceSelector({
             Shared Folders
           </Text>
         </TouchableOpacity>
+
+        {sortEnabled && (
+          <TouchableOpacity
+            onPress={() => {
+              setShowSourceMenu(false);
+              setShowSortMenu(visible => !visible);
+            }}
+            style={[
+              srcStyles.sortButton,
+              {
+                backgroundColor: showSortMenu ? colors.primarySoft : 'transparent',
+                borderColor: showSortMenu ? colors.primary : colors.surfaceBorder,
+              },
+            ]}
+            activeOpacity={0.75}
+            accessibilityLabel="Sort files"
+            accessibilityHint={`Currently sorted by ${sortField}, ${sortDir === 'asc' ? 'ascending' : 'descending'}`}
+          >
+            <AppIcon
+              androidName="sort"
+              iosName="arrow.up.arrow.down"
+              color={showSortMenu ? colors.primary : colors.textSecondary}
+              size={18}
+              fallback="↕"
+            />
+          </TouchableOpacity>
+        )}
       </View>
+
+      {showSortMenu && sortEnabled && (
+        <View style={[srcStyles.sortMenu, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}>
+          {SORT_OPTIONS.map(option => {
+            const isActive = option.field === sortField;
+            return (
+              <TouchableOpacity
+                key={option.field}
+                onPress={() => handleSortSelect(option.field)}
+                style={[srcStyles.sortMenuItem, isActive && { backgroundColor: colors.primarySoft }]}
+                activeOpacity={0.75}
+                accessibilityLabel={`Sort by ${option.label}`}
+              >
+                <Text style={[srcStyles.sortMenuItemText, { color: isActive ? colors.primary : colors.text }]}>
+                  {option.label}
+                </Text>
+                {isActive && (
+                  <View style={srcStyles.sortDirection}>
+                    <Text style={[srcStyles.sortDirectionText, { color: colors.primary }]}>
+                      {sortDir === 'asc' ? '↑' : '↓'}
+                    </Text>
+                    <AppIcon androidName="check" iosName="checkmark" color={colors.primary} size={14} />
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      )}
 
       {mode === 'shared' && (
         <View style={srcStyles.sourceRow}>
@@ -393,6 +487,7 @@ const srcStyles = StyleSheet.create({
   },
   pillRow: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: Spacing.two,
     paddingHorizontal: Spacing.four,
     paddingTop: Spacing.two,
@@ -407,6 +502,31 @@ const srcStyles = StyleSheet.create({
     borderWidth: 1.5,
   },
   pillText: { fontSize: TextScale.xs, fontWeight: '700' },
+  sortButton: {
+    width: 32,
+    height: 32,
+    marginLeft: 'auto',
+    borderWidth: 1,
+    borderRadius: Radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sortMenu: {
+    marginHorizontal: Spacing.four,
+    marginTop: Spacing.two,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    overflow: 'hidden',
+  },
+  sortMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two + 2,
+  },
+  sortMenuItemText: { flex: 1, fontSize: TextScale.sm, fontWeight: '600' },
+  sortDirection: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
+  sortDirectionText: { fontSize: TextScale.sm, fontWeight: '800' },
   sourceRow: { paddingHorizontal: Spacing.four, paddingTop: Spacing.two },
   sourceLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   sourceLoadingText: { fontSize: TextScale.xs },
@@ -1407,84 +1527,6 @@ const SORT_OPTIONS: { field: SortField; label: string }[] = [
   { field: 'size', label: 'Size' },
 ];
 
-type SortBarProps = {
-  field: SortField;
-  dir: SortDir;
-  onChange: (field: SortField, dir: SortDir) => void;
-  colors: AppColors;
-};
-
-function SortBar({ field, dir, onChange, colors }: SortBarProps) {
-  const handlePress = (f: SortField) => {
-    if (f === field) {
-      onChange(f, dir === 'asc' ? 'desc' : 'asc');
-    } else {
-      onChange(f, 'asc');
-    }
-  };
-
-  return (
-    <View style={[sortStyles.wrapper, { backgroundColor: colors.surface, borderBottomColor: colors.surfaceBorder }]}>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={sortStyles.row}
-        style={{ flexGrow: 0 }}
-      >
-        {SORT_OPTIONS.map(opt => {
-          const active = opt.field === field;
-          return (
-            <TouchableOpacity
-              key={opt.field}
-              onPress={() => handlePress(opt.field)}
-              style={[
-                sortStyles.chip,
-                { borderColor: active ? colors.primary : colors.surfaceBorder,
-                  backgroundColor: active ? colors.primarySoft : 'transparent' },
-              ]}
-              activeOpacity={0.7}
-            >
-              <Text style={[sortStyles.chipLabel, { color: active ? colors.primary : colors.textSecondary }]}>
-                {opt.label}
-              </Text>
-              {active && (
-                <Text style={[sortStyles.chipArrow, { color: colors.primary }]}>
-                  {dir === 'asc' ? '↑' : '↓'}
-                </Text>
-              )}
-            </TouchableOpacity>
-          );
-        })}
-      </ScrollView>
-    </View>
-  );
-}
-
-const sortStyles = StyleSheet.create({
-  wrapper: {
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  row: {
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.two,
-    gap: Spacing.two,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: Radius.full,
-    borderWidth: 1.5,
-    height: 30,
-  },
-  chipLabel: { fontSize: TextScale.xs, fontWeight: '600', lineHeight: 16 },
-  chipArrow: { fontSize: 12, fontWeight: '700', lineHeight: 16 },
-});
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Tree Node Renderer
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1707,6 +1749,21 @@ export default function RestoreScreen() {
   const [sortField, setSortField] = useState<SortField>('date');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
 
+  useEffect(() => {
+    let active = true;
+    AsyncStorage.getItem(RESTORE_SORT_PREFERENCE_KEY)
+      .then(raw => {
+        const preference = parseSortPreference(raw);
+        if (!active || !preference) return;
+        setSortField(preference.field);
+        setSortDir(preference.dir);
+      })
+      .catch(() => {
+        // Storage failures should not prevent the Restore screen from working.
+      });
+    return () => { active = false; };
+  }, []);
+
   // Selection mode state
   const [selectionMode, setSelectionMode] = useState(false);
 
@@ -1920,6 +1977,10 @@ export default function RestoreScreen() {
   const handleSortChange = useCallback((field: SortField, dir: SortDir) => {
     setSortField(field);
     setSortDir(dir);
+    void AsyncStorage.setItem(RESTORE_SORT_PREFERENCE_KEY, JSON.stringify({ field, dir }))
+      .catch(() => {
+        // Keep the in-memory choice when the device cannot persist it.
+      });
   }, []);
 
   // Preview handlers
@@ -2275,15 +2336,14 @@ export default function RestoreScreen() {
           selectedSourceId={selectedSourceId}
           isLoadingSources={isLoadingSources}
           isOffline={isOffline}
+          sortEnabled={files.length > 0}
+          sortField={sortField}
+          sortDir={sortDir}
           onModeChange={handleModeChange}
           onSourceSelect={handleSourceSelect}
+          onSortChange={handleSortChange}
           colors={colors}
         />
-      )}
-
-      {/* Sort Bar */}
-      {files.length > 0 && !isDownloading && (
-        <SortBar field={sortField} dir={sortDir} onChange={handleSortChange} colors={colors} />
       )}
 
       {/* Hint Bar */}
@@ -2399,7 +2459,7 @@ const createStyles = (colors: AppColors) =>
     },
     pageTitle: { fontSize: TextScale.xl, fontWeight: '800', color: colors.text, letterSpacing: -0.5 },
     pageSubtitle: { fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '500', marginTop: 2 },
-    headerButtons: { alignItems: 'flex-end', gap: Spacing.two },
+    headerButtons: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
     actionBtn: {
       flexDirection: 'row', alignItems: 'center', gap: Spacing.one,
       paddingHorizontal: Spacing.three, paddingVertical: Spacing.two,
