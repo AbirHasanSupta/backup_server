@@ -57,90 +57,90 @@ ctk.set_default_color_theme("blue")
 # ── Palette ────────────────────────────────────────────────────────────────────
 C_BG        = "#F5F7FB"
 C_SURFACE   = "#FFFFFF"
-C_ELEVATED  = "#F9FBFD"
+C_ELEVATED  = "#F1F5F9"
 C_CARD      = "#FFFFFF"
-C_BORDER    = "#DCE5EE"
+C_BORDER    = "#E1E8F0"
 C_ACCENT    = "#2563EB"
 C_ACCENT2   = "#1D4ED8"
 C_SUCCESS   = "#059669"
 C_ERROR     = "#DC2626"
 C_WARNING   = "#D97706"
 C_INFO      = "#0891B2"
-C_TEXT      = "#102033"
-C_MUTED     = "#637487"
+C_TEXT      = "#172033"
+C_MUTED     = "#66758A"
 C_HIGHLIGHT = "#2563EB"
-C_SOFT_BLUE = "#E8F0FF"
-C_SOFT_GREEN = "#E4F8EF"
-C_SOFT_RED = "#FDECEC"
-C_SOFT_AMBER = "#FFF4DE"
-C_SOFT_INFO = "#E2F6FA"
-C_SOFT_BLUE_HOVER = "#DCEBFF"
-C_SOFT_GREEN_HOVER = "#CEF1E0"
-C_SOFT_RED_HOVER = "#F8D7D7"
+C_SOFT_BLUE = "#EAF1FF"
+C_SOFT_GREEN = "#E7F8F0"
+C_SOFT_RED = "#FDEDEE"
+C_SOFT_AMBER = "#FFF5E1"
+C_SOFT_INFO = "#E6F7FB"
+C_SOFT_BLUE_HOVER = "#DCE9FF"
+C_SOFT_GREEN_HOVER = "#D5F1E3"
+C_SOFT_RED_HOVER = "#F9DCE0"
 C_SUCCESS_HOVER = "#047857"
-C_SUCCESS_BORDER = "#A7E6C5"
-C_ERROR_BORDER = "#F4B4B4"
-C_WARNING_BORDER = "#F4D69D"
-C_LOG_TS = "#3A5070"
+C_SUCCESS_BORDER = "#AFE5C9"
+C_ERROR_BORDER = "#F2BBC3"
+C_WARNING_BORDER = "#F2D7A2"
+C_LOG_TS = "#40536E"
 
 _LIGHT_PALETTE = {
     "C_BG": "#F5F7FB",
     "C_SURFACE": "#FFFFFF",
-    "C_ELEVATED": "#F9FBFD",
+    "C_ELEVATED": "#F1F5F9",
     "C_CARD": "#FFFFFF",
-    "C_BORDER": "#DCE5EE",
+    "C_BORDER": "#E1E8F0",
     "C_ACCENT": "#2563EB",
     "C_ACCENT2": "#1D4ED8",
     "C_SUCCESS": "#059669",
     "C_ERROR": "#DC2626",
     "C_WARNING": "#D97706",
     "C_INFO": "#0891B2",
-    "C_TEXT": "#102033",
-    "C_MUTED": "#637487",
+    "C_TEXT": "#172033",
+    "C_MUTED": "#66758A",
     "C_HIGHLIGHT": "#2563EB",
-    "C_SOFT_BLUE": "#E8F0FF",
-    "C_SOFT_GREEN": "#E4F8EF",
-    "C_SOFT_RED": "#FDECEC",
-    "C_SOFT_AMBER": "#FFF4DE",
-    "C_SOFT_INFO": "#E2F6FA",
-    "C_SOFT_BLUE_HOVER": "#DCEBFF",
-    "C_SOFT_GREEN_HOVER": "#CEF1E0",
-    "C_SOFT_RED_HOVER": "#F8D7D7",
+    "C_SOFT_BLUE": "#EAF1FF",
+    "C_SOFT_GREEN": "#E7F8F0",
+    "C_SOFT_RED": "#FDEDEE",
+    "C_SOFT_AMBER": "#FFF5E1",
+    "C_SOFT_INFO": "#E6F7FB",
+    "C_SOFT_BLUE_HOVER": "#DCE9FF",
+    "C_SOFT_GREEN_HOVER": "#D5F1E3",
+    "C_SOFT_RED_HOVER": "#F9DCE0",
     "C_SUCCESS_HOVER": "#047857",
-    "C_SUCCESS_BORDER": "#A7E6C5",
-    "C_ERROR_BORDER": "#F4B4B4",
-    "C_WARNING_BORDER": "#F4D69D",
-    "C_LOG_TS": "#3A5070",
+    "C_SUCCESS_BORDER": "#AFE5C9",
+    "C_ERROR_BORDER": "#F2BBC3",
+    "C_WARNING_BORDER": "#F2D7A2",
+    "C_LOG_TS": "#40536E",
 }
 
 _DARK_PALETTE = {
-    "C_BG": "#0B1220",
-    "C_SURFACE": "#121C2E",
-    "C_ELEVATED": "#172338",
-    "C_CARD": "#121C2E",
-    "C_BORDER": "#2A3B55",
-    "C_ACCENT": "#60A5FA",
-    "C_ACCENT2": "#3B82F6",
-    "C_SUCCESS": "#34D399",
-    "C_ERROR": "#F87171",
-    "C_WARNING": "#FBBF24",
-    "C_INFO": "#22D3EE",
-    "C_TEXT": "#F4F7FB",
-    "C_MUTED": "#A9B7C8",
-    "C_HIGHLIGHT": "#93C5FD",
-    "C_SOFT_BLUE": "#1C355A",
-    "C_SOFT_GREEN": "#123A2B",
-    "C_SOFT_RED": "#451C25",
-    "C_SOFT_AMBER": "#433213",
-    "C_SOFT_INFO": "#123746",
+    "C_BG": "#0B1120",
+    "C_SURFACE": "#111A2B",
+    "C_ELEVATED": "#182337",
+    "C_CARD": "#111A2B",
+    "C_BORDER": "#29384F",
+    "C_ACCENT": "#7DB4FF",
+    "C_ACCENT2": "#4B91F1",
+    "C_SUCCESS": "#42D6A4",
+    "C_ERROR": "#FB818A",
+    "C_WARNING": "#F6C453",
+    "C_INFO": "#4DD4E8",
+    "C_TEXT": "#F5F8FC",
+    "C_MUTED": "#A8B5C7",
+    "C_HIGHLIGHT": "#A5CBFF",
+    "C_SOFT_BLUE": "#1B355B",
+    "C_SOFT_GREEN": "#123C31",
+    "C_SOFT_RED": "#482330",
+    "C_SOFT_AMBER": "#443515",
+    "C_SOFT_INFO": "#123A49",
     "C_SOFT_BLUE_HOVER": "#244672",
-    "C_SOFT_GREEN_HOVER": "#164833",
-    "C_SOFT_RED_HOVER": "#57212C",
-    "C_SUCCESS_HOVER": "#10B981",
-    "C_SUCCESS_BORDER": "#1D6B4B",
-    "C_ERROR_BORDER": "#7F2A38",
-    "C_WARNING_BORDER": "#725018",
-    "C_LOG_TS": "#7890AE",
+    "C_SOFT_GREEN_HOVER": "#174B3C",
+    "C_SOFT_RED_HOVER": "#5A2A38",
+    "C_SUCCESS_HOVER": "#26BB89",
+    "C_SUCCESS_BORDER": "#1F7358",
+    "C_ERROR_BORDER": "#7C3443",
+    "C_WARNING_BORDER": "#74571D",
+    "C_LOG_TS": "#8496B0",
 }
 
 CURRENT_THEME = "light"
@@ -340,6 +340,61 @@ class BreathingDot(ctk.CTkCanvas):
         super().destroy()
 
 
+class NavigationIcon(ctk.CTkCanvas):
+    """Small, dependency-free line icons used by the desktop navigation."""
+
+    def __init__(self, parent, kind: str, color: str, background: str, size: int = 18):
+        super().__init__(
+            parent, width=size, height=size, highlightthickness=0, bd=0,
+            bg=background,
+        )
+        self._kind = kind
+        self._color = color
+        self._background = background
+        self._draw()
+
+    def update_colors(self, color: str, background: str):
+        self._color = color
+        self._background = background
+        self.configure(bg=background)
+        self._draw()
+
+    def _draw(self):
+        self.delete("all")
+        color = self._color
+        line = {"fill": color, "width": 1.7, "capstyle": "round", "joinstyle": "round", "tags": "icon"}
+
+        if self._kind == "dashboard":
+            for x, y in ((2, 2), (10, 2), (2, 10), (10, 10)):
+                self.create_rectangle(x, y, x + 6, y + 6, outline=color, width=1.5, tags="icon")
+        elif self._kind == "devices":
+            self.create_rectangle(5, 1.5, 13, 16.5, outline=color, width=1.7, tags="icon")
+            self.create_line(8, 14.1, 10, 14.1, **line)
+        elif self._kind == "folders":
+            self.create_line(2, 5, 7, 5, 8.5, 3, 14, 3, **line)
+            self.create_line(2, 5, 2, 15, 16, 15, 16, 5, 2, 5, **line)
+        elif self._kind == "settings":
+            self.create_oval(5.3, 5.3, 12.7, 12.7, outline=color, width=1.7, tags="icon")
+            self.create_oval(7.8, 7.8, 10.2, 10.2, fill=color, outline="", tags="icon")
+            for x1, y1, x2, y2 in ((9, 1.5, 9, 4), (9, 14, 9, 16.5), (1.5, 9, 4, 9), (14, 9, 16.5, 9)):
+                self.create_line(x1, y1, x2, y2, **line)
+        elif self._kind == "logs":
+            self.create_rectangle(3, 1.5, 15, 16.5, outline=color, width=1.5, tags="icon")
+            self.create_line(6, 6, 12.5, 6, **line)
+            self.create_line(6, 9.5, 12.5, 9.5, **line)
+            self.create_line(6, 13, 10.5, 13, **line)
+        elif self._kind == "history":
+            self.create_oval(2, 2, 16, 16, outline=color, width=1.7, tags="icon")
+            self.create_line(9, 5, 9, 9.2, 12, 11, **line)
+        elif self._kind == "storage":
+            self.create_oval(3, 2, 15, 6, outline=color, width=1.5, tags="icon")
+            self.create_line(3, 4, 3, 14, 15, 14, 15, 4, **line)
+            self.create_arc(3, 10, 15, 15, start=0, extent=180, style="arc", outline=color, width=1.5, tags="icon")
+        else:  # file
+            self.create_line(5, 1.5, 11.5, 1.5, 15, 5, 15, 16.5, 5, 16.5, 5, 1.5, **line)
+            self.create_line(11.5, 1.5, 11.5, 5, 15, 5, **line)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main Application
 # ──────────────────────────────────────────────────────────────────────────────
@@ -347,14 +402,6 @@ class BreathingDot(ctk.CTkCanvas):
 class BackupServerApp(ctk.CTk):
 
     PAGES      = ["dashboard", "devices", "shared_folders", "settings", "logs", "history"]
-    PAGE_ICONS = {
-        "dashboard": "󰕇",   # fallback to text if font missing
-        "devices":   "󰄛",
-        "shared_folders": "󰉋",
-        "settings":  "󰒓",
-        "logs":      "󰉩",
-        "history":   "H",
-    }
     PAGE_LABELS = {
         "dashboard": "Dashboard",
         "devices":   "Devices",
@@ -363,13 +410,13 @@ class BackupServerApp(ctk.CTk):
         "logs":      "Logs",
         "history":   "Sync History",
     }
-    PAGE_EMOJI = {
-        "dashboard": "D",
-        "devices":   "P",
-        "shared_folders": "F",
-        "settings":  "S",
-        "logs":      "L",
-        "history":   "H",
+    PAGE_NAV_ICONS = {
+        "dashboard": "dashboard",
+        "devices": "devices",
+        "shared_folders": "folders",
+        "settings": "settings",
+        "logs": "logs",
+        "history": "history",
     }
 
     def __init__(self):
@@ -377,16 +424,16 @@ class BackupServerApp(ctk.CTk):
 
         # Fonts
         global FONT_TITLE, FONT_SECTION, FONT_BODY, FONT_SMALL, FONT_MONO, FONT_CAPTION
-        FONT_TITLE   = ctk.CTkFont(family="Segoe UI", size=26, weight="bold")
-        FONT_SECTION = ctk.CTkFont(family="Segoe UI", size=11, weight="bold")
-        FONT_BODY    = ctk.CTkFont(family="Segoe UI", size=13)
-        FONT_SMALL   = ctk.CTkFont(family="Segoe UI", size=11)
+        FONT_TITLE   = ctk.CTkFont(family="Segoe UI Variable Display", size=28, weight="bold")
+        FONT_SECTION = ctk.CTkFont(family="Segoe UI Variable Text", size=10, weight="bold")
+        FONT_BODY    = ctk.CTkFont(family="Segoe UI Variable Text", size=13)
+        FONT_SMALL   = ctk.CTkFont(family="Segoe UI Variable Text", size=11)
         FONT_MONO    = ctk.CTkFont(family="Consolas",  size=12)
-        FONT_CAPTION = ctk.CTkFont(family="Segoe UI", size=10)
+        FONT_CAPTION = ctk.CTkFont(family="Segoe UI Variable Text", size=10)
 
         self.title("Phone Backup Server")
-        self.geometry("1160x720")
-        self.minsize(900, 600)
+        self.geometry("1280x780")
+        self.minsize(980, 640)
         self.configure(fg_color=C_BG)
 
         # Try to set window icon
@@ -407,6 +454,8 @@ class BackupServerApp(ctk.CTk):
         self._device_card_widgets: dict[str, dict] = {}
         self._theme_rebuild_after_id: str | None = None
         self._shared_dirs: list[dict] = list(load_config().get("SHARED_DIRS", []))
+        self._shared_dirs_save_after_id: str | None = None
+        self._settings_draft: dict[str, object] | None = None
 
         # Build layout
         self._setup_grid()
@@ -435,134 +484,163 @@ class BackupServerApp(ctk.CTk):
     # ─── Sidebar ─────────────────────────────────────────────────────────────
 
     def _build_sidebar(self):
-        sb = ctk.CTkFrame(self, width=236, corner_radius=0, fg_color=C_SURFACE)
-        sb.grid(row=0, column=0, rowspan=2, sticky="nsew")
-        sb.grid_propagate(False)
-        sb.pack_propagate(False)
+        """Build a compact navigation rail that leaves room for active work."""
+        sidebar = ctk.CTkFrame(
+            self, width=214, corner_radius=0, fg_color=C_SURFACE,
+            border_width=0,
+        )
+        sidebar.grid(row=0, column=0, rowspan=2, sticky="nsew")
+        sidebar.grid_propagate(False)
+        sidebar.pack_propagate(False)
 
-        # ── Logo / header bar ────────────────────────────────────────────────
-        header = ctk.CTkFrame(sb, height=138, fg_color=C_SURFACE, corner_radius=0)
-        header.pack(fill="x")
-        header.pack_propagate(False)
+        brand = ctk.CTkFrame(sidebar, height=100, fg_color="transparent")
+        brand.pack(fill="x", padx=14, pady=(14, 4))
+        brand.pack_propagate(False)
 
-        logo = ctk.CTkFrame(header, width=54, height=54, fg_color=C_SOFT_BLUE, corner_radius=16)
-        logo.pack(pady=(22, 8))
-        logo.pack_propagate(False)
+        brand_row = ctk.CTkFrame(brand, fg_color="transparent")
+        brand_row.pack(fill="x", pady=(12, 0))
+        mark = ctk.CTkFrame(
+            brand_row, width=42, height=42, fg_color=C_SOFT_BLUE, corner_radius=13,
+        )
+        mark.pack(side="left")
+        mark.pack_propagate(False)
         ctk.CTkLabel(
-            logo, text="PB", font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            mark, text="PB", font=ctk.CTkFont(family="Segoe UI Variable Display", size=14, weight="bold"),
             text_color=C_ACCENT,
         ).pack(expand=True)
 
+        brand_copy = ctk.CTkFrame(brand_row, fg_color="transparent")
+        brand_copy.pack(side="left", fill="x", expand=True, padx=(10, 0), pady=(1, 0))
         ctk.CTkLabel(
-            header, text="Phone Backup",
-            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
-            text_color=C_TEXT,
-        ).pack()
+            brand_copy, text="Phone Backup",
+            font=ctk.CTkFont(family="Segoe UI Variable Display", size=15, weight="bold"),
+            text_color=C_TEXT, anchor="w",
+        ).pack(fill="x")
         ctk.CTkLabel(
-            header, text="SERVER CONSOLE",
-            font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
-            text_color=C_ACCENT,
-        ).pack(pady=(2, 0))
+            brand_copy, text="SERVER CONSOLE",
+            font=ctk.CTkFont(family="Segoe UI Variable Text", size=8, weight="bold"),
+            text_color=C_ACCENT, anchor="w",
+        ).pack(fill="x", pady=(2, 0))
 
-        ctk.CTkFrame(sb, height=1, fg_color=C_BORDER, corner_radius=0).pack(fill="x")
+        ctk.CTkLabel(
+            sidebar, text="WORKSPACE",
+            font=ctk.CTkFont(family="Segoe UI Variable Text", size=9, weight="bold"),
+            text_color=C_MUTED, anchor="w",
+        ).pack(fill="x", padx=22, pady=(14, 6))
 
-        # ── Nav items ────────────────────────────────────────────────────────
-        nav_container = ctk.CTkFrame(sb, fg_color="transparent")
-        nav_container.pack(fill="x", padx=10, pady=(14, 0))
+        nav_container = ctk.CTkFrame(sidebar, fg_color="transparent")
+        nav_container.pack(fill="x", padx=10)
 
-        self._nav_btns:   dict[str, ctk.CTkButton] = {}
-        self._nav_accents: dict[str, ctk.CTkFrame]  = {}
+        self._nav_btns: dict[str, ctk.CTkButton] = {}
+        self._nav_accents: dict[str, ctk.CTkFrame] = {}
+        self._nav_rows: dict[str, ctk.CTkFrame] = {}
+        self._nav_icon_tiles: dict[str, ctk.CTkFrame] = {}
+        self._nav_icons: dict[str, NavigationIcon] = {}
 
         for page in self.PAGES:
-            emoji = self.PAGE_EMOJI[page]
-            label = self.PAGE_LABELS[page]
-
-            row = ctk.CTkFrame(nav_container, fg_color="transparent", height=46)
-            row.pack(fill="x", pady=3)
+            row = ctk.CTkFrame(nav_container, fg_color="transparent", height=44, corner_radius=12)
+            row.pack(fill="x", pady=2)
             row.pack_propagate(False)
+            self._nav_rows[page] = row
 
-            # Left accent strip (hidden by default)
-            accent = ctk.CTkFrame(row, width=3, fg_color=C_ACCENT, corner_radius=2)
-            accent.pack(side="left", fill="y", padx=(0, 6))
-            accent.pack_propagate(False)
-            self._nav_accents[page] = accent
+            icon_tile = ctk.CTkFrame(
+                row, width=32, height=32, fg_color=C_ELEVATED, corner_radius=10,
+            )
+            icon_tile.pack(side="left", padx=(7, 2), pady=6)
+            icon_tile.pack_propagate(False)
+            nav_icon = NavigationIcon(
+                icon_tile, self.PAGE_NAV_ICONS[page], C_MUTED, C_ELEVATED, size=18,
+            )
+            nav_icon.pack(expand=True)
+            self._bind_click_tree(icon_tile, lambda p=page: self._show_page(p))
+            self._nav_icon_tiles[page] = icon_tile
+            self._nav_icons[page] = nav_icon
 
             btn = ctk.CTkButton(
-                row,
-                text=f" {emoji}   {label}",
-                anchor="w",
-                corner_radius=12,
-                height=42,
-                fg_color="transparent",
-                hover_color=C_ELEVATED,
-                text_color=C_MUTED,
-                font=ctk.CTkFont(family="Segoe UI", size=13),
+                row, text=self.PAGE_LABELS[page], anchor="w",
+                corner_radius=10, height=38, fg_color="transparent",
+                hover_color=C_ELEVATED, text_color=C_MUTED,
+                font=ctk.CTkFont(family="Segoe UI Variable Text", size=12),
                 command=lambda p=page: self._show_page(p),
             )
-            btn.pack(side="left", fill="both", expand=True)
+            btn.pack(side="left", fill="both", expand=True, padx=(2, 7), pady=3)
             self._nav_btns[page] = btn
 
-        # ── Bottom controls ──────────────────────────────────────────────────
-        ctk.CTkFrame(sb, height=1, fg_color=C_BORDER).pack(
-            fill="x", padx=14, pady=14, side="bottom"
-        )
+            accent = ctk.CTkFrame(row, width=3, fg_color="transparent", corner_radius=2)
+            accent.pack(side="right", fill="y", pady=11, padx=(0, 3))
+            self._nav_accents[page] = accent
+
+        footer = ctk.CTkFrame(sidebar, fg_color="transparent")
+        footer.pack(side="bottom", fill="x", padx=12, pady=12)
+
         self._toggle_btn = ctk.CTkButton(
-            sb,
-            text="Stop Server",
-            fg_color=C_SOFT_RED,
-            hover_color=C_SOFT_RED_HOVER,
-            text_color=C_ERROR,
-            border_width=1,
-            border_color=C_ERROR_BORDER,
-            height=44,
-            corner_radius=14,
-            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            footer, text="Stop Server", fg_color=C_SOFT_RED,
+            hover_color=C_SOFT_RED_HOVER, text_color=C_ERROR,
+            border_width=1, border_color=C_ERROR_BORDER, height=40,
+            corner_radius=12,
+            font=ctk.CTkFont(family="Segoe UI Variable Text", size=12, weight="bold"),
             command=self._toggle_server,
         )
-        self._toggle_btn.pack(fill="x", padx=14, pady=(0, 18), side="bottom")
+        self._toggle_btn.pack(fill="x")
+
+        server_summary = ctk.CTkFrame(
+            footer, height=46, fg_color=C_ELEVATED, corner_radius=12,
+        )
+        server_summary.pack(fill="x", pady=(0, 8))
+        server_summary.pack_propagate(False)
+        self._sidebar_state_lbl = ctk.CTkLabel(
+            server_summary, text="Server starting",
+            font=ctk.CTkFont(family="Segoe UI Variable Text", size=11, weight="bold"),
+            text_color=C_TEXT, anchor="w",
+        )
+        self._sidebar_state_lbl.pack(fill="x", padx=12, pady=(7, 0))
+        self._sidebar_endpoint_lbl = ctk.CTkLabel(
+            server_summary, text="Preparing local access",
+            font=FONT_CAPTION, text_color=C_MUTED, anchor="w",
+        )
+        self._sidebar_endpoint_lbl.pack(fill="x", padx=12, pady=(0, 5))
         self._configure_server_button()
 
     # ─── Status bar ──────────────────────────────────────────────────────────
 
     def _build_statusbar(self):
-        bar = ctk.CTkFrame(self, height=44, corner_radius=0, fg_color=C_SURFACE)
+        """A compact but comfortably readable live-server status bar."""
+        bar = ctk.CTkFrame(
+            self, height=44, corner_radius=0, fg_color=C_SURFACE,
+            border_width=0,
+        )
         bar.grid(row=1, column=1, sticky="ew")
         bar.grid_propagate(False)
 
+        ctk.CTkFrame(bar, height=1, fg_color=C_BORDER, corner_radius=0).pack(
+            fill="x", side="top"
+        )
         left = ctk.CTkFrame(bar, fg_color="transparent")
-        left.pack(side="left", fill="y", padx=(16, 0))
+        left.pack(side="left", fill="y", padx=(22, 0))
 
-        # Animated dot
         self._dot = BreathingDot(left, size=10)
-        self._dot.pack(side="left", padx=(0, 8), pady=15)
-
+        self._dot.pack(side="left", padx=(0, 8), pady=16)
         self._status_lbl = ctk.CTkLabel(
             left, text="Starting",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI Variable Text", size=12, weight="bold"),
             text_color=C_TEXT,
         )
         self._status_lbl.pack(side="left")
-
         self._activity_lbl = ctk.CTkLabel(
-            left, text="", font=FONT_SMALL, text_color=C_HIGHLIGHT,
+            left, text="", font=FONT_CAPTION, text_color=C_HIGHLIGHT,
         )
         self._activity_lbl.pack(side="left", padx=(12, 0))
 
         right = ctk.CTkFrame(bar, fg_color="transparent")
-        right.pack(side="right", fill="y", padx=16)
-
+        right.pack(side="right", fill="y", padx=22)
         self._uptime_lbl = ctk.CTkLabel(
-            right, text="", font=FONT_MONO, text_color=C_MUTED,
+            right, text="", font=FONT_CAPTION, text_color=C_MUTED,
         )
-        self._uptime_lbl.pack(side="right", padx=(8, 0))
-
+        self._uptime_lbl.pack(side="right", padx=(12, 0))
         self._addr_lbl = ctk.CTkLabel(
-            right, text="", font=FONT_MONO, text_color=C_HIGHLIGHT,
+            right, text="", font=FONT_CAPTION, text_color=C_HIGHLIGHT,
         )
         self._addr_lbl.pack(side="right")
-
-        # Separator
-        ctk.CTkFrame(bar, width=1, fg_color=C_BORDER).pack(side="right", fill="y", pady=8)
 
     def _set_status(self, running: bool, addr: str = ""):
         self._current_addr = addr if running else ""
@@ -570,11 +648,15 @@ class BackupServerApp(ctk.CTk):
         if running:
             self._status_lbl.configure(text="Server Running", text_color=C_SUCCESS)
             self._addr_lbl.configure(text=addr)
+            self._sidebar_state_lbl.configure(text="Server online", text_color=C_SUCCESS)
+            self._sidebar_endpoint_lbl.configure(text=addr or "Listening for devices")
         else:
             self._status_lbl.configure(text="Server Stopped", text_color=C_ERROR)
             self._addr_lbl.configure(text="")
             self._uptime_lbl.configure(text="")
             self._activity_lbl.configure(text="")
+            self._sidebar_state_lbl.configure(text="Server offline", text_color=C_ERROR)
+            self._sidebar_endpoint_lbl.configure(text="Start the server to accept devices")
 
     def _configure_server_button(self):
         if self._server_running:
@@ -643,26 +725,28 @@ class BackupServerApp(ctk.CTk):
 
     def _page_header(self, parent, title: str, subtitle: str = "") -> ctk.CTkFrame:
         hdr = ctk.CTkFrame(parent, fg_color="transparent")
-        hdr.pack(fill="x", padx=32, pady=(30, 0))
+        hdr.pack(fill="x", padx=36, pady=(24, 0))
+        title_stack = ctk.CTkFrame(hdr, fg_color="transparent")
+        title_stack.pack(side="left", fill="y")
         ctk.CTkLabel(
-            hdr, text=title, font=FONT_TITLE, text_color=C_TEXT, anchor="w",
-        ).pack(side="left", fill="y")
+            title_stack, text=title, font=FONT_TITLE, text_color=C_TEXT, anchor="w",
+        ).pack(fill="x")
         if subtitle:
             ctk.CTkLabel(
-                hdr, text=subtitle, font=FONT_SMALL, text_color=C_MUTED,
-            ).pack(side="left", padx=(14, 0), pady=(8, 0))
+                title_stack, text=subtitle, font=FONT_SMALL, text_color=C_MUTED, anchor="w",
+            ).pack(fill="x", pady=(3, 0))
         return hdr
 
     def _divider(self, parent):
         ctk.CTkFrame(parent, height=1, fg_color=C_BORDER).pack(
-            fill="x", padx=32, pady=(16, 0)
+            fill="x", padx=36, pady=(14, 0)
         )
 
     def _section_label(self, parent, text: str):
         ctk.CTkLabel(
             parent, text=text.upper(),
             font=FONT_SECTION, text_color=C_MUTED,
-        ).pack(anchor="w", padx=32, pady=(20, 7))
+        ).pack(anchor="w", padx=36, pady=(18, 7))
 
     # ─── Page: Dashboard ─────────────────────────────────────────────────────
 
@@ -674,13 +758,13 @@ class BackupServerApp(ctk.CTk):
 
         # ── Stat cards ────────────────────────────────────────────────────
         cards_row = ctk.CTkFrame(frame, fg_color="transparent")
-        cards_row.pack(fill="x", padx=25, pady=(20, 0))
+        cards_row.pack(fill="x", padx=30, pady=(18, 0))
 
         card_defs = [
-            ("F", "Total Files",   C_ACCENT,   "_s_files",   self._open_backup_root),
-            ("P", "Devices",       C_INFO,     "_s_devices", lambda: self._show_page("devices")),
-            ("S", "Total Size",    C_WARNING,  "_s_size",    None),
-            ("T", "Last Backup",   C_SUCCESS,  "_s_last",    None),
+            ("file", "Total Files", C_ACCENT, "_s_files", self._open_backup_root),
+            ("devices", "Devices", C_INFO, "_s_devices", lambda: self._show_page("devices")),
+            ("storage", "Total Size", C_WARNING, "_s_size", None),
+            ("history", "Last Backup", C_SUCCESS, "_s_last", None),
         ]
         for icon, label, color, attr, command in card_defs:
             lbl = self._stat_card(cards_row, icon, label, "-", color, command)
@@ -693,7 +777,7 @@ class BackupServerApp(ctk.CTk):
             frame, fg_color=C_SURFACE,
             corner_radius=18, border_width=1, border_color=C_BORDER,
         )
-        log_frame.pack(fill="both", expand=True, padx=32, pady=(8, 26))
+        log_frame.pack(fill="both", expand=True, padx=36, pady=(8, 20))
 
         self._dash_log = ctk.CTkTextbox(
             log_frame, state="disabled", fg_color="transparent",
@@ -709,11 +793,11 @@ class BackupServerApp(ctk.CTk):
         inner = ctk.CTkFrame(
             parent,
             fg_color=C_CARD,
-            corner_radius=18,
+            corner_radius=16,
             border_width=1,
             border_color=C_BORDER,
         )
-        inner.pack(side="left", fill="both", expand=True, padx=7, pady=4)
+        inner.pack(side="left", fill="both", expand=True, padx=6, pady=4)
 
         # Icon badge uses soft tints so the cards match the Android app.
         _BADGE_TINTS = {
@@ -724,24 +808,25 @@ class BackupServerApp(ctk.CTk):
             C_SUCCESS: C_SOFT_GREEN,
         }
         badge = ctk.CTkFrame(
-            inner,
-            width=44, height=44,
+            inner, width=38, height=38,
             fg_color=_BADGE_TINTS.get(accent, C_ELEVATED),
-            corner_radius=14,
+            corner_radius=12,
         )
-        badge.pack(pady=(18, 2))
+        badge.pack(anchor="w", padx=16, pady=(15, 6))
         badge.pack_propagate(False)
-        ctk.CTkLabel(badge, text=icon, font=ctk.CTkFont(size=20)).pack(expand=True)
+        NavigationIcon(
+            badge, icon, accent, _BADGE_TINTS.get(accent, C_ELEVATED), size=18,
+        ).pack(expand=True)
 
         val_lbl = ctk.CTkLabel(
             inner, text=value,
-            font=ctk.CTkFont(family="Segoe UI", size=24, weight="bold"),
-            text_color=accent,
+            font=ctk.CTkFont(family="Segoe UI Variable Display", size=24, weight="bold"),
+            text_color=C_TEXT, anchor="w",
         )
-        val_lbl.pack(pady=(2, 0))
+        val_lbl.pack(anchor="w", padx=16, pady=(0, 0))
         ctk.CTkLabel(
-            inner, text=label, font=FONT_SMALL, text_color=C_MUTED,
-        ).pack(pady=(0, 18))
+            inner, text=label, font=FONT_SMALL, text_color=C_MUTED, anchor="w",
+        ).pack(fill="x", padx=16, pady=(1, 16))
 
         # Hover effect
         def _enter(e):
@@ -862,7 +947,7 @@ class BackupServerApp(ctk.CTk):
         self._devices_scroll = ctk.CTkScrollableFrame(
             frame, fg_color="transparent", label_text="",
         )
-        self._devices_scroll.pack(fill="both", expand=True, padx=22, pady=(10, 16))
+        self._devices_scroll.pack(fill="both", expand=True, padx=30, pady=(10, 16))
 
         return frame
 
@@ -1071,6 +1156,42 @@ class BackupServerApp(ctk.CTk):
             "chip_files": chip_files
         }
 
+    def _read_settings_draft(self) -> dict[str, object] | None:
+        """Capture visible settings before rebuilding the shell for a theme change."""
+        required_widgets = (
+            "_e_host", "_e_port", "_e_root", "_e_key", "_e_preview_cache_dir",
+            "_sw_approval", "_sw_dark_mode",
+        )
+        if not all(hasattr(self, name) for name in required_widgets):
+            return None
+        try:
+            return {
+                "HOST": self._e_host.get(),
+                "PORT": self._e_port.get(),
+                "BACKUP_ROOT": self._e_root.get(),
+                "API_KEY": self._e_key.get(),
+                "VIDEO_PREVIEW_CACHE_DIR": self._e_preview_cache_dir.get(),
+                "REQUIRE_APPROVAL": bool(self._sw_approval.get()),
+                "THEME_MODE": "dark" if bool(self._sw_dark_mode.get()) else "light",
+            }
+        except (AttributeError, tk.TclError):
+            return None
+
+    def _settings_view_config(self) -> dict:
+        """Return saved settings overlaid with the user's in-session edits."""
+        cfg = dict(load_config())
+        if self._settings_draft:
+            cfg.update(self._settings_draft)
+        return cfg
+
+    def _remember_settings_draft(self, _event=None):
+        """Keep edits made after a theme rebuild intact while navigating."""
+        if self._settings_draft is None:
+            return
+        draft = self._read_settings_draft()
+        if draft:
+            self._settings_draft = draft
+
     # ─── Page: Settings ───────────────────────────────────────────────────────
 
     def _build_settings(self, parent) -> ctk.CTkFrame:
@@ -1080,9 +1201,9 @@ class BackupServerApp(ctk.CTk):
         self._divider(frame)
 
         scroll = ctk.CTkScrollableFrame(frame, fg_color="transparent", label_text="")
-        scroll.pack(fill="both", expand=True, padx=22, pady=(6, 16))
+        scroll.pack(fill="both", expand=True, padx=30, pady=(6, 16))
 
-        cfg = load_config()
+        cfg = self._settings_view_config()
 
         def settings_card(title: str) -> ctk.CTkFrame:
             ctk.CTkLabel(
@@ -1234,6 +1355,13 @@ class BackupServerApp(ctk.CTk):
             font=FONT_BODY, text_color=C_TEXT,
         ).pack(side="left", padx=12)
 
+        self._sw_approval.configure(command=self._remember_settings_draft)
+        for entry in (
+            self._e_host, self._e_port, self._e_root, self._e_key,
+            self._e_preview_cache_dir,
+        ):
+            entry.bind("<KeyRelease>", self._remember_settings_draft, add="+")
+
 
         # ── Save button ───────────────────────────────────────────────────
         ctk.CTkButton(
@@ -1265,14 +1393,14 @@ class BackupServerApp(ctk.CTk):
         )
         self._divider(frame)
 
-        scroll = ctk.CTkScrollableFrame(frame, fg_color="transparent", label_text="")
-        scroll.pack(fill="both", expand=True, padx=22, pady=(6, 16))
+        work_area = ctk.CTkFrame(frame, fg_color="transparent")
+        work_area.pack(fill="both", expand=True, padx=36, pady=(16, 20))
 
         card = ctk.CTkFrame(
-            scroll, fg_color=C_SURFACE,
+            work_area, fg_color=C_SURFACE,
             corner_radius=18, border_width=1, border_color=C_BORDER,
         )
-        card.pack(fill="x", padx=8, pady=(20, 4))
+        card.pack(fill="both", expand=True)
 
         hint_row = ctk.CTkFrame(card, fg_color="transparent")
         hint_row.pack(fill="x", padx=18, pady=(16, 0))
@@ -1286,11 +1414,28 @@ class BackupServerApp(ctk.CTk):
             justify="left", wraplength=560,
         ).pack(anchor="w")
 
-        self._shared_dirs_list_frame = ctk.CTkFrame(card, fg_color="transparent")
-        self._shared_dirs_list_frame.pack(fill="x", padx=18, pady=(12, 0))
+        list_header = ctk.CTkFrame(card, fg_color="transparent")
+        list_header.pack(fill="x", padx=18, pady=(16, 6))
+        ctk.CTkLabel(
+            list_header, text="SHARED LOCATIONS",
+            font=FONT_SECTION, text_color=C_MUTED, anchor="w",
+        ).pack(side="left")
+        self._shared_dirs_count = ctk.CTkLabel(
+            list_header, text="0 folders",
+            font=FONT_CAPTION, text_color=C_MUTED, anchor="e",
+        )
+        self._shared_dirs_count.pack(side="right")
+
+        self._shared_dirs_list_frame = ctk.CTkScrollableFrame(
+            card, fg_color=C_ELEVATED, corner_radius=12,
+            border_width=1, border_color=C_BORDER, label_text="",
+        )
+        self._shared_dirs_list_frame.pack(
+            fill="both", expand=True, padx=18, pady=(0, 12)
+        )
 
         add_btn_row = ctk.CTkFrame(card, fg_color="transparent")
-        add_btn_row.pack(fill="x", padx=18, pady=(10, 16))
+        add_btn_row.pack(side="bottom", fill="x", padx=18, pady=(0, 16))
         ctk.CTkButton(
             add_btn_row, text="+ Add Folder", width=150, height=38,
             fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
@@ -1308,6 +1453,7 @@ class BackupServerApp(ctk.CTk):
         if folder:
             self._e_root.delete(0, "end")
             self._e_root.insert(0, folder)
+            self._remember_settings_draft()
 
     def _browse_preview_cache_dir(self):
         current_dir = self._e_preview_cache_dir.get().strip()
@@ -1318,6 +1464,7 @@ class BackupServerApp(ctk.CTk):
         if folder:
             self._e_preview_cache_dir.delete(0, "end")
             self._e_preview_cache_dir.insert(0, folder)
+            self._remember_settings_draft()
 
     @staticmethod
     def _format_cache_bytes(size_bytes: int) -> str:
@@ -1387,23 +1534,56 @@ class BackupServerApp(ctk.CTk):
 
     # ── Shared Folders helpers ─────────────────────────────────────────
 
+    @staticmethod
+    def _shared_folder_display_path(path: str, max_length: int = 72) -> str:
+        """Keep long Windows paths readable without making a folder row taller."""
+        path = str(path or "")
+        if len(path) <= max_length:
+            return path
+        prefix = max_length // 3
+        suffix = max_length - prefix - 1
+        return f"{path[:prefix]}…{path[-suffix:]}"
+
+    def _queue_shared_dirs_save(self):
+        """Persist label edits shortly after typing stops, without UI flicker."""
+        if self._shared_dirs_save_after_id:
+            try:
+                self.after_cancel(self._shared_dirs_save_after_id)
+            except Exception:
+                pass
+        self._shared_dirs_save_after_id = self.after(400, self._flush_shared_dirs_save)
+
+    def _flush_shared_dirs_save(self):
+        if self._shared_dirs_save_after_id:
+            try:
+                self.after_cancel(self._shared_dirs_save_after_id)
+            except Exception:
+                pass
+        self._shared_dirs_save_after_id = None
+        self._save_shared_dirs_to_config()
+
     def _refresh_shared_dirs_list(self):
         """Re-render the list of shared folder entries in the dedicated panel."""
         for w in self._shared_dirs_list_frame.winfo_children():
             w.destroy()
 
+        count_label = getattr(self, "_shared_dirs_count", None)
+        if count_label:
+            count = len(self._shared_dirs)
+            count_label.configure(text=f"{count} folder{'s' if count != 1 else ''}")
+
         if not self._shared_dirs:
             ctk.CTkLabel(
                 self._shared_dirs_list_frame,
-                text="No shared folders added yet.",
-                font=FONT_SMALL, text_color=C_MUTED,
-            ).pack(anchor="w", pady=(0, 4))
+                text="No shared folders added yet. Use Add Folder to make files available for restore.",
+                font=FONT_SMALL, text_color=C_MUTED, justify="center", wraplength=440,
+            ).pack(expand=True, pady=20)
             return
 
         for idx, entry in enumerate(self._shared_dirs):
             row = ctk.CTkFrame(
                 self._shared_dirs_list_frame,
-                fg_color=C_ELEVATED, corner_radius=10,
+                fg_color=C_SURFACE, corner_radius=10,
                 border_width=1, border_color=C_BORDER,
             )
             row.pack(fill="x", pady=(0, 6))
@@ -1413,7 +1593,7 @@ class BackupServerApp(ctk.CTk):
             icon_badge = ctk.CTkFrame(row, width=34, height=34, fg_color=C_SOFT_BLUE, corner_radius=8)
             icon_badge.grid(row=0, column=0, rowspan=3, padx=(10, 0), pady=8)
             icon_badge.grid_propagate(False)
-            ctk.CTkLabel(icon_badge, text="📂", font=ctk.CTkFont(size=16)).pack(expand=True)
+            NavigationIcon(icon_badge, "folders", C_ACCENT, C_SOFT_BLUE, size=16).pack(expand=True)
 
             # Editable label entry
             lbl_var = tk.StringVar(value=entry.get("label", f"Folder {idx + 1}"))
@@ -1428,14 +1608,15 @@ class BackupServerApp(ctk.CTk):
             def _on_label_change(var=lbl_var, i=idx):
                 if i < len(self._shared_dirs):
                     self._shared_dirs[i]["label"] = var.get()
+                    self._queue_shared_dirs_save()
             lbl_var.trace_add("write", lambda *_, fn=_on_label_change: fn())
-            lbl_entry.bind("<FocusOut>", lambda _event: self._save_shared_dirs_to_config())
+            lbl_entry.bind("<FocusOut>", lambda _event: self._flush_shared_dirs_save())
 
-            # Path label (truncated)
-            path_text = entry.get("path", "")
+            # Paths stay single-line so each shared location stays compact.
+            path_text = self._shared_folder_display_path(entry.get("path", ""))
             ctk.CTkLabel(
                 row, text=path_text, font=FONT_SMALL, text_color=C_MUTED,
-                anchor="w", wraplength=440,
+                anchor="w",
             ).grid(row=1, column=1, sticky="ew", padx=(10, 8), pady=(0, 2))
 
             # Device tag checkboxes
@@ -1530,6 +1711,9 @@ class BackupServerApp(ctk.CTk):
         except ValueError:
             messagebox.showerror("Invalid Port", "Port must be a number.")
             return
+        if not 1 <= port <= 65535:
+            messagebox.showerror("Invalid Port", "Port must be between 1 and 65535.")
+            return
 
         preview_cache_dir_value = self._e_preview_cache_dir.get().strip()
         if not preview_cache_dir_value:
@@ -1556,6 +1740,7 @@ class BackupServerApp(ctk.CTk):
             "SHARED_DIRS":      list(self._shared_dirs),
         }
         save_config(cfg)
+        self._settings_draft = None
 
         try:
             from video_preview import get_video_preview_cache_dir
@@ -1594,6 +1779,7 @@ class BackupServerApp(ctk.CTk):
 
     def _apply_theme_from_settings(self):
         mode = "dark" if bool(self._sw_dark_mode.get()) else "light"
+        self._settings_draft = self._read_settings_draft()
         cfg = load_config()
         cfg["THEME_MODE"] = mode
         save_config(cfg)
@@ -1654,7 +1840,7 @@ class BackupServerApp(ctk.CTk):
             frame, fg_color=C_SURFACE,
             corner_radius=18, border_width=1, border_color=C_BORDER,
         )
-        log_wrap.pack(fill="both", expand=True, padx=32, pady=(12, 26))
+        log_wrap.pack(fill="both", expand=True, padx=36, pady=(12, 20))
 
         self._log_box = ctk.CTkTextbox(
             log_wrap, state="disabled", fg_color="transparent",
@@ -1748,7 +1934,7 @@ class BackupServerApp(ctk.CTk):
             corner_radius=14, border_width=1, border_color=C_BORDER,
             height=44,
         )
-        self._hist_banner.pack(fill="x", padx=32, pady=(14, 0))
+        self._hist_banner.pack(fill="x", padx=36, pady=(14, 0))
         self._hist_banner.pack_propagate(False)
         self._hist_banner_lbl = ctk.CTkLabel(
             self._hist_banner,
@@ -1761,7 +1947,7 @@ class BackupServerApp(ctk.CTk):
         self._hist_scroll = ctk.CTkScrollableFrame(
             frame, fg_color="transparent", label_text="",
         )
-        self._hist_scroll.pack(fill="both", expand=True, padx=22, pady=(10, 16))
+        self._hist_scroll.pack(fill="both", expand=True, padx=30, pady=(10, 16))
         self._hist_scroll.grid_columnconfigure(0, weight=1)
 
         # Fingerprint string cache (prevents full redraw when data unchanged)
@@ -1770,24 +1956,41 @@ class BackupServerApp(ctk.CTk):
         return frame
 
     @staticmethod
+    def _history_device_options(devices: list[dict]) -> tuple[list[str], dict[str, str | None]]:
+        """Build unambiguous filter labels even when two phones share a name."""
+        names = [d.get("device_name") or d.get("device_id") or "Unknown device" for d in devices]
+        duplicate_counts = {name: names.count(name) for name in set(names)}
+        values = ["All Devices"]
+        device_id_map: dict[str, str | None] = {}
+
+        for index, device in enumerate(devices):
+            base = names[index]
+            device_id = device.get("device_id")
+            if duplicate_counts[base] > 1:
+                suffix = str(device_id or device.get("id") or index + 1)[-6:]
+                label = f"{base} · {suffix}"
+            else:
+                label = base
+            while label in device_id_map:
+                label = f"{label} · {index + 1}"
+            values.append(label)
+            device_id_map[label] = device_id
+        return values, device_id_map
+
+    @staticmethod
     def _history_cache_key(sessions: list[dict]) -> str:
-        return "|".join(
-            f"{s.get('id','')}:{s.get('outcome','')}:{s.get('uploaded',0)}"
-            for s in sessions
+        fields = (
+            "id", "outcome", "uploaded", "skipped", "errors", "scanned",
+            "duration_ms", "started_at", "device_name", "device_id", "trigger",
         )
+        return "|".join(repr(tuple(session.get(field) for field in fields)) for session in sessions)
 
     def _refresh_history(self, force: bool = False):
         try:
             # ── Device filter ─────────────────────────────────────────────────
             devices = get_devices()
-            device_names = ["All Devices"] + [
-                d.get("device_name") or d.get("device_id") or "Unknown"
-                for d in devices
-            ]
-            device_id_map = {
-                (d.get("device_name") or d.get("device_id") or "Unknown"): d.get("device_id")
-                for d in devices
-            }
+            device_names, device_id_map = self._history_device_options(devices)
+            self._hist_device_id_map = device_id_map
             current = self._hist_device_var.get()
             self._hist_device_menu.configure(values=device_names)
             if current not in device_names:
@@ -1929,20 +2132,20 @@ class BackupServerApp(ctk.CTk):
                 card = ctk.CTkFrame(
                     self._hist_scroll,
                     fg_color=C_SURFACE,
-                    corner_radius=12,
+                    corner_radius=10,
                     border_width=1,
                     border_color=C_BORDER,
                 )
-                card.grid(row=row_idx, column=0, sticky="ew", padx=8, pady=4)
+                card.grid(row=row_idx, column=0, sticky="ew", padx=8, pady=2)
                 card.grid_columnconfigure(1, weight=1)
 
                 # Left accent strip — column 0, sticky ns keeps it flush
-                accent_bar = ctk.CTkFrame(card, width=5, fg_color=fg, corner_radius=0)
-                accent_bar.grid(row=0, column=0, rowspan=2, sticky="ns")
+                accent_bar = ctk.CTkFrame(card, width=4, fg_color=fg, corner_radius=0)
+                accent_bar.grid(row=0, column=0, sticky="ns")
 
                 # Body — column 1
                 body = ctk.CTkFrame(card, fg_color="transparent")
-                body.grid(row=0, column=1, sticky="ew", padx=(12, 14), pady=(9, 9))
+                body.grid(row=0, column=1, sticky="ew", padx=(10, 12), pady=(6, 6))
                 body.grid_columnconfigure(0, weight=1)
 
                 # Top row: badge · auto-chip · device-name · timestamp
@@ -1955,9 +2158,9 @@ class BackupServerApp(ctk.CTk):
                 ctk.CTkLabel(
                     badge_pill,
                     text=f"{icon}  {label}",
-                    font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+                    font=ctk.CTkFont(family="Segoe UI Variable Text", size=9, weight="bold"),
                     text_color=fg,
-                ).pack(padx=9, pady=2)
+                ).pack(padx=8, pady=1)
 
                 col_off = 1
                 if trigger == "auto":
@@ -1968,14 +2171,14 @@ class BackupServerApp(ctk.CTk):
                     auto_pill.grid(row=0, column=col_off, sticky="w", padx=(5, 0))
                     ctk.CTkLabel(
                         auto_pill, text="AUTO",
-                        font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
+                        font=ctk.CTkFont(family="Segoe UI Variable Text", size=8, weight="bold"),
                         text_color=C_MUTED,
-                    ).pack(padx=7, pady=2)
+                    ).pack(padx=6, pady=1)
                     col_off = 2
 
                 ctk.CTkLabel(
                     top, text=device_label,
-                    font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+                    font=ctk.CTkFont(family="Segoe UI Variable Text", size=11, weight="bold"),
                     text_color=C_TEXT, anchor="w",
                 ).grid(row=0, column=col_off, sticky="w", padx=(8, 0))
 
@@ -1986,7 +2189,7 @@ class BackupServerApp(ctk.CTk):
 
                 # Stats row: inline chips
                 chips = ctk.CTkFrame(body, fg_color="transparent")
-                chips.grid(row=1, column=0, sticky="w", pady=(5, 0))
+                chips.grid(row=1, column=0, sticky="w", pady=(3, 0))
 
                 chip_defs = [
                     (f"⬆︎ {uploaded:,} uploaded", C_SUCCESS if uploaded else C_MUTED),
@@ -2001,9 +2204,9 @@ class BackupServerApp(ctk.CTk):
                 for ci, (txt, clr) in enumerate(chip_defs):
                     ctk.CTkLabel(
                         chips, text=txt,
-                        font=ctk.CTkFont(family="Segoe UI", size=11),
+                        font=ctk.CTkFont(family="Segoe UI Variable Text", size=10),
                         text_color=clr,
-                    ).grid(row=0, column=ci, padx=(0, 14), sticky="w")
+                    ).grid(row=0, column=ci, padx=(0, 10), sticky="w")
 
         except Exception:
             traceback.print_exc()
@@ -2014,10 +2217,7 @@ class BackupServerApp(ctk.CTk):
             return
         selected = self._hist_device_var.get()
         devices  = get_devices()
-        device_id_map = {
-            (d.get("device_name") or d.get("device_id") or "Unknown"): d.get("device_id")
-            for d in devices
-        }
+        _, device_id_map = self._history_device_options(devices)
         filter_id = device_id_map.get(selected) if selected != "All Devices" else None
         clear_sync_sessions(device_id=filter_id)
         self._hist_cache_key = ""
@@ -2031,10 +2231,22 @@ class BackupServerApp(ctk.CTk):
         for name, btn in self._nav_btns.items():
             accent = self._nav_accents[name]
             if name == page:
-                btn.configure(fg_color=C_SOFT_BLUE, text_color=C_ACCENT, font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"))
+                self._nav_rows[name].configure(fg_color=C_SOFT_BLUE)
+                self._nav_icon_tiles[name].configure(fg_color=C_SOFT_BLUE)
+                self._nav_icons[name].update_colors(C_ACCENT, C_SOFT_BLUE)
+                btn.configure(
+                    fg_color="transparent", hover_color=C_SOFT_BLUE, text_color=C_ACCENT,
+                    font=ctk.CTkFont(family="Segoe UI Variable Text", size=12, weight="bold"),
+                )
                 accent.configure(fg_color=C_ACCENT)
             else:
-                btn.configure(fg_color="transparent", text_color=C_MUTED, font=ctk.CTkFont(family="Segoe UI", size=13))
+                self._nav_rows[name].configure(fg_color="transparent")
+                self._nav_icon_tiles[name].configure(fg_color=C_ELEVATED)
+                self._nav_icons[name].update_colors(C_MUTED, C_ELEVATED)
+                btn.configure(
+                    fg_color="transparent", hover_color=C_ELEVATED, text_color=C_MUTED,
+                    font=ctk.CTkFont(family="Segoe UI Variable Text", size=12),
+                )
                 accent.configure(fg_color="transparent")
 
         self._pages[page].tkraise()
@@ -2056,7 +2268,7 @@ class BackupServerApp(ctk.CTk):
     # ─── Auto-refresh ─────────────────────────────────────────────────────────
 
     def _refresh_settings(self):
-        cfg = load_config()
+        cfg = self._settings_view_config()
         for entry, key, default in [
             (self._e_host, "HOST",        "0.0.0.0"),
             (self._e_port, "PORT",        "8000"),

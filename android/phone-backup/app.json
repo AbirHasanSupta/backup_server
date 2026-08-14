@@ -52,13 +52,15 @@
       "package": "com.abirsupta.phonebackup",
       "versionCode": 10
     },
-    "extra": {
-      "eas": {
-        "projectId": "34a3ecdc-92d8-4a6c-a350-87e39a6a636e"
-      }
-    },
     "ios": {
       "bundleIdentifier": "com.abirsupta.phonebackup"
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "f27f73d7-0702-4b41-ad97-2eb5524a1901"
+      }
+    },
+    "owner": "abirsupto"
   }
 }
