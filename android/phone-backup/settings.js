@@ -21,7 +21,11 @@ const KEYS = {
   DEVICE_TOKEN:   'device_token',
   CERT_FINGERPRINT: 'server_cert_fp',
   AUTO_SYNC_SUPPRESSED_UNTIL: 'auto_sync_suppressed_until',
+  LAST_MEMORY_NOTIFIED_DATE: 'last_memory_notified_date',
 };
+
+export async function getLastMemoryNotifiedDate() { return (await AsyncStorage.getItem(KEYS.LAST_MEMORY_NOTIFIED_DATE)) || ''; }
+export async function setLastMemoryNotifiedDate(dateStr) { await AsyncStorage.setItem(KEYS.LAST_MEMORY_NOTIFIED_DATE, dateStr); }
 
 function safeJsonParse(raw, fallback) {
   if (!raw) return fallback;

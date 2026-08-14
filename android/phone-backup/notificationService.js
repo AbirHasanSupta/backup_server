@@ -15,6 +15,8 @@ const BackgroundService = BackgroundServiceModule ? (BackgroundServiceModule.def
 
 const SYNC_CHANNEL_ID = 'backup-sync';
 const SYNC_NOTIFICATION_ID = 'backup-sync-progress';
+const MEMORIES_CHANNEL_ID = 'memories';
+const MEMORIES_NOTIFICATION_ID = 'memories-today';
 const APP_PRIMARY_COLOR = '#2563EB';
 
 function immediateNotificationTrigger() {
@@ -72,6 +74,12 @@ export async function setupNotifications() {
         importance: N.AndroidImportance.LOW,
         vibrationPattern: [0, 0],
         enableVibrate: false,
+        lightColor: APP_PRIMARY_COLOR,
+        showBadge: false,
+      });
+      await N.setNotificationChannelAsync(MEMORIES_CHANNEL_ID, {
+        name: 'Memories',
+        importance: N.AndroidImportance.DEFAULT,
         lightColor: APP_PRIMARY_COLOR,
         showBadge: false,
       });
@@ -199,11 +207,49 @@ export async function showSyncErrorNotification(message) {
   }
 }
 
+function memoriesNotificationTrigger() {
+  return Platform.OS === 'android' ? { channelId: MEMORIES_CHANNEL_ID } : null;
+}
+
+export async function showMemoriesNotification(count) {
+  if (!N) return;
+  try {
+    await N.scheduleNotificationAsync({
+      identifier: MEMORIES_NOTIFICATION_ID,
+      content: {
+        title: '✨ On This Day',
+        body: count > 1
+          ? `You have ${count} memories from past years. Tap to check them out!`
+          : 'You have a memory from a past year. Tap to check it out!',
+        data: { type: 'memories' },
+      },
+      trigger: memoriesNotificationTrigger(),
+    });
+  } catch (e) {
+    console.warn('[Notifications] showMemoriesNotification failed:', e?.message);
+  }
+}
+
 export async function dismissSyncNotification() {
   if (!N) return;
   try {
     await N.dismissNotificationAsync(SYNC_NOTIFICATION_ID).catch(() => {});
   } catch (e) {
     console.warn('[Notifications] dismissSyncNotification failed:', e?.message);
+  }
+}
+
+export function addMemoriesTapListener(onTap) {
+  if (!N) return () => {};
+  try {
+    const sub = N.addNotificationResponseReceivedListener(response => {
+      if (response.notification.request.content.data?.type === 'memories') {
+        onTap();
+      }
+    });
+    return () => sub.remove();
+  } catch (e) {
+    console.warn('[Notifications] addMemoriesTapListener failed:', e?.message);
+    return () => {};
   }
 }

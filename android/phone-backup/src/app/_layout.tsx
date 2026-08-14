@@ -1,11 +1,13 @@
-import { Tabs } from 'expo-router';
+import { Tabs, useRouter } from 'expo-router';
 import { useEffect, useMemo } from 'react';
 import { Platform, View, StyleSheet } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import * as MediaLibrary from 'expo-media-library';
 import { registerBackgroundTask } from '../../backgroundTask';
-import { setupNotifications } from '../../notificationService';
+import { setupNotifications, showMemoriesNotification, addMemoriesTapListener } from '../../notificationService';
+import { getLastMemoryNotifiedDate, setLastMemoryNotifiedDate } from '../../settings';
+import { getTodaysMemories } from '../../downloader';
 import { AppColors, Radius, Shadows, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { AppThemeProvider, useAppTheme } from '@/hooks/use-app-theme';
@@ -49,6 +51,19 @@ function TabIcon({ androidName, iosName, focused, colors, styles }: TabIconProps
   );
 }
 
+async function checkAndNotifyMemories() {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const lastNotified = await getLastMemoryNotifiedDate();
+  if (lastNotified === todayStr) return;
+
+  const res = await getTodaysMemories();
+  const count = Array.isArray(res?.groups) ? res.groups.length : 0;
+  if (count > 0) {
+    await showMemoriesNotification(count);
+    await setLastMemoryNotifiedDate(todayStr);
+  }
+}
+
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -62,6 +77,7 @@ export default function RootLayout() {
 function RootLayoutContent() {
   const { colors } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const router = useRouter();
 
   useEffect(() => {
     (async () => {
@@ -70,8 +86,13 @@ function RootLayoutContent() {
       } catch {}
       await setupNotifications().catch(() => {});
       await registerBackgroundTask();
+      checkAndNotifyMemories().catch(() => {});
     })();
   }, []);
+
+  useEffect(() => {
+    return addMemoriesTapListener(() => router.push('/memories'));
+  }, [router]);
 
   return (
     <SafeAreaProvider>
