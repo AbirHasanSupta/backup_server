@@ -571,7 +571,25 @@ class BackupServerApp(ctk.CTk):
             self._nav_accents[page] = accent
 
         footer = ctk.CTkFrame(sidebar, fg_color="transparent")
-        footer.pack(side="bottom", fill="x", padx=12, pady=12)
+        footer.pack(side="bottom", fill="x", padx=12, pady=(8, 14))
+
+        server_summary = ctk.CTkFrame(
+            footer, height=62, fg_color=C_ELEVATED, corner_radius=12,
+        )
+        server_summary.pack(fill="x", pady=(0, 8))
+        server_summary.pack_propagate(False)
+        self._sidebar_state_lbl = ctk.CTkLabel(
+            server_summary, text="Server starting",
+            font=ctk.CTkFont(family="Segoe UI Variable Text", size=13, weight="bold"),
+            text_color=C_TEXT, anchor="w",
+        )
+        self._sidebar_state_lbl.pack(fill="x", padx=12, pady=(8, 0))
+        self._sidebar_endpoint_lbl = ctk.CTkLabel(
+            server_summary, text="Preparing local access",
+            font=ctk.CTkFont(family="Segoe UI Variable Text", size=12, weight="bold"),
+            text_color=C_MUTED, anchor="w",
+        )
+        self._sidebar_endpoint_lbl.pack(fill="x", padx=12, pady=(1, 8))
 
         self._toggle_btn = ctk.CTkButton(
             footer, text="Stop Server", fg_color=C_SOFT_RED,
@@ -582,31 +600,14 @@ class BackupServerApp(ctk.CTk):
             command=self._toggle_server,
         )
         self._toggle_btn.pack(fill="x")
-
-        server_summary = ctk.CTkFrame(
-            footer, height=46, fg_color=C_ELEVATED, corner_radius=12,
-        )
-        server_summary.pack(fill="x", pady=(0, 8))
-        server_summary.pack_propagate(False)
-        self._sidebar_state_lbl = ctk.CTkLabel(
-            server_summary, text="Server starting",
-            font=ctk.CTkFont(family="Segoe UI Variable Text", size=11, weight="bold"),
-            text_color=C_TEXT, anchor="w",
-        )
-        self._sidebar_state_lbl.pack(fill="x", padx=12, pady=(7, 0))
-        self._sidebar_endpoint_lbl = ctk.CTkLabel(
-            server_summary, text="Preparing local access",
-            font=FONT_CAPTION, text_color=C_MUTED, anchor="w",
-        )
-        self._sidebar_endpoint_lbl.pack(fill="x", padx=12, pady=(0, 5))
         self._configure_server_button()
 
     # ─── Status bar ──────────────────────────────────────────────────────────
 
     def _build_statusbar(self):
-        """A compact but comfortably readable live-server status bar."""
+        """A prominent live-server status bar."""
         bar = ctk.CTkFrame(
-            self, height=44, corner_radius=0, fg_color=C_SURFACE,
+            self, height=56, corner_radius=0, fg_color=C_SURFACE,
             border_width=0,
         )
         bar.grid(row=1, column=1, sticky="ew")
@@ -618,27 +619,33 @@ class BackupServerApp(ctk.CTk):
         left = ctk.CTkFrame(bar, fg_color="transparent")
         left.pack(side="left", fill="y", padx=(22, 0))
 
-        self._dot = BreathingDot(left, size=10)
-        self._dot.pack(side="left", padx=(0, 8), pady=16)
+        self._dot = BreathingDot(left, size=12)
+        self._dot.pack(side="left", padx=(0, 10), pady=18)
         self._status_lbl = ctk.CTkLabel(
             left, text="Starting",
-            font=ctk.CTkFont(family="Segoe UI Variable Text", size=12, weight="bold"),
+            font=ctk.CTkFont(family="Segoe UI Variable Text", size=14, weight="bold"),
             text_color=C_TEXT,
         )
         self._status_lbl.pack(side="left")
         self._activity_lbl = ctk.CTkLabel(
-            left, text="", font=FONT_CAPTION, text_color=C_HIGHLIGHT,
+            left, text="",
+            font=ctk.CTkFont(family="Segoe UI Variable Text", size=12),
+            text_color=C_HIGHLIGHT,
         )
-        self._activity_lbl.pack(side="left", padx=(12, 0))
+        self._activity_lbl.pack(side="left", padx=(14, 0))
 
         right = ctk.CTkFrame(bar, fg_color="transparent")
         right.pack(side="right", fill="y", padx=22)
         self._uptime_lbl = ctk.CTkLabel(
-            right, text="", font=FONT_CAPTION, text_color=C_MUTED,
+            right, text="",
+            font=ctk.CTkFont(family="Segoe UI Variable Text", size=12),
+            text_color=C_MUTED,
         )
-        self._uptime_lbl.pack(side="right", padx=(12, 0))
+        self._uptime_lbl.pack(side="right", padx=(14, 0))
         self._addr_lbl = ctk.CTkLabel(
-            right, text="", font=FONT_CAPTION, text_color=C_HIGHLIGHT,
+            right, text="",
+            font=ctk.CTkFont(family="Segoe UI Variable Text", size=13, weight="bold"),
+            text_color=C_HIGHLIGHT,
         )
         self._addr_lbl.pack(side="right")
 
@@ -932,7 +939,7 @@ class BackupServerApp(ctk.CTk):
     def _build_devices(self, parent) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(parent, fg_color=C_BG)
 
-        hdr = self._page_header(frame, "Connected Devices")
+        hdr = self._page_header(frame, "Connected Devices", "Devices paired with this backup server")
         ctk.CTkButton(
             hdr, text="Refresh", width=110, height=36,
             fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
@@ -1801,7 +1808,7 @@ class BackupServerApp(ctk.CTk):
     def _build_logs(self, parent) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(parent, fg_color=C_BG)
 
-        hdr = self._page_header(frame, "Activity Logs")
+        hdr = self._page_header(frame, "Activity Logs", "Real-time event stream and request logs")
 
         # Right-side controls
         ctrl = ctk.CTkFrame(hdr, fg_color="transparent")
@@ -2128,11 +2135,11 @@ class BackupServerApp(ctk.CTk):
                 scanned      = sess.get("scanned",     0)
                 dur_ms       = sess.get("duration_ms", 0)
 
-                # Card — grid-based so height is driven only by content
+                # Card — compact single-line horizontal bar
                 card = ctk.CTkFrame(
                     self._hist_scroll,
                     fg_color=C_SURFACE,
-                    corner_radius=10,
+                    corner_radius=8,
                     border_width=1,
                     border_color=C_BORDER,
                 )
@@ -2143,70 +2150,72 @@ class BackupServerApp(ctk.CTk):
                 accent_bar = ctk.CTkFrame(card, width=4, fg_color=fg, corner_radius=0)
                 accent_bar.grid(row=0, column=0, sticky="ns")
 
-                # Body — column 1
+                # Body — single horizontal row
                 body = ctk.CTkFrame(card, fg_color="transparent")
-                body.grid(row=0, column=1, sticky="ew", padx=(10, 12), pady=(6, 6))
-                body.grid_columnconfigure(0, weight=1)
+                body.grid(row=0, column=1, sticky="ew", padx=(10, 12), pady=(4, 4))
+                body.grid_columnconfigure(3, weight=1)
 
-                # Top row: badge · auto-chip · device-name · timestamp
-                top = ctk.CTkFrame(body, fg_color="transparent")
-                top.grid(row=0, column=0, sticky="ew")
-                top.grid_columnconfigure(2, weight=1)   # device name stretches
-
-                badge_pill = ctk.CTkFrame(top, fg_color=bg, corner_radius=999)
+                # Col 0: Outcome badge pill
+                badge_pill = ctk.CTkFrame(body, fg_color=bg, corner_radius=999)
                 badge_pill.grid(row=0, column=0, sticky="w")
                 ctk.CTkLabel(
                     badge_pill,
                     text=f"{icon}  {label}",
                     font=ctk.CTkFont(family="Segoe UI Variable Text", size=9, weight="bold"),
                     text_color=fg,
-                ).pack(padx=8, pady=1)
+                ).pack(padx=7, pady=1)
 
-                col_off = 1
+                col_idx = 1
                 if trigger == "auto":
                     auto_pill = ctk.CTkFrame(
-                        top, fg_color=C_ELEVATED, corner_radius=999,
+                        body, fg_color=C_ELEVATED, corner_radius=999,
                         border_width=1, border_color=C_BORDER,
                     )
-                    auto_pill.grid(row=0, column=col_off, sticky="w", padx=(5, 0))
+                    auto_pill.grid(row=0, column=col_idx, sticky="w", padx=(5, 0))
                     ctk.CTkLabel(
                         auto_pill, text="AUTO",
                         font=ctk.CTkFont(family="Segoe UI Variable Text", size=8, weight="bold"),
                         text_color=C_MUTED,
-                    ).pack(padx=6, pady=1)
-                    col_off = 2
+                    ).pack(padx=5, pady=1)
+                    col_idx += 1
 
+                # Col idx: Device label
                 ctk.CTkLabel(
-                    top, text=device_label,
+                    body, text=device_label,
                     font=ctk.CTkFont(family="Segoe UI Variable Text", size=11, weight="bold"),
                     text_color=C_TEXT, anchor="w",
-                ).grid(row=0, column=col_off, sticky="w", padx=(8, 0))
+                ).grid(row=0, column=col_idx, sticky="w", padx=(8, 0))
+                col_idx += 1
+
+                # Col idx: Inline compact stats summary
+                stat_items = []
+                if uploaded:
+                    stat_items.append(f"⬆︎ {uploaded:,} uploaded")
+                if skipped:
+                    stat_items.append(f"✓ {skipped:,} saved")
+                if not uploaded and not skipped:
+                    stat_items.append("0 files")
+
+                if errors:
+                    stat_items.append(f"✗ {errors} errors")
+                if dur_ms:
+                    stat_items.append(f"⏱ {_fmt_dur(dur_ms)}")
+
+                stats_str = "   ·   ".join(stat_items)
+                stats_clr = C_ERROR if errors else (C_SUCCESS if uploaded else C_MUTED)
 
                 ctk.CTkLabel(
-                    top, text=_fmt_ts(started_ts),
+                    body, text=f"·   {stats_str}",
+                    font=ctk.CTkFont(family="Segoe UI Variable Text", size=10),
+                    text_color=stats_clr, anchor="w",
+                ).grid(row=0, column=col_idx, sticky="w", padx=(8, 0))
+                col_idx += 1
+
+                # Far right: Timestamp
+                ctk.CTkLabel(
+                    body, text=_fmt_ts(started_ts),
                     font=FONT_SMALL, text_color=C_MUTED, anchor="e",
-                ).grid(row=0, column=3, sticky="e", padx=(8, 0))
-
-                # Stats row: inline chips
-                chips = ctk.CTkFrame(body, fg_color="transparent")
-                chips.grid(row=1, column=0, sticky="w", pady=(3, 0))
-
-                chip_defs = [
-                    (f"⬆︎ {uploaded:,} uploaded", C_SUCCESS if uploaded else C_MUTED),
-                    (f"✓ {skipped:,} already saved",   C_MUTED),
-                    (f"⏱ {_fmt_dur(dur_ms)}",          C_MUTED),
-                ]
-                if errors:
-                    chip_defs.insert(2, (f"✗ {errors} errors", C_ERROR))
-                if scanned:
-                    chip_defs.append((f"⊙ {scanned:,} scanned", C_MUTED))
-
-                for ci, (txt, clr) in enumerate(chip_defs):
-                    ctk.CTkLabel(
-                        chips, text=txt,
-                        font=ctk.CTkFont(family="Segoe UI Variable Text", size=10),
-                        text_color=clr,
-                    ).grid(row=0, column=ci, padx=(0, 10), sticky="w")
+                ).grid(row=0, column=col_idx, sticky="e", padx=(8, 0))
 
         except Exception:
             traceback.print_exc()
