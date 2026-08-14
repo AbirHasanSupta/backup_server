@@ -11,6 +11,7 @@ import {
   PanResponder,
   Alert,
   StatusBar,
+  ScrollView,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
@@ -22,8 +23,9 @@ import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import {
-  getTodaysMemories,
+  getRecentMemories,
   getConfig,
   buildPreviewUrl,
   buildVideoPreviewUrl,
@@ -32,6 +34,9 @@ import {
 } from '../../downloader';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+const DAY_CARD_W = 132;
+const DAY_CARD_H = 208;
+const DAY_CARD_GAP = 14;
 
 type ExpoVideoModule = typeof import('expo-video');
 type VideoSource = import('expo-video').VideoSource;
@@ -54,10 +59,26 @@ interface MemoryItem {
   is_video: boolean;
 }
 
+interface StoryItem extends MemoryItem {
+  year: number;
+  years_ago: number;
+}
+
 interface YearGroup {
   year: number;
   years_ago: number;
   items: MemoryItem[];
+}
+
+interface DayMemory {
+  date: { month: number; day: number; year: number };
+  days_ago: number;
+  is_today: boolean;
+  groups: YearGroup[];
+}
+
+interface MemoriesResponse {
+  days: DayMemory[];
 }
 
 interface ServerConfig {
@@ -65,6 +86,32 @@ interface ServerConfig {
   port: string;
   key: string;
   deviceId: string;
+}
+
+function dayItemCount(day: DayMemory): number {
+  return day.groups.reduce((sum, g) => sum + g.items.length, 0);
+}
+
+function flattenDayItems(day: DayMemory): StoryItem[] {
+  const flat: StoryItem[] = [];
+  for (const g of day.groups) {
+    for (const it of g.items) {
+      flat.push({ ...it, year: g.year, years_ago: g.years_ago });
+    }
+  }
+  return flat;
+}
+
+function formatDayLabel(day: DayMemory): string {
+  if (day.days_ago === 0) return 'Today';
+  if (day.days_ago === 1) return 'Yesterday';
+  const d = new Date(day.date.year, day.date.month - 1, day.date.day);
+  return d.toLocaleDateString('en-US', { weekday: 'long' });
+}
+
+function formatDayDate(day: DayMemory): string {
+  const d = new Date(day.date.year, day.date.month - 1, day.date.day);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 export default function MemoriesScreen() {
@@ -75,11 +122,11 @@ export default function MemoriesScreen() {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<{ today: { month: number; day: number }; groups: YearGroup[] } | null>(null);
+  const [data, setData] = useState<MemoriesResponse | null>(null);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
 
   // Story Viewer state
-  const [activeGroupIdx, setActiveGroupIdx] = useState<number | null>(null);
+  const [activeDayIdx, setActiveDayIdx] = useState<number | null>(null);
   const [activeItemIdx, setActiveItemIdx] = useState<number>(0);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [savingItem, setSavingItem] = useState<boolean>(false);
@@ -91,11 +138,11 @@ export default function MemoriesScreen() {
     setLoading(true);
     setError(null);
     try {
-      const [cfg, res] = await Promise.all([getConfig(), getTodaysMemories()]);
+      const [cfg, res] = await Promise.all([getConfig(), getRecentMemories(7)]);
       setServerConfig(cfg);
       setData(res);
     } catch (err: any) {
-      setError(err.message || 'Failed to load memories');
+      setError(sanitizeErrorMessage(err, 'Could not load your memories right now.'));
     } finally {
       setLoading(false);
     }
@@ -103,7 +150,7 @@ export default function MemoriesScreen() {
 
   useEffect(() => {
     let active = true;
-    Promise.all([getConfig(), getTodaysMemories()])
+    Promise.all([getConfig(), getRecentMemories(7)])
       .then(([cfg, res]) => {
         if (active) {
           setServerConfig(cfg);
@@ -113,7 +160,7 @@ export default function MemoriesScreen() {
       })
       .catch((err: any) => {
         if (active) {
-          setError(err.message || 'Failed to load memories');
+          setError(sanitizeErrorMessage(err, 'Could not load your memories right now.'));
           setLoading(false);
         }
       });
@@ -122,42 +169,53 @@ export default function MemoriesScreen() {
     };
   }, []);
 
-  // Story Auto-Advance logic for photos (~4 seconds)
-  const currentGroup = activeGroupIdx !== null && data?.groups ? data.groups[activeGroupIdx] : null;
-  const currentItem = currentGroup && currentGroup.items[activeItemIdx] ? currentGroup.items[activeItemIdx] : null;
+  const todayDay = data?.days && data.days.length > 0 ? data.days[0] : null;
+  const historyDays = data?.days && data.days.length > 1 ? data.days.slice(1) : [];
+  const totalItemsAcrossAllDays = data?.days ? data.days.reduce((sum, d) => sum + dayItemCount(d), 0) : 0;
+
+  const activeDay = activeDayIdx !== null && data?.days ? data.days[activeDayIdx] : null;
+  const activeItems = useMemo(() => (activeDay ? flattenDayItems(activeDay) : []), [activeDay]);
+  const currentItem = activeItems[activeItemIdx] ?? null;
+
+  const openDayStory = useCallback((dayIdx: number, startOffset: number = 0) => {
+    setActiveDayIdx(dayIdx);
+    setActiveItemIdx(startOffset);
+    setProgressRatio(0);
+    setIsPaused(false);
+  }, []);
+
+  const openYearGroupStory = useCallback(
+    (dayIdx: number, groupIdx: number) => {
+      const day = data?.days?.[dayIdx];
+      if (!day) return;
+      let offset = 0;
+      for (let i = 0; i < groupIdx; i++) {
+        offset += day.groups[i]?.items.length ?? 0;
+      }
+      openDayStory(dayIdx, offset);
+    },
+    [data, openDayStory],
+  );
 
   const advanceItem = useCallback(() => {
-    if (activeGroupIdx === null || !data?.groups) return;
-    const group = data.groups[activeGroupIdx];
-    if (activeItemIdx < group.items.length - 1) {
+    if (activeItemIdx < activeItems.length - 1) {
       setActiveItemIdx(idx => idx + 1);
       setProgressRatio(0);
-    } else if (activeGroupIdx < data.groups.length - 1) {
-      setActiveGroupIdx(gIdx => (gIdx !== null ? gIdx + 1 : null));
-      setActiveItemIdx(0);
-      setProgressRatio(0);
     } else {
-      setActiveGroupIdx(null);
+      setActiveDayIdx(null);
       setActiveItemIdx(0);
     }
-  }, [activeGroupIdx, activeItemIdx, data]);
+  }, [activeItemIdx, activeItems.length]);
 
   const prevItem = useCallback(() => {
-    if (activeGroupIdx === null || !data?.groups) return;
     if (activeItemIdx > 0) {
       setActiveItemIdx(idx => idx - 1);
       setProgressRatio(0);
-    } else if (activeGroupIdx > 0) {
-      const prevGIdx = activeGroupIdx - 1;
-      const prevGroup = data.groups[prevGIdx];
-      setActiveGroupIdx(prevGIdx);
-      setActiveItemIdx(prevGroup.items.length - 1);
-      setProgressRatio(0);
     }
-  }, [activeGroupIdx, activeItemIdx, data]);
+  }, [activeItemIdx]);
 
   useEffect(() => {
-    if (activeGroupIdx === null || !currentItem || isPaused) {
+    if (activeDayIdx === null || !currentItem || isPaused) {
       if (photoTimerRef.current) clearInterval(photoTimerRef.current);
       return;
     }
@@ -183,7 +241,7 @@ export default function MemoriesScreen() {
     return () => {
       if (photoTimerRef.current) clearInterval(photoTimerRef.current);
     };
-  }, [activeGroupIdx, activeItemIdx, currentItem, isPaused, advanceItem]);
+  }, [activeDayIdx, activeItemIdx, currentItem, isPaused, advanceItem]);
 
   // Handle saving current item to device library
   const handleSaveItem = async (item: MemoryItem) => {
@@ -211,7 +269,7 @@ export default function MemoriesScreen() {
       await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
       Alert.alert('Saved', 'Photo/Video saved to your gallery!');
     } catch (err: any) {
-      Alert.alert('Save Failed', err.message || 'Could not save file to device.');
+      Alert.alert('Save Failed', sanitizeErrorMessage(err, 'Could not save file to device.'));
     } finally {
       setSavingItem(false);
     }
@@ -224,7 +282,7 @@ export default function MemoriesScreen() {
         onMoveShouldSetPanResponder: (_, gestureState) => gestureState.dy > 30 && Math.abs(gestureState.dx) < 40,
         onPanResponderRelease: (_, gestureState) => {
           if (gestureState.dy > 50) {
-            setActiveGroupIdx(null);
+            setActiveDayIdx(null);
           }
         },
       }),
@@ -239,7 +297,6 @@ export default function MemoriesScreen() {
     return buildPreviewUrl(serverConfig, item.relative_path, item.source_type, item.source_id);
   };
 
-  // Format header date string
   const todayDateStr = useMemo(() => {
     const d = new Date();
     return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
@@ -278,77 +335,152 @@ export default function MemoriesScreen() {
             <Text style={styles.retryBtnText}>Retry</Text>
           </TouchableOpacity>
         </View>
-      ) : !data || !data.groups || data.groups.length === 0 ? (
+      ) : !data || !data.days || data.days.length === 0 || totalItemsAcrossAllDays === 0 ? (
         <View style={styles.centered}>
           <View style={styles.emptyIconBg}>
             <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={40} />
           </View>
-          <Text style={styles.emptyTitle}>No Memories Today</Text>
-          <Text style={styles.emptySubtitle}>Check back tomorrow to relive photos and videos from past years.</Text>
+          <Text style={styles.emptyTitle}>No Memories Yet</Text>
+          <Text style={styles.emptySubtitle}>Check back over the next few days to relive photos and videos from past years.</Text>
         </View>
       ) : (
-        <View style={styles.cardList}>
-          {data.groups.map((group, index) => {
-            const coverItem = group.items[0];
-            const coverUrl = coverItem ? getMediaUrl(coverItem) : '';
-            const photoCount = group.items.filter(i => !i.is_video).length;
-            const videoCount = group.items.filter(i => i.is_video).length;
-            const countsStr = [
-              photoCount > 0 ? `${photoCount} photo${photoCount > 1 ? 's' : ''}` : null,
-              videoCount > 0 ? `${videoCount} video${videoCount > 1 ? 's' : ''}` : null,
-            ]
-              .filter(Boolean)
-              .join(' · ');
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+          {/* Today Section — highlighted and featured at the top */}
+          <View style={styles.sectionHeaderRow}>
+            <View style={styles.todayBadge}>
+              <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={14} />
+              <Text style={styles.todayBadgeText}>TODAY</Text>
+            </View>
+            <Text style={styles.sectionSubtitle}>{todayDateStr}</Text>
+          </View>
 
-            return (
-              <AnimatedPressable
-                key={group.year}
-                style={styles.yearCardContainer}
-                onPress={() => {
-                  setActiveGroupIdx(index);
-                  setActiveItemIdx(0);
-                  setProgressRatio(0);
-                }}
-                scaleDown={0.97}
+          {!todayDay || todayDay.groups.length === 0 ? (
+            <View style={styles.todayEmptyCard}>
+              <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.textMuted} size={22} />
+              <Text style={styles.todayEmptyText}>No memories from past years today</Text>
+            </View>
+          ) : (
+            <View style={styles.cardList}>
+              {todayDay.groups.map((group, groupIndex) => {
+                const coverItem = group.items[0];
+                const coverUrl = coverItem ? getMediaUrl(coverItem) : '';
+                const photoCount = group.items.filter(i => !i.is_video).length;
+                const videoCount = group.items.filter(i => i.is_video).length;
+                const countsStr = [
+                  photoCount > 0 ? `${photoCount} photo${photoCount > 1 ? 's' : ''}` : null,
+                  videoCount > 0 ? `${videoCount} video${videoCount > 1 ? 's' : ''}` : null,
+                ]
+                  .filter(Boolean)
+                  .join(' · ');
+
+                return (
+                  <AnimatedPressable
+                    key={group.year}
+                    style={styles.featuredCardContainer}
+                    onPress={() => openYearGroupStory(0, groupIndex)}
+                    scaleDown={0.97}
+                  >
+                    <View style={[styles.stackLayer, styles.stackLayerBack]} />
+                    <View style={[styles.stackLayer, styles.stackLayerMiddle]} />
+
+                    <View style={styles.featuredCardMain}>
+                      {coverUrl ? (
+                        <Image source={{ uri: coverUrl }} style={styles.cardImage} contentFit="cover" transition={200} />
+                      ) : (
+                        <View style={styles.cardImagePlaceholder} />
+                      )}
+
+                      <View style={styles.cardGradientOverlay}>
+                        <View style={styles.cardBadge}>
+                          <Text style={styles.cardBadgeText}>{group.year}</Text>
+                        </View>
+                        <View style={styles.cardTextContainer}>
+                          <Text style={styles.cardYearsAgo}>
+                            {group.years_ago} {group.years_ago === 1 ? 'Year' : 'Years'} Ago
+                          </Text>
+                          <Text style={styles.cardCountText}>{countsStr}</Text>
+                        </View>
+                      </View>
+                    </View>
+                  </AnimatedPressable>
+                );
+              })}
+            </View>
+          )}
+
+          {/* History Section — Snapchat-style swipeable day cards */}
+          {historyDays.length > 0 && (
+            <>
+              <View style={styles.sectionHeaderRow}>
+                <Text style={styles.sectionTitle}>Past Days</Text>
+                <Text style={styles.sectionSubtitle}>Swipe to explore</Text>
+              </View>
+
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                snapToInterval={DAY_CARD_W + DAY_CARD_GAP}
+                decelerationRate="fast"
+                contentContainerStyle={styles.historyRow}
               >
-                {/* Stacked Photo Layer Effect */}
-                <View style={[styles.stackLayer, styles.stackLayerBack]} />
-                <View style={[styles.stackLayer, styles.stackLayerMiddle]} />
+                {historyDays.map((day, idx) => {
+                  const dayIdx = idx + 1;
+                  const count = dayItemCount(day);
+                  const coverItem = day.groups[0]?.items[0];
+                  const coverUrl = coverItem ? getMediaUrl(coverItem) : '';
+                  const isEmpty = count === 0;
 
-                {/* Main Cover Card */}
-                <View style={styles.cardMain}>
-                  {coverUrl ? (
-                    <Image source={{ uri: coverUrl }} style={styles.cardImage} contentFit="cover" transition={200} />
-                  ) : (
-                    <View style={styles.cardImagePlaceholder} />
-                  )}
+                  return (
+                    <AnimatedPressable
+                      key={`${day.date.month}-${day.date.day}-${day.date.year}`}
+                      style={styles.dayCardContainer}
+                      disabled={isEmpty}
+                      onPress={() => openDayStory(dayIdx, 0)}
+                      scaleDown={0.95}
+                    >
+                      <View style={[styles.dayCardMain, isEmpty && styles.dayCardMainEmpty]}>
+                        {!isEmpty && coverUrl ? (
+                          <Image source={{ uri: coverUrl }} style={styles.cardImage} contentFit="cover" transition={200} />
+                        ) : (
+                          <View style={styles.dayCardEmptyIconWrap}>
+                            <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.textMuted} size={22} />
+                          </View>
+                        )}
 
-                  {/* Gradient Overlay & Text */}
-                  <View style={styles.cardGradientOverlay}>
-                    <View style={styles.cardBadge}>
-                      <Text style={styles.cardBadgeText}>{group.year}</Text>
-                    </View>
-                    <View style={styles.cardTextContainer}>
-                      <Text style={styles.cardYearsAgo}>
-                        {group.years_ago} {group.years_ago === 1 ? 'Year' : 'Years'} Ago
-                      </Text>
-                      <Text style={styles.cardCountText}>{countsStr}</Text>
-                    </View>
-                  </View>
-                </View>
-              </AnimatedPressable>
-            );
-          })}
-        </View>
+                        {!isEmpty && (
+                          <View style={styles.dayCardGradientOverlay}>
+                            <View style={styles.dayCardCountBadge}>
+                              <Text style={styles.dayCardCountBadgeText}>{count}</Text>
+                            </View>
+                            <View>
+                              <Text style={styles.dayCardLabel}>{formatDayLabel(day)}</Text>
+                              <Text style={styles.dayCardDate}>{formatDayDate(day)}</Text>
+                            </View>
+                          </View>
+                        )}
+                        {isEmpty && (
+                          <View style={styles.dayCardEmptyFooter}>
+                            <Text style={styles.dayCardLabelEmpty}>{formatDayLabel(day)}</Text>
+                            <Text style={styles.dayCardDateEmpty}>{formatDayDate(day)}</Text>
+                          </View>
+                        )}
+                      </View>
+                    </AnimatedPressable>
+                  );
+                })}
+              </ScrollView>
+            </>
+          )}
+        </ScrollView>
       )}
 
       {/* Full-Screen Story Viewer Modal */}
-      {currentGroup && currentItem && (
+      {activeDay && currentItem && (
         <Modal
-          visible={activeGroupIdx !== null}
+          visible={activeDayIdx !== null}
           transparent={false}
           animationType="fade"
-          onRequestClose={() => setActiveGroupIdx(null)}
+          onRequestClose={() => setActiveDayIdx(null)}
         >
           <View style={styles.storyContainer} {...panResponder.panHandlers}>
             <StatusBar barStyle="light-content" />
@@ -384,7 +516,7 @@ export default function MemoriesScreen() {
             {/* Top Bar: Progress Segments + Close Button */}
             <View style={[styles.storyTopBar, { paddingTop: Math.max(insets.top, 16) }]}>
               <View style={styles.segmentContainer}>
-                {currentGroup.items.map((it, idx) => {
+                {activeItems.map((it, idx) => {
                   let fill = 0;
                   if (idx < activeItemIdx) fill = 1;
                   else if (idx === activeItemIdx) fill = progressRatio;
@@ -399,14 +531,19 @@ export default function MemoriesScreen() {
 
               <View style={styles.storyHeaderRow}>
                 <View style={styles.storyHeaderInfo}>
+                  {!activeDay.is_today && (
+                    <View style={styles.storyDayPill}>
+                      <Text style={styles.storyDayPillText}>{formatDayLabel(activeDay)}</Text>
+                    </View>
+                  )}
                   <Text style={styles.storyYearTitle}>
-                    {currentGroup.years_ago} {currentGroup.years_ago === 1 ? 'Year' : 'Years'} Ago ({currentGroup.year})
+                    {currentItem.years_ago} {currentItem.years_ago === 1 ? 'Year' : 'Years'} Ago ({currentItem.year})
                   </Text>
                   <Text style={styles.storySourceSub}>{currentItem.source_label}</Text>
                 </View>
                 <TouchableOpacity
                   style={styles.closeBtn}
-                  onPress={() => setActiveGroupIdx(null)}
+                  onPress={() => setActiveDayIdx(null)}
                   hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                 >
                   <AppIcon androidName="close" iosName="xmark" color="#fff" size={24} />
@@ -507,6 +644,8 @@ function NativeStoryVideoPlayer({
 
   const player = videoModule.useVideoPlayer(source, p => {
     p.loop = false;
+    p.muted = false;
+    p.volume = 1;
     safeMediaCall(() => p.play());
   });
 
@@ -609,8 +748,45 @@ const createStyles = (colors: AppColors, insets: any) =>
       lineHeight: 20,
     },
 
-    cardList: { padding: Spacing.five, gap: Spacing.five },
-    yearCardContainer: { height: 220, marginVertical: Spacing.two },
+    scrollContent: { paddingBottom: Spacing.eight },
+
+    sectionHeaderRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      paddingHorizontal: Spacing.five,
+      marginTop: Spacing.five,
+      marginBottom: Spacing.three,
+    },
+    sectionTitle: { fontSize: TextScale.lg, fontWeight: '800', color: colors.text },
+    sectionSubtitle: { fontSize: TextScale.xs, color: colors.textSecondary, fontWeight: '600' },
+    todayBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingHorizontal: Spacing.three,
+      paddingVertical: 6,
+      borderRadius: Radius.full,
+      backgroundColor: colors.primarySoft,
+    },
+    todayBadgeText: { color: colors.primary, fontWeight: '900', fontSize: TextScale.xs, letterSpacing: 0.6 },
+
+    todayEmptyCard: {
+      marginHorizontal: Spacing.five,
+      paddingVertical: Spacing.six,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: Spacing.two,
+      borderRadius: Radius.xl,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+      borderStyle: 'dashed',
+    },
+    todayEmptyText: { fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '600' },
+
+    cardList: { paddingHorizontal: Spacing.five, gap: Spacing.five },
+    featuredCardContainer: { height: 240, marginVertical: Spacing.two },
     stackLayer: {
       position: 'absolute',
       left: 12,
@@ -629,16 +805,18 @@ const createStyles = (colors: AppColors, insets: any) =>
       transform: [{ rotate: '2deg' }],
       opacity: 0.7,
     },
-    cardMain: {
+    featuredCardMain: {
       flex: 1,
       borderRadius: Radius.xl,
       overflow: 'hidden',
       backgroundColor: colors.surface,
-      elevation: 4,
-      shadowColor: '#000',
-      shadowOffset: { width: 0, height: 4 },
-      shadowOpacity: 0.15,
-      shadowRadius: 8,
+      borderWidth: 2,
+      borderColor: colors.primary,
+      elevation: 6,
+      shadowColor: colors.primary,
+      shadowOffset: { width: 0, height: 6 },
+      shadowOpacity: 0.25,
+      shadowRadius: 14,
     },
     cardImage: { width: '100%', height: '100%' },
     cardImagePlaceholder: { width: '100%', height: '100%', backgroundColor: colors.surfaceBorder },
@@ -659,6 +837,56 @@ const createStyles = (colors: AppColors, insets: any) =>
     cardTextContainer: { gap: 2 },
     cardYearsAgo: { color: '#fff', fontSize: TextScale.xl, fontWeight: '900', letterSpacing: -0.5 },
     cardCountText: { color: 'rgba(255,255,255,0.85)', fontSize: TextScale.xs, fontWeight: '600' },
+
+    historyRow: { paddingHorizontal: Spacing.five, gap: DAY_CARD_GAP },
+    dayCardContainer: { width: DAY_CARD_W, height: DAY_CARD_H },
+    dayCardMain: {
+      flex: 1,
+      borderRadius: Radius.lg,
+      overflow: 'hidden',
+      backgroundColor: colors.surface,
+      elevation: 3,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 3 },
+      shadowOpacity: 0.12,
+      shadowRadius: 6,
+    },
+    dayCardMainEmpty: {
+      borderWidth: 1.5,
+      borderColor: colors.surfaceBorder,
+      borderStyle: 'dashed',
+      justifyContent: 'space-between',
+    },
+    dayCardEmptyIconWrap: {
+      flex: 1,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    dayCardEmptyFooter: {
+      alignItems: 'center',
+      paddingBottom: Spacing.three,
+    },
+    dayCardLabelEmpty: { color: colors.textSecondary, fontWeight: '800', fontSize: TextScale.sm },
+    dayCardDateEmpty: { color: colors.textMuted, fontWeight: '600', fontSize: TextScale.xs, marginTop: 2 },
+    dayCardGradientOverlay: {
+      ...StyleSheet.absoluteFill,
+      backgroundColor: 'rgba(0,0,0,0.3)',
+      justifyContent: 'space-between',
+      padding: Spacing.three,
+    },
+    dayCardCountBadge: {
+      alignSelf: 'flex-end',
+      minWidth: 22,
+      height: 22,
+      paddingHorizontal: 6,
+      borderRadius: Radius.full,
+      backgroundColor: 'rgba(0,0,0,0.6)',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    dayCardCountBadgeText: { color: '#fff', fontWeight: '800', fontSize: TextScale.xs },
+    dayCardLabel: { color: '#fff', fontWeight: '800', fontSize: TextScale.sm },
+    dayCardDate: { color: 'rgba(255,255,255,0.85)', fontWeight: '600', fontSize: TextScale.xs, marginTop: 1 },
 
     /* Story Modal Styles */
     storyContainer: { flex: 1, backgroundColor: '#000' },
@@ -687,6 +915,15 @@ const createStyles = (colors: AppColors, insets: any) =>
 
     storyHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingBottom: Spacing.three },
     storyHeaderInfo: { gap: 2 },
+    storyDayPill: {
+      alignSelf: 'flex-start',
+      paddingHorizontal: Spacing.two,
+      paddingVertical: 2,
+      borderRadius: Radius.sm,
+      backgroundColor: 'rgba(255,255,255,0.2)',
+      marginBottom: 2,
+    },
+    storyDayPillText: { color: '#fff', fontWeight: '700', fontSize: TextScale.xs },
     storyYearTitle: { color: '#fff', fontWeight: '800', fontSize: TextScale.md },
     storySourceSub: { color: 'rgba(255,255,255,0.75)', fontSize: TextScale.xs, fontWeight: '500' },
     closeBtn: {

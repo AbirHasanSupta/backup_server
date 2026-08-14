@@ -5,7 +5,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import * as MediaLibrary from 'expo-media-library';
 import { registerBackgroundTask } from '../../backgroundTask';
-import { setupNotifications, showMemoriesNotification, addMemoriesTapListener } from '../../notificationService';
+import { setupNotifications, showMemoriesNotification, addMemoriesTapListener, getInitialMemoriesTap } from '../../notificationService';
 import { getLastMemoryNotifiedDate, setLastMemoryNotifiedDate } from '../../settings';
 import { getTodaysMemories } from '../../downloader';
 import { AppColors, Radius, Shadows, TextScale } from '@/constants/theme';
@@ -91,7 +91,17 @@ function RootLayoutContent() {
   }, []);
 
   useEffect(() => {
-    return addMemoriesTapListener(() => router.push('/memories'));
+    let active = true;
+    getInitialMemoriesTap().then(shouldOpen => {
+      if (active && shouldOpen) {
+        router.push('/memories');
+      }
+    });
+    const unsubscribe = addMemoriesTapListener(() => router.push('/memories'));
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [router]);
 
   return (

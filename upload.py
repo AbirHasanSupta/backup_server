@@ -1046,6 +1046,18 @@ async def get_memories_today(
     return memories.get_todays_memories(device_id)
 
 
+@router.get("/memories/recent")
+async def get_memories_recent(
+    device_id: str,
+    days: int = 7,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    return memories.get_recent_memories(device_id, days=days)
+
+
 @router.post("/memories/reindex")
 async def reindex_memories(
     device_id: str,

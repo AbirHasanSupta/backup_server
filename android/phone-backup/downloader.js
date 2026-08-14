@@ -200,6 +200,20 @@ export async function getTodaysMemories() {
 }
 
 /**
+ * Fetch memories for today and the previous 6 days from the server.
+ * @returns {Promise<{days: Array<{date: {month: number, day: number, year: number}, days_ago: number, is_today: boolean, groups: Array<{year: number, years_ago: number, items: Array<any>}>}>}>}
+ */
+export async function getRecentMemories(days = 7) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/memories/recent?device_id=${encodeURIComponent(deviceId)}&days=${encodeURIComponent(days)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch recent memories (${res.status})`);
+  return await res.json();
+}
+
+/**
  * Trigger media reindexing on the server.
  */
 export async function triggerMemoriesReindex() {
@@ -213,4 +227,4 @@ export async function triggerMemoriesReindex() {
   );
   if (!res.ok) throw new Error(`Reindex failed (${res.status})`);
   return await res.json();
-}
+}

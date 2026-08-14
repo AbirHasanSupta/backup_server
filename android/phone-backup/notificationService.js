@@ -239,6 +239,17 @@ export async function dismissSyncNotification() {
   }
 }
 
+export async function getInitialMemoriesTap() {
+  if (!N) return false;
+  try {
+    const response = await N.getLastNotificationResponseAsync();
+    return response?.notification?.request?.content?.data?.type === 'memories';
+  } catch (e) {
+    console.warn('[Notifications] getInitialMemoriesTap failed:', e?.message);
+    return false;
+  }
+}
+
 export function addMemoriesTapListener(onTap) {
   if (!N) return () => {};
   try {

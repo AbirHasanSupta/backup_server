@@ -99,7 +99,10 @@ def _extract_video_creation_time(full_path: str) -> int | None:
             "-show_format",
             full_path,
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        run_options = {"capture_output": True, "text": True, "timeout": 10}
+        if os.name == "nt":
+            run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+        proc = subprocess.run(cmd, **run_options)
         if proc.returncode != 0 or not proc.stdout:
             return None
         data = json.loads(proc.stdout)
@@ -283,11 +286,8 @@ def startup_scan_loop() -> None:
             time_module.sleep(300)
 
 
-def get_todays_memories(device_id: str) -> dict:
-    today = date.today()
+def _shared_sources_for_device(device_id: str, shared_dirs: list) -> tuple[list[tuple[str, str]], dict[str, str]]:
     sources = [("phone", device_id)]
-
-    shared_dirs = load_config().get("SHARED_DIRS", [])
     shared_labels = {}
     for d in shared_dirs:
         sid = d.get("id")
@@ -297,8 +297,16 @@ def get_todays_memories(device_id: str) -> dict:
             shared_labels[sid] = label
             if isinstance(tagged, list) and (device_id in tagged or "all" in tagged):
                 sources.append(("shared", sid))
+    return sources, shared_labels
 
-    rows = get_media_for_day(sources, today.month, today.day, exclude_year=today.year)
+
+def _build_day_memories(
+    device_id: str,
+    target_date: date,
+    sources: list[tuple[str, str]],
+    shared_labels: dict[str, str],
+) -> dict:
+    rows = get_media_for_day(sources, target_date.month, target_date.day, exclude_year=target_date.year)
 
     grouped: dict[int, list[dict]] = {}
     for r in rows:
@@ -325,14 +333,44 @@ def get_todays_memories(device_id: str) -> dict:
     sorted_years = sorted(grouped.keys(), reverse=True)
     groups = []
     for yr in sorted_years:
-        years_ago = today.year - yr
         groups.append({
             "year": yr,
-            "years_ago": years_ago,
+            "years_ago": target_date.year - yr,
             "items": grouped[yr],
         })
 
     return {
-        "today": {"month": today.month, "day": today.day},
+        "date": {"month": target_date.month, "day": target_date.day, "year": target_date.year},
         "groups": groups,
     }
+
+
+def get_todays_memories(device_id: str) -> dict:
+    today = date.today()
+    shared_dirs = load_config().get("SHARED_DIRS", [])
+    sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
+    day_data = _build_day_memories(device_id, today, sources, shared_labels)
+
+    return {
+        "today": {"month": today.month, "day": today.day},
+        "groups": day_data["groups"],
+    }
+
+
+def get_recent_memories(device_id: str, days: int = 7) -> dict:
+    today = date.today()
+    shared_dirs = load_config().get("SHARED_DIRS", [])
+    sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
+
+    result_days = []
+    for offset in range(max(1, days)):
+        target_date = today - timedelta(days=offset)
+        day_data = _build_day_memories(device_id, target_date, sources, shared_labels)
+        result_days.append({
+            "date": day_data["date"],
+            "days_ago": offset,
+            "is_today": offset == 0,
+            "groups": day_data["groups"],
+        })
+
+    return {"days": result_days}
