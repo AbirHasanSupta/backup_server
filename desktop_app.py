@@ -2135,59 +2135,55 @@ class BackupServerApp(ctk.CTk):
                 scanned      = sess.get("scanned",     0)
                 dur_ms       = sess.get("duration_ms", 0)
 
-                # Card — compact single-line horizontal bar
+                # Card — ultra-compact single-line horizontal bar (packed top-to-bottom)
                 card = ctk.CTkFrame(
                     self._hist_scroll,
+                    height=0,
                     fg_color=C_SURFACE,
-                    corner_radius=8,
+                    corner_radius=6,
                     border_width=1,
                     border_color=C_BORDER,
                 )
-                card.grid(row=row_idx, column=0, sticky="ew", padx=8, pady=2)
-                card.grid_columnconfigure(1, weight=1)
+                card.pack(fill="x", padx=6, pady=2)
 
-                # Left accent strip — column 0, sticky ns keeps it flush
-                accent_bar = ctk.CTkFrame(card, width=4, fg_color=fg, corner_radius=0)
-                accent_bar.grid(row=0, column=0, sticky="ns")
+                # Left accent strip — flush on left (height=0 prevents CTkFrame 200px default)
+                accent_bar = ctk.CTkFrame(card, width=3, height=0, fg_color=fg, corner_radius=0)
+                accent_bar.pack(side="left", fill="y")
 
                 # Body — single horizontal row
-                body = ctk.CTkFrame(card, fg_color="transparent")
-                body.grid(row=0, column=1, sticky="ew", padx=(10, 12), pady=(4, 4))
-                body.grid_columnconfigure(3, weight=1)
+                body = ctk.CTkFrame(card, height=0, fg_color="transparent")
+                body.pack(side="left", fill="both", expand=True, padx=(8, 10), pady=(3, 3))
 
                 # Col 0: Outcome badge pill
-                badge_pill = ctk.CTkFrame(body, fg_color=bg, corner_radius=999)
-                badge_pill.grid(row=0, column=0, sticky="w")
+                badge_pill = ctk.CTkFrame(body, height=0, fg_color=bg, corner_radius=999)
+                badge_pill.pack(side="left", padx=(0, 6))
                 ctk.CTkLabel(
                     badge_pill,
                     text=f"{icon}  {label}",
                     font=ctk.CTkFont(family="Segoe UI Variable Text", size=9, weight="bold"),
                     text_color=fg,
-                ).pack(padx=7, pady=1)
+                ).pack(padx=6, pady=1)
 
-                col_idx = 1
                 if trigger == "auto":
                     auto_pill = ctk.CTkFrame(
-                        body, fg_color=C_ELEVATED, corner_radius=999,
+                        body, height=0, fg_color=C_ELEVATED, corner_radius=999,
                         border_width=1, border_color=C_BORDER,
                     )
-                    auto_pill.grid(row=0, column=col_idx, sticky="w", padx=(5, 0))
+                    auto_pill.pack(side="left", padx=(0, 6))
                     ctk.CTkLabel(
                         auto_pill, text="AUTO",
                         font=ctk.CTkFont(family="Segoe UI Variable Text", size=8, weight="bold"),
                         text_color=C_MUTED,
                     ).pack(padx=5, pady=1)
-                    col_idx += 1
 
-                # Col idx: Device label
+                # Device label
                 ctk.CTkLabel(
                     body, text=device_label,
-                    font=ctk.CTkFont(family="Segoe UI Variable Text", size=11, weight="bold"),
+                    font=ctk.CTkFont(family="Segoe UI Variable Text", size=10, weight="bold"),
                     text_color=C_TEXT, anchor="w",
-                ).grid(row=0, column=col_idx, sticky="w", padx=(8, 0))
-                col_idx += 1
+                ).pack(side="left", padx=(0, 8))
 
-                # Col idx: Inline compact stats summary
+                # Inline compact stats summary
                 stat_items = []
                 if uploaded:
                     stat_items.append(f"⬆︎ {uploaded:,} uploaded")
@@ -2208,14 +2204,13 @@ class BackupServerApp(ctk.CTk):
                     body, text=f"·   {stats_str}",
                     font=ctk.CTkFont(family="Segoe UI Variable Text", size=10),
                     text_color=stats_clr, anchor="w",
-                ).grid(row=0, column=col_idx, sticky="w", padx=(8, 0))
-                col_idx += 1
+                ).pack(side="left")
 
                 # Far right: Timestamp
                 ctk.CTkLabel(
                     body, text=_fmt_ts(started_ts),
                     font=FONT_SMALL, text_color=C_MUTED, anchor="e",
-                ).grid(row=0, column=col_idx, sticky="e", padx=(8, 0))
+                ).pack(side="right")
 
         except Exception:
             traceback.print_exc()
