@@ -109,8 +109,10 @@ type TreeNode = {
   children: TreeNode[];
   totalSize: number;
   fileCount: number;
-  isExpanded: boolean;
+  filePaths: string[];
 };
+
+type FlatRow = { node: TreeNode; depth: number };
 
 type SortField = 'name' | 'date' | 'type' | 'size';
 type SortDir   = 'asc' | 'desc';
@@ -207,7 +209,7 @@ function insertFileIntoTree(node: TreeNode, segments: string[], file: RemoteFile
   if (depth === segments.length - 1) {
     node.children.push({
       name: segments[depth], key: file.path, isFolder: false,
-      file, children: [], totalSize: file.size, fileCount: 1, isExpanded: false,
+      file, children: [], totalSize: file.size, fileCount: 1, filePaths: [file.path],
     });
     return;
   }
@@ -215,7 +217,7 @@ function insertFileIntoTree(node: TreeNode, segments: string[], file: RemoteFile
   const folderKey = segments.slice(0, depth + 1).join('/');
   let child = node.children.find(c => c.isFolder && c.name === segName);
   if (!child) {
-    child = { name: segName, key: folderKey, isFolder: true, children: [], totalSize: 0, fileCount: 0, isExpanded: false };
+    child = { name: segName, key: folderKey, isFolder: true, children: [], totalSize: 0, fileCount: 0, filePaths: [] };
     node.children.push(child);
   }
   insertFileIntoTree(child, segments, file, depth + 1);
@@ -226,16 +228,17 @@ function rollupStats(node: TreeNode): void {
   for (const child of node.children) rollupStats(child);
   node.totalSize = node.children.reduce((s, c) => s + c.totalSize, 0);
   node.fileCount = node.children.reduce((s, c) => s + c.fileCount, 0);
+  node.filePaths = node.children.flatMap(c => c.filePaths);
 }
 
 function buildTree(files: RemoteFile[]): TreeNode {
-  const root: TreeNode = { name: '__root__', key: '__root__', isFolder: true, children: [], totalSize: 0, fileCount: 0, isExpanded: true };
+  const root: TreeNode = { name: '__root__', key: '__root__', isFolder: true, children: [], totalSize: 0, fileCount: 0, filePaths: [] };
   for (const file of files) {
     const displayPath = sanitizeRelativePath(file.path);
     const segments = displayPath.split('/').filter(Boolean);
     if (segments.length === 0) continue;
     if (segments.length === 1) {
-      root.children.push({ name: segments[0], key: file.path, isFolder: false, file, children: [], totalSize: file.size, fileCount: 1, isExpanded: false });
+      root.children.push({ name: segments[0], key: file.path, isFolder: false, file, children: [], totalSize: file.size, fileCount: 1, filePaths: [file.path] });
     } else {
       insertFileIntoTree(root, segments, file, 0);
     }
@@ -245,17 +248,29 @@ function buildTree(files: RemoteFile[]): TreeNode {
 }
 
 function collectFilePaths(node: TreeNode): string[] {
-  if (!node.isFolder) return node.file ? [node.file.path] : [];
-  return node.children.flatMap(collectFilePaths);
+  return node.filePaths;
 }
 
 function folderSelectionState(node: TreeNode, selectedPaths: Set<string>): 'none' | 'partial' | 'all' {
-  const paths = collectFilePaths(node);
+  const paths = node.filePaths;
   if (paths.length === 0) return 'none';
-  const selected = paths.filter(p => selectedPaths.has(p)).length;
+  if (selectedPaths.size === 0) return 'none';
+  let selected = 0;
+  for (const p of paths) {
+    if (selectedPaths.has(p)) selected++;
+  }
   if (selected === 0) return 'none';
   if (selected === paths.length) return 'all';
   return 'partial';
+}
+
+function flattenVisibleRows(nodes: TreeNode[], depth: number, expandedKeys: Set<string>, out: FlatRow[]): void {
+  for (const node of nodes) {
+    out.push({ node, depth });
+    if (node.isFolder && node.children.length > 0 && expandedKeys.has(node.key)) {
+      flattenVisibleRows(node.children, depth + 1, expandedKeys, out);
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1535,6 +1550,7 @@ const SORT_OPTIONS: { field: SortField; label: string }[] = [
 type TreeNodeViewProps = {
   node: TreeNode;
   depth: number;
+  isExpanded: boolean;
   selectedPaths: Set<string>;
   selectionMode: boolean;
   onToggleNode: (node: TreeNode) => void;
@@ -1547,7 +1563,7 @@ type TreeNodeViewProps = {
 };
 
 const TreeNodeView = React.memo(function TreeNodeView({
-  node, depth, selectedPaths, selectionMode, onToggleNode, onToggleExpand, onPreview, onWarmPreview, onEnterSelectionMode, styles, colors,
+  node, depth, isExpanded, selectedPaths, selectionMode, onToggleNode, onToggleExpand, onPreview, onWarmPreview, onEnterSelectionMode, styles, colors,
 }: TreeNodeViewProps) {
   const indent = depth * 16;
 
@@ -1641,63 +1657,35 @@ const TreeNodeView = React.memo(function TreeNodeView({
   const checkboxStyle = [styles.checkbox, (isAllSelected || isPartial) && styles.checkboxSelected, isPartial && styles.checkboxPartial];
 
   return (
-    <View>
-      <View style={[styles.folderRow, { paddingLeft: indent + Spacing.four }]}>
-        <TouchableOpacity style={styles.chevronBtn} onPress={() => onToggleExpand(node.key)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 4 }}>
-          <AppIcon androidName={node.isExpanded ? 'expand_more' : 'chevron_right'} iosName={node.isExpanded ? 'chevron.down' : 'chevron.right'} color={colors.textSecondary} size={22} />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={checkboxStyle}
-          onPress={() => {
-            if (selectionMode) {
-              onToggleNode(node);
-            } else {
-              onEnterSelectionMode(node);
-            }
-          }}
-          hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
-        >
-          {isAllSelected && <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />}
-          {isPartial && <View style={styles.partialDot} />}
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.folderLabelBtn} onPress={() => onToggleExpand(node.key)} activeOpacity={0.7}>
-          <AppIcon androidName="folder" iosName="folder.fill" color={colors.primary} size={18} />
-          <Text style={styles.folderName} numberOfLines={1}>{node.name}</Text>
-        </TouchableOpacity>
-        <View style={styles.folderBadge}>
-          <Text style={styles.folderBadgeText}>{node.fileCount} {node.fileCount === 1 ? 'file' : 'files'}</Text>
-          <Text style={styles.folderBadgeSize}>{formatSize(node.totalSize)}</Text>
-        </View>
+    <View style={[styles.folderRow, { paddingLeft: indent + Spacing.four }]}>
+      <TouchableOpacity style={styles.chevronBtn} onPress={() => onToggleExpand(node.key)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 4 }}>
+        <AppIcon androidName={isExpanded ? 'expand_more' : 'chevron_right'} iosName={isExpanded ? 'chevron.down' : 'chevron.right'} color={colors.textSecondary} size={22} />
+      </TouchableOpacity>
+      <TouchableOpacity
+        style={checkboxStyle}
+        onPress={() => {
+          if (selectionMode) {
+            onToggleNode(node);
+          } else {
+            onEnterSelectionMode(node);
+          }
+        }}
+        hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
+      >
+        {isAllSelected && <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />}
+        {isPartial && <View style={styles.partialDot} />}
+      </TouchableOpacity>
+      <TouchableOpacity style={styles.folderLabelBtn} onPress={() => onToggleExpand(node.key)} activeOpacity={0.7}>
+        <AppIcon androidName="folder" iosName="folder.fill" color={colors.primary} size={18} />
+        <Text style={styles.folderName} numberOfLines={1}>{node.name}</Text>
+      </TouchableOpacity>
+      <View style={styles.folderBadge}>
+        <Text style={styles.folderBadgeText}>{node.fileCount} {node.fileCount === 1 ? 'file' : 'files'}</Text>
+        <Text style={styles.folderBadgeSize}>{formatSize(node.totalSize)}</Text>
       </View>
-      {node.isExpanded && node.children.map(child => (
-        <TreeNodeView
-          key={child.key} node={child} depth={depth + 1}
-          selectedPaths={selectedPaths} selectionMode={selectionMode}
-          onToggleNode={onToggleNode} onEnterSelectionMode={onEnterSelectionMode}
-          onToggleExpand={onToggleExpand} onPreview={onPreview} onWarmPreview={onWarmPreview}
-          styles={styles} colors={colors}
-        />
-      ))}
     </View>
   );
 });
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tree mutation helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-function deepCloneTree(node: TreeNode): TreeNode {
-  return { ...node, children: node.children.map(deepCloneTree) };
-}
-
-function findNodeByKey(node: TreeNode, key: string): TreeNode | null {
-  if (node.key === key) return node;
-  for (const child of node.children) {
-    const found = findNodeByKey(child, key);
-    if (found) return found;
-  }
-  return null;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main Restore Screen Component
@@ -1761,6 +1749,7 @@ export default function RestoreScreen() {
   // File list & tree state
   const [files, setFiles] = useState<RemoteFile[]>([]);
   const [tree, setTree] = useState<TreeNode | null>(null);
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(() => new Set());
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [isFetching, setIsFetching] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
@@ -1915,6 +1904,7 @@ export default function RestoreScreen() {
     setSourceMode(mode);
     setFiles([]);
     setTree(null);
+    setExpandedKeys(new Set());
     setSelectedPaths(new Set());
     setSelectionMode(false);
     if (mode !== 'shared') {
@@ -1934,14 +1924,23 @@ export default function RestoreScreen() {
     setSelectedSourceId(source.id);
     setFiles([]);
     setTree(null);
+    setExpandedKeys(new Set());
     setSelectedPaths(new Set());
   }, []);
 
-  // Sorted tree
+  // Sorted tree — only recomputed when the file list or sort choice changes,
+  // never on folder expand/collapse.
   const sortedTree = useMemo(() => {
     if (!tree) return null;
     return sortTreeChildren(tree, sortField, sortDir);
   }, [tree, sortField, sortDir]);
+
+  const visibleRows = useMemo<FlatRow[]>(() => {
+    if (!sortedTree) return [];
+    const out: FlatRow[] = [];
+    flattenVisibleRows(sortedTree.children, 0, expandedKeys, out);
+    return out;
+  }, [sortedTree, expandedKeys]);
 
   // Flat ordered list of previewable files
   const previewableFiles = useMemo<RemoteFile[]>(() => {
@@ -1990,6 +1989,7 @@ export default function RestoreScreen() {
 
       const newTree = buildTree(serverFiles);
       setTree(newTree);
+      setExpandedKeys(new Set());
       setSelectedPaths(new Set());
     } catch (error: any) {
       Alert.alert('Fetch Failed', sanitizeErrorMessage(error, 'Could not fetch files from server.'));
@@ -2036,14 +2036,12 @@ export default function RestoreScreen() {
     setPreviewFile(null);
   }, []);
 
-  // Expand / collapse folder nodes
   const handleToggleExpand = useCallback((nodeKey: string) => {
-    setTree(prev => {
-      if (!prev) return prev;
-      const cloned = deepCloneTree(prev);
-      const target = findNodeByKey(cloned, nodeKey);
-      if (target) target.isExpanded = !target.isExpanded;
-      return cloned;
+    setExpandedKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(nodeKey)) next.delete(nodeKey);
+      else next.add(nodeKey);
+      return next;
     });
   }, []);
 
@@ -2259,7 +2257,7 @@ export default function RestoreScreen() {
     [handleDownloadFiles, selectedPaths],
   );
 
-  const rootChildren = sortedTree?.children ?? [];
+
   const warmPreviewUrl = useMemo(() => {
     if (!warmPreviewFile || !serverConfig || getFileCategory(warmPreviewFile.path) !== 'video') {
       return '';
@@ -2411,11 +2409,12 @@ export default function RestoreScreen() {
       {/* File Tree List */}
       <FlatList
         style={{ flex: 1 }}
-        data={rootChildren}
-        keyExtractor={item => item.key}
+        data={visibleRows}
+        keyExtractor={row => row.node.key}
         renderItem={({ item }) => (
           <TreeNodeView
-            node={item} depth={0}
+            node={item.node} depth={item.depth}
+            isExpanded={expandedKeys.has(item.node.key)}
             selectedPaths={selectedPaths}
             selectionMode={selectionMode}
             onToggleNode={handleToggleNode}
@@ -2430,6 +2429,11 @@ export default function RestoreScreen() {
         showsVerticalScrollIndicator={false}
         onScroll={isDownloading ? undefined : onListScroll}
         scrollEventThrottle={16}
+        removeClippedSubviews
+        initialNumToRender={24}
+        maxToRenderPerBatch={24}
+        updateCellsBatchingPeriod={50}
+        windowSize={9}
         ListEmptyComponent={
           !isFetching ? (
             <View style={styles.emptyContainer}>

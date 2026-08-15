@@ -19,7 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
 
-import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
+import { AppColors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
@@ -170,7 +170,8 @@ export default function MemoriesScreen() {
   }, []);
 
   const todayDay = data?.days && data.days.length > 0 ? data.days[0] : null;
-  const historyDays = data?.days && data.days.length > 1 ? data.days.slice(1) : [];
+  const historyDaysAll = data?.days && data.days.length > 1 ? data.days.slice(1) : [];
+  const historyDays = historyDaysAll.filter(day => dayItemCount(day) > 0);
   const totalItemsAcrossAllDays = data?.days ? data.days.reduce((sum, d) => sum + dayItemCount(d), 0) : 0;
 
   const activeDay = activeDayIdx !== null && data?.days ? data.days[activeDayIdx] : null;
@@ -423,23 +424,21 @@ export default function MemoriesScreen() {
                 decelerationRate="fast"
                 contentContainerStyle={styles.historyRow}
               >
-                {historyDays.map((day, idx) => {
-                  const dayIdx = idx + 1;
+                {historyDays.map(day => {
+                  const dayIdx = historyDaysAll.indexOf(day) + 1;
                   const count = dayItemCount(day);
                   const coverItem = day.groups[0]?.items[0];
                   const coverUrl = coverItem ? getMediaUrl(coverItem) : '';
-                  const isEmpty = count === 0;
 
                   return (
                     <AnimatedPressable
                       key={`${day.date.month}-${day.date.day}-${day.date.year}`}
                       style={styles.dayCardContainer}
-                      disabled={isEmpty}
                       onPress={() => openDayStory(dayIdx, 0)}
                       scaleDown={0.95}
                     >
-                      <View style={[styles.dayCardMain, isEmpty && styles.dayCardMainEmpty]}>
-                        {!isEmpty && coverUrl ? (
+                      <View style={styles.dayCardMain}>
+                        {coverUrl ? (
                           <Image source={{ uri: coverUrl }} style={styles.cardImage} contentFit="cover" transition={200} />
                         ) : (
                           <View style={styles.dayCardEmptyIconWrap}>
@@ -447,23 +446,15 @@ export default function MemoriesScreen() {
                           </View>
                         )}
 
-                        {!isEmpty && (
-                          <View style={styles.dayCardGradientOverlay}>
-                            <View style={styles.dayCardCountBadge}>
-                              <Text style={styles.dayCardCountBadgeText}>{count}</Text>
-                            </View>
-                            <View>
-                              <Text style={styles.dayCardLabel}>{formatDayLabel(day)}</Text>
-                              <Text style={styles.dayCardDate}>{formatDayDate(day)}</Text>
-                            </View>
+                        <View style={styles.dayCardGradientOverlay}>
+                          <View style={styles.dayCardCountBadge}>
+                            <Text style={styles.dayCardCountBadgeText}>{count}</Text>
                           </View>
-                        )}
-                        {isEmpty && (
-                          <View style={styles.dayCardEmptyFooter}>
-                            <Text style={styles.dayCardLabelEmpty}>{formatDayLabel(day)}</Text>
-                            <Text style={styles.dayCardDateEmpty}>{formatDayDate(day)}</Text>
+                          <View>
+                            <Text style={styles.dayCardLabel}>{formatDayLabel(day)}</Text>
+                            <Text style={styles.dayCardDate}>{formatDayDate(day)}</Text>
                           </View>
-                        )}
+                        </View>
                       </View>
                     </AnimatedPressable>
                   );
@@ -748,7 +739,7 @@ const createStyles = (colors: AppColors, insets: any) =>
       lineHeight: 20,
     },
 
-    scrollContent: { paddingBottom: Spacing.eight },
+    scrollContent: { paddingBottom: BottomTabInset + insets.bottom + Spacing.eight },
 
     sectionHeaderRow: {
       flexDirection: 'row',
