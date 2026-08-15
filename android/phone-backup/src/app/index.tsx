@@ -25,6 +25,8 @@ import { checkDeviceConnection } from '../../uploader';
 import {
   getServerIp,
   getServerName,
+  setServerName,
+  getServerPort,
   getLastSyncTime,
   getTotalSynced,
   getSyncInterval,
@@ -176,6 +178,23 @@ export default function HomeScreen() {
     if (!ip) {
       setServerStatus('unknown');
       return;
+    }
+
+    if (!name) {
+      try {
+        const port = await getServerPort();
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2500);
+        const res = await fetch(`http://${ip}:${port}/ping`, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.name) {
+            await setServerName(data.name);
+            setServerLabel(data.name);
+          }
+        }
+      } catch {}
     }
 
     // Keep connected status visible while re-probing to avoid Sync Now flicker.

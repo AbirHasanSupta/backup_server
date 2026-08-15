@@ -160,11 +160,23 @@ export default function SettingsScreen() {
     setSavingServer(true);
     try {
       const key = apiKey.trim() || 'YOUR_SECRET_KEY';
+      let discoveredName = '';
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2500);
+        const res = await fetch(`http://${cleanIp}:${portNum}/ping`, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (res.ok) {
+          const data = await res.json();
+          discoveredName = data?.name || '';
+        }
+      } catch {}
+
       await Promise.all([
         setServerIp(cleanIp),
         setServerPort(portNum),
         setApiKey(key),
-        setServerName(''),
+        setServerName(discoveredName),
         setDeviceToken(''),
         setServerCertFingerprint(''),
       ]);
