@@ -17,7 +17,7 @@ ROOT  = Path(__file__).resolve().parent
 VENV  = ROOT / ".venv"
 DIST  = ROOT / "dist"
 BUILD = ROOT / "build"
-OUT   = ROOT / "PhoneBackupServer.exe"
+OUT   = ROOT / "Phone Backup Server.exe"
 
 SEP = "=" * 53
 
@@ -104,6 +104,10 @@ def main() -> None:
         "starlette.middleware",
         "starlette.responses",
         "starlette.requests",
+        "pystray",
+        "pystray._win32",
+        "PIL",
+        "PIL.Image",
     ]
 
     add_data_files = [
@@ -118,9 +122,10 @@ def main() -> None:
     cmd = [
         python, "-m", "PyInstaller",
         "--noconfirm",
+        "--clean",
         "--onefile",
         "--windowed",
-        "--name", "PhoneBackupServer",
+        "--name", "Phone Backup Server",
         "--icon", str(ROOT / "assets" / "icon.ico"),
         "--add-data", f"{ROOT / 'assets'}{sep}assets",
         "--collect-all", "customtkinter",
@@ -153,7 +158,7 @@ def main() -> None:
 
     # ── 5. Copy EXE to project root ──────────────────────────────────────────
     step(5, 5, "Copying output to project root...")
-    built_exe = DIST / "PhoneBackupServer.exe"
+    built_exe = DIST / "Phone Backup Server.exe"
     if not built_exe.exists():
         print(f"[ERROR] Expected output not found at: {built_exe}")
         sys.exit(1)
@@ -167,7 +172,7 @@ def main() -> None:
     print(f"  Output: {OUT}")
     print(f"{SEP}")
     print(f"\n  File size: {size_bytes:,} bytes  (~{size_mb:.1f} MB)")
-    print("\n  Done. You can now distribute PhoneBackupServer.exe")
+    print("\n  Done. You can now distribute \"Phone Backup Server.exe\"")
     print("  Users do NOT need Python installed.\n")
 
 

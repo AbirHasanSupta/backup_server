@@ -52,7 +52,55 @@ _DEFAULTS = {
     # List of dicts: [{id: str, label: str, path: str}, ...]
     # IDs are stable slugs like "shared_0", "shared_1", etc.
     "SHARED_DIRS": [],
+    "START_WITH_WINDOWS": False,
+    "MINIMIZE_TO_TRAY": True,
 }
+
+_AUTOSTART_KEY_NAME = APP_NAME
+_AUTOSTART_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def _autostart_target() -> str | None:
+    if sys.platform != "win32":
+        return None
+    if _IS_FROZEN:
+        return f'"{sys.executable}"'
+    return f'"{sys.executable}" "{os.path.abspath(__file__).replace("config.py", "desktop_app.py")}"'
+
+
+def is_autostart_enabled() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_REG_PATH, 0, winreg.KEY_READ) as key:
+            winreg.QueryValueEx(key, _AUTOSTART_KEY_NAME)
+            return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
+def set_autostart_enabled(enabled: bool) -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _AUTOSTART_REG_PATH, 0, winreg.KEY_SET_VALUE) as key:
+            if enabled:
+                target = _autostart_target()
+                if not target:
+                    return False
+                winreg.SetValueEx(key, _AUTOSTART_KEY_NAME, 0, winreg.REG_SZ, target)
+            else:
+                try:
+                    winreg.DeleteValue(key, _AUTOSTART_KEY_NAME)
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception:
+        return False
 
 
 def _copy_if_missing(src: str, dest: str) -> None:

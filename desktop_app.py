@@ -51,7 +51,14 @@ from state import (
     pending_connections,
     resolve_connection,
 )
-from config import load_config, save_config
+from config import load_config, save_config, is_autostart_enabled, set_autostart_enabled
+
+try:
+    import pystray
+    from PIL import Image as _PILImage
+except Exception:
+    pystray = None
+    _PILImage = None
 from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessions, init_db, remove_device
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
@@ -458,6 +465,11 @@ class BackupServerApp(ctk.CTk):
         self._theme_rebuild_after_id: str | None = None
         self._shared_dirs: list[dict] = list(load_config().get("SHARED_DIRS", []))
         self._shared_dirs_save_after_id: str | None = None
+
+        self._tray_icon = None
+        self._tray_thread: threading.Thread | None = None
+        self._tray_enabled = bool(load_config().get("MINIMIZE_TO_TRAY", True))
+        self.bind("<Unmap>", self._on_minimize)
         self._settings_draft: dict[str, object] | None = None
 
         # Build layout
@@ -843,7 +855,7 @@ class BackupServerApp(ctk.CTk):
             inner.configure(fg_color=C_ELEVATED, border_color=accent)
         def _leave(e):
             inner.configure(fg_color=C_CARD, border_color=C_BORDER)
-        
+
         inner.bind("<Enter>", _enter)
         inner.bind("<Leave>", _leave)
         # Bind to children too so hover doesn't flicker
@@ -1170,7 +1182,7 @@ class BackupServerApp(ctk.CTk):
         """Capture visible settings before rebuilding the shell for a theme change."""
         required_widgets = (
             "_e_host", "_e_port", "_e_root", "_e_key", "_e_preview_cache_dir",
-            "_sw_approval", "_sw_dark_mode",
+            "_sw_approval", "_sw_dark_mode", "_sw_autostart", "_sw_tray",
         )
         if not all(hasattr(self, name) for name in required_widgets):
             return None
@@ -1183,6 +1195,8 @@ class BackupServerApp(ctk.CTk):
                 "VIDEO_PREVIEW_CACHE_DIR": self._e_preview_cache_dir.get(),
                 "REQUIRE_APPROVAL": bool(self._sw_approval.get()),
                 "THEME_MODE": "dark" if bool(self._sw_dark_mode.get()) else "light",
+                "START_WITH_WINDOWS": bool(self._sw_autostart.get()),
+                "MINIMIZE_TO_TRAY": bool(self._sw_tray.get()),
             }
         except (AttributeError, tk.TclError):
             return None
@@ -1366,6 +1380,40 @@ class BackupServerApp(ctk.CTk):
         ).pack(side="left", padx=12)
 
         self._sw_approval.configure(command=self._remember_settings_draft)
+
+        # ── STARTUP ───────────────────────────────────────────────────────
+        startup_card = settings_card("Startup")
+
+        sw_row2 = ctk.CTkFrame(startup_card, fg_color="transparent")
+        sw_row2.pack(fill="x", padx=18, pady=(6, 8))
+        self._sw_autostart = ctk.CTkSwitch(
+            sw_row2, text="", width=52, height=26,
+            button_color=C_ACCENT, progress_color=C_ACCENT,
+        )
+        self._sw_autostart.pack(side="left")
+        if cfg.get("START_WITH_WINDOWS", False):
+            self._sw_autostart.select()
+        ctk.CTkLabel(
+            sw_row2, text="Start with Windows",
+            font=FONT_BODY, text_color=C_TEXT,
+        ).pack(side="left", padx=12)
+        self._sw_autostart.configure(command=self._remember_settings_draft)
+
+        sw_row3 = ctk.CTkFrame(startup_card, fg_color="transparent")
+        sw_row3.pack(fill="x", padx=18, pady=(0, 18))
+        self._sw_tray = ctk.CTkSwitch(
+            sw_row3, text="", width=52, height=26,
+            button_color=C_ACCENT, progress_color=C_ACCENT,
+        )
+        self._sw_tray.pack(side="left")
+        if cfg.get("MINIMIZE_TO_TRAY", True):
+            self._sw_tray.select()
+        ctk.CTkLabel(
+            sw_row3, text="Minimize to system tray instead of taskbar",
+            font=FONT_BODY, text_color=C_TEXT,
+        ).pack(side="left", padx=12)
+        self._sw_tray.configure(command=self._remember_settings_draft)
+
         for entry in (
             self._e_host, self._e_port, self._e_root, self._e_key,
             self._e_preview_cache_dir,
@@ -1748,8 +1796,19 @@ class BackupServerApp(ctk.CTk):
             "THEME_MODE":       "dark" if bool(self._sw_dark_mode.get()) else "light",
             "VIDEO_PREVIEW_CACHE_DIR": preview_cache_dir,
             "SHARED_DIRS":      list(self._shared_dirs),
+            "START_WITH_WINDOWS": bool(self._sw_autostart.get()),
+            "MINIMIZE_TO_TRAY": bool(self._sw_tray.get()),
         }
         save_config(cfg)
+        if not set_autostart_enabled(cfg["START_WITH_WINDOWS"]):
+            self._sw_autostart.deselect() if not cfg["START_WITH_WINDOWS"] else None
+            messagebox.showwarning(
+                "Startup Setting",
+                "Could not update the Windows startup entry. "
+                "Try running the app as your normal user (not elevated), "
+                "or add it manually via Task Manager > Startup.",
+            )
+        self._tray_enabled = cfg["MINIMIZE_TO_TRAY"]
         self._settings_draft = None
 
         try:
@@ -2532,10 +2591,64 @@ class BackupServerApp(ctk.CTk):
         dlg.after(1000, tick)
         self.bell()
 
+    # ─── Minimize to tray ─────────────────────────────────────────────────────
+
+    def _on_minimize(self, event=None):
+        if event is not None and event.widget is not self:
+            return
+        if str(self.state()) != "iconic":
+            return
+        if not self._tray_enabled or pystray is None:
+            return
+        self.withdraw()
+        self._ensure_tray_icon()
+
+    def _ensure_tray_icon(self):
+        if self._tray_icon is not None:
+            return
+        icon_path = _resolve_asset("icon.ico")
+        try:
+            image = _PILImage.open(icon_path) if os.path.exists(icon_path) else _PILImage.new("RGB", (64, 64), "black")
+        except Exception:
+            image = _PILImage.new("RGB", (64, 64), "black")
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Open Phone Backup Server", self._tray_restore, default=True),
+            pystray.MenuItem("Quit", self._tray_quit),
+        )
+        self._tray_icon = pystray.Icon("PhoneBackupServer", image, "Phone Backup Server", menu)
+        self._tray_thread = threading.Thread(target=self._tray_icon.run, daemon=True)
+        self._tray_thread.start()
+
+    def _tray_restore(self, icon=None, item=None):
+        self.after(0, self._restore_from_tray)
+
+    def _restore_from_tray(self):
+        if self._tray_icon is not None:
+            self._tray_icon.stop()
+            self._tray_icon = None
+        self.deiconify()
+        self.state("normal")
+        self.lift()
+        self.focus_force()
+
+    def _tray_quit(self, icon=None, item=None):
+        if self._tray_icon is not None:
+            self._tray_icon.stop()
+            self._tray_icon = None
+        self.after(0, self._force_close)
+
+    def _force_close(self):
+        self.deiconify()
+        self._on_close()
+
     # ─── Window close ─────────────────────────────────────────────────────────
 
     def _on_close(self):
         if messagebox.askyesno("Quit", "Stop the backup server and quit?"):
+            if self._tray_icon is not None:
+                self._tray_icon.stop()
+                self._tray_icon = None
             self._stop_server()
             # Preview files are session-only.  Clear them before the Tk process
             # exits so a private FFmpeg cache job cannot leave a completed or
@@ -2562,5 +2675,8 @@ class BackupServerApp(ctk.CTk):
 
 if __name__ == "__main__":
     init_db()
+    _cfg = load_config()
+    if bool(_cfg.get("START_WITH_WINDOWS", False)) != is_autostart_enabled():
+        set_autostart_enabled(bool(_cfg.get("START_WITH_WINDOWS", False)))
     app = BackupServerApp()
     app.mainloop()

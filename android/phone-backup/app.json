@@ -4,6 +4,7 @@
     "slug": "phone-backup",
     "scheme": "phonebackup",
     "version": "3.1.0",
+    "icon": "./assets/images/icon.png",
     "plugins": [
       "expo-media-library",
       "expo-task-manager",
@@ -33,6 +34,12 @@
       "expo-asset"
     ],
     "android": {
+      "icon": "./assets/images/icon.png",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
       "permissions": [
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
