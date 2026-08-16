@@ -55,7 +55,7 @@ export default function QuizScreen() {
       const cfg = await getConfig();
       setServerConfig(cfg);
       const res = await getQuizRound(10);
-      if (!res.items || res.items.length === 0) {
+      if (!res?.items || res.items.length === 0) {
         setError('Not enough dated photos yet to play — keep backing up!');
         setItems([]);
       } else {
@@ -69,6 +69,8 @@ export default function QuizScreen() {
   }, []);
 
   useEffect(() => {
+    // Initial round fetch on mount / play-again.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadRound();
   }, [loadRound]);
 
@@ -120,6 +122,10 @@ export default function QuizScreen() {
         <View style={styles.centered}>
           <AppIcon androidName="image_not_supported" iosName="exclamationmark.triangle" color="#fff" size={44} />
           <Text style={styles.errorText}>{error}</Text>
+          <TouchableOpacity style={styles.playAgainBtn} onPress={loadRound}>
+            <AppIcon androidName="replay" iosName="arrow.clockwise" color="#fff" size={18} />
+            <Text style={styles.playAgainText}>Try Again</Text>
+          </TouchableOpacity>
         </View>
       ) : finished ? (
         <View style={styles.centered}>

@@ -894,6 +894,39 @@ def get_media_for_year_window(
     return [dict(r) for r in rows]
 
 
+def get_media_for_ymd_list(
+    source_type_and_keys: list[tuple[str, str]],
+    ymd_list: list[tuple[int, int, int]],
+) -> list[dict]:
+    """Match exact (year, month, day) triples — correct across year boundaries."""
+    if not source_type_and_keys or not ymd_list:
+        return []
+    conn = get_conn()
+    or_clauses = []
+    params: list = []
+    for stype, skey in source_type_and_keys:
+        or_clauses.append("(source_type = ? AND source_key = ?)")
+        params.extend([stype, skey])
+    where_source = " OR ".join(or_clauses)
+
+    day_clauses = []
+    for y, m, d in ymd_list:
+        day_clauses.append("(cap_year = ? AND cap_month = ? AND cap_day = ?)")
+        params.extend([y, m, d])
+    where_days = " OR ".join(day_clauses)
+
+    sql = f"""
+        SELECT source_type, source_key, relative_path, size, modified_time, capture_time, capture_source, cap_month, cap_day, cap_year
+        FROM media_index
+        WHERE ({where_source})
+          AND ({where_days})
+        ORDER BY capture_time DESC, relative_path ASC
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_year_wrapped_stats(
     source_type_and_keys: list[tuple[str, str]],
     year: int,
@@ -979,6 +1012,7 @@ def get_quiz_photo_pool(
 
 def get_random_media_row(
     source_type_and_keys: list[tuple[str, str]],
+    allowed_exts: set[str] | None = None,
 ) -> dict | None:
     if not source_type_and_keys:
         return None
@@ -990,16 +1024,31 @@ def get_random_media_row(
         params.extend([stype, skey])
     where_source = " OR ".join(or_clauses)
 
+    ext_clause = ""
+    if allowed_exts:
+        # relative_path LIKE '%.jpg' OR ... (case-insensitive via LOWER)
+        ext_parts = []
+        for ext in sorted(allowed_exts):
+            ext_parts.append("LOWER(relative_path) LIKE ?")
+            params.append(f"%{ext.lower()}")
+        ext_clause = f"AND ({' OR '.join(ext_parts)})"
+
     sql = f"""
         SELECT source_type, source_key, relative_path, size, capture_time, cap_year
         FROM media_index
         WHERE ({where_source})
+        {ext_clause}
         ORDER BY RANDOM()
         LIMIT 1
     """
     row = conn.execute(sql, params).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def get_random_media_item(source_type: str, source_key: str) -> dict | None:
+    """Public alias matching the feature-spec name."""
+    return get_random_media_row([(source_type, source_key)])
 
 
 def prune_media_index(source_type: str, source_key: str, keep_paths: set[str]) -> None:

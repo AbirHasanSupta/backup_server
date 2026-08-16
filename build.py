@@ -108,6 +108,10 @@ def main() -> None:
         "pystray._win32",
         "PIL",
         "PIL.Image",
+        "memories",
+        "rewind",
+        "video_preview",
+        "ffmpeg_utils",
     ]
 
     add_data_files = [
@@ -117,6 +121,10 @@ def main() -> None:
         "storage.py",
         "upload.py",
         "server.py",
+        "memories.py",
+        "rewind.py",
+        "video_preview.py",
+        "ffmpeg_utils.py",
     ]
 
     cmd = [

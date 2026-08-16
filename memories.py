@@ -5,6 +5,7 @@ into SQLite media_index cache for phone backups and tagged shared folders.
 """
 
 from datetime import date, datetime, timedelta
+import calendar
 import json
 import os
 import random
@@ -17,8 +18,7 @@ from database import (
     get_devices,
     get_files_for_device,
     get_media_for_day,
-    get_media_for_year_month,
-    get_media_for_year_window,
+    get_media_for_ymd_list,
     get_media_index_cache,
     get_quiz_photo_pool,
     get_random_media_row,
@@ -39,6 +39,11 @@ VIDEO_EXTS = {
     ".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp",
     ".m4v", ".wmv", ".flv", ".ts", ".mts",
 }
+
+# Formats Android expo-image / typical ffmpeg still encodes can show without HEIF plugins.
+CLIENT_DISPLAYABLE_STILL_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+CLIENT_ROULETTE_EXTS = CLIENT_DISPLAYABLE_STILL_EXTS | VIDEO_EXTS
+CLIENT_FLASHBACK_EXTS = CLIENT_ROULETTE_EXTS
 
 
 def _parse_date_str(val: str) -> int | None:
@@ -105,7 +110,12 @@ def _extract_video_creation_time(full_path: str) -> int | None:
             "-show_format",
             full_path,
         ]
-        run_options = {"capture_output": True, "text": True, "timeout": 10}
+        run_options = {
+            "capture_output": True,
+            "text": True,
+            "timeout": 10,
+            "stdin": subprocess.DEVNULL,
+        }
         if os.name == "nt":
             run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
         proc = subprocess.run(cmd, **run_options)
@@ -389,6 +399,12 @@ FLASHBACK_WEIGHTS = [5, 4, 3, 2, 1, 1]
 FLASHBACK_WINDOW_DAYS = 4
 
 
+def _safe_anniversary(year: int, month: int, day: int) -> date:
+    """Clamp day for months that don't have that day (e.g. Feb 29 → Feb 28)."""
+    max_day = calendar.monthrange(year, month)[1]
+    return date(year, month, min(day, max_day))
+
+
 def get_random_flashback(device_id: str) -> dict | None:
     """Pick one random media item from roughly 'N years ago this week',
     weighted toward more recent years so flashbacks feel closer to home."""
@@ -399,15 +415,17 @@ def get_random_flashback(device_id: str) -> dict | None:
     candidates: list[tuple[int, int, list[dict]]] = []
     for years_ago, weight in zip(FLASHBACK_YEARS_AGO, FLASHBACK_WEIGHTS):
         target_year = today.year - years_ago
-        month_day_pairs = []
+        anchor = _safe_anniversary(target_year, today.month, today.day)
+        ymd_list = []
         for offset in range(-FLASHBACK_WINDOW_DAYS, FLASHBACK_WINDOW_DAYS + 1):
-            try:
-                d = date(target_year, today.month, today.day) + timedelta(days=offset)
-            except ValueError:
-                continue
-            month_day_pairs.append((d.month, d.day))
+            d = anchor + timedelta(days=offset)
+            ymd_list.append((d.year, d.month, d.day))
 
-        rows = get_media_for_year_window(sources, target_year, month_day_pairs)
+        rows = get_media_for_ymd_list(sources, ymd_list)
+        rows = [
+            r for r in rows
+            if os.path.splitext(r["relative_path"])[1].lower() in CLIENT_FLASHBACK_EXTS
+        ]
         if rows:
             candidates.append((years_ago, weight, rows))
 
@@ -473,22 +491,29 @@ def get_wrapped(device_id: str, year: int) -> dict:
         "total_size": total_size,
         "busiest_month": busiest_month,
         "busiest_month_count": month_counts.get(busiest_month, 0) if busiest_month is not None else 0,
-        "month_counts": month_counts,
+        # String keys so JSON clients don't depend on int-key coercion.
+        "month_counts": {str(m): month_counts[m] for m in range(1, 13)},
     }
-
-
-# ─── Rewind Reel media selection ──────────────────────────────────────────────
-
-def get_reel_items(device_id: str, year: int, month: int | None, limit: int = 18) -> list[dict]:
-    shared_dirs = load_config().get("SHARED_DIRS", [])
-    sources, _ = _shared_sources_for_device(device_id, shared_dirs)
-    return get_media_for_year_month(sources, year, month, limit=limit)
 
 
 # ─── Guess the Year ───────────────────────────────────────────────────────────
 
 QUIZ_DEFAULT_COUNT = 10
 QUIZ_OPTION_COUNT = 4
+QUIZ_MIN_DISTINCT_YEARS = 3
+QUIZ_DISPLAYABLE_EXTS = CLIENT_DISPLAYABLE_STILL_EXTS
+
+
+def get_quiz_photos(source_type: str, source_key: str, count: int = 10) -> list[dict]:
+    """Thin wrapper matching the public name from the feature spec."""
+    pool = get_quiz_photo_pool([(source_type, source_key)])
+    photo_pool = [
+        r for r in pool
+        if os.path.splitext(r["relative_path"])[1].lower() in QUIZ_DISPLAYABLE_EXTS
+    ]
+    if len(photo_pool) <= count:
+        return photo_pool
+    return random.sample(photo_pool, count)
 
 
 def get_quiz_round(device_id: str, count: int = QUIZ_DEFAULT_COUNT) -> dict:
@@ -498,11 +523,11 @@ def get_quiz_round(device_id: str, count: int = QUIZ_DEFAULT_COUNT) -> dict:
 
     photo_pool = [
         r for r in pool
-        if os.path.splitext(r["relative_path"])[1].lower() in IMAGE_EXTS
+        if os.path.splitext(r["relative_path"])[1].lower() in QUIZ_DISPLAYABLE_EXTS
     ]
 
     distinct_years = sorted({r["cap_year"] for r in photo_pool if r.get("cap_year") is not None})
-    if len(photo_pool) < 2 or len(distinct_years) < 2:
+    if len(photo_pool) < 2 or len(distinct_years) < QUIZ_MIN_DISTINCT_YEARS:
         return {"items": []}
 
     round_size = min(max(1, count), len(photo_pool))
@@ -546,7 +571,7 @@ def get_quiz_round(device_id: str, count: int = QUIZ_DEFAULT_COUNT) -> dict:
 def get_roulette_item(device_id: str) -> dict | None:
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
-    row = get_random_media_row(sources)
+    row = get_random_media_row(sources, allowed_exts=CLIENT_ROULETTE_EXTS)
     if not row:
         return None
 

@@ -9,6 +9,8 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 
+/* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
+
 interface AnimatedPressableProps {
   children?: React.ReactNode;
   onPress?: () => void;

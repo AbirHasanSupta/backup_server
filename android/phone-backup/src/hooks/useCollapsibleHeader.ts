@@ -12,6 +12,7 @@ import {
   NativeSyntheticEvent,
 } from 'react-native';
 
+/* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
 interface CollapsibleHeaderConfig {
   /** Estimated header height used until onLayout measures the real one. */
   headerHeight: number;
@@ -68,7 +69,6 @@ export function useCollapsibleHeader({
     headerTranslateY.value = withTiming(0, { duration: 200 });
   }, [headerTranslateY]);
 
-  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
       const headerHeight = measuredRef.current;
@@ -87,7 +87,6 @@ export function useCollapsibleHeader({
     },
     [scrollThreshold, headerTranslateY]
   );
-  /* eslint-enable react-hooks/immutability */
 
   const headerAnimatedStyle = useAnimatedStyle(() => {
     const headerHeight = Math.max(heightSV.value, 1);

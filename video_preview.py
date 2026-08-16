@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from config import APP_DATA_DIR, load_config
+from ffmpeg_utils import resolve_ffmpeg_path, resolve_ffprobe_path
 from state import add_log
 
 
@@ -363,27 +364,12 @@ def _ready_cache_path(source_path: str) -> tuple[str, str] | None:
     return None
 
 
-@lru_cache(maxsize=1)
 def _ffmpeg_path() -> str | None:
-    """Prefer the ffmpeg binary bundled with the desktop application."""
-    executable = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
-    bundle_dir = getattr(sys, "_MEIPASS", None)
-    if bundle_dir:
-        bundled_path = os.path.join(bundle_dir, executable)
-        if os.path.isfile(bundled_path):
-            return bundled_path
-    return shutil.which("ffmpeg")
+    return resolve_ffmpeg_path()
 
 
-@lru_cache(maxsize=1)
 def _ffprobe_path() -> str | None:
-    executable = "ffprobe.exe" if os.name == "nt" else "ffprobe"
-    bundle_dir = getattr(sys, "_MEIPASS", None)
-    if bundle_dir:
-        bundled_path = os.path.join(bundle_dir, executable)
-        if os.path.isfile(bundled_path):
-            return bundled_path
-    return shutil.which("ffprobe")
+    return resolve_ffprobe_path()
 
 
 def _is_preview_candidate(source_path: str) -> bool:

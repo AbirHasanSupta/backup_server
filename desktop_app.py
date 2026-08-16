@@ -2371,7 +2371,17 @@ class BackupServerApp(ctk.CTk):
         """Reload modules in dependency order and start uvicorn."""
         import importlib
 
-        for mod_name in ("config", "storage", "database", "upload", "server"):
+        for mod_name in (
+            "config",
+            "storage",
+            "database",
+            "ffmpeg_utils",
+            "video_preview",
+            "memories",
+            "rewind",
+            "upload",
+            "server",
+        ):
             if mod_name in sys.modules:
                 importlib.reload(sys.modules[mod_name])
 
@@ -2429,6 +2439,12 @@ class BackupServerApp(ctk.CTk):
     def _stop_server(self):
         if self._uvicorn_server:
             self._uvicorn_server.should_exit = True
+        try:
+            from rewind import terminate_active_rewind_ffmpeg
+            if terminate_active_rewind_ffmpeg():
+                add_log("Terminated in-flight Rewind Reel encode.")
+        except Exception:
+            pass
         self._server_running    = False
         self._server_start_time = None
         self.after(0, lambda: self._set_status(False))
@@ -2650,6 +2666,11 @@ class BackupServerApp(ctk.CTk):
                 self._tray_icon.stop()
                 self._tray_icon = None
             self._stop_server()
+            try:
+                from rewind import terminate_active_rewind_ffmpeg
+                terminate_active_rewind_ffmpeg()
+            except Exception:
+                pass
             # Preview files are session-only.  Clear them before the Tk process
             # exits so a private FFmpeg cache job cannot leave a completed or
             # partial artifact behind on the next launch.

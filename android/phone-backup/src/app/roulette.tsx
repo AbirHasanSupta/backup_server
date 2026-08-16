@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, Animated, Easing } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, Animated, Easing, Alert } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
+import * as Sharing from 'expo-sharing';
 
 import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
@@ -77,13 +78,14 @@ export default function RouletteScreen() {
   const [item, setItem] = useState<RouletteItem | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [sharing, setSharing] = useState(false);
 
   const phaseRef = useRef<Phase>('idle');
   useEffect(() => { phaseRef.current = phase; }, [phase]);
 
-  const spinRotate = useRef(new Animated.Value(0)).current;
-  const revealScale = useRef(new Animated.Value(0.85)).current;
-  const revealOpacity = useRef(new Animated.Value(0)).current;
+  const spinRotate = useMemo(() => new Animated.Value(0), []);
+  const revealScale = useMemo(() => new Animated.Value(0.85), []);
+  const revealOpacity = useMemo(() => new Animated.Value(0), []);
   const spinLoopRef = useRef<Animated.CompositeAnimation | null>(null);
 
   useEffect(() => {
@@ -136,18 +138,33 @@ export default function RouletteScreen() {
   // Shake-to-spin — only listens while this screen is mounted.
   useEffect(() => {
     if (!expoSensorsModule) return;
-    expoSensorsModule.Accelerometer.setUpdateInterval(120);
-    let lastShake = 0;
-    const subscription = expoSensorsModule.Accelerometer.addListener(({ x, y, z }) => {
-      const magnitude = Math.sqrt(x * x + y * y + z * z);
-      const delta = Math.abs(magnitude - 1);
-      const now = Date.now();
-      if (delta > SHAKE_THRESHOLD && now - lastShake > SHAKE_DEBOUNCE_MS && phaseRef.current !== 'spinning') {
-        lastShake = now;
-        spin();
+    let subscription: { remove: () => void } | null = null;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const available = await expoSensorsModule!.Accelerometer.isAvailableAsync();
+        if (!available || cancelled) return;
+        expoSensorsModule!.Accelerometer.setUpdateInterval(120);
+        let lastShake = 0;
+        subscription = expoSensorsModule!.Accelerometer.addListener(({ x, y, z }) => {
+          const magnitude = Math.sqrt(x * x + y * y + z * z);
+          const delta = Math.abs(magnitude - 1);
+          const now = Date.now();
+          if (delta > SHAKE_THRESHOLD && now - lastShake > SHAKE_DEBOUNCE_MS && phaseRef.current !== 'spinning') {
+            lastShake = now;
+            spin();
+          }
+        });
+      } catch (e) {
+        console.warn('[Roulette] Accelerometer unavailable:', e);
       }
-    });
-    return () => subscription.remove();
+    })();
+
+    return () => {
+      cancelled = true;
+      subscription?.remove();
+    };
   }, [spin]);
 
   useEffect(() => () => stopSpinAnimation(), [stopSpinAnimation]);
@@ -172,10 +189,39 @@ export default function RouletteScreen() {
       }
       await MediaLibrary.saveToLibraryAsync(tmpUri);
       await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
-    } catch {
-      // Non-critical — the reveal card stays up either way.
+      Alert.alert('Saved', 'Saved to your gallery!');
+    } catch (err: any) {
+      Alert.alert('Save Failed', sanitizeErrorMessage(err, 'Could not save to device.'));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleShare = async () => {
+    if (!item || sharing) return;
+    setSharing(true);
+    try {
+      const displayName = item.relative_path.split(/[/\\]/).pop() ?? `roulette_${Date.now()}`;
+      const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
+      const tmpUri = `${cacheDir}roulette_share_${Date.now()}_${displayName}`;
+
+      if (item.source_type === 'shared') {
+        await downloadSharedFile(item.source_id, item.relative_path, tmpUri);
+      } else {
+        await downloadFile(item.relative_path, tmpUri);
+      }
+
+      const canShare = await Sharing.isAvailableAsync();
+      if (!canShare) {
+        Alert.alert('Sharing Unavailable', 'Sharing is not available on this device.');
+        return;
+      }
+      await Sharing.shareAsync(tmpUri);
+      await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+    } catch (err: any) {
+      Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not share this memory.'));
+    } finally {
+      setSharing(false);
     }
   };
 
@@ -222,7 +268,7 @@ export default function RouletteScreen() {
         {phase === 'empty' && (
           <View style={styles.centered}>
             <AppIcon androidName="image_not_supported" iosName="exclamationmark.triangle" color="#fff" size={44} />
-            <Text style={styles.idleSubtitle}>Nothing backed up yet — spin again once you've synced some photos.</Text>
+            <Text style={styles.idleSubtitle}>Nothing backed up yet — spin again once you have synced some photos.</Text>
           </View>
         )}
 
@@ -246,13 +292,22 @@ export default function RouletteScreen() {
               <Text style={styles.revealMetaText}>
                 {item.year ? item.year : item.source_label}
               </Text>
-              <TouchableOpacity onPress={handleSave} disabled={saving} style={styles.revealSaveBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                {saving ? (
-                  <ActivityIndicator size="small" color="#fff" />
-                ) : (
-                  <AppIcon androidName="download" iosName="arrow.down.circle" color="#fff" size={20} />
-                )}
-              </TouchableOpacity>
+              <View style={styles.revealActions}>
+                <TouchableOpacity onPress={handleShare} disabled={sharing} style={styles.revealSaveBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                  {sharing ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={20} />
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity onPress={handleSave} disabled={saving} style={styles.revealSaveBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                  {saving ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <AppIcon androidName="download" iosName="arrow.down.circle" color="#fff" size={20} />
+                  )}
+                </TouchableOpacity>
+              </View>
             </View>
           </Animated.View>
         )}
@@ -291,7 +346,7 @@ function NativeRouletteVideoPlayer({ uri, videoModule }: { uri: string; videoMod
     p.muted = false;
     safeCall(() => p.play());
   });
-  return <videoModule.VideoView style={{ width: '100%', height: '100%' }} player={player} nativeControls={false} />;
+  return <videoModule.VideoView style={{ width: '100%', height: '100%' }} player={player} nativeControls={false} contentFit="cover" surfaceType="textureView" />;
 }
 
 const styles_fallback = StyleSheet.create({
@@ -352,6 +407,7 @@ const createStyles = (colors: AppColors, insets: any) =>
       backgroundColor: 'rgba(255,255,255,0.06)',
     },
     revealMetaText: { color: '#fff', fontSize: TextScale.base, fontWeight: '700' },
+    revealActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
     revealSaveBtn: {
       width: 36, height: 36, borderRadius: 18,
       alignItems: 'center', justifyContent: 'center',

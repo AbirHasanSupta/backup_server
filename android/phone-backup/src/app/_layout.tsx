@@ -70,7 +70,8 @@ async function checkAndNotifyMemories() {
   if (lastNotified === todayStr) return;
 
   const res = await getTodaysMemories();
-  const count = Array.isArray(res?.groups) ? res.groups.length : 0;
+  const groups = Array.isArray(res?.groups) ? res.groups : [];
+  const count = groups.reduce((sum, g) => sum + (Array.isArray(g?.items) ? g.items.length : 0), 0);
   if (count > 0) {
     await showMemoriesNotification(count);
     await setLastMemoryNotifiedDate(todayStr);
@@ -91,7 +92,7 @@ async function checkAndNotifyFlashback() {
 
   const item = await getRandomFlashback();
   if (item) {
-    await showFlashbackNotification(item.years_ago);
+    await showFlashbackNotification(item);
     await setLastFlashbackNotifiedAt(Date.now());
   }
 }
@@ -125,16 +126,19 @@ function RootLayoutContent() {
 
   useEffect(() => {
     let active = true;
-    getInitialMemoriesTap().then(shouldOpen => {
-      if (active && shouldOpen) {
+    // Read once so memories/flashback don't race on the same sticky last-response.
+    (async () => {
+      const isFlashback = await getInitialFlashbackTap();
+      if (!active) return;
+      if (isFlashback) {
+        router.push('/memories?flashback=1');
+        return;
+      }
+      const isMemories = await getInitialMemoriesTap();
+      if (active && isMemories) {
         router.push('/memories');
       }
-    });
-    getInitialFlashbackTap().then(shouldOpen => {
-      if (active && shouldOpen) {
-        router.push('/memories?flashback=1');
-      }
-    });
+    })();
     const unsubscribeMemories = addMemoriesTapListener(() => router.push('/memories'));
     const unsubscribeFlashback = addFlashbackTapListener(() => router.push('/memories?flashback=1'));
     return () => {

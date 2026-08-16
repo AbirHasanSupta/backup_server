@@ -1,10 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, ScrollView, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ViewShot, { captureRef } from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system/legacy';
 
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
@@ -49,7 +48,7 @@ export default function WrappedScreen() {
   const [stats, setStats] = useState<WrappedStats | null>(null);
   const [sharing, setSharing] = useState(false);
 
-  const shotRef = React.useRef<ViewShot>(null);
+  const shotRef = React.useRef<React.ElementRef<typeof ViewShot>>(null);
 
   const fetchWrapped = useCallback(async (targetYear: number) => {
     setLoading(true);
@@ -65,6 +64,8 @@ export default function WrappedScreen() {
   }, []);
 
   useEffect(() => {
+    // Year picker / first load.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchWrapped(year);
   }, [year, fetchWrapped]);
 
@@ -79,9 +80,11 @@ export default function WrappedScreen() {
       const canShare = await Sharing.isAvailableAsync();
       if (canShare) {
         await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: `My ${year} Wrapped` });
+      } else {
+        Alert.alert('Sharing Unavailable', 'Sharing is not available on this device.');
       }
-    } catch (err) {
-      // Sharing is a nice-to-have — swallow silently if the platform can't do it.
+    } catch (err: any) {
+      Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not export the wrapped card.'));
     } finally {
       setSharing(false);
     }
@@ -157,13 +160,20 @@ export default function WrappedScreen() {
               <Text style={styles.cardYear}>{year}</Text>
               <Text style={styles.cardTagline}>Your Year in Photos</Text>
 
+              <View style={styles.ratioRing}>
+                <View style={[styles.ratioRingHalo, { backgroundColor: colors.primaryGlow }]} />
+                <View style={[styles.ratioRingOuter, { borderColor: colors.primary }]}>
+                  <View style={[styles.ratioRingInner, { backgroundColor: colors.bg }]}>
+                    <Text style={styles.ratioRingPct}>{photoPct}%</Text>
+                    <Text style={styles.ratioRingLabel}>photos</Text>
+                    <Text style={styles.ratioRingSub}>{videoPct}% videos</Text>
+                  </View>
+                </View>
+              </View>
+
               <Text style={styles.cardTotal}>{stats.total.toLocaleString()}</Text>
               <Text style={styles.cardTotalLabel}>memories captured</Text>
 
-              <View style={styles.ratioBar}>
-                <View style={[styles.ratioSegmentPhoto, { flex: Math.max(photoPct, 2) }]} />
-                <View style={[styles.ratioSegmentVideo, { flex: Math.max(videoPct, 2) }]} />
-              </View>
               <View style={styles.ratioLegendRow}>
                 <View style={styles.legendItem}>
                   <View style={[styles.legendDot, { backgroundColor: colors.primary }]} />
@@ -203,6 +213,37 @@ export default function WrappedScreen() {
                   value={formatBytes(stats.total_size)}
                 />
               </View>
+
+              {Object.values(stats.month_counts || {}).some(c => c > 0) && (
+                <View style={styles.monthChart}>
+                  <Text style={styles.monthChartTitle}>Photos by month</Text>
+                  <View style={styles.monthBarsRow}>
+                    {MONTH_NAMES.map((name, idx) => {
+                      const raw = stats.month_counts?.[String(idx + 1)] ?? stats.month_counts?.[idx + 1] ?? 0;
+                      const count = Number(raw) || 0;
+                      const maxCount = Math.max(1, ...Object.values(stats.month_counts || {}).map(v => Number(v) || 0));
+                      const barHeight = Math.max(count > 0 ? 6 : 2, Math.round((count / maxCount) * 72));
+                      const isBusiest = stats.busiest_month === idx + 1;
+                      return (
+                        <View key={name} style={styles.monthBarCol}>
+                          <View
+                            style={[
+                              styles.monthBar,
+                              {
+                                height: barHeight,
+                                backgroundColor: isBusiest ? colors.primary : colors.primarySoft,
+                              },
+                            ]}
+                          />
+                          <Text style={[styles.monthBarLabel, isBusiest && { color: colors.primary, fontWeight: '800' }]}>
+                            {name.slice(0, 1)}
+                          </Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+                </View>
+              )}
             </View>
           </ViewShot>
         </ScrollView>
@@ -290,23 +331,59 @@ const createStyles = (colors: AppColors, insets: any) =>
     },
     cardYear: { fontSize: TextScale.hero, fontWeight: '900', color: colors.primary, letterSpacing: -1 },
     cardTagline: { fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '700', marginTop: -4, marginBottom: Spacing.five },
-    cardTotal: { fontSize: 56, fontWeight: '900', color: colors.text, letterSpacing: -1 },
-    cardTotalLabel: { fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '600', marginTop: -6, marginBottom: Spacing.five },
+    cardTotal: { fontSize: 56, fontWeight: '900', color: colors.text, letterSpacing: -1, marginTop: Spacing.four },
+    cardTotalLabel: { fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '600', marginTop: -6, marginBottom: Spacing.four },
 
-    ratioBar: {
-      flexDirection: 'row',
-      width: '100%',
-      height: 14,
-      borderRadius: Radius.full,
-      overflow: 'hidden',
-      backgroundColor: colors.surfaceBorder,
+    ratioRing: {
+      width: 160,
+      height: 160,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginBottom: Spacing.two,
     },
-    ratioSegmentPhoto: { backgroundColor: colors.primary },
-    ratioSegmentVideo: { backgroundColor: colors.success },
-    ratioLegendRow: { flexDirection: 'row', gap: Spacing.five, marginTop: Spacing.three, marginBottom: Spacing.six },
+    ratioRingHalo: {
+      position: 'absolute',
+      width: 160,
+      height: 160,
+      borderRadius: 80,
+      opacity: 0.35,
+    },
+    ratioRingOuter: {
+      width: 148,
+      height: 148,
+      borderRadius: 74,
+      borderWidth: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    ratioRingInner: {
+      width: 112,
+      height: 112,
+      borderRadius: 56,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    ratioRingPct: { fontSize: TextScale.xl, fontWeight: '900', color: colors.text },
+    ratioRingLabel: { fontSize: TextScale.xs, fontWeight: '700', color: colors.textSecondary, marginTop: -2 },
+    ratioRingSub: { fontSize: 10, fontWeight: '600', color: colors.success, marginTop: 2 },
+
+    ratioLegendRow: { flexDirection: 'row', gap: Spacing.five, marginBottom: Spacing.six },
     legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
     legendDot: { width: 8, height: 8, borderRadius: 4 },
     legendText: { fontSize: TextScale.xs, color: colors.textSecondary, fontWeight: '700' },
 
     statsGrid: { flexDirection: 'row', gap: Spacing.three, width: '100%', marginBottom: Spacing.three },
+
+    monthChart: { width: '100%', marginTop: Spacing.three },
+    monthChartTitle: {
+      fontSize: TextScale.xs, fontWeight: '700', color: colors.textSecondary,
+      marginBottom: Spacing.three, textAlign: 'center',
+    },
+    monthBarsRow: {
+      flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between',
+      height: 88, width: '100%', gap: 4,
+    },
+    monthBarCol: { flex: 1, alignItems: 'center', justifyContent: 'flex-end' },
+    monthBar: { width: '100%', borderRadius: 4, minHeight: 2 },
+    monthBarLabel: { fontSize: 10, color: colors.textMuted, marginTop: 4, fontWeight: '600' },
   });

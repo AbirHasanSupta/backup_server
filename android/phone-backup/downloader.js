@@ -88,12 +88,12 @@ export async function downloadFile(relativePath, destUri, onProgress) {
 
 /**
  * Build the full authenticated URL for a file — used by the preview modal
- * to pass directly to expo-av (video/audio) or FileSystem.downloadAsync (images).
+ * to pass directly to expo-video (video) or FileSystem.downloadAsync (images).
  *
  * @param {string} relativePath — the path key as stored in the server DB
  * @returns {Promise<string>}   — a fully-qualified http:// URL with auth baked-in
  *                                 NOTE: auth is sent via query param as a fallback
- *                                 because expo-av does not support custom headers on
+ *                                 because expo-video does not support custom headers on
  *                                 Android. The server must accept ?token= as well.
  */
 export async function getFilePreviewUrl(relativePath) {
@@ -170,7 +170,7 @@ export async function downloadSharedFile(sourceId, relativePath, destUri, onProg
 
 /**
  * Build the full authenticated URL for a shared file preview
- * (auth via ?token= query param since expo-av doesn't support custom headers on Android).
+ * (auth via ?token= query param since expo-video doesn't support custom headers on Android).
  * @param {string} sourceId
  * @param {string} relativePath
  * @returns {Promise<string>}

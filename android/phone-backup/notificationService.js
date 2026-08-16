@@ -242,9 +242,10 @@ export async function showMemoriesNotification(count) {
   }
 }
 
-export async function showFlashbackNotification(yearsAgo) {
+export async function showFlashbackNotification(item) {
   if (!N) return;
   try {
+    const yearsAgo = item?.years_ago;
     await N.scheduleNotificationAsync({
       identifier: FLASHBACK_NOTIFICATION_ID,
       content: {
@@ -252,7 +253,18 @@ export async function showFlashbackNotification(yearsAgo) {
         body: yearsAgo === 1
           ? 'A memory from a year ago this week. Tap to see it!'
           : `A memory from ${yearsAgo} years ago this week. Tap to see it!`,
-        data: { type: 'flashback' },
+        data: {
+          type: 'flashback',
+          relative_path: item?.relative_path || '',
+          source_type: item?.source_type || 'phone',
+          source_id: item?.source_id || '',
+          source_label: item?.source_label || '',
+          years_ago: yearsAgo ?? 0,
+          year: item?.year ?? null,
+          is_video: !!item?.is_video,
+          size: item?.size || 0,
+          capture_time: item?.capture_time ?? null,
+        },
       },
       trigger: flashbackNotificationTrigger(),
     });
@@ -261,11 +273,79 @@ export async function showFlashbackNotification(yearsAgo) {
   }
 }
 
+let _pendingFlashbackItem = null;
+
+export function setPendingFlashbackItem(item) {
+  _pendingFlashbackItem = item || null;
+}
+
+export function consumePendingFlashbackItem() {
+  const item = _pendingFlashbackItem;
+  _pendingFlashbackItem = null;
+  return item;
+}
+
+function coerceNotificationBool(value) {
+  return value === true || value === 1 || value === 'true' || value === '1';
+}
+
+function flashbackItemFromNotificationData(data) {
+  if (!data || data.type !== 'flashback' || !data.relative_path) return null;
+  return {
+    relative_path: data.relative_path,
+    source_type: data.source_type || 'phone',
+    source_id: data.source_id || '',
+    source_label: data.source_label || '',
+    years_ago: Number(data.years_ago) || 0,
+    year: data.year != null ? Number(data.year) : null,
+    is_video: coerceNotificationBool(data.is_video),
+    size: Number(data.size) || 0,
+    capture_time: data.capture_time != null ? Number(data.capture_time) : null,
+  };
+}
+
+function readLastNotificationResponse() {
+  if (!N) return null;
+  try {
+    // Prefer sync API (Expo 57+); fall back to deprecated async wrapper.
+    if (typeof N.getLastNotificationResponse === 'function') {
+      return N.getLastNotificationResponse();
+    }
+    if (typeof N.getLastNotificationResponseAsync === 'function') {
+      return N.getLastNotificationResponseAsync();
+    }
+  } catch (e) {
+    console.warn('[Notifications] readLastNotificationResponse failed:', e?.message);
+  }
+  return null;
+}
+
+function clearHandledNotificationResponse() {
+  if (!N) return;
+  try {
+    if (typeof N.clearLastNotificationResponse === 'function') {
+      N.clearLastNotificationResponse();
+      return;
+    }
+    if (typeof N.clearLastNotificationResponseAsync === 'function') {
+      N.clearLastNotificationResponseAsync().catch(() => {});
+    }
+  } catch (e) {
+    console.warn('[Notifications] clearHandledNotificationResponse failed:', e?.message);
+  }
+}
+
 export async function getInitialFlashbackTap() {
   if (!N) return false;
   try {
-    const response = await N.getLastNotificationResponseAsync();
-    return response?.notification?.request?.content?.data?.type === 'flashback';
+    const response = await Promise.resolve(readLastNotificationResponse());
+    const data = response?.notification?.request?.content?.data;
+    if (data?.type !== 'flashback') return false;
+    const item = flashbackItemFromNotificationData(data);
+    if (!item) return false;
+    setPendingFlashbackItem(item);
+    clearHandledNotificationResponse();
+    return true;
   } catch (e) {
     console.warn('[Notifications] getInitialFlashbackTap failed:', e?.message);
     return false;
@@ -276,7 +356,11 @@ export function addFlashbackTapListener(onTap) {
   if (!N) return () => {};
   try {
     const sub = N.addNotificationResponseReceivedListener(response => {
-      if (response.notification.request.content.data?.type === 'flashback') {
+      const data = response.notification.request.content.data;
+      if (data?.type === 'flashback') {
+        const item = flashbackItemFromNotificationData(data);
+        if (item) setPendingFlashbackItem(item);
+        clearHandledNotificationResponse();
         onTap();
       }
     });
@@ -299,8 +383,10 @@ export async function dismissSyncNotification() {
 export async function getInitialMemoriesTap() {
   if (!N) return false;
   try {
-    const response = await N.getLastNotificationResponseAsync();
-    return response?.notification?.request?.content?.data?.type === 'memories';
+    const response = await Promise.resolve(readLastNotificationResponse());
+    if (response?.notification?.request?.content?.data?.type !== 'memories') return false;
+    clearHandledNotificationResponse();
+    return true;
   } catch (e) {
     console.warn('[Notifications] getInitialMemoriesTap failed:', e?.message);
     return false;
@@ -312,6 +398,7 @@ export function addMemoriesTapListener(onTap) {
   try {
     const sub = N.addNotificationResponseReceivedListener(response => {
       if (response.notification.request.content.data?.type === 'memories') {
+        clearHandledNotificationResponse();
         onTap();
       }
     });

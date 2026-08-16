@@ -12,6 +12,8 @@ import Animated, {
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { AppIcon } from '@/components/AppIcon';
 
+/* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
+
 const ACTION_WIDTH = 80;
 const SNAP_THRESHOLD = ACTION_WIDTH * 0.6;
 const SPRING_CONFIG = { damping: 20, stiffness: 300, mass: 0.8 };

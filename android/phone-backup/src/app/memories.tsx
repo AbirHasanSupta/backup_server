@@ -37,6 +37,7 @@ import {
   buildRewindReelStreamUrl,
   downloadRewindReel,
 } from '../../downloader';
+import { consumePendingFlashbackItem } from '../../notificationService';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 const DAY_CARD_W = 132;
@@ -99,6 +100,7 @@ interface FlashbackItem extends MemoryItem {
 }
 
 type RewindStatus = 'idle' | 'checking' | 'generating' | 'ready' | 'none' | 'error';
+const REWIND_POLL_MAX_ATTEMPTS = 45;
 
 function dayItemCount(day: DayMemory): number {
   return day.groups.reduce((sum, g) => sum + g.items.length, 0);
@@ -271,7 +273,7 @@ export default function MemoriesScreen() {
     };
   }, [activeDayIdx, activeItemIdx, currentItem, isPaused, advanceItem]);
 
-  const openFlashback = useCallback(async () => {
+  const openFlashback = useCallback(async (prefetched?: FlashbackItem | null) => {
     setFlashbackVisible(true);
     setFlashbackLoading(true);
     setFlashbackError(null);
@@ -279,6 +281,11 @@ export default function MemoriesScreen() {
       if (!serverConfig) {
         const cfg = await getConfig();
         setServerConfig(cfg);
+      }
+      const pending = prefetched || consumePendingFlashbackItem();
+      if (pending?.relative_path) {
+        setFlashbackItem(pending as FlashbackItem);
+        return;
       }
       const item = await getRandomFlashback();
       setFlashbackItem(item);
@@ -298,6 +305,8 @@ export default function MemoriesScreen() {
 
   useEffect(() => {
     if (params.flashback === '1') {
+      // Deep-link / notification entry — intentionally kick off async fetch.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       openFlashback();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -351,7 +360,7 @@ export default function MemoriesScreen() {
       } catch {}
     }
     try {
-      const status = await getRewindReelStatus(year);
+      let status = await getRewindReelStatus(year);
       if (status.ready) {
         setRewindStatus('ready');
         return;
@@ -360,10 +369,23 @@ export default function MemoriesScreen() {
         setRewindStatus('none');
         return;
       }
-      await generateRewindReel(year);
+      // Start (or restart after a prior failure) unless already generating.
+      if (status.status !== 'generating') {
+        const started = await generateRewindReel(year);
+        if (started?.status === 'none') {
+          setRewindStatus('none');
+          return;
+        }
+        if (started?.status === 'ready') {
+          setRewindStatus('ready');
+          return;
+        }
+      }
       setRewindStatus('generating');
       clearRewindPoll();
+      let attempts = 0;
       rewindPollRef.current = setInterval(async () => {
+        attempts += 1;
         try {
           const poll = await getRewindReelStatus(year);
           if (poll.ready) {
@@ -372,12 +394,22 @@ export default function MemoriesScreen() {
           } else if (poll.status === 'none') {
             setRewindStatus('none');
             clearRewindPoll();
+          } else if (poll.status === 'failed') {
+            setRewindStatus('error');
+            clearRewindPoll();
+          } else if (attempts >= REWIND_POLL_MAX_ATTEMPTS) {
+            setRewindStatus('error');
+            clearRewindPoll();
           }
+          // Keep polling for generating / not_generated — job may still be starting.
         } catch {
-          // keep polling — transient network hiccups shouldn't abort the build
+          if (attempts >= REWIND_POLL_MAX_ATTEMPTS) {
+            setRewindStatus('error');
+            clearRewindPoll();
+          }
         }
       }, 2000);
-    } catch (err) {
+    } catch {
       setRewindStatus('error');
     }
   }, [serverConfig, clearRewindPoll]);
@@ -468,6 +500,14 @@ export default function MemoriesScreen() {
     return buildPreviewUrl(serverConfig, item.relative_path, item.source_type, item.source_id);
   };
 
+  // Image components cannot render video streams — prefer a displayable photo cover.
+  const getCoverUrl = (items: MemoryItem[]) => {
+    if (!serverConfig || !items?.length) return '';
+    const photo = items.find(i => !i.is_video && /\.(jpe?g|png|webp|gif|bmp)$/i.test(i.relative_path));
+    if (!photo) return '';
+    return buildPreviewUrl(serverConfig, photo.relative_path, photo.source_type, photo.source_id);
+  };
+
   const todayDateStr = useMemo(() => {
     const d = new Date();
     return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
@@ -487,7 +527,7 @@ export default function MemoriesScreen() {
           <Text style={styles.headerSubtitle}>{todayDateStr}</Text>
         </View>
         <View style={styles.headerActionsRow}>
-          <TouchableOpacity style={styles.surpriseBtn} onPress={openFlashback}>
+          <TouchableOpacity style={styles.surpriseBtn} onPress={() => openFlashback()}>
             <AppIcon androidName="shuffle" iosName="shuffle" color={colors.primary} size={18} />
           </TouchableOpacity>
           <TouchableOpacity style={styles.surpriseBtn} onPress={() => router.push('/wrapped')}>
@@ -515,13 +555,29 @@ export default function MemoriesScreen() {
           </TouchableOpacity>
         </View>
       ) : !data || !data.days || data.days.length === 0 || totalItemsAcrossAllDays === 0 ? (
-        <View style={styles.centered}>
-          <View style={styles.emptyIconBg}>
-            <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={40} />
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+          <View style={styles.gamesRow}>
+            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/roulette')} activeOpacity={0.85}>
+              <View style={[styles.gameIconWrap, { backgroundColor: '#F59E0B22' }]}>
+                <AppIcon androidName="casino" iosName="die.face.5.fill" color="#F59E0B" size={20} />
+              </View>
+              <Text style={styles.gameCardText}>Photo Roulette</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/quiz')} activeOpacity={0.85}>
+              <View style={[styles.gameIconWrap, { backgroundColor: '#8B5CF622' }]}>
+                <AppIcon androidName="psychology" iosName="brain" color="#8B5CF6" size={20} />
+              </View>
+              <Text style={styles.gameCardText}>Guess the Year</Text>
+            </TouchableOpacity>
           </View>
-          <Text style={styles.emptyTitle}>No Memories Yet</Text>
-          <Text style={styles.emptySubtitle}>Check back over the next few days to relive photos and videos from past years.</Text>
-        </View>
+          <View style={styles.centeredEmpty}>
+            <View style={styles.emptyIconBg}>
+              <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={40} />
+            </View>
+            <Text style={styles.emptyTitle}>No Memories Yet</Text>
+            <Text style={styles.emptySubtitle}>Check back over the next few days to relive photos and videos from past years — or try Roulette and Guess the Year above.</Text>
+          </View>
+        </ScrollView>
       ) : (
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
           {/* Games Shelf */}
@@ -557,8 +613,7 @@ export default function MemoriesScreen() {
           ) : (
             <View style={styles.cardList}>
               {todayDay.groups.map((group, groupIndex) => {
-                const coverItem = group.items[0];
-                const coverUrl = coverItem ? getMediaUrl(coverItem) : '';
+                const coverUrl = getCoverUrl(group.items);
                 const photoCount = group.items.filter(i => !i.is_video).length;
                 const videoCount = group.items.filter(i => i.is_video).length;
                 const countsStr = [
@@ -582,7 +637,9 @@ export default function MemoriesScreen() {
                         {coverUrl ? (
                           <Image source={{ uri: coverUrl }} style={styles.cardImage} contentFit="cover" transition={200} />
                         ) : (
-                          <View style={styles.cardImagePlaceholder} />
+                          <View style={styles.cardImagePlaceholder}>
+                            <AppIcon androidName="videocam" iosName="video.fill" color="rgba(255,255,255,0.55)" size={36} />
+                          </View>
                         )}
 
                         <View style={styles.cardGradientOverlay}>
@@ -631,8 +688,8 @@ export default function MemoriesScreen() {
                 {historyDays.map(day => {
                   const dayIdx = historyDaysAll.indexOf(day) + 1;
                   const count = dayItemCount(day);
-                  const coverItem = day.groups[0]?.items[0];
-                  const coverUrl = coverItem ? getMediaUrl(coverItem) : '';
+                  const coverItems = day.groups.flatMap(g => g.items);
+                  const coverUrl = getCoverUrl(coverItems);
 
                   return (
                     <AnimatedPressable
@@ -646,7 +703,7 @@ export default function MemoriesScreen() {
                           <Image source={{ uri: coverUrl }} style={styles.cardImage} contentFit="cover" transition={200} />
                         ) : (
                           <View style={styles.dayCardEmptyIconWrap}>
-                            <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.textMuted} size={22} />
+                            <AppIcon androidName="videocam" iosName="video.fill" color={colors.textMuted} size={22} />
                           </View>
                         )}
 
@@ -781,6 +838,9 @@ export default function MemoriesScreen() {
             <View style={styles.centered}>
               <ActivityIndicator size="large" color="#fff" />
               <Text style={[styles.loadingText, { color: '#fff' }]}>Finding a surprise memory…</Text>
+              <TouchableOpacity style={[styles.closeBtn, { marginTop: Spacing.six }]} onPress={closeFlashback}>
+                <AppIcon androidName="close" iosName="xmark" color="#fff" size={24} />
+              </TouchableOpacity>
             </View>
           ) : flashbackError || !flashbackItem ? (
             <View style={styles.centered}>
@@ -788,6 +848,9 @@ export default function MemoriesScreen() {
               <Text style={[styles.errorSubtext, { color: '#fff', marginTop: Spacing.three }]}>
                 {flashbackError || 'No flashback available yet.'}
               </Text>
+              <TouchableOpacity style={[styles.closeBtn, { marginTop: Spacing.six }]} onPress={closeFlashback}>
+                <AppIcon androidName="close" iosName="xmark" color="#fff" size={24} />
+              </TouchableOpacity>
             </View>
           ) : (
             <>
@@ -888,6 +951,14 @@ export default function MemoriesScreen() {
                   <Text style={[styles.errorSubtext, { color: '#fff', marginTop: Spacing.three }]}>
                     Could not build the reel right now.
                   </Text>
+                  {rewindYear != null && (
+                    <TouchableOpacity
+                      style={[styles.retryBtn, { marginTop: Spacing.four }]}
+                      onPress={() => openRewind(rewindYear)}
+                    >
+                      <Text style={styles.retryBtnText}>Try Again</Text>
+                    </TouchableOpacity>
+                  )}
                 </>
               )}
             </View>
@@ -1037,7 +1108,13 @@ function NativeStoryVideoPlayer({
 
   return (
     <View style={styles.videoContainer}>
-      <videoModule.VideoView style={styles.videoFull} player={player} nativeControls={false} />
+      <videoModule.VideoView
+        style={styles.videoFull}
+        player={player}
+        nativeControls={false}
+        contentFit="contain"
+        surfaceType="textureView"
+      />
     </View>
   );
 }
@@ -1073,7 +1150,13 @@ function NativeRewindVideoPlayer({
 
   return (
     <View style={styles.videoContainer}>
-      <videoModule.VideoView style={styles.videoFull} player={player} nativeControls={false} />
+      <videoModule.VideoView
+        style={styles.videoFull}
+        player={player}
+        nativeControls={false}
+        contentFit="contain"
+        surfaceType="textureView"
+      />
     </View>
   );
 }
@@ -1122,6 +1205,7 @@ const createStyles = (colors: AppColors, insets: any) =>
     },
 
     centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.five },
+    centeredEmpty: { alignItems: 'center', justifyContent: 'center', padding: Spacing.five, paddingTop: Spacing.eight },
     loadingText: { marginTop: Spacing.three, fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '600' },
     errorText: { fontSize: TextScale.lg, fontWeight: '800', color: colors.error, marginTop: Spacing.two },
     errorSubtext: { fontSize: TextScale.xs, color: colors.textSecondary, textAlign: 'center', marginTop: 4 },
@@ -1264,7 +1348,10 @@ const createStyles = (colors: AppColors, insets: any) =>
       shadowRadius: 14,
     },
     cardImage: { width: '100%', height: '100%' },
-    cardImagePlaceholder: { width: '100%', height: '100%', backgroundColor: colors.surfaceBorder },
+    cardImagePlaceholder: {
+      width: '100%', height: '100%', backgroundColor: colors.surfaceBorder,
+      alignItems: 'center', justifyContent: 'center',
+    },
     cardGradientOverlay: {
       ...StyleSheet.absoluteFill,
       backgroundColor: 'rgba(0,0,0,0.35)',

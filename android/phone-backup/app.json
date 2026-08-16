@@ -31,7 +31,10 @@
       "expo-splash-screen",
       "expo-status-bar",
       "expo-web-browser",
-      "expo-asset"
+      "expo-asset",
+      "expo-video",
+      "expo-sensors",
+      "expo-sharing"
     ],
     "android": {
       "icon": "./assets/images/icon.png",
