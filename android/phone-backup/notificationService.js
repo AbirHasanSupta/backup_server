@@ -17,6 +17,8 @@ const SYNC_CHANNEL_ID = 'backup-sync';
 const SYNC_NOTIFICATION_ID = 'backup-sync-progress';
 const MEMORIES_CHANNEL_ID = 'memories';
 const MEMORIES_NOTIFICATION_ID = 'memories-today';
+const FLASHBACK_CHANNEL_ID = 'flashback';
+const FLASHBACK_NOTIFICATION_ID = 'memories-flashback';
 const APP_PRIMARY_COLOR = '#2563EB';
 
 function immediateNotificationTrigger() {
@@ -79,6 +81,12 @@ export async function setupNotifications() {
       });
       await N.setNotificationChannelAsync(MEMORIES_CHANNEL_ID, {
         name: 'Memories',
+        importance: N.AndroidImportance.DEFAULT,
+        lightColor: APP_PRIMARY_COLOR,
+        showBadge: false,
+      });
+      await N.setNotificationChannelAsync(FLASHBACK_CHANNEL_ID, {
+        name: 'Flashback',
         importance: N.AndroidImportance.DEFAULT,
         lightColor: APP_PRIMARY_COLOR,
         showBadge: false,
@@ -211,6 +219,10 @@ function memoriesNotificationTrigger() {
   return Platform.OS === 'android' ? { channelId: MEMORIES_CHANNEL_ID } : null;
 }
 
+function flashbackNotificationTrigger() {
+  return Platform.OS === 'android' ? { channelId: FLASHBACK_CHANNEL_ID } : null;
+}
+
 export async function showMemoriesNotification(count) {
   if (!N) return;
   try {
@@ -227,6 +239,51 @@ export async function showMemoriesNotification(count) {
     });
   } catch (e) {
     console.warn('[Notifications] showMemoriesNotification failed:', e?.message);
+  }
+}
+
+export async function showFlashbackNotification(yearsAgo) {
+  if (!N) return;
+  try {
+    await N.scheduleNotificationAsync({
+      identifier: FLASHBACK_NOTIFICATION_ID,
+      content: {
+        title: '👀 Remember this?',
+        body: yearsAgo === 1
+          ? 'A memory from a year ago this week. Tap to see it!'
+          : `A memory from ${yearsAgo} years ago this week. Tap to see it!`,
+        data: { type: 'flashback' },
+      },
+      trigger: flashbackNotificationTrigger(),
+    });
+  } catch (e) {
+    console.warn('[Notifications] showFlashbackNotification failed:', e?.message);
+  }
+}
+
+export async function getInitialFlashbackTap() {
+  if (!N) return false;
+  try {
+    const response = await N.getLastNotificationResponseAsync();
+    return response?.notification?.request?.content?.data?.type === 'flashback';
+  } catch (e) {
+    console.warn('[Notifications] getInitialFlashbackTap failed:', e?.message);
+    return false;
+  }
+}
+
+export function addFlashbackTapListener(onTap) {
+  if (!N) return () => {};
+  try {
+    const sub = N.addNotificationResponseReceivedListener(response => {
+      if (response.notification.request.content.data?.type === 'flashback') {
+        onTap();
+      }
+    });
+    return () => sub.remove();
+  } catch (e) {
+    console.warn('[Notifications] addFlashbackTapListener failed:', e?.message);
+    return () => {};
   }
 }
 

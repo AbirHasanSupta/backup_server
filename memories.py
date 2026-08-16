@@ -7,6 +7,7 @@ into SQLite media_index cache for phone backups and tagged shared folders.
 from datetime import date, datetime, timedelta
 import json
 import os
+import random
 import subprocess
 import time as time_module
 from PIL import Image
@@ -16,7 +17,12 @@ from database import (
     get_devices,
     get_files_for_device,
     get_media_for_day,
+    get_media_for_year_month,
+    get_media_for_year_window,
     get_media_index_cache,
+    get_quiz_photo_pool,
+    get_random_media_row,
+    get_year_wrapped_stats,
     prune_media_index,
     upsert_media_index_row,
 )
@@ -374,3 +380,189 @@ def get_recent_memories(device_id: str, days: int = 7) -> dict:
         })
 
     return {"days": result_days}
+
+
+# ─── Random Flashback ────────────────────────────────────────────────────────
+
+FLASHBACK_YEARS_AGO = [1, 2, 3, 5, 7, 10]
+FLASHBACK_WEIGHTS = [5, 4, 3, 2, 1, 1]
+FLASHBACK_WINDOW_DAYS = 4
+
+
+def get_random_flashback(device_id: str) -> dict | None:
+    """Pick one random media item from roughly 'N years ago this week',
+    weighted toward more recent years so flashbacks feel closer to home."""
+    today = date.today()
+    shared_dirs = load_config().get("SHARED_DIRS", [])
+    sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
+
+    candidates: list[tuple[int, int, list[dict]]] = []
+    for years_ago, weight in zip(FLASHBACK_YEARS_AGO, FLASHBACK_WEIGHTS):
+        target_year = today.year - years_ago
+        month_day_pairs = []
+        for offset in range(-FLASHBACK_WINDOW_DAYS, FLASHBACK_WINDOW_DAYS + 1):
+            try:
+                d = date(target_year, today.month, today.day) + timedelta(days=offset)
+            except ValueError:
+                continue
+            month_day_pairs.append((d.month, d.day))
+
+        rows = get_media_for_year_window(sources, target_year, month_day_pairs)
+        if rows:
+            candidates.append((years_ago, weight, rows))
+
+    if not candidates:
+        return None
+
+    weights = [c[1] for c in candidates]
+    years_ago, _, rows = random.choices(candidates, weights=weights, k=1)[0]
+    row = random.choice(rows)
+
+    ext = os.path.splitext(row["relative_path"])[1].lower()
+    is_video = ext in VIDEO_EXTS
+    s_type = row["source_type"]
+    s_key = row["source_key"]
+    s_label = "Phone Backup" if s_type == "phone" else shared_labels.get(s_key, "Shared Folder")
+
+    return {
+        "source_type": s_type,
+        "source_id": s_key,
+        "source_label": s_label,
+        "relative_path": row["relative_path"],
+        "size": row["size"],
+        "capture_time": row["capture_time"],
+        "is_video": is_video,
+        "year": row["cap_year"],
+        "years_ago": years_ago,
+    }
+
+
+# ─── Year Wrapped ─────────────────────────────────────────────────────────────
+
+def get_wrapped(device_id: str, year: int) -> dict:
+    shared_dirs = load_config().get("SHARED_DIRS", [])
+    sources, _ = _shared_sources_for_device(device_id, shared_dirs)
+    rows = get_year_wrapped_stats(sources, year)
+
+    photos = 0
+    videos = 0
+    total_size = 0
+    month_counts = {m: 0 for m in range(1, 13)}
+
+    for r in rows:
+        ext = os.path.splitext(r["relative_path"])[1].lower()
+        if ext in VIDEO_EXTS:
+            videos += 1
+        else:
+            photos += 1
+        total_size += r.get("size", 0) or 0
+        m = r.get("cap_month")
+        if m and 1 <= m <= 12:
+            month_counts[m] += 1
+
+    total = photos + videos
+    busiest_month = max(month_counts, key=lambda m: month_counts[m]) if total > 0 else None
+    if busiest_month is not None and month_counts[busiest_month] == 0:
+        busiest_month = None
+
+    return {
+        "year": year,
+        "total": total,
+        "photos": photos,
+        "videos": videos,
+        "total_size": total_size,
+        "busiest_month": busiest_month,
+        "busiest_month_count": month_counts.get(busiest_month, 0) if busiest_month is not None else 0,
+        "month_counts": month_counts,
+    }
+
+
+# ─── Rewind Reel media selection ──────────────────────────────────────────────
+
+def get_reel_items(device_id: str, year: int, month: int | None, limit: int = 18) -> list[dict]:
+    shared_dirs = load_config().get("SHARED_DIRS", [])
+    sources, _ = _shared_sources_for_device(device_id, shared_dirs)
+    return get_media_for_year_month(sources, year, month, limit=limit)
+
+
+# ─── Guess the Year ───────────────────────────────────────────────────────────
+
+QUIZ_DEFAULT_COUNT = 10
+QUIZ_OPTION_COUNT = 4
+
+
+def get_quiz_round(device_id: str, count: int = QUIZ_DEFAULT_COUNT) -> dict:
+    shared_dirs = load_config().get("SHARED_DIRS", [])
+    sources, _ = _shared_sources_for_device(device_id, shared_dirs)
+    pool = get_quiz_photo_pool(sources)
+
+    photo_pool = [
+        r for r in pool
+        if os.path.splitext(r["relative_path"])[1].lower() in IMAGE_EXTS
+    ]
+
+    distinct_years = sorted({r["cap_year"] for r in photo_pool if r.get("cap_year") is not None})
+    if len(photo_pool) < 2 or len(distinct_years) < 2:
+        return {"items": []}
+
+    round_size = min(max(1, count), len(photo_pool))
+    chosen = random.sample(photo_pool, round_size)
+
+    items = []
+    for row in chosen:
+        correct_year = row["cap_year"]
+        wrong_pool = [y for y in distinct_years if y != correct_year]
+
+        if len(wrong_pool) >= QUIZ_OPTION_COUNT - 1:
+            wrong_years = random.sample(wrong_pool, QUIZ_OPTION_COUNT - 1)
+        else:
+            wrong_years = list(wrong_pool)
+            jitter = 1
+            guard = 0
+            while len(wrong_years) < QUIZ_OPTION_COUNT - 1 and guard < 40:
+                offset = jitter if jitter % 2 else -jitter
+                candidate = correct_year + offset
+                jitter += 1
+                guard += 1
+                if candidate != correct_year and candidate not in wrong_years:
+                    wrong_years.append(candidate)
+
+        options = wrong_years + [correct_year]
+        random.shuffle(options)
+
+        items.append({
+            "source_type": row["source_type"],
+            "source_id": row["source_key"],
+            "relative_path": row["relative_path"],
+            "correct_year": correct_year,
+            "options": options,
+        })
+
+    return {"items": items}
+
+
+# ─── Photo Roulette ───────────────────────────────────────────────────────────
+
+def get_roulette_item(device_id: str) -> dict | None:
+    shared_dirs = load_config().get("SHARED_DIRS", [])
+    sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
+    row = get_random_media_row(sources)
+    if not row:
+        return None
+
+    ext = os.path.splitext(row["relative_path"])[1].lower()
+    is_video = ext in VIDEO_EXTS
+    s_type = row["source_type"]
+    s_key = row["source_key"]
+    s_label = "Phone Backup" if s_type == "phone" else shared_labels.get(s_key, "Shared Folder")
+
+    return {
+        "source_type": s_type,
+        "source_id": s_key,
+        "source_label": s_label,
+        "relative_path": row["relative_path"],
+        "size": row["size"],
+        "capture_time": row["capture_time"],
+        "is_video": is_video,
+        "year": row["cap_year"],
+    }

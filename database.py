@@ -859,6 +859,149 @@ def get_media_for_day(
     return [dict(r) for r in rows]
 
 
+def get_media_for_year_window(
+    source_type_and_keys: list[tuple[str, str]],
+    year: int,
+    month_day_pairs: list[tuple[int, int]],
+) -> list[dict]:
+    if not source_type_and_keys or not month_day_pairs:
+        return []
+    conn = get_conn()
+    or_clauses = []
+    params: list = []
+    for stype, skey in source_type_and_keys:
+        or_clauses.append("(source_type = ? AND source_key = ?)")
+        params.extend([stype, skey])
+    where_source = " OR ".join(or_clauses)
+
+    day_clauses = []
+    for m, d in month_day_pairs:
+        day_clauses.append("(cap_month = ? AND cap_day = ?)")
+        params.extend([m, d])
+    where_days = " OR ".join(day_clauses)
+    params.append(year)
+
+    sql = f"""
+        SELECT source_type, source_key, relative_path, size, modified_time, capture_time, capture_source, cap_month, cap_day, cap_year
+        FROM media_index
+        WHERE ({where_source})
+          AND ({where_days})
+          AND cap_year = ?
+        ORDER BY capture_time DESC, relative_path ASC
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_year_wrapped_stats(
+    source_type_and_keys: list[tuple[str, str]],
+    year: int,
+) -> list[dict]:
+    if not source_type_and_keys:
+        return []
+    conn = get_conn()
+    or_clauses = []
+    params: list = []
+    for stype, skey in source_type_and_keys:
+        or_clauses.append("(source_type = ? AND source_key = ?)")
+        params.extend([stype, skey])
+    where_source = " OR ".join(or_clauses)
+    params.append(year)
+
+    sql = f"""
+        SELECT relative_path, size, cap_month
+        FROM media_index
+        WHERE ({where_source}) AND cap_year = ?
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_media_for_year_month(
+    source_type_and_keys: list[tuple[str, str]],
+    year: int,
+    month: int | None,
+    limit: int = 20,
+) -> list[dict]:
+    if not source_type_and_keys:
+        return []
+    conn = get_conn()
+    or_clauses = []
+    params: list = []
+    for stype, skey in source_type_and_keys:
+        or_clauses.append("(source_type = ? AND source_key = ?)")
+        params.extend([stype, skey])
+    where_source = " OR ".join(or_clauses)
+    params.append(year)
+
+    month_clause = ""
+    if month:
+        month_clause = "AND cap_month = ?"
+        params.append(month)
+    params.append(limit)
+
+    sql = f"""
+        SELECT source_type, source_key, relative_path, size, modified_time, capture_time, cap_month, cap_day, cap_year
+        FROM media_index
+        WHERE ({where_source}) AND cap_year = ? {month_clause}
+        ORDER BY capture_time ASC
+        LIMIT ?
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_quiz_photo_pool(
+    source_type_and_keys: list[tuple[str, str]],
+) -> list[dict]:
+    if not source_type_and_keys:
+        return []
+    conn = get_conn()
+    or_clauses = []
+    params: list = []
+    for stype, skey in source_type_and_keys:
+        or_clauses.append("(source_type = ? AND source_key = ?)")
+        params.extend([stype, skey])
+    where_source = " OR ".join(or_clauses)
+
+    sql = f"""
+        SELECT source_type, source_key, relative_path, cap_year
+        FROM media_index
+        WHERE ({where_source}) AND cap_year IS NOT NULL
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_random_media_row(
+    source_type_and_keys: list[tuple[str, str]],
+) -> dict | None:
+    if not source_type_and_keys:
+        return None
+    conn = get_conn()
+    or_clauses = []
+    params: list = []
+    for stype, skey in source_type_and_keys:
+        or_clauses.append("(source_type = ? AND source_key = ?)")
+        params.extend([stype, skey])
+    where_source = " OR ".join(or_clauses)
+
+    sql = f"""
+        SELECT source_type, source_key, relative_path, size, capture_time, cap_year
+        FROM media_index
+        WHERE ({where_source})
+        ORDER BY RANDOM()
+        LIMIT 1
+    """
+    row = conn.execute(sql, params).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def prune_media_index(source_type: str, source_key: str, keep_paths: set[str]) -> None:
     conn = get_conn()
     rows = conn.execute(

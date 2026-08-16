@@ -5,9 +5,22 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import * as MediaLibrary from 'expo-media-library';
 import { registerBackgroundTask } from '../../backgroundTask';
-import { setupNotifications, showMemoriesNotification, addMemoriesTapListener, getInitialMemoriesTap } from '../../notificationService';
-import { getLastMemoryNotifiedDate, setLastMemoryNotifiedDate } from '../../settings';
-import { getTodaysMemories } from '../../downloader';
+import {
+  setupNotifications,
+  showMemoriesNotification,
+  addMemoriesTapListener,
+  getInitialMemoriesTap,
+  showFlashbackNotification,
+  addFlashbackTapListener,
+  getInitialFlashbackTap,
+} from '../../notificationService';
+import {
+  getLastMemoryNotifiedDate,
+  setLastMemoryNotifiedDate,
+  getLastFlashbackNotifiedAt,
+  setLastFlashbackNotifiedAt,
+} from '../../settings';
+import { getTodaysMemories, getRandomFlashback } from '../../downloader';
 import { AppColors, Radius, Shadows, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { AppThemeProvider, useAppTheme } from '@/hooks/use-app-theme';
@@ -64,6 +77,25 @@ async function checkAndNotifyMemories() {
   }
 }
 
+// Surprise notification unrelated to "On This Day" — fires at a randomized
+// 2-5 day interval so it doesn't feel scheduled/predictable.
+const FLASHBACK_MIN_INTERVAL_DAYS = 2;
+const FLASHBACK_MAX_INTERVAL_DAYS = 5;
+
+async function checkAndNotifyFlashback() {
+  const lastNotifiedAt = await getLastFlashbackNotifiedAt();
+  const thresholdDays = FLASHBACK_MIN_INTERVAL_DAYS +
+    Math.random() * (FLASHBACK_MAX_INTERVAL_DAYS - FLASHBACK_MIN_INTERVAL_DAYS);
+  const thresholdMs = thresholdDays * 24 * 60 * 60 * 1000;
+  if (lastNotifiedAt && Date.now() - lastNotifiedAt < thresholdMs) return;
+
+  const item = await getRandomFlashback();
+  if (item) {
+    await showFlashbackNotification(item.years_ago);
+    await setLastFlashbackNotifiedAt(Date.now());
+  }
+}
+
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -87,6 +119,7 @@ function RootLayoutContent() {
       await setupNotifications().catch(() => {});
       await registerBackgroundTask();
       checkAndNotifyMemories().catch(() => {});
+      checkAndNotifyFlashback().catch(() => {});
     })();
   }, []);
 
@@ -97,10 +130,17 @@ function RootLayoutContent() {
         router.push('/memories');
       }
     });
-    const unsubscribe = addMemoriesTapListener(() => router.push('/memories'));
+    getInitialFlashbackTap().then(shouldOpen => {
+      if (active && shouldOpen) {
+        router.push('/memories?flashback=1');
+      }
+    });
+    const unsubscribeMemories = addMemoriesTapListener(() => router.push('/memories'));
+    const unsubscribeFlashback = addFlashbackTapListener(() => router.push('/memories?flashback=1'));
     return () => {
       active = false;
-      unsubscribe();
+      unsubscribeMemories();
+      unsubscribeFlashback();
     };
   }, [router]);
 
@@ -166,6 +206,9 @@ function RootLayoutContent() {
         />
         <Tabs.Screen name="explore" options={{ href: null }} />
         <Tabs.Screen name="memories" options={{ href: null }} />
+        <Tabs.Screen name="wrapped" options={{ href: null }} />
+        <Tabs.Screen name="quiz" options={{ href: null }} />
+        <Tabs.Screen name="roulette" options={{ href: null }} />
       </Tabs>
     </SafeAreaProvider>
   );

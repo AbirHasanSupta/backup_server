@@ -22,10 +22,19 @@ const KEYS = {
   CERT_FINGERPRINT: 'server_cert_fp',
   AUTO_SYNC_SUPPRESSED_UNTIL: 'auto_sync_suppressed_until',
   LAST_MEMORY_NOTIFIED_DATE: 'last_memory_notified_date',
+  LAST_FLASHBACK_NOTIFIED_AT: 'last_flashback_notified_at',
 };
 
 export async function getLastMemoryNotifiedDate() { return (await AsyncStorage.getItem(KEYS.LAST_MEMORY_NOTIFIED_DATE)) || ''; }
 export async function setLastMemoryNotifiedDate(dateStr) { await AsyncStorage.setItem(KEYS.LAST_MEMORY_NOTIFIED_DATE, dateStr); }
+
+export async function getLastFlashbackNotifiedAt() {
+  const raw = await AsyncStorage.getItem(KEYS.LAST_FLASHBACK_NOTIFIED_AT);
+  return Number.parseInt(raw || '', 10) || 0;
+}
+export async function setLastFlashbackNotifiedAt(ts) {
+  await AsyncStorage.setItem(KEYS.LAST_FLASHBACK_NOTIFIED_AT, String(ts));
+}
 
 function safeJsonParse(raw, fallback) {
   if (!raw) return fallback;

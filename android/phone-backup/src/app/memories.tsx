@@ -14,7 +14,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
@@ -31,6 +31,11 @@ import {
   buildVideoPreviewUrl,
   downloadFile,
   downloadSharedFile,
+  getRandomFlashback,
+  generateRewindReel,
+  getRewindReelStatus,
+  buildRewindReelStreamUrl,
+  downloadRewindReel,
 } from '../../downloader';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
@@ -88,6 +93,13 @@ interface ServerConfig {
   deviceId: string;
 }
 
+interface FlashbackItem extends MemoryItem {
+  year: number;
+  years_ago: number;
+}
+
+type RewindStatus = 'idle' | 'checking' | 'generating' | 'ready' | 'none' | 'error';
+
 function dayItemCount(day: DayMemory): number {
   return day.groups.reduce((sum, g) => sum + g.items.length, 0);
 }
@@ -133,6 +145,21 @@ export default function MemoriesScreen() {
 
   const photoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [progressRatio, setProgressRatio] = useState<number>(0);
+
+  // Flashback state
+  const params = useLocalSearchParams<{ flashback?: string }>();
+  const [flashbackVisible, setFlashbackVisible] = useState(false);
+  const [flashbackLoading, setFlashbackLoading] = useState(false);
+  const [flashbackItem, setFlashbackItem] = useState<FlashbackItem | null>(null);
+  const [flashbackError, setFlashbackError] = useState<string | null>(null);
+  const [flashbackSaving, setFlashbackSaving] = useState(false);
+
+  // Rewind Reel state
+  const [rewindVisible, setRewindVisible] = useState(false);
+  const [rewindYear, setRewindYear] = useState<number | null>(null);
+  const [rewindStatus, setRewindStatus] = useState<RewindStatus>('idle');
+  const [rewindSaving, setRewindSaving] = useState(false);
+  const rewindPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchMemories = useCallback(async () => {
     setLoading(true);
@@ -244,6 +271,149 @@ export default function MemoriesScreen() {
     };
   }, [activeDayIdx, activeItemIdx, currentItem, isPaused, advanceItem]);
 
+  const openFlashback = useCallback(async () => {
+    setFlashbackVisible(true);
+    setFlashbackLoading(true);
+    setFlashbackError(null);
+    try {
+      if (!serverConfig) {
+        const cfg = await getConfig();
+        setServerConfig(cfg);
+      }
+      const item = await getRandomFlashback();
+      setFlashbackItem(item);
+      if (!item) setFlashbackError('No flashback available yet — keep backing up!');
+    } catch (err: any) {
+      setFlashbackError(sanitizeErrorMessage(err, 'Could not load a flashback right now.'));
+    } finally {
+      setFlashbackLoading(false);
+    }
+  }, [serverConfig]);
+
+  const closeFlashback = useCallback(() => {
+    setFlashbackVisible(false);
+    setFlashbackItem(null);
+    setFlashbackError(null);
+  }, []);
+
+  useEffect(() => {
+    if (params.flashback === '1') {
+      openFlashback();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params.flashback]);
+
+  const handleSaveFlashback = async () => {
+    if (!flashbackItem || flashbackSaving) return;
+    setFlashbackSaving(true);
+    try {
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Needed', 'Media library permission is required to save photos and videos.');
+        setFlashbackSaving(false);
+        return;
+      }
+      const displayName = flashbackItem.relative_path.split(/[/\\]/).pop() ?? `flashback_${Date.now()}`;
+      const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
+      const tmpUri = `${cacheDir}flashback_save_${Date.now()}_${displayName}`;
+
+      if (flashbackItem.source_type === 'shared') {
+        await downloadSharedFile(flashbackItem.source_id, flashbackItem.relative_path, tmpUri);
+      } else {
+        await downloadFile(flashbackItem.relative_path, tmpUri);
+      }
+
+      await MediaLibrary.saveToLibraryAsync(tmpUri);
+      await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+      Alert.alert('Saved', 'Photo/Video saved to your gallery!');
+    } catch (err: any) {
+      Alert.alert('Save Failed', sanitizeErrorMessage(err, 'Could not save file to device.'));
+    } finally {
+      setFlashbackSaving(false);
+    }
+  };
+
+  const clearRewindPoll = useCallback(() => {
+    if (rewindPollRef.current) {
+      clearInterval(rewindPollRef.current);
+      rewindPollRef.current = null;
+    }
+  }, []);
+
+  const openRewind = useCallback(async (year: number) => {
+    setRewindVisible(true);
+    setRewindYear(year);
+    setRewindStatus('checking');
+    if (!serverConfig) {
+      try {
+        const cfg = await getConfig();
+        setServerConfig(cfg);
+      } catch {}
+    }
+    try {
+      const status = await getRewindReelStatus(year);
+      if (status.ready) {
+        setRewindStatus('ready');
+        return;
+      }
+      if (status.status === 'none') {
+        setRewindStatus('none');
+        return;
+      }
+      await generateRewindReel(year);
+      setRewindStatus('generating');
+      clearRewindPoll();
+      rewindPollRef.current = setInterval(async () => {
+        try {
+          const poll = await getRewindReelStatus(year);
+          if (poll.ready) {
+            setRewindStatus('ready');
+            clearRewindPoll();
+          } else if (poll.status === 'none') {
+            setRewindStatus('none');
+            clearRewindPoll();
+          }
+        } catch {
+          // keep polling — transient network hiccups shouldn't abort the build
+        }
+      }, 2000);
+    } catch (err) {
+      setRewindStatus('error');
+    }
+  }, [serverConfig, clearRewindPoll]);
+
+  const closeRewind = useCallback(() => {
+    clearRewindPoll();
+    setRewindVisible(false);
+    setRewindYear(null);
+    setRewindStatus('idle');
+  }, [clearRewindPoll]);
+
+  useEffect(() => () => clearRewindPoll(), [clearRewindPoll]);
+
+  const handleSaveRewind = async () => {
+    if (!rewindYear || rewindSaving) return;
+    setRewindSaving(true);
+    try {
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Needed', 'Media library permission is required to save videos.');
+        setRewindSaving(false);
+        return;
+      }
+      const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
+      const tmpUri = `${cacheDir}rewind_${rewindYear}_${Date.now()}.mp4`;
+      await downloadRewindReel(rewindYear, undefined, tmpUri);
+      await MediaLibrary.saveToLibraryAsync(tmpUri);
+      await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+      Alert.alert('Saved', 'Rewind Reel saved to your gallery!');
+    } catch (err: any) {
+      Alert.alert('Save Failed', sanitizeErrorMessage(err, 'Could not save the reel to device.'));
+    } finally {
+      setRewindSaving(false);
+    }
+  };
+
   // Handle saving current item to device library
   const handleSaveItem = async (item: MemoryItem) => {
     if (savingItem) return;
@@ -316,9 +486,17 @@ export default function MemoriesScreen() {
           <Text style={styles.headerTitle}>On This Day</Text>
           <Text style={styles.headerSubtitle}>{todayDateStr}</Text>
         </View>
-        <TouchableOpacity style={styles.refreshBtn} onPress={fetchMemories} disabled={loading}>
-          <AppIcon androidName="refresh" iosName="arrow.clockwise" color={colors.primary} size={20} />
-        </TouchableOpacity>
+        <View style={styles.headerActionsRow}>
+          <TouchableOpacity style={styles.surpriseBtn} onPress={openFlashback}>
+            <AppIcon androidName="shuffle" iosName="shuffle" color={colors.primary} size={18} />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.surpriseBtn} onPress={() => router.push('/wrapped')}>
+            <AppIcon androidName="insights" iosName="chart.bar.fill" color={colors.primary} size={18} />
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.refreshBtn} onPress={fetchMemories} disabled={loading}>
+            <AppIcon androidName="refresh" iosName="arrow.clockwise" color={colors.primary} size={20} />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Body Content */}
@@ -346,6 +524,22 @@ export default function MemoriesScreen() {
         </View>
       ) : (
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+          {/* Games Shelf */}
+          <View style={styles.gamesRow}>
+            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/roulette')} activeOpacity={0.85}>
+              <View style={[styles.gameIconWrap, { backgroundColor: '#F59E0B22' }]}>
+                <AppIcon androidName="casino" iosName="die.face.5.fill" color="#F59E0B" size={20} />
+              </View>
+              <Text style={styles.gameCardText}>Photo Roulette</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/quiz')} activeOpacity={0.85}>
+              <View style={[styles.gameIconWrap, { backgroundColor: '#8B5CF622' }]}>
+                <AppIcon androidName="psychology" iosName="brain" color="#8B5CF6" size={20} />
+              </View>
+              <Text style={styles.gameCardText}>Guess the Year</Text>
+            </TouchableOpacity>
+          </View>
+
           {/* Today Section — highlighted and featured at the top */}
           <View style={styles.sectionHeaderRow}>
             <View style={styles.todayBadge}>
@@ -375,35 +569,45 @@ export default function MemoriesScreen() {
                   .join(' · ');
 
                 return (
-                  <AnimatedPressable
-                    key={group.year}
-                    style={styles.featuredCardContainer}
-                    onPress={() => openYearGroupStory(0, groupIndex)}
-                    scaleDown={0.97}
-                  >
-                    <View style={[styles.stackLayer, styles.stackLayerBack]} />
-                    <View style={[styles.stackLayer, styles.stackLayerMiddle]} />
+                  <View key={group.year} style={styles.featuredCardContainer}>
+                    <AnimatedPressable
+                      style={StyleSheet.absoluteFill}
+                      onPress={() => openYearGroupStory(0, groupIndex)}
+                      scaleDown={0.97}
+                    >
+                      <View style={[styles.stackLayer, styles.stackLayerBack]} />
+                      <View style={[styles.stackLayer, styles.stackLayerMiddle]} />
 
-                    <View style={styles.featuredCardMain}>
-                      {coverUrl ? (
-                        <Image source={{ uri: coverUrl }} style={styles.cardImage} contentFit="cover" transition={200} />
-                      ) : (
-                        <View style={styles.cardImagePlaceholder} />
-                      )}
+                      <View style={styles.featuredCardMain}>
+                        {coverUrl ? (
+                          <Image source={{ uri: coverUrl }} style={styles.cardImage} contentFit="cover" transition={200} />
+                        ) : (
+                          <View style={styles.cardImagePlaceholder} />
+                        )}
 
-                      <View style={styles.cardGradientOverlay}>
-                        <View style={styles.cardBadge}>
-                          <Text style={styles.cardBadgeText}>{group.year}</Text>
-                        </View>
-                        <View style={styles.cardTextContainer}>
-                          <Text style={styles.cardYearsAgo}>
-                            {group.years_ago} {group.years_ago === 1 ? 'Year' : 'Years'} Ago
-                          </Text>
-                          <Text style={styles.cardCountText}>{countsStr}</Text>
+                        <View style={styles.cardGradientOverlay}>
+                          <View style={styles.cardBadge}>
+                            <Text style={styles.cardBadgeText}>{group.year}</Text>
+                          </View>
+                          <View style={styles.cardTextContainer}>
+                            <Text style={styles.cardYearsAgo}>
+                              {group.years_ago} {group.years_ago === 1 ? 'Year' : 'Years'} Ago
+                            </Text>
+                            <Text style={styles.cardCountText}>{countsStr}</Text>
+                          </View>
                         </View>
                       </View>
-                    </View>
-                  </AnimatedPressable>
+                    </AnimatedPressable>
+
+                    <TouchableOpacity
+                      style={styles.rewindBtn}
+                      onPress={() => openRewind(group.year)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <AppIcon androidName="movie" iosName="film" color="#fff" size={14} />
+                      <Text style={styles.rewindBtnText}>Rewind</Text>
+                    </TouchableOpacity>
+                  </View>
                 );
               })}
             </View>
@@ -562,6 +766,171 @@ export default function MemoriesScreen() {
           </View>
         </Modal>
       )}
+
+      {/* Flashback Modal — surprise single-item viewer, separate from the day/year story flow */}
+      <Modal
+        visible={flashbackVisible}
+        transparent={false}
+        animationType="fade"
+        onRequestClose={closeFlashback}
+      >
+        <View style={styles.storyContainer}>
+          <StatusBar barStyle="light-content" />
+
+          {flashbackLoading ? (
+            <View style={styles.centered}>
+              <ActivityIndicator size="large" color="#fff" />
+              <Text style={[styles.loadingText, { color: '#fff' }]}>Finding a surprise memory…</Text>
+            </View>
+          ) : flashbackError || !flashbackItem ? (
+            <View style={styles.centered}>
+              <AppIcon androidName="auto_awesome" iosName="sparkles" color="#fff" size={40} />
+              <Text style={[styles.errorSubtext, { color: '#fff', marginTop: Spacing.three }]}>
+                {flashbackError || 'No flashback available yet.'}
+              </Text>
+            </View>
+          ) : (
+            <>
+              {flashbackItem.is_video ? (
+                <StoryVideoPlayer
+                  uri={getMediaUrl(flashbackItem)}
+                  isPaused={false}
+                  onEnded={() => {}}
+                  onProgressRatio={() => {}}
+                  styles={styles}
+                />
+              ) : (
+                <Image
+                  source={{ uri: getMediaUrl(flashbackItem) }}
+                  style={styles.storyMedia}
+                  contentFit="contain"
+                />
+              )}
+
+              <View style={[styles.storyTopBar, { paddingTop: Math.max(insets.top, 16) }]}>
+                <View style={styles.storyHeaderRow}>
+                  <View style={styles.storyHeaderInfo}>
+                    <View style={styles.storyDayPill}>
+                      <Text style={styles.storyDayPillText}>FLASHBACK</Text>
+                    </View>
+                    <Text style={styles.storyYearTitle}>
+                      {flashbackItem.years_ago} {flashbackItem.years_ago === 1 ? 'Year' : 'Years'} Ago ({flashbackItem.year})
+                    </Text>
+                    <Text style={styles.storySourceSub}>{flashbackItem.source_label}</Text>
+                  </View>
+                  <TouchableOpacity
+                    style={styles.closeBtn}
+                    onPress={closeFlashback}
+                    hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                  >
+                    <AppIcon androidName="close" iosName="xmark" color="#fff" size={24} />
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              <View style={[styles.storyBottomBar, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+                <TouchableOpacity
+                  style={styles.saveBtn}
+                  onPress={handleSaveFlashback}
+                  disabled={flashbackSaving}
+                >
+                  {flashbackSaving ? (
+                    <ActivityIndicator size="small" color="#fff" />
+                  ) : (
+                    <>
+                      <AppIcon androidName="download" iosName="arrow.down.circle" color="#fff" size={20} />
+                      <Text style={styles.saveBtnText}>Save to Device</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </>
+          )}
+        </View>
+      </Modal>
+
+      {/* Rewind Reel Modal — server-generated year slideshow video */}
+      <Modal
+        visible={rewindVisible}
+        transparent={false}
+        animationType="fade"
+        onRequestClose={closeRewind}
+      >
+        <View style={styles.storyContainer}>
+          <StatusBar barStyle="light-content" />
+
+          {rewindStatus === 'ready' && serverConfig && rewindYear ? (
+            <RewindVideoPlayer
+              uri={buildRewindReelStreamUrl(serverConfig, rewindYear)}
+              styles={styles}
+            />
+          ) : (
+            <View style={styles.centered}>
+              {(rewindStatus === 'checking' || rewindStatus === 'generating') && (
+                <>
+                  <ActivityIndicator size="large" color="#fff" />
+                  <Text style={[styles.loadingText, { color: '#fff' }]}>
+                    {rewindStatus === 'checking' ? 'Checking your reel…' : 'Building your Rewind Reel…'}
+                  </Text>
+                </>
+              )}
+              {rewindStatus === 'none' && (
+                <>
+                  <AppIcon androidName="movie" iosName="film" color="#fff" size={40} />
+                  <Text style={[styles.errorSubtext, { color: '#fff', marginTop: Spacing.three }]}>
+                    Not enough photos from {rewindYear} yet to build a reel.
+                  </Text>
+                </>
+              )}
+              {rewindStatus === 'error' && (
+                <>
+                  <AppIcon androidName="cloud_off" iosName="wifi.slash" color="#fff" size={40} />
+                  <Text style={[styles.errorSubtext, { color: '#fff', marginTop: Spacing.three }]}>
+                    Could not build the reel right now.
+                  </Text>
+                </>
+              )}
+            </View>
+          )}
+
+          <View style={[styles.storyTopBar, { paddingTop: Math.max(insets.top, 16) }]}>
+            <View style={styles.storyHeaderRow}>
+              <View style={styles.storyHeaderInfo}>
+                <View style={styles.storyDayPill}>
+                  <Text style={styles.storyDayPillText}>REWIND REEL</Text>
+                </View>
+                <Text style={styles.storyYearTitle}>{rewindYear}</Text>
+              </View>
+              <TouchableOpacity
+                style={styles.closeBtn}
+                onPress={closeRewind}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              >
+                <AppIcon androidName="close" iosName="xmark" color="#fff" size={24} />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {rewindStatus === 'ready' && (
+            <View style={[styles.storyBottomBar, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+              <TouchableOpacity
+                style={styles.saveBtn}
+                onPress={handleSaveRewind}
+                disabled={rewindSaving}
+              >
+                {rewindSaving ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <>
+                    <AppIcon androidName="download" iosName="arrow.down.circle" color="#fff" size={20} />
+                    <Text style={styles.saveBtnText}>Save to Device</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -673,6 +1042,42 @@ function NativeStoryVideoPlayer({
   );
 }
 
+function RewindVideoPlayer({ uri, styles }: { uri: string; styles: any }) {
+  if (!expoVideoModule) {
+    return (
+      <View style={styles.videoFallbackContainer}>
+        <AppIcon androidName="videocam" iosName="video" color="#fff" size={48} />
+        <Text style={styles.videoFallbackText}>Video Playback Unavailable</Text>
+      </View>
+    );
+  }
+  return <NativeRewindVideoPlayer uri={uri} videoModule={expoVideoModule} styles={styles} />;
+}
+
+function NativeRewindVideoPlayer({
+  uri,
+  videoModule,
+  styles,
+}: {
+  uri: string;
+  videoModule: ExpoVideoModule;
+  styles: any;
+}) {
+  const source = useMemo<VideoSource>(() => ({ uri, useCaching: true, contentType: 'progressive' }), [uri]);
+  const player = videoModule.useVideoPlayer(source, p => {
+    p.loop = true;
+    p.muted = false;
+    p.volume = 1;
+    safeMediaCall(() => p.play());
+  });
+
+  return (
+    <View style={styles.videoContainer}>
+      <videoModule.VideoView style={styles.videoFull} player={player} nativeControls={false} />
+    </View>
+  );
+}
+
 const createStyles = (colors: AppColors, insets: any) =>
   StyleSheet.create({
     root: { flex: 1, backgroundColor: colors.bg },
@@ -698,6 +1103,15 @@ const createStyles = (colors: AppColors, insets: any) =>
     headerTitleContainer: { alignItems: 'center' },
     headerTitle: { fontSize: TextScale.lg, fontWeight: '800', color: colors.text },
     headerSubtitle: { fontSize: TextScale.xs, color: colors.textSecondary, fontWeight: '600' },
+    headerActionsRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
+    surpriseBtn: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colors.primarySoft,
+    },
     refreshBtn: {
       width: 36,
       height: 36,
@@ -741,6 +1155,30 @@ const createStyles = (colors: AppColors, insets: any) =>
 
     scrollContent: { paddingBottom: BottomTabInset + insets.bottom + Spacing.eight },
 
+    gamesRow: {
+      flexDirection: 'row',
+      gap: Spacing.three,
+      paddingHorizontal: Spacing.five,
+      marginTop: Spacing.four,
+    },
+    gameCard: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: Spacing.two,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+      borderRadius: Radius.lg,
+      paddingVertical: Spacing.three,
+      paddingHorizontal: Spacing.three,
+    },
+    gameIconWrap: {
+      width: 34, height: 34, borderRadius: 17,
+      alignItems: 'center', justifyContent: 'center',
+    },
+    gameCardText: { fontSize: TextScale.xs, fontWeight: '700', color: colors.text, flexShrink: 1 },
+
     sectionHeaderRow: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -778,6 +1216,22 @@ const createStyles = (colors: AppColors, insets: any) =>
 
     cardList: { paddingHorizontal: Spacing.five, gap: Spacing.five },
     featuredCardContainer: { height: 240, marginVertical: Spacing.two },
+    rewindBtn: {
+      position: 'absolute',
+      top: Spacing.three,
+      right: Spacing.four + Spacing.two,
+      zIndex: 5,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      paddingHorizontal: Spacing.three,
+      paddingVertical: 6,
+      borderRadius: Radius.full,
+      backgroundColor: 'rgba(0,0,0,0.55)',
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.35)',
+    },
+    rewindBtnText: { color: '#fff', fontWeight: '700', fontSize: TextScale.xs },
     stackLayer: {
       position: 'absolute',
       left: 12,

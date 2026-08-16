@@ -192,6 +192,12 @@ function formatDate(ts: number | undefined): string {
   });
 }
 
+function formatMediaTime(sec: number): string {
+  const s = Math.max(0, Math.floor(sec || 0));
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, '0')}`;
+}
+
 function sanitizeRelativePath(raw: string): string {
   const normalised = raw.replace(/\\/g, '/');
   const match = normalised.match(/^([^/]+):(.+)$/);
@@ -866,13 +872,7 @@ const PreviewModal = React.memo(function PreviewModal({
   const panResponder = useMemo(() => {
     // eslint-disable-next-line react-hooks/refs
     return PanResponder.create({
-      onStartShouldSetPanResponder: (evt) => {
-        const cur = latestRef.current;
-        if (cur.category === 'video' && scaleRef.current <= 1.02) {
-          return false;
-        }
-        return true;
-      },
+      onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: (evt, gs) => {
         const touches = evt.nativeEvent.touches;
         const cur = latestRef.current;
@@ -1275,7 +1275,30 @@ function NativeVideoPreviewPlayer({
   });
 
   const { status } = useEvent(player, 'statusChange', { status: player.status });
+  const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: player.playing });
   const isBuffering = status !== 'readyToPlay' && status !== 'error';
+
+  const insets = useSafeAreaInsets();
+  const [positionSec, setPositionSec] = useState(0);
+  const [durationSec, setDurationSec] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      safeMediaCall(() => {
+        setPositionSec(player.currentTime || 0);
+        setDurationSec(player.duration || 0);
+      });
+    }, 250);
+    return () => clearInterval(interval);
+  }, [player]);
+
+  const togglePlay = useCallback(() => {
+    if (player.playing) {
+      safeMediaCall(() => player.pause());
+    } else {
+      safeMediaCall(() => player.play());
+    }
+  }, [player]);
 
   useEffect(() => {
     upgradedRef.current = false;
@@ -1345,13 +1368,15 @@ function NativeVideoPreviewPlayer({
     };
   }, [shouldUpgrade, status, isActive, originalUri, player]);
 
+  const progress = durationSec > 0 ? positionSec / durationSec : 0;
+
   return (
     <View style={pvStyles.videoContainer}>
       <videoModule.VideoView
         player={player}
         style={pvStyles.videoFull}
         contentFit="contain"
-        nativeControls={true}
+        nativeControls={false}
         surfaceType="textureView"
       />
       {isBuffering && (
@@ -1360,6 +1385,29 @@ function NativeVideoPreviewPlayer({
           <Text style={pvStyles.videoLoadingText}>Buffering video…</Text>
         </View>
       )}
+      <View
+        style={[pvStyles.videoControlsBar, { bottom: insets.bottom + Spacing.six }]}
+        pointerEvents="box-none"
+      >
+        <TouchableOpacity
+          onPress={togglePlay}
+          style={pvStyles.videoPlayBtn}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
+          <AppIcon
+            androidName={isPlaying ? 'pause' : 'play_arrow'}
+            iosName={isPlaying ? 'pause.fill' : 'play.fill'}
+            color="#fff"
+            size={20}
+          />
+        </TouchableOpacity>
+        <View style={pvStyles.videoProgressBg} pointerEvents="none">
+          <View style={[pvStyles.videoProgressFill, { width: `${progress * 100}%` }]} />
+        </View>
+        <Text style={pvStyles.videoTimeText} pointerEvents="none">
+          {formatMediaTime(positionSec)} / {formatMediaTime(durationSec)}
+        </Text>
+      </View>
     </View>
   );
 }
@@ -1495,29 +1543,23 @@ function NativeAudioPlayer({
     }
   };
 
-  const formatSec = (sec: number) => {
-    const s = Math.floor(sec);
-    const m = Math.floor(s / 60);
-    return `${m}:${String(s % 60).padStart(2, '0')}`;
-  };
-
   const positionSec = status.currentTime ?? 0;
   const durationSec = status.duration ?? 0;
   const progress = durationSec > 0 ? positionSec / durationSec : 0;
 
   return (
-    <View style={pvStyles.audioPlayer}>
-      <View style={[pvStyles.audioIconWrap, { backgroundColor: colors.primarySoft }]}>
+    <View style={pvStyles.audioPlayer} pointerEvents="box-none">
+      <View style={[pvStyles.audioIconWrap, { backgroundColor: colors.primarySoft }]} pointerEvents="none">
         <AppIcon androidName="music_note" iosName="music.note" color={colors.primary} size={52} />
       </View>
-      <Text style={pvStyles.audioFileName} numberOfLines={2}>{fileName}</Text>
+      <Text style={pvStyles.audioFileName} numberOfLines={2} pointerEvents="none">{fileName}</Text>
 
-      <View style={pvStyles.audioProgressBg}>
+      <View style={pvStyles.audioProgressBg} pointerEvents="none">
         <View style={[pvStyles.audioProgressFill, { width: `${progress * 100}%`, backgroundColor: colors.primary }]} />
       </View>
-      <View style={pvStyles.audioTimings}>
-        <Text style={pvStyles.audioTime}>{formatSec(positionSec)}</Text>
-        <Text style={pvStyles.audioTime}>{formatSec(durationSec)}</Text>
+      <View style={pvStyles.audioTimings} pointerEvents="none">
+        <Text style={pvStyles.audioTime}>{formatMediaTime(positionSec)}</Text>
+        <Text style={pvStyles.audioTime}>{formatMediaTime(durationSec)}</Text>
       </View>
 
       <TouchableOpacity onPress={togglePlay} style={[pvStyles.audioPlayBtn, { backgroundColor: colors.primary }]}>
@@ -2714,6 +2756,29 @@ const pvStyles = StyleSheet.create({
   videoContainer: { width: SCREEN_W, height: SCREEN_H },
   videoFull: { width: '100%', height: '100%' },
   videoLoadingText: { color: '#fff', fontSize: TextScale.sm, fontWeight: '600' },
+  videoControlsBar: {
+    position: 'absolute',
+    left: Spacing.six,
+    right: Spacing.six,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+  },
+  videoPlayBtn: {
+    width: 36, height: 36, borderRadius: 18,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.35)',
+  },
+  videoProgressBg: {
+    flex: 1, height: 4,
+    backgroundColor: 'rgba(255,255,255,0.25)',
+    borderRadius: Radius.full,
+    overflow: 'hidden',
+  },
+  videoProgressFill: { height: '100%', backgroundColor: '#fff', borderRadius: Radius.full },
+  videoTimeText: { color: 'rgba(255,255,255,0.85)', fontSize: TextScale.xs, fontWeight: '600' },
   externalMediaPlayer: {
     width: SCREEN_W,
     alignItems: 'center',

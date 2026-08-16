@@ -9,6 +9,7 @@ import time
 import uuid
 
 import memories
+import rewind
 from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -1068,3 +1069,96 @@ async def reindex_memories(
     verify_known_device_by_id(device_id)
     threading.Thread(target=memories.reindex_all, daemon=True).start()
     return {"ok": True}
+
+
+@router.get("/memories/flashback")
+async def get_memories_flashback(
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    return memories.get_random_flashback(device_id)
+
+
+@router.get("/memories/wrapped")
+async def get_memories_wrapped(
+    device_id: str,
+    year: int,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    return memories.get_wrapped(device_id, year)
+
+
+@router.get("/memories/quiz")
+async def get_memories_quiz(
+    device_id: str,
+    count: int = 10,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    return memories.get_quiz_round(device_id, count)
+
+
+@router.get("/memories/roulette")
+async def get_memories_roulette(
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    return memories.get_roulette_item(device_id)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rewind Reel Endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.post("/memories/rewind/generate")
+async def generate_rewind_reel(
+    device_id: str,
+    year: int,
+    month: int | None = None,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    return rewind.start_rewind_build(device_id, year, month)
+
+
+@router.get("/memories/rewind/status")
+async def get_rewind_reel_status(
+    device_id: str,
+    year: int,
+    month: int | None = None,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    return rewind.get_rewind_status(device_id, year, month)
+
+
+@router.get("/memories/rewind/stream")
+async def stream_rewind_reel(
+    device_id: str,
+    year: int,
+    request: Request,
+    month: int | None = None,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    path = rewind.get_rewind_path(device_id, year, month)
+    if not path:
+        raise HTTPException(status_code=404, detail="Reel not ready")
+    return _file_range_response(path, request)
