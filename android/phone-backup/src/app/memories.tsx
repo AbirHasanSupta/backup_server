@@ -12,9 +12,10 @@ import {
   Alert,
   StatusBar,
   ScrollView,
+  AppState,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
@@ -423,6 +424,39 @@ export default function MemoriesScreen() {
   }, [clearRewindPoll]);
 
   useEffect(() => () => clearRewindPoll(), [clearRewindPoll]);
+
+  // Stop any story/flashback/rewind video and dismiss their modals so audio
+  // never keeps playing behind another tab (e.g. navigating to Guess the
+  // Year or Roulette) or behind the OS when the app is backgrounded.
+  const stopAllPlayback = useCallback(() => {
+    clearRewindPoll();
+    setActiveDayIdx(null);
+    setActiveItemIdx(0);
+    setIsPaused(false);
+    setFlashbackVisible(false);
+    setFlashbackItem(null);
+    setFlashbackError(null);
+    setRewindVisible(false);
+    setRewindYear(null);
+    setRewindStatus('idle');
+  }, [clearRewindPoll]);
+
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        stopAllPlayback();
+      };
+    }, [stopAllPlayback]),
+  );
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') {
+        stopAllPlayback();
+      }
+    });
+    return () => sub.remove();
+  }, [stopAllPlayback]);
 
   const handleSaveRewind = async () => {
     if (!rewindYear || rewindSaving) return;
@@ -1145,6 +1179,11 @@ function NativeStoryVideoPlayer({
     return () => clearInterval(interval);
   }, [player, onProgressRatio]);
 
+  // Belt-and-suspenders: explicitly pause before the player is released so
+  // audio never keeps running behind a transition (next story item, modal
+  // close, or tab switch) even if unmount is delayed.
+  useEffect(() => () => safeMediaCall(() => player.pause()), [player]);
+
   return (
     <View style={styles.videoContainer}>
       <videoModule.VideoView
@@ -1186,6 +1225,8 @@ function NativeRewindVideoPlayer({
     p.volume = 1;
     safeMediaCall(() => p.play());
   });
+
+  useEffect(() => () => safeMediaCall(() => player.pause()), [player]);
 
   return (
     <View style={styles.videoContainer}>
