@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, BackHandler, PanResponder } from 'react-native';
+import { GestureResponderHandlers, View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, BackHandler, PanResponder } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,6 +15,7 @@ interface QuizItem {
   source_id: string;
   relative_path: string;
   correct_year: number;
+  capture_time?: number | null;
   options: number[];
 }
 
@@ -26,6 +27,16 @@ interface ServerConfig {
 }
 
 type AnswerState = 'unanswered' | 'correct' | 'wrong';
+
+function formatCaptureDate(captureTime: number | null | undefined): string {
+  if (!captureTime) return '';
+  try {
+    const d = new Date(captureTime * 1000);
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  } catch {
+    return '';
+  }
+}
 
 export default function QuizScreen() {
   const router = useRouter();
@@ -96,7 +107,7 @@ export default function QuizScreen() {
     if (isCorrect) setScore(s => s + 1);
   };
 
-  const handleNext = () => {
+  const handleNext = useCallback(() => {
     if (roundIdx + 1 >= items.length) {
       setFinished(true);
       return;
@@ -104,11 +115,10 @@ export default function QuizScreen() {
     setRoundIdx(i => i + 1);
     setSelectedYear(null);
     setAnswerState('unanswered');
-  };
+  }, [roundIdx, items.length]);
 
-  // Answered state can be advanced by a horizontal swipe as well as the
-  // "Next" button — keep the latest state in a ref so the responder created
-  // once via useMemo still sees up-to-date values.
+  // Keep latest values in refs so the PanResponder callbacks (created once)
+  // always see up-to-date state without needing to recreate the responder.
   const answerStateRef = useRef(answerState);
   const handleNextRef = useRef(handleNext);
   useEffect(() => {
@@ -116,19 +126,22 @@ export default function QuizScreen() {
     handleNextRef.current = handleNext;
   }, [answerState, handleNext]);
 
-  const swipeResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, g) =>
-          answerStateRef.current !== 'unanswered' && Math.abs(g.dx) > 20 && Math.abs(g.dx) > Math.abs(g.dy),
-        onPanResponderRelease: (_, g) => {
-          if (answerStateRef.current !== 'unanswered' && Math.abs(g.dx) > 50) {
-            handleNextRef.current();
-          }
-        },
-      }),
-    [],
-  );
+  // PanResponder is created once after mount (inside useEffect) so that
+  // .current is never accessed during render — satisfies react-hooks/refs.
+  // panHandlers is stored in state so it can safely be spread in JSX.
+  const [swipePanHandlers, setSwipePanHandlers] = useState<GestureResponderHandlers | null>(null);
+  useEffect(() => {
+    const responder = PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) =>
+        answerStateRef.current !== 'unanswered' && Math.abs(g.dx) > 20 && Math.abs(g.dx) > Math.abs(g.dy),
+      onPanResponderRelease: (_, g) => {
+        if (answerStateRef.current !== 'unanswered' && Math.abs(g.dx) > 50) {
+          handleNextRef.current();
+        }
+      },
+    });
+    setSwipePanHandlers(responder.panHandlers);
+  }, []); // intentionally empty — callbacks always read from refs
 
   return (
     <View style={styles.root}>
@@ -173,7 +186,7 @@ export default function QuizScreen() {
           </TouchableOpacity>
         </View>
       ) : currentItem ? (
-        <View style={styles.gameArea} {...swipeResponder.panHandlers}>
+        <View style={styles.gameArea} {...(swipePanHandlers ?? {})}>
           <View style={styles.progressRow}>
             {items.map((_, i) => (
               <View
@@ -216,17 +229,23 @@ export default function QuizScreen() {
             })}
           </View>
 
-          {answerState !== 'unanswered' && (
-            <View style={styles.feedbackRow}>
-              <Text style={[styles.feedbackText, answerState === 'correct' ? styles.feedbackCorrect : styles.feedbackWrong]}>
-                {answerState === 'correct' ? 'Correct!' : `It was ${currentItem.correct_year}`}
-              </Text>
-              <TouchableOpacity style={styles.nextBtn} onPress={handleNext}>
-                <Text style={styles.nextBtnText}>{roundIdx + 1 >= items.length ? 'See Score' : 'Next'}</Text>
-                <AppIcon androidName="arrow_forward" iosName="arrow.right" color="#000" size={16} />
-              </TouchableOpacity>
-            </View>
-          )}
+          {answerState !== 'unanswered' && (() => {
+            const captureDate = formatCaptureDate(currentItem.capture_time);
+            return (
+              <View style={styles.feedbackRow}>
+                <Text style={[styles.feedbackText, answerState === 'correct' ? styles.feedbackCorrect : styles.feedbackWrong]}>
+                  {answerState === 'correct' ? 'Correct!' : `It was ${currentItem.correct_year}`}
+                </Text>
+                {captureDate ? (
+                  <Text style={styles.feedbackDate}>{captureDate}</Text>
+                ) : null}
+                <TouchableOpacity style={styles.nextBtn} onPress={handleNext}>
+                  <Text style={styles.nextBtnText}>{roundIdx + 1 >= items.length ? 'See Score' : 'Next'}</Text>
+                  <AppIcon androidName="arrow_forward" iosName="arrow.right" color="#000" size={16} />
+                </TouchableOpacity>
+              </View>
+            );
+          })()}
         </View>
       ) : null}
     </View>
@@ -313,6 +332,7 @@ const createStyles = (colors: AppColors, insets: any) =>
     feedbackText: { fontSize: TextScale.base, fontWeight: '700' },
     feedbackCorrect: { color: '#4ade80' },
     feedbackWrong: { color: '#f87171' },
+    feedbackDate: { fontSize: TextScale.xs, color: 'rgba(255,255,255,0.6)', fontWeight: '500' },
     nextBtn: {
       flexDirection: 'row', alignItems: 'center', gap: 6,
       backgroundColor: '#fff',

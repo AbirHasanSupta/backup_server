@@ -43,6 +43,22 @@ try {
 const SHAKE_THRESHOLD = 1.6;
 const SHAKE_DEBOUNCE_MS = 3000;
 
+/**
+ * Format a Unix epoch timestamp into a readable date string like "Aug 14, 2022 · 3:41 PM".
+ * Returns the source label fallback string when capture_time is absent.
+ */
+function formatCaptureDate(captureTime: number | null | undefined, fallback: string): string {
+  if (!captureTime) return fallback;
+  try {
+    const d = new Date(captureTime * 1000);
+    const datePart = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const timePart = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    return `${datePart} · ${timePart}`;
+  } catch {
+    return fallback;
+  }
+}
+
 interface ServerConfig {
   ip: string;
   port: string;
@@ -325,7 +341,7 @@ export default function RouletteScreen() {
             </View>
             <View style={styles.revealMetaRow}>
               <Text style={styles.revealMetaText}>
-                {item.year ? item.year : item.source_label}
+                {formatCaptureDate(item.capture_time, item.year ? String(item.year) : item.source_label)}
               </Text>
               <View style={styles.revealActions}>
                 <TouchableOpacity onPress={handleShare} disabled={sharing} style={styles.revealSaveBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>

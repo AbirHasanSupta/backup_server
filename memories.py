@@ -606,6 +606,7 @@ def get_quiz_round(device_id: str, count: int = QUIZ_DEFAULT_COUNT) -> dict:
             "source_id": row["source_key"],
             "relative_path": row["relative_path"],
             "correct_year": correct_year,
+            "capture_time": row.get("capture_time"),
             "options": options,
         })
 

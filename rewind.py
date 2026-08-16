@@ -161,9 +161,14 @@ def _is_rewind_usable(item: dict) -> bool:
 def get_reel_items(device_id: str, year: int, month: int | None) -> list[dict]:
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, _ = _shared_sources_for_device(device_id, shared_dirs)
-    # Random pool first so LIMIT does not pin the reel to January of a busy year.
+    # Use deterministic capture_time ordering so the same item list — and
+    # therefore the same cache_key — is produced on every call for a given
+    # (device, year, month) tuple.  A random order caused the generate call
+    # and the status-poll calls to select different pools, producing different
+    # cache keys so the completed file was never found and the reel stayed
+    # stuck on "Building" forever.
     pool = get_media_for_year_month(
-        sources, year, month, limit=REEL_CANDIDATE_POOL, order="random",
+        sources, year, month, limit=REEL_CANDIDATE_POOL, order="time",
     )
     usable = [it for it in pool if _is_rewind_usable(it)]
     usable.sort(key=lambda it: (it.get("capture_time") is None, it.get("capture_time") or 0))
@@ -351,3 +356,54 @@ def start_rewind_build(device_id: str, year: int, month: int | None) -> dict:
         name=f"rewind-{job_key}",
     ).start()
     return {"ok": True, "status": "generating"}
+
+
+# ─── Cache management helpers (used by desktop_app settings + shutdown) ────────
+
+def get_rewind_cache_stats() -> dict:
+    """Return {files, bytes} for the rewind cache directory."""
+    cache_dir = _cache_dir()
+    total_files = 0
+    total_bytes = 0
+    try:
+        for name in os.listdir(cache_dir):
+            p = os.path.join(cache_dir, name)
+            if os.path.isfile(p):
+                total_files += 1
+                try:
+                    total_bytes += os.path.getsize(p)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return {"files": total_files, "bytes": total_bytes}
+
+
+def clear_rewind_cache() -> dict:
+    """Delete all files in the rewind cache directory.
+    Returns {files, bytes} of what was removed.
+    Also clears the in-memory job sets so stale state is not carried over.
+    """
+    cache_dir = _cache_dir()
+    removed_files = 0
+    removed_bytes = 0
+    try:
+        for name in os.listdir(cache_dir):
+            p = os.path.join(cache_dir, name)
+            try:
+                if os.path.isfile(p):
+                    size = os.path.getsize(p)
+                    os.remove(p)
+                    removed_files += 1
+                    removed_bytes += size
+                elif os.path.isdir(p):
+                    shutil.rmtree(p, ignore_errors=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
+    # Clear in-memory job state so a fresh generate request is accepted.
+    with _generation_lock:
+        _active_jobs.clear()
+        _failed_jobs.clear()
+    return {"files": removed_files, "bytes": removed_bytes}

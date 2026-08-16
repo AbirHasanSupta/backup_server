@@ -1357,6 +1357,56 @@ class BackupServerApp(ctk.CTk):
         self._preview_cache_clear_button.pack(side="right", padx=(12, 0))
         self.after(100, self._refresh_video_preview_cache_status)
 
+        # ── REWIND CACHE ─────────────────────────────────────────────────
+        rewind_cache_card = settings_card("Rewind Reel Cache")
+        rewind_cache_row = ctk.CTkFrame(rewind_cache_card, fg_color="transparent")
+        rewind_cache_row.pack(fill="x", padx=18, pady=(14, 18))
+        rewind_cache_copy = ctk.CTkFrame(rewind_cache_row, fg_color="transparent")
+        rewind_cache_copy.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            rewind_cache_copy, text="Server-generated Rewind Reel videos",
+            font=FONT_BODY, text_color=C_TEXT,
+        ).pack(anchor="w")
+        self._rewind_cache_status_var = tk.StringVar(value="Checking cache…")
+        ctk.CTkLabel(
+            rewind_cache_copy, textvariable=self._rewind_cache_status_var,
+            font=FONT_SMALL, text_color=C_MUTED, wraplength=330, justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+        self._rewind_cache_clear_button = ctk.CTkButton(
+            rewind_cache_row, text="Clean Cache", width=122, height=38,
+            fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
+            text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
+            corner_radius=12, font=FONT_BODY,
+            command=self._clear_rewind_cache,
+        )
+        self._rewind_cache_clear_button.pack(side="right", padx=(12, 0))
+        self.after(120, self._refresh_rewind_cache_status)
+
+        # ── THUMBNAIL CACHE ──────────────────────────────────────────────
+        thumb_cache_card = settings_card("Thumbnail Cache")
+        thumb_cache_row = ctk.CTkFrame(thumb_cache_card, fg_color="transparent")
+        thumb_cache_row.pack(fill="x", padx=18, pady=(14, 18))
+        thumb_cache_copy = ctk.CTkFrame(thumb_cache_row, fg_color="transparent")
+        thumb_cache_copy.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            thumb_cache_copy, text="Video poster-frame thumbnail images",
+            font=FONT_BODY, text_color=C_TEXT,
+        ).pack(anchor="w")
+        self._thumb_cache_status_var = tk.StringVar(value="Checking cache…")
+        ctk.CTkLabel(
+            thumb_cache_copy, textvariable=self._thumb_cache_status_var,
+            font=FONT_SMALL, text_color=C_MUTED, wraplength=330, justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+        self._thumb_cache_clear_button = ctk.CTkButton(
+            thumb_cache_row, text="Clean Cache", width=122, height=38,
+            fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
+            text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
+            corner_radius=12, font=FONT_BODY,
+            command=self._clear_thumbnail_cache,
+        )
+        self._thumb_cache_clear_button.pack(side="right", padx=(12, 0))
+        self.after(140, self._refresh_thumbnail_cache_status)
+
         # ── SECURITY ──────────────────────────────────────────────────────
         sec_card = settings_card("Security")
         self._e_key = labeled_entry(sec_card, "API Key  (must match Android app)",
@@ -1589,6 +1639,98 @@ class BackupServerApp(ctk.CTk):
             self.after(0, _finish)
 
         threading.Thread(target=_clean, name="clear-video-preview-cache", daemon=True).start()
+
+    def _refresh_rewind_cache_status(self):
+        status_var = getattr(self, "_rewind_cache_status_var", None)
+        if status_var is None:
+            return
+        try:
+            from rewind import get_rewind_cache_stats
+            stats = get_rewind_cache_stats()
+            status_var.set(
+                f"{stats['files']} cached file{'s' if stats['files'] != 1 else ''} · "
+                f"{self._format_cache_bytes(int(stats['bytes']))}"
+            )
+        except Exception:
+            status_var.set("Rewind cache unavailable until the server starts.")
+
+    def _clear_rewind_cache(self):
+        if not confirm_dialog(
+            self,
+            "Clean Rewind Reel Cache",
+            "Remove all server-generated Rewind Reel videos?\n\n"
+            "Your original backups are not affected. New reels will be built on demand.",
+        ):
+            return
+
+        button = getattr(self, "_rewind_cache_clear_button", None)
+        if button:
+            button.configure(state="disabled", text="Cleaning…")
+
+        def _clean():
+            try:
+                from rewind import clear_rewind_cache
+                result = clear_rewind_cache()
+                removed = self._format_cache_bytes(int(result["bytes"]))
+                message = f"Removed {result['files']} rewind file(s) ({removed})."
+            except Exception as exc:
+                message = f"Could not clean the rewind cache: {exc}"
+
+            def _finish():
+                if button and button.winfo_exists():
+                    button.configure(state="normal", text="Clean Cache")
+                self._refresh_rewind_cache_status()
+                messagebox.showinfo("Rewind Reel Cache", message)
+
+            self.after(0, _finish)
+
+        threading.Thread(target=_clean, name="clear-rewind-cache", daemon=True).start()
+
+    def _refresh_thumbnail_cache_status(self):
+        status_var = getattr(self, "_thumb_cache_status_var", None)
+        if status_var is None:
+            return
+        try:
+            from thumbnail import get_thumbnail_cache_stats
+            stats = get_thumbnail_cache_stats()
+            status_var.set(
+                f"{stats['files']} cached file{'s' if stats['files'] != 1 else ''} · "
+                f"{self._format_cache_bytes(int(stats['bytes']))}"
+            )
+        except Exception:
+            status_var.set("Thumbnail cache unavailable until the server starts.")
+
+    def _clear_thumbnail_cache(self):
+        if not confirm_dialog(
+            self,
+            "Clean Thumbnail Cache",
+            "Remove all cached video thumbnail images?\n\n"
+            "Your original backups are not affected. Thumbnails will be regenerated on demand.",
+        ):
+            return
+
+        button = getattr(self, "_thumb_cache_clear_button", None)
+        if button:
+            button.configure(state="disabled", text="Cleaning…")
+
+        def _clean():
+            try:
+                from thumbnail import clear_thumbnail_cache
+                result = clear_thumbnail_cache()
+                removed = self._format_cache_bytes(int(result["bytes"]))
+                message = f"Removed {result['files']} thumbnail file(s) ({removed})."
+            except Exception as exc:
+                message = f"Could not clean the thumbnail cache: {exc}"
+
+            def _finish():
+                if button and button.winfo_exists():
+                    button.configure(state="normal", text="Clean Cache")
+                self._refresh_thumbnail_cache_status()
+                messagebox.showinfo("Thumbnail Cache", message)
+
+            self.after(0, _finish)
+
+        threading.Thread(target=_clean, name="clear-thumbnail-cache", daemon=True).start()
 
     # ── Shared Folders helpers ─────────────────────────────────────────
 
@@ -2694,6 +2836,28 @@ class BackupServerApp(ctk.CTk):
                 # Closing the desktop app must never be blocked by a cache
                 # directory that has become unavailable or externally locked.
                 add_log(f"Could not clear video preview cache on exit: {exc}")
+            # Clear session-only rewind reel cache on exit.
+            try:
+                from rewind import clear_rewind_cache
+                r2 = clear_rewind_cache()
+                if r2["files"]:
+                    add_log(
+                        "Cleared rewind cache on exit: "
+                        f"{r2['files']} file(s), {r2['bytes']} bytes."
+                    )
+            except Exception as exc:
+                add_log(f"Could not clear rewind cache on exit: {exc}")
+            # Clear session-only thumbnail cache on exit.
+            try:
+                from thumbnail import clear_thumbnail_cache
+                r3 = clear_thumbnail_cache()
+                if r3["files"]:
+                    add_log(
+                        "Cleared thumbnail cache on exit: "
+                        f"{r3['files']} file(s), {r3['bytes']} bytes."
+                    )
+            except Exception as exc:
+                add_log(f"Could not clear thumbnail cache on exit: {exc}")
             self._dot.stop()
             self.after(600, self.destroy)
 

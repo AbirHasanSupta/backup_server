@@ -1281,16 +1281,24 @@ function NativeVideoPreviewPlayer({
   const insets = useSafeAreaInsets();
   const [positionSec, setPositionSec] = useState(0);
   const [durationSec, setDurationSec] = useState(0);
+  const [isMuted, setIsMuted] = useState(false);
+  // Seeking state — while the user drags the bar we freeze the position display
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [seekProgress, setSeekProgress] = useState(0);
+  // Layout width of the seekbar track, measured on layout
+  const seekBarWidthRef = useRef(1);
+  const wasPlayingBeforeSeekRef = useRef(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
+      if (isSeeking) return;
       safeMediaCall(() => {
         setPositionSec(player.currentTime || 0);
         setDurationSec(player.duration || 0);
       });
     }, 250);
     return () => clearInterval(interval);
-  }, [player]);
+  }, [player, isSeeking]);
 
   const togglePlay = useCallback(() => {
     if (player.playing) {
@@ -1299,6 +1307,71 @@ function NativeVideoPreviewPlayer({
       safeMediaCall(() => player.play());
     }
   }, [player]);
+
+  const toggleMute = useCallback(() => {
+    setIsMuted(prev => {
+      const next = !prev;
+      safeMediaCall(() => { player.muted = next; });
+      return next;
+    });
+  }, [player]);
+
+  const skipBackward = useCallback(() => {
+    safeMediaCall(() => {
+      const next = Math.max(0, (player.currentTime || 0) - 10);
+      player.currentTime = next;
+      setPositionSec(next);
+    });
+  }, [player]);
+
+  const skipForward = useCallback(() => {
+    safeMediaCall(() => {
+      const dur = player.duration || 0;
+      if (dur <= 0) return;
+      const next = Math.min(dur, (player.currentTime || 0) + 10);
+      player.currentTime = next;
+      setPositionSec(next);
+    });
+  }, [player]);
+
+  // Seekbar PanResponder — handles tap + drag to seek
+  const seekPanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    // Steal the touch from the parent gallery pan-responder so seek works
+    onStartShouldSetPanResponderCapture: () => true,
+    onMoveShouldSetPanResponderCapture: () => true,
+    onPanResponderGrant: (evt) => {
+      wasPlayingBeforeSeekRef.current = player.playing;
+      safeMediaCall(() => player.pause());
+      setIsSeeking(true);
+      const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / seekBarWidthRef.current));
+      setSeekProgress(ratio);
+    },
+    onPanResponderMove: (evt, gs) => {
+      const locationX = evt.nativeEvent.locationX + gs.dx;
+      const ratio = Math.max(0, Math.min(1, locationX / seekBarWidthRef.current));
+      setSeekProgress(ratio);
+    },
+    onPanResponderRelease: (_, gs) => {
+      const ratio = Math.max(0, Math.min(1, seekProgress + gs.dx / seekBarWidthRef.current));
+      const finalRatio = Math.max(0, Math.min(1, ratio));
+      const dur = durationSec > 0 ? durationSec : (player.duration || 0);
+      const newTime = finalRatio * dur;
+      safeMediaCall(() => { player.currentTime = newTime; });
+      setPositionSec(newTime);
+      setIsSeeking(false);
+      if (wasPlayingBeforeSeekRef.current) {
+        safeMediaCall(() => player.play());
+      }
+    },
+    onPanResponderTerminate: () => {
+      setIsSeeking(false);
+      if (wasPlayingBeforeSeekRef.current) {
+        safeMediaCall(() => player.play());
+      }
+    },
+  }), [player, seekProgress, durationSec]);
 
   useEffect(() => {
     upgradedRef.current = false;
@@ -1368,7 +1441,10 @@ function NativeVideoPreviewPlayer({
     };
   }, [shouldUpgrade, status, isActive, originalUri, player]);
 
-  const progress = durationSec > 0 ? positionSec / durationSec : 0;
+  // Displayed position/progress: while dragging show the seek thumb position
+  const displayProgress = isSeeking ? seekProgress : (durationSec > 0 ? positionSec / durationSec : 0);
+  const displayPosition = isSeeking ? seekProgress * durationSec : positionSec;
+  const remaining = Math.max(0, durationSec - displayPosition);
 
   return (
     <View style={pvStyles.videoContainer}>
@@ -1385,28 +1461,108 @@ function NativeVideoPreviewPlayer({
           <Text style={pvStyles.videoLoadingText}>Buffering video…</Text>
         </View>
       )}
+
+      {/* ── Full video controls panel ── */}
       <View
-        style={[pvStyles.videoControlsBar, { bottom: insets.bottom + Spacing.six }]}
+        style={[pvStyles.videoControlsPanel, { bottom: insets.bottom + Spacing.two }]}
         pointerEvents="box-none"
       >
-        <TouchableOpacity
-          onPress={togglePlay}
-          style={pvStyles.videoPlayBtn}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <AppIcon
-            androidName={isPlaying ? 'pause' : 'play_arrow'}
-            iosName={isPlaying ? 'pause.fill' : 'play.fill'}
-            color="#fff"
-            size={20}
-          />
-        </TouchableOpacity>
-        <View style={pvStyles.videoProgressBg} pointerEvents="none">
-          <View style={[pvStyles.videoProgressFill, { width: `${progress * 100}%` }]} />
+        {/* Seekbar row */}
+        <View style={pvStyles.videoSeekRow} pointerEvents="box-none">
+          <Text style={pvStyles.videoTimeLabel}>{formatMediaTime(displayPosition)}</Text>
+          {/* Seekbar track — touchable for tap+drag seeking */}
+          <View
+            style={pvStyles.videoSeekTrackWrap}
+            onLayout={e => { seekBarWidthRef.current = e.nativeEvent.layout.width || 1; }}
+            {...seekPanResponder.panHandlers}
+          >
+            {/* Background track */}
+            <View style={pvStyles.videoSeekTrackBg} />
+            {/* Filled portion */}
+            <View
+              style={[pvStyles.videoSeekTrackFill, { width: `${Math.min(displayProgress * 100, 100)}%` }]}
+            />
+            {/* Thumb */}
+            <View
+              style={[
+                pvStyles.videoSeekThumb,
+                { left: `${Math.min(displayProgress * 100, 100)}%` },
+                isSeeking && pvStyles.videoSeekThumbActive,
+              ]}
+            />
+          </View>
+          <Text style={pvStyles.videoTimeLabel}>-{formatMediaTime(remaining)}</Text>
         </View>
-        <Text style={pvStyles.videoTimeText} pointerEvents="none">
-          {formatMediaTime(positionSec)} / {formatMediaTime(durationSec)}
-        </Text>
+
+        {/* Buttons row */}
+        <View style={pvStyles.videoButtonRow} pointerEvents="box-none">
+          {/* Mute / Volume */}
+          <TouchableOpacity
+            onPress={toggleMute}
+            style={pvStyles.videoCtrlBtn}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel={isMuted ? 'Unmute' : 'Mute'}
+          >
+            <AppIcon
+              androidName={isMuted ? 'volume_off' : 'volume_up'}
+              iosName={isMuted ? 'speaker.slash.fill' : 'speaker.wave.2.fill'}
+              color="#fff"
+              size={20}
+            />
+          </TouchableOpacity>
+
+          {/* −10 s rewind */}
+          <TouchableOpacity
+            onPress={skipBackward}
+            style={pvStyles.videoCtrlBtn}
+            hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+            accessibilityLabel="Rewind 10 seconds"
+          >
+            <AppIcon
+              androidName="replay_10"
+              iosName="gobackward.10"
+              color="#fff"
+              size={22}
+              fallback="↺"
+            />
+          </TouchableOpacity>
+
+          {/* Play / Pause (centre, larger) */}
+          <TouchableOpacity
+            onPress={togglePlay}
+            style={pvStyles.videoPlayBtnLarge}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel={isPlaying ? 'Pause' : 'Play'}
+          >
+            <AppIcon
+              androidName={isPlaying ? 'pause' : 'play_arrow'}
+              iosName={isPlaying ? 'pause.fill' : 'play.fill'}
+              color="#fff"
+              size={26}
+            />
+          </TouchableOpacity>
+
+          {/* +10 s forward */}
+          <TouchableOpacity
+            onPress={skipForward}
+            style={pvStyles.videoCtrlBtn}
+            hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
+            accessibilityLabel="Skip forward 10 seconds"
+          >
+            <AppIcon
+              androidName="forward_10"
+              iosName="goforward.10"
+              color="#fff"
+              size={22}
+              fallback="↻"
+            />
+          </TouchableOpacity>
+
+          {/* Duration / total time (right side spacer-match for mute button) */}
+          <View style={[pvStyles.videoCtrlBtn, { alignItems: 'flex-end' }]}>
+            <Text style={pvStyles.videoDurationText}>{formatMediaTime(durationSec)}</Text>
+          </View>
+        </View>
       </View>
     </View>
   );
@@ -2756,6 +2912,7 @@ const pvStyles = StyleSheet.create({
   videoContainer: { width: SCREEN_W, height: SCREEN_H },
   videoFull: { width: '100%', height: '100%' },
   videoLoadingText: { color: '#fff', fontSize: TextScale.sm, fontWeight: '600' },
+  // Legacy single-row bar — kept so any remaining references compile
   videoControlsBar: {
     position: 'absolute',
     left: Spacing.six,
@@ -2779,6 +2936,110 @@ const pvStyles = StyleSheet.create({
   },
   videoProgressFill: { height: '100%', backgroundColor: '#fff', borderRadius: Radius.full },
   videoTimeText: { color: 'rgba(255,255,255,0.85)', fontSize: TextScale.xs, fontWeight: '600' },
+
+  // ── Full-featured controls panel ──────────────────────────────────────────
+  videoControlsPanel: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    paddingHorizontal: Spacing.four,
+    paddingBottom: Spacing.three,
+    paddingTop: Spacing.three,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    gap: Spacing.two,
+  },
+
+  // Seekbar row
+  videoSeekRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingHorizontal: 2,
+  },
+  videoTimeLabel: {
+    color: 'rgba(255,255,255,0.8)',
+    fontSize: TextScale.xs,
+    fontWeight: '600',
+    minWidth: 36,
+    textAlign: 'center',
+  },
+  videoSeekTrackWrap: {
+    flex: 1,
+    height: 28,          // tall hit area; visual bar is inset via padding
+    justifyContent: 'center',
+    position: 'relative',
+  },
+  videoSeekTrackBg: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 3,
+    borderRadius: Radius.full,
+    backgroundColor: 'rgba(255,255,255,0.25)',
+    top: '50%',
+    marginTop: -1.5,
+  },
+  videoSeekTrackFill: {
+    position: 'absolute',
+    left: 0,
+    height: 3,
+    borderRadius: Radius.full,
+    backgroundColor: '#fff',
+    top: '50%',
+    marginTop: -1.5,
+  },
+  videoSeekThumb: {
+    position: 'absolute',
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#fff',
+    top: '50%',
+    marginTop: -7,
+    marginLeft: -7,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.4,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  videoSeekThumbActive: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    marginTop: -9,
+    marginLeft: -9,
+    backgroundColor: '#4CA8FF',
+  },
+
+  // Buttons row
+  videoButtonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.one,
+  },
+  videoCtrlBtn: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  videoPlayBtnLarge: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.5)',
+  },
+  videoDurationText: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: TextScale.xs,
+    fontWeight: '600',
+  },
   externalMediaPlayer: {
     width: SCREEN_W,
     alignItems: 'center',

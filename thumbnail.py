@@ -84,3 +84,50 @@ def get_video_thumbnail_path(source_path: str) -> str | None:
             except OSError:
                 pass
         return None
+
+
+# ─── Cache management helpers (used by desktop_app settings + shutdown) ────────
+
+def get_thumbnail_cache_stats() -> dict:
+    """Return {files, bytes} for the thumbnail cache directory."""
+    cache_dir = _cache_dir()
+    total_files = 0
+    total_bytes = 0
+    try:
+        for name in os.listdir(cache_dir):
+            p = os.path.join(cache_dir, name)
+            if os.path.isfile(p):
+                total_files += 1
+                try:
+                    total_bytes += os.path.getsize(p)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return {"files": total_files, "bytes": total_bytes}
+
+
+def clear_thumbnail_cache() -> dict:
+    """Delete all files in the thumbnail cache directory.
+    Returns {files, bytes} of what was removed.
+    """
+    import shutil
+    cache_dir = _cache_dir()
+    removed_files = 0
+    removed_bytes = 0
+    try:
+        for name in os.listdir(cache_dir):
+            p = os.path.join(cache_dir, name)
+            try:
+                if os.path.isfile(p):
+                    size = os.path.getsize(p)
+                    os.remove(p)
+                    removed_files += 1
+                    removed_bytes += size
+                elif os.path.isdir(p):
+                    shutil.rmtree(p, ignore_errors=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return {"files": removed_files, "bytes": removed_bytes}

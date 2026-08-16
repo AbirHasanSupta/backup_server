@@ -108,6 +108,23 @@ function dayItemCount(day: DayMemory): number {
   return day.groups.reduce((sum, g) => sum + g.items.length, 0);
 }
 
+/**
+ * Format a Unix epoch timestamp into a human-readable date string.
+ * Returns something like "Aug 14, 2022 · 3:41 PM" when a valid timestamp
+ * is provided, or an empty string when capture_time is null/undefined.
+ */
+function formatCaptureDate(captureTime: number | null | undefined): string {
+  if (!captureTime) return '';
+  try {
+    const d = new Date(captureTime * 1000);
+    const datePart = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const timePart = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    return `${datePart} · ${timePart}`;
+  } catch {
+    return '';
+  }
+}
+
 function flattenDayItems(day: DayMemory): StoryItem[] {
   const flat: StoryItem[] = [];
   for (const g of day.groups) {
@@ -863,6 +880,9 @@ export default function MemoriesScreen() {
                   <Text style={styles.storyYearTitle}>
                     {currentItem.years_ago} {currentItem.years_ago === 1 ? 'Year' : 'Years'} Ago ({currentItem.year})
                   </Text>
+                  {currentItem.capture_time ? (
+                    <Text style={styles.storyCaptureDate}>{formatCaptureDate(currentItem.capture_time)}</Text>
+                  ) : null}
                   <Text style={styles.storySourceSub}>{currentItem.source_label}</Text>
                 </View>
                 <TouchableOpacity
@@ -951,6 +971,10 @@ export default function MemoriesScreen() {
                     <Text style={styles.storyYearTitle}>
                       {flashbackItem.years_ago} {flashbackItem.years_ago === 1 ? 'Year' : 'Years'} Ago ({flashbackItem.year})
                     </Text>
+                    {(() => {
+                      const dateStr = formatCaptureDate(flashbackItem.capture_time);
+                      return dateStr ? <Text style={styles.storyCaptureDate}>{dateStr}</Text> : null;
+                    })()}
                     <Text style={styles.storySourceSub}>{flashbackItem.source_label}</Text>
                   </View>
                   <TouchableOpacity
@@ -964,7 +988,15 @@ export default function MemoriesScreen() {
               </View>
 
               <View style={[styles.storyBottomBar, { paddingBottom: Math.max(insets.bottom, 20) }]}>
-                <Text style={styles.storySourceSub}>Swipe for another surprise</Text>
+                <TouchableOpacity
+                  style={styles.nextSurpriseBtn}
+                  onPress={() => openFlashback()}
+                  disabled={flashbackLoading}
+                  activeOpacity={0.8}
+                >
+                  <AppIcon androidName="shuffle" iosName="shuffle" color="#fff" size={16} />
+                  <Text style={styles.nextSurpriseBtnText}>Next Surprise</Text>
+                </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.saveBtn}
                   onPress={handleSaveFlashback}
@@ -1540,6 +1572,20 @@ const createStyles = (colors: AppColors, insets: any) =>
     storyDayPillText: { color: '#fff', fontWeight: '700', fontSize: TextScale.xs },
     storyYearTitle: { color: '#fff', fontWeight: '800', fontSize: TextScale.md },
     storySourceSub: { color: 'rgba(255,255,255,0.75)', fontSize: TextScale.xs, fontWeight: '500' },
+    storyCaptureDate: { color: 'rgba(255,255,255,0.65)', fontSize: TextScale.xs, fontWeight: '500', marginTop: 1 },
+    nextSurpriseBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: Spacing.two,
+      paddingHorizontal: Spacing.four,
+      paddingVertical: Spacing.two,
+      borderRadius: Radius.full,
+      backgroundColor: 'rgba(255,255,255,0.18)',
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.3)',
+      alignSelf: 'center',
+    },
+    nextSurpriseBtnText: { color: '#fff', fontSize: TextScale.xs, fontWeight: '700' },
     closeBtn: {
       width: 36,
       height: 36,
@@ -1556,7 +1602,9 @@ const createStyles = (colors: AppColors, insets: any) =>
       right: 0,
       zIndex: 20,
       paddingHorizontal: Spacing.five,
+      paddingTop: Spacing.three,
       alignItems: 'center',
+      gap: Spacing.two,
       backgroundColor: 'rgba(0,0,0,0.4)',
     },
     saveBtn: {
