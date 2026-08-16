@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, Animated, Easing, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, Animated, Easing, Alert, BackHandler } from 'react-native';
 import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
@@ -169,6 +169,27 @@ export default function RouletteScreen() {
 
   useEffect(() => () => stopSpinAnimation(), [stopSpinAnimation]);
 
+  // Screen can stay mounted in the background (tab navigator) — stop any
+  // playing video/animation and reset to a fresh state when it loses focus.
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        stopSpinAnimation();
+        setPhase('idle');
+        setItem(null);
+        setErrorMsg(null);
+      };
+    }, [stopSpinAnimation]),
+  );
+
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      router.replace('/memories');
+      return true;
+    });
+    return () => sub.remove();
+  }, [router]);
+
   const handleSave = async () => {
     if (!item || saving) return;
     setSaving(true);
@@ -238,7 +259,7 @@ export default function RouletteScreen() {
       <StatusBar barStyle="light-content" />
 
       <View style={styles.header}>
-        <TouchableOpacity style={styles.closeBtn} onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+        <TouchableOpacity style={styles.closeBtn} onPress={() => router.replace('/memories')} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
           <AppIcon androidName="close" iosName="xmark" color="#fff" size={22} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Photo Roulette</Text>

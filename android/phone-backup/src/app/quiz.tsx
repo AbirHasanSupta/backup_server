@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, BackHandler } from 'react-native';
 import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
@@ -68,11 +68,20 @@ export default function QuizScreen() {
     }
   }, []);
 
+  useFocusEffect(
+    useCallback(() => {
+      // Fresh round every time this screen gains focus, not just on first mount.
+      loadRound();
+    }, [loadRound]),
+  );
+
   useEffect(() => {
-    // Initial round fetch on mount / play-again.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    loadRound();
-  }, [loadRound]);
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      router.replace('/memories');
+      return true;
+    });
+    return () => sub.remove();
+  }, [router]);
 
   const currentItem = items[roundIdx] ?? null;
   const imageUrl = currentItem && serverConfig
@@ -102,7 +111,7 @@ export default function QuizScreen() {
       <StatusBar barStyle="light-content" />
 
       <View style={styles.header}>
-        <TouchableOpacity style={styles.closeBtn} onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+        <TouchableOpacity style={styles.closeBtn} onPress={() => router.replace('/memories')} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
           <AppIcon androidName="close" iosName="xmark" color="#fff" size={22} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Guess the Year</Text>
@@ -240,7 +249,7 @@ const createStyles = (colors: AppColors, insets: any) =>
     },
     playAgainText: { color: '#fff', fontWeight: '700', fontSize: TextScale.sm },
 
-    gameArea: { flex: 1, paddingHorizontal: Spacing.five },
+    gameArea: { flex: 1, paddingHorizontal: Spacing.five, paddingBottom: insets.bottom + Spacing.two },
     progressRow: { flexDirection: 'row', gap: 6, marginBottom: Spacing.four },
     progressDot: { flex: 1, height: 4, borderRadius: Radius.full, backgroundColor: 'rgba(255,255,255,0.15)' },
     progressDotDone: { backgroundColor: colors.primary },

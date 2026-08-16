@@ -274,7 +274,7 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
 
                 with open(list_file, "w", encoding="utf-8") as f:
                     for seg in segments:
-                        escaped = seg.replace("'", "'\\''")
+                        escaped = seg.replace("\\", "/").replace("'", "'\\''")
                         f.write(f"file '{escaped}'\n")
 
                 concat_cmd = [

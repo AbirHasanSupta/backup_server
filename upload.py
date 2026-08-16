@@ -11,7 +11,7 @@ import uuid
 import memories
 import rewind
 from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 
 from config import load_config
@@ -38,6 +38,7 @@ from database import (
 )
 from state import add_log, get_current_activity, pending_connections, set_current_activity
 from storage import file_exists, save_fileobj, save_upload_stream, full_path_for
+from thumbnail import get_video_thumbnail_path
 from video_preview import (
     arm_active_video_preview,
     get_video_preview_path,
@@ -681,6 +682,26 @@ async def preview_file(
     return _file_range_response(preview_path, request, cache_control=cache_control)
 
 
+@router.get("/files/thumbnail")
+async def thumbnail_file(
+        relative_path: str,
+        device_id: str,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    path = full_path_for(relative_path, device_id=device_id)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    if not is_video_path(path):
+        raise HTTPException(status_code=400, detail="Thumbnail is only available for video files")
+    thumb_path = get_video_thumbnail_path(path)
+    if not thumb_path:
+        raise HTTPException(status_code=500, detail="Failed to generate thumbnail")
+    return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
+
+
 class WarmPreviewsRequest(BaseModel):
     relative_paths: list[str]
 
@@ -1030,6 +1051,41 @@ async def preview_shared_file(
 
     cache_control = "private, no-cache" if preview_path == full_path else None
     return _file_range_response(preview_path, request, cache_control=cache_control)
+
+
+@router.get("/shared/{source_id}/thumbnail")
+async def thumbnail_shared_file(
+        source_id: str,
+        relative_path: str,
+        device_id: str | None = None,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+
+    entry = _find_shared_dir(source_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Shared source not found")
+    if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
+        raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
+
+    root = os.path.abspath(entry["path"])
+    if not os.path.isdir(root):
+        raise HTTPException(status_code=404, detail="Shared directory not found on server")
+
+    safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
+    full_path = os.path.abspath(os.path.join(root, safe_rel))
+    if os.path.commonpath([root, full_path]) != root:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    if not os.path.isfile(full_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    if not is_video_path(full_path):
+        raise HTTPException(status_code=400, detail="Thumbnail is only available for video files")
+    thumb_path = get_video_thumbnail_path(full_path)
+    if not thumb_path:
+        raise HTTPException(status_code=500, detail="Failed to generate thumbnail")
+    return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
 
 
 # ──────────────────────────────────────────────────────────────────────────────

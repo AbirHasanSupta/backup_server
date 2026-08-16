@@ -212,10 +212,22 @@ function RootLayoutContent() {
           }}
         />
         <Tabs.Screen name="explore" options={{ href: null }} />
-        <Tabs.Screen name="memories" options={{ href: null }} />
-        <Tabs.Screen name="wrapped" options={{ href: null }} />
-        <Tabs.Screen name="quiz" options={{ href: null }} />
-        <Tabs.Screen name="roulette" options={{ href: null }} />
+        <Tabs.Screen
+          name="memories"
+          options={{ href: null, tabBarStyle: { display: 'none' } }}
+        />
+        <Tabs.Screen
+          name="wrapped"
+          options={{ href: null, tabBarStyle: { display: 'none' } }}
+        />
+        <Tabs.Screen
+          name="quiz"
+          options={{ href: null, tabBarStyle: { display: 'none' } }}
+        />
+        <Tabs.Screen
+          name="roulette"
+          options={{ href: null, tabBarStyle: { display: 'none' } }}
+        />
       </Tabs>
     </SafeAreaProvider>
   );

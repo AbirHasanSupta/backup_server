@@ -23,46 +23,86 @@ def init_db():
     cursor = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='devices'")
     res = cursor.fetchone()
     sql = res[0] if res else ""
-    
+
     if res and ("device_id" not in cols or "UNIQUE" in sql.split("device_ip")[1].split(",")[0].split("\n")[0].upper()):
         # Needs migration: either device_id column is missing, or device_ip still has UNIQUE constraint
         conn.execute("ALTER TABLE devices RENAME TO devices_old")
         conn.execute("""
-            CREATE TABLE devices (
-                id             INTEGER PRIMARY KEY AUTOINCREMENT,
-                device_id      TEXT    UNIQUE,
-                device_name    TEXT    NOT NULL,
-                device_ip      TEXT    NOT NULL,
-                status         TEXT    NOT NULL DEFAULT 'accepted',
-                first_seen     INTEGER NOT NULL,
-                last_seen      INTEGER NOT NULL,
-                files_backed_up INTEGER NOT NULL DEFAULT 0,
-                folder_name    TEXT,
-                device_model   TEXT
-            )
-        """)
+                     CREATE TABLE devices
+                     (
+                         id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                         device_id       TEXT UNIQUE,
+                         device_name     TEXT    NOT NULL,
+                         device_ip       TEXT    NOT NULL,
+                         status          TEXT    NOT NULL DEFAULT 'accepted',
+                         first_seen      INTEGER NOT NULL,
+                         last_seen       INTEGER NOT NULL,
+                         files_backed_up INTEGER NOT NULL DEFAULT 0,
+                         folder_name     TEXT,
+                         device_model    TEXT
+                     )
+                     """)
         # Copy data, handle missing device_id by using device_ip as fallback
         conn.execute("""
-            INSERT OR IGNORE INTO devices (id, device_id, device_name, device_ip, status, first_seen, last_seen, files_backed_up)
-            SELECT id, COALESCE(device_id, device_ip), device_name, device_ip, status, first_seen, last_seen, files_backed_up
-            FROM devices_old
-        """)
+                     INSERT
+                     OR IGNORE INTO devices (id, device_id, device_name, device_ip, status, first_seen, last_seen, files_backed_up)
+                     SELECT id,
+                            COALESCE(device_id, device_ip),
+                            device_name,
+                            device_ip,
+                            status,
+                            first_seen,
+                            last_seen,
+                            files_backed_up
+                     FROM devices_old
+                     """)
         conn.execute("DROP TABLE devices_old")
 
     # 2. Create devices table if not exists
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS devices (
-            id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id      TEXT    UNIQUE,
-            device_name    TEXT    NOT NULL,
-            device_ip      TEXT    NOT NULL,
-            status         TEXT    NOT NULL DEFAULT 'accepted',
-            first_seen     INTEGER NOT NULL,
-            last_seen      INTEGER NOT NULL,
-            files_backed_up INTEGER NOT NULL DEFAULT 0,
-            folder_name    TEXT,
-            device_model   TEXT
+        CREATE TABLE IF NOT EXISTS devices
+        (
+            id
+            INTEGER
+            PRIMARY
+            KEY
+            AUTOINCREMENT,
+            device_id
+            TEXT
+            UNIQUE,
+            device_name
+            TEXT
+            NOT
+            NULL,
+            device_ip
+            TEXT
+            NOT
+            NULL,
+            status
+            TEXT
+            NOT
+            NULL
+            DEFAULT
+            'accepted',
+            first_seen
+            INTEGER
+            NOT
+            NULL,
+            last_seen
+            INTEGER
+            NOT
+            NULL,
+            files_backed_up
+            INTEGER
+            NOT
+            NULL
+            DEFAULT
+            0,
+            folder_name
+            TEXT,
+            device_model
+            TEXT
         )
         """
     )
@@ -101,52 +141,78 @@ def init_db():
     cursor = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='files'")
     res = cursor.fetchone()
     sql = res[0] if res else ""
-    
+
     has_device_ip = 'device_ip' in cols
     has_proper_unique = "UNIQUE(device_id, path)" in sql or "UNIQUE (device_id, path)" in sql
-    
+
     if res and (not has_device_ip or not has_proper_unique):
         conn.execute("ALTER TABLE files RENAME TO files_old")
         conn.execute("""
-            CREATE TABLE files (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                device_id     TEXT,
-                external_id   TEXT,
-                path          TEXT    NOT NULL,
-                size          INTEGER NOT NULL,
-                modified_time INTEGER NOT NULL,
-                sha256        TEXT,
-                uploaded_time INTEGER NOT NULL,
-                device_ip     TEXT,
-                UNIQUE(device_id, path)
-            )
-        """)
+                     CREATE TABLE files
+                     (
+                         id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                         device_id     TEXT,
+                         external_id   TEXT,
+                         path          TEXT    NOT NULL,
+                         size          INTEGER NOT NULL,
+                         modified_time INTEGER NOT NULL,
+                         sha256        TEXT,
+                         uploaded_time INTEGER NOT NULL,
+                         device_ip     TEXT,
+                         UNIQUE (device_id, path)
+                     )
+                     """)
         # Build column list for SELECT based on what exists in old table
         old_cols = ['id', 'path', 'size', 'modified_time', 'uploaded_time']
         for c in ['device_id', 'external_id', 'sha256']:
             if c in cols: old_cols.append(c)
-        
+
         select_cols = ", ".join(old_cols)
         insert_cols = ", ".join(old_cols)
-        
+
         conn.execute(f"INSERT OR IGNORE INTO files ({insert_cols}) SELECT {select_cols} FROM files_old")
         conn.execute("DROP TABLE files_old")
 
     # 4. Create files table if not exists
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS files (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id     TEXT,
-            external_id   TEXT,
-            path          TEXT    NOT NULL,
-            size          INTEGER NOT NULL,
-            modified_time INTEGER NOT NULL,
-            sha256        TEXT,
-            uploaded_time INTEGER NOT NULL,
-            device_ip     TEXT,
-            UNIQUE(device_id, path)
+        CREATE TABLE IF NOT EXISTS files
+        (
+            id
+            INTEGER
+            PRIMARY
+            KEY
+            AUTOINCREMENT,
+            device_id
+            TEXT,
+            external_id
+            TEXT,
+            path
+            TEXT
+            NOT
+            NULL,
+            size
+            INTEGER
+            NOT
+            NULL,
+            modified_time
+            INTEGER
+            NOT
+            NULL,
+            sha256
+            TEXT,
+            uploaded_time
+            INTEGER
+            NOT
+            NULL,
+            device_ip
+            TEXT,
+            UNIQUE
+        (
+            device_id,
+            path
         )
+            )
         """
     )
 
@@ -160,21 +226,79 @@ def init_db():
     # 5. sync_sessions table — one row per completed/stopped/failed sync session
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS sync_sessions (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            device_id    TEXT,
-            device_name  TEXT,
-            started_at   INTEGER NOT NULL,
-            ended_at     INTEGER NOT NULL,
-            duration_ms  INTEGER NOT NULL DEFAULT 0,
-            trigger      TEXT    NOT NULL DEFAULT 'manual',
-            outcome      TEXT    NOT NULL DEFAULT 'completed',
-            scanned      INTEGER NOT NULL DEFAULT 0,
-            checked      INTEGER NOT NULL DEFAULT 0,
-            uploaded     INTEGER NOT NULL DEFAULT 0,
-            skipped      INTEGER NOT NULL DEFAULT 0,
-            errors       INTEGER NOT NULL DEFAULT 0,
-            total_files  INTEGER NOT NULL DEFAULT 0
+        CREATE TABLE IF NOT EXISTS sync_sessions
+        (
+            id
+            INTEGER
+            PRIMARY
+            KEY
+            AUTOINCREMENT,
+            device_id
+            TEXT,
+            device_name
+            TEXT,
+            started_at
+            INTEGER
+            NOT
+            NULL,
+            ended_at
+            INTEGER
+            NOT
+            NULL,
+            duration_ms
+            INTEGER
+            NOT
+            NULL
+            DEFAULT
+            0,
+            trigger
+            TEXT
+            NOT
+            NULL
+            DEFAULT
+            'manual',
+            outcome
+            TEXT
+            NOT
+            NULL
+            DEFAULT
+            'completed',
+            scanned
+            INTEGER
+            NOT
+            NULL
+            DEFAULT
+            0,
+            checked
+            INTEGER
+            NOT
+            NULL
+            DEFAULT
+            0,
+            uploaded
+            INTEGER
+            NOT
+            NULL
+            DEFAULT
+            0,
+            skipped
+            INTEGER
+            NOT
+            NULL
+            DEFAULT
+            0,
+            errors
+            INTEGER
+            NOT
+            NULL
+            DEFAULT
+            0,
+            total_files
+            INTEGER
+            NOT
+            NULL
+            DEFAULT
+            0
         )
         """
     )
@@ -184,21 +308,54 @@ def init_db():
     # 6. media_index table for memories precomputation
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS media_index (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_type   TEXT NOT NULL,      -- 'phone' | 'shared'
-            source_key    TEXT NOT NULL,      -- device_id  | shared source id
-            relative_path TEXT NOT NULL,
-            size          INTEGER NOT NULL,
-            modified_time INTEGER NOT NULL,
-            capture_time  INTEGER,            -- unix epoch seconds, nullable
-            capture_source TEXT,              -- 'exif' | 'video' | 'fs_ctime'
-            cap_month     INTEGER,
-            cap_day       INTEGER,
-            cap_year      INTEGER,
-            indexed_at    INTEGER NOT NULL,
-            UNIQUE(source_type, source_key, relative_path)
+        CREATE TABLE IF NOT EXISTS media_index
+        (
+            id
+            INTEGER
+            PRIMARY
+            KEY
+            AUTOINCREMENT,
+            source_type
+            TEXT
+            NOT
+            NULL,    -- 'phone' | 'shared'
+            source_key
+            TEXT
+            NOT
+            NULL,    -- device_id  | shared source id
+            relative_path
+            TEXT
+            NOT
+            NULL,
+            size
+            INTEGER
+            NOT
+            NULL,
+            modified_time
+            INTEGER
+            NOT
+            NULL,
+            capture_time
+            INTEGER, -- unix epoch seconds, nullable
+            capture_source
+            TEXT,    -- 'exif' | 'video' | 'fs_ctime'
+            cap_month
+            INTEGER,
+            cap_day
+            INTEGER,
+            cap_year
+            INTEGER,
+            indexed_at
+            INTEGER
+            NOT
+            NULL,
+            UNIQUE
+        (
+            source_type,
+            source_key,
+            relative_path
         )
+            )
         """
     )
     conn.execute(
@@ -212,14 +369,13 @@ def init_db():
     #    Rows with no device_ip are left untouched.
     conn.execute(
         """
-        DELETE FROM files
+        DELETE
+        FROM files
         WHERE device_ip IS NOT NULL
-          AND rowid NOT IN (
-              SELECT MAX(rowid)
-              FROM files
-              WHERE device_ip IS NOT NULL
-              GROUP BY device_ip, path
-          )
+          AND rowid NOT IN (SELECT MAX(rowid)
+                            FROM files
+                            WHERE device_ip IS NOT NULL
+                            GROUP BY device_ip, path)
         """
     )
 
@@ -255,7 +411,7 @@ def _metadata_matches(row, size, modified_time):
 def is_uploaded_compatible(path, size, modified_time, external_id=None, device_id=None):
     conn = get_conn()
     path = (path or "").replace("\\", "/")
-    
+
     # Try by external_id first if available
     if external_id:
         if device_id:
@@ -268,7 +424,7 @@ def is_uploaded_compatible(path, size, modified_time, external_id=None, device_i
                 "SELECT size, modified_time FROM files WHERE device_id IS NULL AND path=? AND external_id=?",
                 (path, external_id),
             ).fetchall()
-        
+
         if any(_metadata_matches(row, size, modified_time) for row in rows):
             conn.close()
             return True
@@ -299,7 +455,7 @@ def batch_check_files(items: list[dict]):
 
     conn = get_conn()
     present_keys = set()
-    
+
     # Check by (device_id, path) - most efficient if device_id is present
     device_groups = {}
     for item in items:
@@ -307,7 +463,7 @@ def batch_check_files(items: list[dict]):
         if did not in device_groups:
             device_groups[did] = []
         device_groups[did].append(item)
-    
+
     for did, group in device_groups.items():
         paths = [i["path"] for i in group]
         placeholders = ",".join(["?"] * len(paths))
@@ -322,10 +478,10 @@ def batch_check_files(items: list[dict]):
                 f"SELECT path, size, modified_time, external_id FROM files WHERE device_id IS NULL AND path IN ({placeholders})",
                 paths
             ).fetchall()
-            
+
         # Match rows back to items
-        row_map = {} # path -> list of rows
-        eid_map = {} # external_id -> list of rows
+        row_map = {}  # path -> list of rows
+        eid_map = {}  # external_id -> list of rows
         for r in rows:
             p = (r["path"] or "").replace("\\", "/")
             if p not in row_map: row_map[p] = []
@@ -333,7 +489,7 @@ def batch_check_files(items: list[dict]):
             if r["external_id"]:
                 if r["external_id"] not in eid_map: eid_map[r["external_id"]] = []
                 eid_map[r["external_id"]].append(r)
-            
+
         for item in group:
             p = (item["path"] or "").replace("\\", "/")
             s, m, eid = item["size"], item["modified_time"], item.get("external_id")
@@ -348,7 +504,7 @@ def batch_check_files(items: list[dict]):
                     if _metadata_matches(r, s, m):
                         found = True
                         break
-            
+
             if found:
                 # We use the ORIGINAL item["path"] for the key to match what upload.py expects,
                 # but it should be consistent anyway.
@@ -358,7 +514,8 @@ def batch_check_files(items: list[dict]):
     return present_keys
 
 
-def insert_file(path, size, modified_time, uploaded_time, device_ip=None, external_id=None, sha256=None, device_id=None):
+def insert_file(path, size, modified_time, uploaded_time, device_ip=None, external_id=None, sha256=None,
+                device_id=None):
     conn = get_conn()
     path = (path or "").replace("\\", "/")
     # If we have device_id, we can use it for a more specific update
@@ -467,13 +624,13 @@ def _make_folder_name(device_name: str) -> str:
 
 
 def upsert_device(
-    device_name: str,
-    device_ip: str,
-    device_id: str | None = None,
-    device_model: str | None = None,
+        device_name: str,
+        device_ip: str,
+        device_id: str | None = None,
+        device_model: str | None = None,
 ) -> None:
     """Insert a new device or update its name/last_seen.
-    
+
     folder_name is set ONCE on first insert and never updated afterward,
     so the on-disk backup folder always keeps the original device name.
     """
@@ -489,15 +646,16 @@ def upsert_device(
 
         conn.execute(
             """
-            INSERT INTO devices (device_id, device_name, device_ip, status, first_seen, last_seen, folder_name, device_model)
-            VALUES (?, ?, ?, 'accepted', ?, ?, ?, ?)
-            ON CONFLICT(device_id) DO UPDATE SET
-                device_name  = excluded.device_name,
-                device_ip    = excluded.device_ip,
-                last_seen    = excluded.last_seen,
-                status       = 'accepted',
-                device_model = COALESCE(devices.device_model, excluded.device_model),
-                folder_name  = COALESCE(devices.folder_name, excluded.folder_name)
+            INSERT INTO devices (device_id, device_name, device_ip, status, first_seen, last_seen, folder_name,
+                                 device_model)
+            VALUES (?, ?, ?, 'accepted', ?, ?, ?, ?) ON CONFLICT(device_id) DO
+            UPDATE SET
+                device_name = excluded.device_name,
+                device_ip = excluded.device_ip,
+                last_seen = excluded.last_seen,
+                status = 'accepted',
+                device_model = COALESCE (devices.device_model, excluded.device_model),
+                folder_name = COALESCE (devices.folder_name, excluded.folder_name)
             """,
             (device_id, device_name, device_ip, now, now, folder_name, device_model),
         )
@@ -585,7 +743,7 @@ def get_device_folder_name(device_id: str) -> str | None:
 
 
 def find_device_by_name_model(
-    device_name: str, device_model: str | None
+        device_name: str, device_model: str | None
 ) -> dict | None:
     """Find an existing accepted device by name AND model.
     Used to detect a reinstalled app that got a new device_id.
@@ -632,13 +790,14 @@ def touch_device(device_ip: str, device_id: str | None = None, files_delta: int 
     """Update last_seen timestamp and recalculate file counter for a device."""
     now = int(_time.time())
     conn = get_conn()
-    
+
     # If device_id is missing, try to resolve it from the devices table
     if not device_id:
-        row = conn.execute("SELECT device_id FROM devices WHERE device_ip = ? AND device_id IS NOT NULL LIMIT 1", (device_ip,)).fetchone()
+        row = conn.execute("SELECT device_id FROM devices WHERE device_ip = ? AND device_id IS NOT NULL LIMIT 1",
+                           (device_ip,)).fetchone()
         if row:
             device_id = row["device_id"]
-    
+
     if device_id:
         conn.execute(
             "UPDATE devices SET last_seen = ?, device_ip = ? WHERE device_id = ?",
@@ -668,7 +827,7 @@ def touch_device(device_ip: str, device_id: str | None = None, files_delta: int 
             "UPDATE devices SET files_backed_up = ? WHERE device_ip = ?",
             (count, device_ip),
         )
-        
+
     conn.commit()
     conn.close()
 
@@ -708,27 +867,27 @@ def is_device_known(device_ip: str, device_id: str | None = None) -> bool:
 # ─── Sync session helpers ──────────────────────────────────────────────────────
 
 def insert_sync_session(
-    device_id: str | None,
-    device_name: str | None,
-    started_at: int,
-    ended_at: int,
-    duration_ms: int,
-    trigger: str,
-    outcome: str,
-    scanned: int = 0,
-    checked: int = 0,
-    uploaded: int = 0,
-    skipped: int = 0,
-    errors: int = 0,
-    total_files: int = 0,
+        device_id: str | None,
+        device_name: str | None,
+        started_at: int,
+        ended_at: int,
+        duration_ms: int,
+        trigger: str,
+        outcome: str,
+        scanned: int = 0,
+        checked: int = 0,
+        uploaded: int = 0,
+        skipped: int = 0,
+        errors: int = 0,
+        total_files: int = 0,
 ) -> int:
     """Insert one sync session record and return its new id."""
     conn = get_conn()
     cur = conn.execute(
         """
         INSERT INTO sync_sessions
-            (device_id, device_name, started_at, ended_at, duration_ms,
-             trigger, outcome, scanned, checked, uploaded, skipped, errors, total_files)
+        (device_id, device_name, started_at, ended_at, duration_ms,
+         trigger, outcome, scanned, checked, uploaded, skipped, errors, total_files)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (device_id, device_name, started_at, ended_at, duration_ms,
@@ -771,27 +930,26 @@ def clear_sync_sessions(device_id: str | None = None) -> None:
 # ─── Media Index / Memories helpers ──────────────────────────────────────────
 
 def upsert_media_index_row(
-    source_type: str,
-    source_key: str,
-    relative_path: str,
-    size: int,
-    modified_time: int,
-    capture_time: int | None,
-    capture_source: str | None,
-    cap_month: int | None,
-    cap_day: int | None,
-    cap_year: int | None,
-    indexed_at: int,
+        source_type: str,
+        source_key: str,
+        relative_path: str,
+        size: int,
+        modified_time: int,
+        capture_time: int | None,
+        capture_source: str | None,
+        cap_month: int | None,
+        cap_day: int | None,
+        cap_year: int | None,
+        indexed_at: int,
 ) -> None:
     conn = get_conn()
     conn.execute(
         """
-        INSERT INTO media_index (
-            source_type, source_key, relative_path, size, modified_time,
-            capture_time, capture_source, cap_month, cap_day, cap_year, indexed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(source_type, source_key, relative_path) DO UPDATE SET
-            size=excluded.size,
+        INSERT INTO media_index (source_type, source_key, relative_path, size, modified_time,
+                                 capture_time, capture_source, cap_month, cap_day, cap_year, indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_type, source_key, relative_path) DO
+        UPDATE SET
+            size =excluded.size,
             modified_time=excluded.modified_time,
             capture_time=excluded.capture_time,
             capture_source=excluded.capture_source,
@@ -818,22 +976,22 @@ def upsert_media_index_row(
     conn.close()
 
 
-def get_media_index_cache(source_type: str, source_key: str) -> dict[str, tuple[int, int]]:
-    """Return {relative_path: (size, modified_time)} for a given source."""
+def get_media_index_cache(source_type: str, source_key: str) -> dict[str, tuple[int, int, str | None]]:
+    """Return {relative_path: (size, modified_time, capture_source)} for a given source."""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT relative_path, size, modified_time FROM media_index WHERE source_type = ? AND source_key = ?",
+        "SELECT relative_path, size, modified_time, capture_source FROM media_index WHERE source_type = ? AND source_key = ?",
         (source_type, source_key),
     ).fetchall()
     conn.close()
-    return {r["relative_path"]: (r["size"], r["modified_time"]) for r in rows}
+    return {r["relative_path"]: (r["size"], r["modified_time"], r["capture_source"]) for r in rows}
 
 
 def get_media_for_day(
-    source_type_and_keys: list[tuple[str, str]],
-    month: int,
-    day: int,
-    exclude_year: int,
+        source_type_and_keys: list[tuple[str, str]],
+        month: int,
+        day: int,
+        exclude_year: int,
 ) -> list[dict]:
     if not source_type_and_keys:
         return []
@@ -862,9 +1020,9 @@ def get_media_for_day(
 
 
 def get_media_for_year_window(
-    source_type_and_keys: list[tuple[str, str]],
-    year: int,
-    month_day_pairs: list[tuple[int, int]],
+        source_type_and_keys: list[tuple[str, str]],
+        year: int,
+        month_day_pairs: list[tuple[int, int]],
 ) -> list[dict]:
     if not source_type_and_keys or not month_day_pairs:
         return []
@@ -897,8 +1055,8 @@ def get_media_for_year_window(
 
 
 def get_media_for_ymd_list(
-    source_type_and_keys: list[tuple[str, str]],
-    ymd_list: list[tuple[int, int, int]],
+        source_type_and_keys: list[tuple[str, str]],
+        ymd_list: list[tuple[int, int, int]],
 ) -> list[dict]:
     """Match exact (year, month, day) triples — correct across year boundaries."""
     if not source_type_and_keys or not ymd_list:
@@ -930,8 +1088,8 @@ def get_media_for_ymd_list(
 
 
 def get_year_wrapped_stats(
-    source_type_and_keys: list[tuple[str, str]],
-    year: int,
+        source_type_and_keys: list[tuple[str, str]],
+        year: int,
 ) -> list[dict]:
     if not source_type_and_keys:
         return []
@@ -955,12 +1113,12 @@ def get_year_wrapped_stats(
 
 
 def get_media_for_year_month(
-    source_type_and_keys: list[tuple[str, str]],
-    year: int,
-    month: int | None,
-    limit: int = 20,
-    *,
-    order: str = "time",
+        source_type_and_keys: list[tuple[str, str]],
+        year: int,
+        month: int | None,
+        limit: int = 20,
+        *,
+        order: str = "time",
 ) -> list[dict]:
     """Fetch media for a year (optionally month).
 
@@ -1002,7 +1160,7 @@ def get_media_for_year_month(
 
 
 def get_distinct_cap_years(
-    source_type_and_keys: list[tuple[str, str]],
+        source_type_and_keys: list[tuple[str, str]],
 ) -> list[int]:
     if not source_type_and_keys:
         return []
@@ -1025,8 +1183,8 @@ def get_distinct_cap_years(
 
 
 def get_quiz_photo_pool(
-    source_type_and_keys: list[tuple[str, str]],
-    limit: int = 800,
+        source_type_and_keys: list[tuple[str, str]],
+        limit: int = 800,
 ) -> list[dict]:
     if not source_type_and_keys:
         return []
@@ -1053,8 +1211,8 @@ def get_quiz_photo_pool(
 
 
 def get_random_media_row(
-    source_type_and_keys: list[tuple[str, str]],
-    allowed_exts: set[str] | None = None,
+        source_type_and_keys: list[tuple[str, str]],
+        allowed_exts: set[str] | None = None,
 ) -> dict | None:
     if not source_type_and_keys:
         return None
@@ -1105,7 +1263,7 @@ def prune_media_index(source_type: str, source_key: str, keep_paths: set[str]) -
         to_delete_list = list(to_delete)
         chunk_size = 500
         for i in range(0, len(to_delete_list), chunk_size):
-            chunk = to_delete_list[i : i + chunk_size]
+            chunk = to_delete_list[i: i + chunk_size]
             placeholders = ",".join(["?"] * len(chunk))
             conn.execute(
                 f"DELETE FROM media_index WHERE source_type = ? AND source_key = ? AND relative_path IN ({placeholders})",
@@ -1113,4 +1271,3 @@ def prune_media_index(source_type: str, source_key: str, keep_paths: set[str]) -
             )
         conn.commit()
     conn.close()
-

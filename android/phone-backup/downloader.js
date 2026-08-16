@@ -24,6 +24,14 @@ export function buildVideoPreviewUrl(config, relativePath, sourceMode, sourceId)
   return `http://${config.ip}:${config.port}/files/preview?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
 }
 
+export function buildThumbnailUrl(config, relativePath, sourceMode, sourceId) {
+  if (!config || !config.ip || !config.port) return '';
+  if (sourceMode === 'shared' && sourceId) {
+    return `http://${config.ip}:${config.port}/shared/${encodeURIComponent(sourceId)}/thumbnail?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+  }
+  return `http://${config.ip}:${config.port}/files/thumbnail?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+}
+
 export async function warmVideoPreviews(relativePaths, sourceMode, sourceId) {
   if (!relativePaths || relativePaths.length === 0) return { ok: true, scheduled: 0 };
   const { ip, port, key, deviceId } = await getConfig();

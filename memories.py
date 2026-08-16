@@ -87,9 +87,18 @@ def _extract_image_exif_time(full_path: str) -> int | None:
             exif = img.getexif()
             if not exif:
                 return None
-            # 36867 = DateTimeOriginal, 306 = DateTime, 36868 = DateTimeDigitized
-            for tag in (36867, 306, 36868):
-                raw_val = exif.get(tag)
+            tags = dict(exif)
+            # DateTimeOriginal (36867) and DateTimeDigitized (36868) live in the
+            # Exif sub-IFD (tag 0x8769), not the top-level IFD0 that getexif()
+            # returns directly — without this, EXIF capture time is almost
+            # always missed and files fall back to filesystem time.
+            try:
+                tags.update(exif.get_ifd(0x8769))
+            except Exception:
+                pass
+            # 36867 = DateTimeOriginal, 36868 = DateTimeDigitized, 306 = DateTime
+            for tag in (36867, 36868, 306):
+                raw_val = tags.get(tag)
                 if raw_val:
                     ts = _parse_date_str(str(raw_val))
                     if ts is not None:
@@ -180,7 +189,9 @@ def reindex_device(device_id: str) -> None:
         seen_paths.add(rel_path)
 
         cached_entry = cache.get(rel_path)
-        if cached_entry and cached_entry == (size, mtime):
+        unchanged = cached_entry and cached_entry[0] == size and cached_entry[1] == mtime
+        stale_fallback = cached_entry and cached_entry[2] == "fs_ctime" and ext in IMAGE_EXTS
+        if unchanged and not stale_fallback:
             continue
 
         cap_time, cap_source = extract_capture_time(full_path, ext)
@@ -234,7 +245,9 @@ def reindex_shared(source_id: str, root_path: str) -> None:
             seen_paths.add(rel_path)
 
             cached_entry = cache.get(rel_path)
-            if cached_entry and cached_entry == (size, mtime):
+            unchanged = cached_entry and cached_entry[0] == size and cached_entry[1] == mtime
+            stale_fallback = cached_entry and cached_entry[2] == "fs_ctime" and ext in IMAGE_EXTS
+            if unchanged and not stale_fallback:
                 continue
 
             cap_time, cap_source = extract_capture_time(full_path, ext)

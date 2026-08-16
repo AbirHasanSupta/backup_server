@@ -29,6 +29,7 @@ import {
   getConfig,
   buildPreviewUrl,
   buildVideoPreviewUrl,
+  buildThumbnailUrl,
   downloadFile,
   downloadSharedFile,
   getRandomFlashback,
@@ -478,6 +479,20 @@ export default function MemoriesScreen() {
     }
   };
 
+  // PanResponder for swipe to fetch a new random flashback item
+  const flashbackPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 20 && Math.abs(g.dx) > Math.abs(g.dy),
+        onPanResponderRelease: (_, g) => {
+          if (Math.abs(g.dx) > 60 && !flashbackLoading) {
+            openFlashback();
+          }
+        },
+      }),
+    [flashbackLoading, openFlashback],
+  );
+
   // PanResponder for swipe down to dismiss story
   const panResponder = useMemo(
     () =>
@@ -500,12 +515,15 @@ export default function MemoriesScreen() {
     return buildPreviewUrl(serverConfig, item.relative_path, item.source_type, item.source_id);
   };
 
-  // Image components cannot render video streams — prefer a displayable photo cover.
+  // Image components cannot render video streams — prefer a displayable photo cover,
+  // otherwise fall back to a server-generated static poster frame for a video cover.
   const getCoverUrl = (items: MemoryItem[]) => {
     if (!serverConfig || !items?.length) return '';
     const photo = items.find(i => !i.is_video && /\.(jpe?g|png|webp|gif|bmp)$/i.test(i.relative_path));
-    if (!photo) return '';
-    return buildPreviewUrl(serverConfig, photo.relative_path, photo.source_type, photo.source_id);
+    if (photo) return buildPreviewUrl(serverConfig, photo.relative_path, photo.source_type, photo.source_id);
+    const video = items.find(i => i.is_video);
+    if (video) return buildThumbnailUrl(serverConfig, video.relative_path, video.source_type, video.source_id);
+    return '';
   };
 
   const todayDateStr = useMemo(() => {
@@ -851,7 +869,7 @@ export default function MemoriesScreen() {
         animationType="fade"
         onRequestClose={closeFlashback}
       >
-        <View style={styles.storyContainer}>
+        <View style={styles.storyContainer} {...flashbackPanResponder.panHandlers}>
           <StatusBar barStyle="light-content" />
 
           {flashbackLoading ? (
@@ -912,6 +930,7 @@ export default function MemoriesScreen() {
               </View>
 
               <View style={[styles.storyBottomBar, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+                <Text style={styles.storySourceSub}>Swipe for another surprise</Text>
                 <TouchableOpacity
                   style={styles.saveBtn}
                   onPress={handleSaveFlashback}

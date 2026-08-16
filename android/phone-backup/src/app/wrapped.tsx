@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, ScrollView, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, ScrollView, Alert, BackHandler } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import ViewShot, { captureRef } from 'react-native-view-shot';
@@ -51,6 +51,14 @@ export default function WrappedScreen() {
 
   const shotRef = React.useRef<React.ElementRef<typeof ViewShot>>(null);
 
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      router.replace('/memories');
+      return true;
+    });
+    return () => sub.remove();
+  }, [router]);
+
   const fetchWrapped = useCallback(async (targetYear: number) => {
     setLoading(true);
     setError(null);
@@ -96,7 +104,7 @@ export default function WrappedScreen() {
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
 
       <View style={styles.header}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => router.replace('/memories')}>
           <AppIcon androidName="arrow_back" iosName="chevron.left" color={colors.text} size={22} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Year Wrapped</Text>
