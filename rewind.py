@@ -58,7 +58,7 @@ def _run_options() -> dict:
     opts: dict = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stderr": subprocess.PIPE,
     }
     if os.name == "nt":
         opts["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -73,13 +73,13 @@ def _run_ffmpeg(cmd: list[str], timeout: float) -> None:
         _active_ffmpeg_process = process
     try:
         try:
-            process.communicate(timeout=timeout)
+            _, stderr = process.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
             raise
         if process.returncode:
-            raise subprocess.CalledProcessError(process.returncode, cmd)
+            raise subprocess.CalledProcessError(process.returncode, cmd, stderr=stderr)
     finally:
         with _ffmpeg_process_guard:
             if _active_ffmpeg_process is process:
@@ -200,6 +200,16 @@ def get_rewind_path(device_id: str, year: int, month: int | None) -> str | None:
     return path if os.path.isfile(path) else None
 
 
+def _describe_ffmpeg_error(e: Exception) -> str:
+    stderr = getattr(e, "stderr", None)
+    if stderr:
+        text = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr)
+        text = text.strip()
+        if text:
+            return f"{e} :: {text[-500:]}"
+    return str(e)
+
+
 def _build_segment(ffmpeg: str, src_path: str, seg_path: str, is_video: bool) -> bool:
     vf = (
         f"scale={REEL_WIDTH}:{REEL_HEIGHT}:force_original_aspect_ratio=decrease,"
@@ -209,6 +219,7 @@ def _build_segment(ffmpeg: str, src_path: str, seg_path: str, is_video: bool) ->
         "-vf", vf,
         "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
         "-r", "30", "-an", "-movflags", "+faststart",
+        "-f", "mp4",
         seg_path,
     ]
     if is_video:
@@ -221,7 +232,7 @@ def _build_segment(ffmpeg: str, src_path: str, seg_path: str, is_video: bool) ->
         _run_ffmpeg(cmd, FFMPEG_STEP_TIMEOUT_SEC)
         return os.path.isfile(seg_path)
     except Exception as e:
-        add_log(f"[Rewind] segment build failed for {src_path}: {e}")
+        add_log(f"[Rewind] segment build failed for {src_path}: {_describe_ffmpeg_error(e)}")
         return False
 
 
@@ -272,7 +283,7 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                     add_log("[Rewind] no usable segments — aborting reel build")
                     return
 
-                with open(list_file, "w", encoding="utf-8") as f:
+                with open(list_file, "w", encoding="utf-8", newline="\n") as f:
                     for seg in segments:
                         escaped = seg.replace("\\", "/").replace("'", "'\\''")
                         f.write(f"file '{escaped}'\n")
@@ -280,9 +291,17 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                 concat_cmd = [
                     ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
                     "-f", "concat", "-safe", "0", "-i", list_file,
-                    "-c", "copy", "-movflags", "+faststart", partial_out,
+                    "-c", "copy", "-movflags", "+faststart",
+                    # Output name ends in ".partial", not ".mp4" — ffmpeg cannot
+                    # guess the container from that extension and aborts with
+                    # AVERROR(EINVAL) before writing anything. Force it explicitly.
+                    "-f", "mp4", partial_out,
                 ]
-                _run_ffmpeg(concat_cmd, FFMPEG_CONCAT_TIMEOUT_SEC)
+                try:
+                    _run_ffmpeg(concat_cmd, FFMPEG_CONCAT_TIMEOUT_SEC)
+                except Exception as e:
+                    add_log(f"[Rewind] concat failed: {_describe_ffmpeg_error(e)}")
+                    raise
                 if os.path.isfile(partial_out) and os.path.getsize(partial_out) > 0:
                     os.replace(partial_out, out_path)
                     success = True

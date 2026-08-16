@@ -222,11 +222,11 @@ function RootLayoutContent() {
         />
         <Tabs.Screen
           name="quiz"
-          options={{ href: null, tabBarStyle: { display: 'none' } }}
+          options={{ href: null, tabBarStyle: { display: 'none' }, freezeOnBlur: true }}
         />
         <Tabs.Screen
           name="roulette"
-          options={{ href: null, tabBarStyle: { display: 'none' } }}
+          options={{ href: null, tabBarStyle: { display: 'none' }, freezeOnBlur: true }}
         />
       </Tabs>
     </SafeAreaProvider>

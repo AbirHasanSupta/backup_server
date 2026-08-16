@@ -4,4 +4,5 @@ python-multipart
 customtkinter
 pyinstaller
 pillow
+pillow-heif
 pystray

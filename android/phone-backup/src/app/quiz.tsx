@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, BackHandler } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, BackHandler, PanResponder } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -106,6 +106,30 @@ export default function QuizScreen() {
     setAnswerState('unanswered');
   };
 
+  // Answered state can be advanced by a horizontal swipe as well as the
+  // "Next" button — keep the latest state in a ref so the responder created
+  // once via useMemo still sees up-to-date values.
+  const answerStateRef = useRef(answerState);
+  const handleNextRef = useRef(handleNext);
+  useEffect(() => {
+    answerStateRef.current = answerState;
+    handleNextRef.current = handleNext;
+  }, [answerState, handleNext]);
+
+  const swipeResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, g) =>
+          answerStateRef.current !== 'unanswered' && Math.abs(g.dx) > 20 && Math.abs(g.dx) > Math.abs(g.dy),
+        onPanResponderRelease: (_, g) => {
+          if (answerStateRef.current !== 'unanswered' && Math.abs(g.dx) > 50) {
+            handleNextRef.current();
+          }
+        },
+      }),
+    [],
+  );
+
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" />
@@ -149,7 +173,7 @@ export default function QuizScreen() {
           </TouchableOpacity>
         </View>
       ) : currentItem ? (
-        <View style={styles.gameArea}>
+        <View style={styles.gameArea} {...swipeResponder.panHandlers}>
           <View style={styles.progressRow}>
             {items.map((_, i) => (
               <View
@@ -249,7 +273,7 @@ const createStyles = (colors: AppColors, insets: any) =>
     },
     playAgainText: { color: '#fff', fontWeight: '700', fontSize: TextScale.sm },
 
-    gameArea: { flex: 1, paddingHorizontal: Spacing.five, paddingBottom: insets.bottom + Spacing.two },
+    gameArea: { flex: 1, paddingHorizontal: Spacing.five, paddingBottom: Math.max(insets.bottom, 20) + Spacing.two },
     progressRow: { flexDirection: 'row', gap: 6, marginBottom: Spacing.four },
     progressDot: { flex: 1, height: 4, borderRadius: Radius.full, backgroundColor: 'rgba(255,255,255,0.15)' },
     progressDotDone: { backgroundColor: colors.primary },

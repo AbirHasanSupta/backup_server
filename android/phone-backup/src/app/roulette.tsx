@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, Animated, Easing, Alert, BackHandler } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, Animated, Easing, Alert, BackHandler, AppState } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -190,6 +190,20 @@ export default function RouletteScreen() {
     return () => sub.remove();
   }, [router]);
 
+  // App backgrounded (home button / app switcher) — screen keeps focus in the
+  // tab navigator so useFocusEffect's blur cleanup never fires; stop the
+  // video/spin explicitly or it silently keeps playing behind the OS.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') {
+        stopSpinAnimation();
+        setPhase('idle');
+        setItem(null);
+      }
+    });
+    return () => sub.remove();
+  }, [stopSpinAnimation]);
+
   const handleSave = async () => {
     if (!item || saving) return;
     setSaving(true);
@@ -334,7 +348,7 @@ export default function RouletteScreen() {
         )}
       </View>
 
-      <View style={[styles.footer, { paddingBottom: insets.bottom + Spacing.four }]}>
+      <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 20) + Spacing.four }]}>
         <TouchableOpacity
           style={styles.spinBtn}
           onPress={spin}
@@ -367,6 +381,9 @@ function NativeRouletteVideoPlayer({ uri, videoModule }: { uri: string; videoMod
     p.muted = false;
     safeCall(() => p.play());
   });
+  // Belt-and-suspenders: explicitly pause before the player is released so
+  // audio never keeps running behind a transition even if unmount is delayed.
+  useEffect(() => () => safeCall(() => player.pause()), [player]);
   return <videoModule.VideoView style={{ width: '100%', height: '100%' }} player={player} nativeControls={false} contentFit="cover" surfaceType="textureView" />;
 }
 

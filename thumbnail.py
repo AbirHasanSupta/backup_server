@@ -9,6 +9,7 @@ import threading
 
 from config import APP_DATA_DIR
 from ffmpeg_utils import resolve_ffmpeg_path
+from state import add_log
 
 DEFAULT_THUMBNAIL_CACHE_DIR = os.path.join(APP_DATA_DIR, "thumbnail_cache")
 _lock = threading.Lock()
@@ -28,7 +29,7 @@ def _run_options() -> dict:
     opts: dict = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stderr": subprocess.PIPE,
         "timeout": 20,
     }
     if os.name == "nt":
@@ -53,20 +54,30 @@ def get_video_thumbnail_path(source_path: str) -> str | None:
         if os.path.isfile(out_path):
             return out_path
         partial = out_path + ".partial"
+        last_err = None
         for seek in ("0.5", "0"):
             cmd = [
                 ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-ss", seek, "-i", source_path,
                 "-frames:v", "1", "-vf", "scale=480:-2",
+                # ".partial" isn't a recognized image extension — without an
+                # explicit muxer, ffmpeg can't guess the output format and
+                # exits before writing anything.
+                "-f", "mjpeg",
                 partial,
             ]
             try:
                 subprocess.run(cmd, **_run_options(), check=True)
-            except Exception:
+            except Exception as e:
+                last_err = e
                 continue
             if os.path.isfile(partial) and os.path.getsize(partial) > 0:
                 os.replace(partial, out_path)
                 return out_path
+        if last_err is not None:
+            stderr = getattr(last_err, "stderr", None)
+            stderr_text = stderr.decode("utf-8", "replace").strip()[-500:] if isinstance(stderr, bytes) else ""
+            add_log(f"[Thumbnail] failed for {source_path}: {last_err} :: {stderr_text}")
         if os.path.isfile(partial):
             try:
                 os.remove(partial)

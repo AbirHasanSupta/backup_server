@@ -13,6 +13,16 @@ import subprocess
 import time as time_module
 from PIL import Image
 
+try:
+    # Bare Pillow cannot open HEIC/HEIF (the default capture format on most
+    # iPhones and many Android phones) — without this, EXIF extraction for
+    # those files always fails silently and falls back to the file's local
+    # backup-copy time instead of the real capture date.
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except Exception:
+    pass
+
 from config import load_config
 from database import (
     get_devices,
@@ -144,8 +154,15 @@ def _extract_video_creation_time(full_path: str) -> int | None:
     return None
 
 
-def extract_capture_time(full_path: str, ext: str) -> tuple[int | None, str]:
-    """Extract capture epoch timestamp and source label from file metadata."""
+def extract_capture_time(full_path: str, ext: str, fallback_mtime: int | None = None) -> tuple[int | None, str]:
+    """Extract capture epoch timestamp and source label from file metadata.
+
+    fallback_mtime, when given, is the file's modified time as reported by
+    the originating device/uploader. Most transfer paths preserve mtime from
+    the original file, while the local filesystem's creation time only
+    reflects when this copy landed on the backup server — so mtime is a far
+    better last-resort proxy for the real capture date than local ctime.
+    """
     ext_lower = ext.lower()
     if ext_lower in IMAGE_EXTS:
         ts = _extract_image_exif_time(full_path)
@@ -156,12 +173,22 @@ def extract_capture_time(full_path: str, ext: str) -> tuple[int | None, str]:
         if ts is not None:
             return ts, "video"
 
-    # Fallback to filesystem creation time
+    # Fallback: prefer the originating device's modified time when available,
+    # otherwise fall back to this local copy's filesystem creation time.
+    candidates = []
+    if fallback_mtime:
+        candidates.append(int(fallback_mtime))
     try:
-        ctime = int(os.path.getctime(full_path))
-        return ctime, "fs_ctime"
+        candidates.append(int(os.path.getctime(full_path)))
     except Exception:
+        pass
+    try:
+        candidates.append(int(os.path.getmtime(full_path)))
+    except Exception:
+        pass
+    if not candidates:
         return None, "fs_ctime"
+    return min(candidates), "fs_ctime"
 
 
 def reindex_device(device_id: str) -> None:
@@ -190,11 +217,14 @@ def reindex_device(device_id: str) -> None:
 
         cached_entry = cache.get(rel_path)
         unchanged = cached_entry and cached_entry[0] == size and cached_entry[1] == mtime
-        stale_fallback = cached_entry and cached_entry[2] == "fs_ctime" and ext in IMAGE_EXTS
+        # Retry extraction if we previously only got the fallback timestamp —
+        # covers files re-indexed after fixing HEIC support or after ffmpeg
+        # becomes available, for both images and videos.
+        stale_fallback = cached_entry and cached_entry[2] == "fs_ctime" and (ext in IMAGE_EXTS or ext in VIDEO_EXTS)
         if unchanged and not stale_fallback:
             continue
 
-        cap_time, cap_source = extract_capture_time(full_path, ext)
+        cap_time, cap_source = extract_capture_time(full_path, ext, fallback_mtime=mtime)
         cap_month, cap_day, cap_year = None, None, None
         if cap_time is not None:
             try:
@@ -246,11 +276,11 @@ def reindex_shared(source_id: str, root_path: str) -> None:
 
             cached_entry = cache.get(rel_path)
             unchanged = cached_entry and cached_entry[0] == size and cached_entry[1] == mtime
-            stale_fallback = cached_entry and cached_entry[2] == "fs_ctime" and ext in IMAGE_EXTS
+            stale_fallback = cached_entry and cached_entry[2] == "fs_ctime" and (ext in IMAGE_EXTS or ext in VIDEO_EXTS)
             if unchanged and not stale_fallback:
                 continue
 
-            cap_time, cap_source = extract_capture_time(full_path, ext)
+            cap_time, cap_source = extract_capture_time(full_path, ext, fallback_mtime=mtime)
             cap_month, cap_day, cap_year = None, None, None
             if cap_time is not None:
                 try:
