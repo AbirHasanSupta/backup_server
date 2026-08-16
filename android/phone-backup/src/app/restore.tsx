@@ -694,6 +694,8 @@ const PreviewModal = React.memo(function PreviewModal({
   const hasPrev = activeIdx > 0;
   const hasNext = activeIdx < fileList.length - 1;
   const canZoom = category === 'image' || category === 'video';
+  // Zoom UI (buttons + pill) only for images — video outer panResponder is disabled so no gesture zoom
+  const canZoomUI = category === 'image';
 
   // Zoom parameters
   const ZOOM_MIN = 1;
@@ -872,10 +874,18 @@ const PreviewModal = React.memo(function PreviewModal({
   const panResponder = useMemo(() => {
     // eslint-disable-next-line react-hooks/refs
     return PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponder: (evt) => {
+        // For video files, let all touches go directly to the video controls/seekbar.
+        // The video player has its own panResponder with capture flags.
+        const cur = latestRef.current;
+        if (cur.category === 'video') return false;
+        return true;
+      },
       onMoveShouldSetPanResponder: (evt, gs) => {
         const touches = evt.nativeEvent.touches;
         const cur = latestRef.current;
+        // Never steal moves from the video controls
+        if (cur.category === 'video') return false;
         if (cur.canZoom && touches.length === 2) return true;
         if (cur.canZoom && scaleRef.current > 1.02) return true;
         return Math.abs(gs.dx) > 10 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.2;
@@ -1086,7 +1096,7 @@ const PreviewModal = React.memo(function PreviewModal({
         <StatusBar barStyle="light-content" backgroundColor="#000" hidden={isFullscreen} />
 
         {/* Floating Zoom level indicator / reset pill */}
-        {canZoom && currentScaleDisplay > 1.02 && (
+        {canZoomUI && currentScaleDisplay > 1.02 && (
           <TouchableOpacity
             style={pvStyles.zoomPill}
             onPress={() => resetZoom(true)}
@@ -1145,13 +1155,13 @@ const PreviewModal = React.memo(function PreviewModal({
           </View>
           <View style={pvStyles.topBarRightActions}>
             {/* Zoom Out */}
-            {canZoom && (
+            {canZoomUI && (
               <TouchableOpacity onPress={zoomOut} style={pvStyles.topBarBtn}>
                 <AppIcon androidName="zoom_out" iosName="minus.magnifyingglass" color="#fff" size={18} />
               </TouchableOpacity>
             )}
             {/* Zoom In */}
-            {canZoom && (
+            {canZoomUI && (
               <TouchableOpacity onPress={zoomIn} style={pvStyles.topBarBtn}>
                 <AppIcon androidName="zoom_in" iosName="plus.magnifyingglass" color="#fff" size={18} />
               </TouchableOpacity>
@@ -1176,9 +1186,19 @@ const PreviewModal = React.memo(function PreviewModal({
           </View>
         </Animated.View>
 
-        {/* Left / Right Nav Arrows */}
+        {/* Left / Right Nav Arrows
+            • Videos: always visible and tappable (only navigation method — no swipe)
+            • Photos: fade with chrome, hidden in fullscreen (swipe is primary navigation) */}
         {hasPrev && (
-          <Animated.View style={[pvStyles.navArrowLeft, { opacity: chromeOpacity }]} pointerEvents={isFullscreen ? 'none' : 'auto'}>
+          <Animated.View
+            style={[
+              pvStyles.navArrowLeft,
+              category === 'video'
+                ? pvStyles.navArrowVideoPosition
+                : { opacity: chromeOpacity },
+            ]}
+            pointerEvents={category === 'video' ? 'auto' : (isFullscreen ? 'none' : 'auto')}
+          >
             <TouchableOpacity
               style={pvStyles.navArrowBtnInner}
               onPress={() => animateToFile(activeIdx - 1)}
@@ -1189,7 +1209,15 @@ const PreviewModal = React.memo(function PreviewModal({
           </Animated.View>
         )}
         {hasNext && (
-          <Animated.View style={[pvStyles.navArrowRight, { opacity: chromeOpacity }]} pointerEvents={isFullscreen ? 'none' : 'auto'}>
+          <Animated.View
+            style={[
+              pvStyles.navArrowRight,
+              category === 'video'
+                ? pvStyles.navArrowVideoPosition
+                : { opacity: chromeOpacity },
+            ]}
+            pointerEvents={category === 'video' ? 'auto' : (isFullscreen ? 'none' : 'auto')}
+          >
             <TouchableOpacity
               style={pvStyles.navArrowBtnInner}
               onPress={() => animateToFile(activeIdx + 1)}
@@ -1285,6 +1313,8 @@ function NativeVideoPreviewPlayer({
   // Seeking state — while the user drags the bar we freeze the position display
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekProgress, setSeekProgress] = useState(0);
+  // Ref mirror of seekProgress so onPanResponderRelease can read it without stale closures
+  const seekProgressRef = useRef(0);
   // Layout width of the seekbar track, measured on layout
   const seekBarWidthRef = useRef(1);
   const wasPlayingBeforeSeekRef = useRef(false);
@@ -1335,6 +1365,9 @@ function NativeVideoPreviewPlayer({
   }, [player]);
 
   // Seekbar PanResponder — handles tap + drag to seek
+  // seekProgressRef/seekBarWidthRef/wasPlayingBeforeSeekRef are accessed only inside gesture
+  // event callbacks (grant/move/release/terminate), never during render — disable is correct.
+  // eslint-disable-next-line react-hooks/refs
   const seekPanResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
@@ -1346,17 +1379,21 @@ function NativeVideoPreviewPlayer({
       safeMediaCall(() => player.pause());
       setIsSeeking(true);
       const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / seekBarWidthRef.current));
+      seekProgressRef.current = ratio;
       setSeekProgress(ratio);
     },
-    onPanResponderMove: (evt, gs) => {
-      const locationX = evt.nativeEvent.locationX + gs.dx;
-      const ratio = Math.max(0, Math.min(1, locationX / seekBarWidthRef.current));
+    onPanResponderMove: (evt) => {
+      // locationX is the touch position within the seekbar track view — use it directly.
+      const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / seekBarWidthRef.current));
+      seekProgressRef.current = ratio;
       setSeekProgress(ratio);
     },
-    onPanResponderRelease: (_, gs) => {
-      const ratio = Math.max(0, Math.min(1, seekProgress + gs.dx / seekBarWidthRef.current));
-      const finalRatio = Math.max(0, Math.min(1, ratio));
-      const dur = durationSec > 0 ? durationSec : (player.duration || 0);
+    onPanResponderRelease: () => {
+      // Use the ref to get the current ratio — avoids stale-closure from useMemo deps.
+      const finalRatio = seekProgressRef.current;
+      // Read duration directly from player at release time — freshest possible value,
+      // no stale closure risk regardless of when the useMemo was last created.
+      const dur = player.duration || 0;
       const newTime = finalRatio * dur;
       safeMediaCall(() => { player.currentTime = newTime; });
       setPositionSec(newTime);
@@ -1371,7 +1408,7 @@ function NativeVideoPreviewPlayer({
         safeMediaCall(() => player.play());
       }
     },
-  }), [player, seekProgress, durationSec]);
+  }), [player]);
 
   useEffect(() => {
     upgradedRef.current = false;
@@ -1443,8 +1480,10 @@ function NativeVideoPreviewPlayer({
 
   // Displayed position/progress: while dragging show the seek thumb position
   const displayProgress = isSeeking ? seekProgress : (durationSec > 0 ? positionSec / durationSec : 0);
-  const displayPosition = isSeeking ? seekProgress * durationSec : positionSec;
-  const remaining = Math.max(0, durationSec - displayPosition);
+  // While seeking, use the freshest duration (player.duration falls back if state hasn't ticked yet)
+  const liveDuration = durationSec > 0 ? durationSec : (player.duration || 0);
+  const displayPosition = isSeeking ? seekProgress * liveDuration : positionSec;
+  const remaining = Math.max(0, liveDuration - displayPosition);
 
   return (
     <View style={pvStyles.videoContainer}>
@@ -1465,10 +1504,10 @@ function NativeVideoPreviewPlayer({
       {/* ── Full video controls panel ── */}
       <View
         style={[pvStyles.videoControlsPanel, { bottom: insets.bottom + Spacing.two }]}
-        pointerEvents="box-none"
+        pointerEvents="auto"
       >
         {/* Seekbar row */}
-        <View style={pvStyles.videoSeekRow} pointerEvents="box-none">
+        <View style={pvStyles.videoSeekRow} pointerEvents="auto">
           <Text style={pvStyles.videoTimeLabel}>{formatMediaTime(displayPosition)}</Text>
           {/* Seekbar track — touchable for tap+drag seeking */}
           <View
@@ -1495,7 +1534,7 @@ function NativeVideoPreviewPlayer({
         </View>
 
         {/* Buttons row */}
-        <View style={pvStyles.videoButtonRow} pointerEvents="box-none">
+        <View style={pvStyles.videoButtonRow} pointerEvents="auto">
           {/* Mute / Volume */}
           <TouchableOpacity
             onPress={toggleMute}
@@ -2892,6 +2931,9 @@ const pvStyles = StyleSheet.create({
     zIndex: 20,
   },
   navArrowBtnInner: { width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' },
+  // For video: override vertical position to sit at ~35% from top (clear of the controls bar)
+  // and force full opacity so arrows are always visible.
+  navArrowVideoPosition: { top: '35%', marginTop: -22, opacity: 1 },
 
   bottomBar: {
     position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 10,
