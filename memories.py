@@ -16,6 +16,7 @@ from PIL import Image
 from config import load_config
 from database import (
     get_devices,
+    get_distinct_cap_years,
     get_files_for_device,
     get_media_for_day,
     get_media_for_ymd_list,
@@ -519,15 +520,17 @@ def get_quiz_photos(source_type: str, source_key: str, count: int = 10) -> list[
 def get_quiz_round(device_id: str, count: int = QUIZ_DEFAULT_COUNT) -> dict:
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, _ = _shared_sources_for_device(device_id, shared_dirs)
-    pool = get_quiz_photo_pool(sources)
+    distinct_years = get_distinct_cap_years(sources)
+    if len(distinct_years) < QUIZ_MIN_DISTINCT_YEARS:
+        return {"items": []}
 
+    pool = get_quiz_photo_pool(sources)
     photo_pool = [
         r for r in pool
         if os.path.splitext(r["relative_path"])[1].lower() in QUIZ_DISPLAYABLE_EXTS
     ]
 
-    distinct_years = sorted({r["cap_year"] for r in photo_pool if r.get("cap_year") is not None})
-    if len(photo_pool) < 2 or len(distinct_years) < QUIZ_MIN_DISTINCT_YEARS:
+    if len(photo_pool) < 2:
         return {"items": []}
 
     round_size = min(max(1, count), len(photo_pool))

@@ -42,6 +42,7 @@ export default function WrappedScreen() {
   const styles = useMemo(() => createStyles(colors, insets), [colors, insets]);
 
   const currentYear = new Date().getFullYear();
+  const MIN_WRAPPED_YEAR = 2000;
   const [year, setYear] = useState(currentYear);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -111,10 +112,15 @@ export default function WrappedScreen() {
       <View style={styles.yearPickerRow}>
         <TouchableOpacity
           style={styles.yearArrowBtn}
-          onPress={() => setYear(y => y - 1)}
-          disabled={loading}
+          onPress={() => setYear(y => Math.max(MIN_WRAPPED_YEAR, y - 1))}
+          disabled={loading || year <= MIN_WRAPPED_YEAR}
         >
-          <AppIcon androidName="chevron_left" iosName="chevron.left" color={colors.text} size={18} />
+          <AppIcon
+            androidName="chevron_left"
+            iosName="chevron.left"
+            color={year <= MIN_WRAPPED_YEAR ? colors.textMuted : colors.text}
+            size={18}
+          />
         </TouchableOpacity>
         <Text style={styles.yearLabel}>{year}</Text>
         <TouchableOpacity
@@ -155,8 +161,9 @@ export default function WrappedScreen() {
         </View>
       ) : (
         <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
-          <ViewShot ref={shotRef} options={{ format: 'png', quality: 1 }}>
-            <View style={styles.card}>
+          <ViewShot ref={shotRef} options={{ format: 'png', quality: 1 }} style={{ backgroundColor: colors.bg }}>
+            {/* collapsable={false} is required for reliable Android screenshot capture */}
+            <View collapsable={false} style={styles.card}>
               <Text style={styles.cardYear}>{year}</Text>
               <Text style={styles.cardTagline}>Your Year in Photos</Text>
 

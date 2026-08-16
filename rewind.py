@@ -25,9 +25,11 @@ REEL_WIDTH = 1080
 REEL_HEIGHT = 1920
 PHOTO_DURATION_SEC = 2.0
 VIDEO_CLIP_SEC = 3.0
-MAX_ITEMS = 12
+MAX_ITEMS = 15
+# Random pool size before even spacing — large enough to cover a full year.
+REEL_CANDIDATE_POOL = 400
 FFMPEG_STEP_TIMEOUT_SEC = 30
-FFMPEG_CONCAT_TIMEOUT_SEC = 60
+FFMPEG_CONCAT_TIMEOUT_SEC = 90
 
 # Stills Android + typical ffmpeg builds can encode without extra codecs.
 REWIND_STILL_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
@@ -159,8 +161,12 @@ def _is_rewind_usable(item: dict) -> bool:
 def get_reel_items(device_id: str, year: int, month: int | None) -> list[dict]:
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, _ = _shared_sources_for_device(device_id, shared_dirs)
-    pool = get_media_for_year_month(sources, year, month, limit=max(MAX_ITEMS * 20, 200))
+    # Random pool first so LIMIT does not pin the reel to January of a busy year.
+    pool = get_media_for_year_month(
+        sources, year, month, limit=REEL_CANDIDATE_POOL, order="random",
+    )
     usable = [it for it in pool if _is_rewind_usable(it)]
+    usable.sort(key=lambda it: (it.get("capture_time") is None, it.get("capture_time") or 0))
     return _sample_evenly(usable, MAX_ITEMS)
 
 
@@ -242,8 +248,12 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
             work_dir = os.path.join(_cache_dir(), f"tmp_{cache_key}")
             os.makedirs(work_dir, exist_ok=True)
             list_file = os.path.join(work_dir, "concat.txt")
+            partial_out = out_path + ".partial"
 
             try:
+                if os.path.isfile(partial_out):
+                    os.remove(partial_out)
+
                 segments = []
                 for idx, item in enumerate(items):
                     src_path = _source_full_path(item)
@@ -270,12 +280,21 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                 concat_cmd = [
                     ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
                     "-f", "concat", "-safe", "0", "-i", list_file,
-                    "-c", "copy", "-movflags", "+faststart", out_path,
+                    "-c", "copy", "-movflags", "+faststart", partial_out,
                 ]
                 _run_ffmpeg(concat_cmd, FFMPEG_CONCAT_TIMEOUT_SEC)
-                success = os.path.isfile(out_path)
-                add_log(f"[Rewind] built reel for {device_id} {year}/{month or 'all'} ({len(segments)} clips)")
+                if os.path.isfile(partial_out) and os.path.getsize(partial_out) > 0:
+                    os.replace(partial_out, out_path)
+                    success = True
+                    add_log(f"[Rewind] built reel for {device_id} {year}/{month or 'all'} ({len(segments)} clips)")
+                else:
+                    add_log("[Rewind] concat produced empty output — aborting")
             finally:
+                if os.path.isfile(partial_out):
+                    try:
+                        os.remove(partial_out)
+                    except OSError:
+                        pass
                 shutil.rmtree(work_dir, ignore_errors=True)
     except Exception as e:
         add_log(f"[Rewind] build failed: {e}")

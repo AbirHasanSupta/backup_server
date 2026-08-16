@@ -8,6 +8,8 @@ def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # Background reindex / rewind threads share the DB with FastAPI workers.
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -957,7 +959,14 @@ def get_media_for_year_month(
     year: int,
     month: int | None,
     limit: int = 20,
+    *,
+    order: str = "time",
 ) -> list[dict]:
+    """Fetch media for a year (optionally month).
+
+    order=\"time\": chronological (ASC) — used when the caller will subsample evenly.
+    order=\"random\": random pool — avoids early-year bias when LIMIT truncates a large year.
+    """
     if not source_type_and_keys:
         return []
     conn = get_conn()
@@ -973,22 +982,51 @@ def get_media_for_year_month(
     if month:
         month_clause = "AND cap_month = ?"
         params.append(month)
-    params.append(limit)
+
+    order_sql = "ORDER BY RANDOM()" if order == "random" else "ORDER BY capture_time ASC"
+    limit_sql = ""
+    if limit is not None and limit > 0:
+        limit_sql = "LIMIT ?"
+        params.append(limit)
 
     sql = f"""
         SELECT source_type, source_key, relative_path, size, modified_time, capture_time, cap_month, cap_day, cap_year
         FROM media_index
         WHERE ({where_source}) AND cap_year = ? {month_clause}
-        ORDER BY capture_time ASC
-        LIMIT ?
+        {order_sql}
+        {limit_sql}
     """
     rows = conn.execute(sql, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
+def get_distinct_cap_years(
+    source_type_and_keys: list[tuple[str, str]],
+) -> list[int]:
+    if not source_type_and_keys:
+        return []
+    conn = get_conn()
+    or_clauses = []
+    params: list = []
+    for stype, skey in source_type_and_keys:
+        or_clauses.append("(source_type = ? AND source_key = ?)")
+        params.extend([stype, skey])
+    where_source = " OR ".join(or_clauses)
+    sql = f"""
+        SELECT DISTINCT cap_year
+        FROM media_index
+        WHERE ({where_source}) AND cap_year IS NOT NULL
+        ORDER BY cap_year ASC
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [int(r["cap_year"]) for r in rows if r["cap_year"] is not None]
+
+
 def get_quiz_photo_pool(
     source_type_and_keys: list[tuple[str, str]],
+    limit: int = 800,
 ) -> list[dict]:
     if not source_type_and_keys:
         return []
@@ -999,11 +1037,15 @@ def get_quiz_photo_pool(
         or_clauses.append("(source_type = ? AND source_key = ?)")
         params.extend([stype, skey])
     where_source = " OR ".join(or_clauses)
+    params.append(max(1, limit))
 
+    # Cap the pool so huge libraries don't load the entire index into RAM.
     sql = f"""
         SELECT source_type, source_key, relative_path, cap_year
         FROM media_index
         WHERE ({where_source}) AND cap_year IS NOT NULL
+        ORDER BY RANDOM()
+        LIMIT ?
     """
     rows = conn.execute(sql, params).fetchall()
     conn.close()
@@ -1026,11 +1068,11 @@ def get_random_media_row(
 
     ext_clause = ""
     if allowed_exts:
-        # relative_path LIKE '%.jpg' OR ... (case-insensitive via LOWER)
+        # Suffix match via GLOB on lowercased path (avoids matching ".jpg.bak").
         ext_parts = []
         for ext in sorted(allowed_exts):
-            ext_parts.append("LOWER(relative_path) LIKE ?")
-            params.append(f"%{ext.lower()}")
+            ext_parts.append("LOWER(relative_path) GLOB ?")
+            params.append(f"*{ext.lower()}")
         ext_clause = f"AND ({' OR '.join(ext_parts)})"
 
     sql = f"""

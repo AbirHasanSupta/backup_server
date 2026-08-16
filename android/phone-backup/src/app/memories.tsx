@@ -569,13 +569,23 @@ export default function MemoriesScreen() {
               </View>
               <Text style={styles.gameCardText}>Guess the Year</Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.gameCard}
+              onPress={() => openRewind(new Date().getFullYear() - 1)}
+              activeOpacity={0.85}
+            >
+              <View style={[styles.gameIconWrap, { backgroundColor: '#06B6D422' }]}>
+                <AppIcon androidName="movie" iosName="film" color="#06B6D4" size={20} />
+              </View>
+              <Text style={styles.gameCardText}>Rewind Reel</Text>
+            </TouchableOpacity>
           </View>
           <View style={styles.centeredEmpty}>
             <View style={styles.emptyIconBg}>
               <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={40} />
             </View>
             <Text style={styles.emptyTitle}>No Memories Yet</Text>
-            <Text style={styles.emptySubtitle}>Check back over the next few days to relive photos and videos from past years — or try Roulette and Guess the Year above.</Text>
+            <Text style={styles.emptySubtitle}>Check back over the next few days to relive photos and videos from past years — or try Roulette, Guess the Year, and Rewind above.</Text>
           </View>
         </ScrollView>
       ) : (
@@ -593,6 +603,16 @@ export default function MemoriesScreen() {
                 <AppIcon androidName="psychology" iosName="brain" color="#8B5CF6" size={20} />
               </View>
               <Text style={styles.gameCardText}>Guess the Year</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.gameCard}
+              onPress={() => openRewind(new Date().getFullYear() - 1)}
+              activeOpacity={0.85}
+            >
+              <View style={[styles.gameIconWrap, { backgroundColor: '#06B6D422' }]}>
+                <AppIcon androidName="movie" iosName="film" color="#06B6D4" size={20} />
+              </View>
+              <Text style={styles.gameCardText}>Rewind Reel</Text>
             </TouchableOpacity>
           </View>
 
@@ -1241,12 +1261,14 @@ const createStyles = (colors: AppColors, insets: any) =>
 
     gamesRow: {
       flexDirection: 'row',
+      flexWrap: 'wrap',
       gap: Spacing.three,
       paddingHorizontal: Spacing.five,
       marginTop: Spacing.four,
     },
     gameCard: {
-      flex: 1,
+      flexGrow: 1,
+      flexBasis: '40%',
       flexDirection: 'row',
       alignItems: 'center',
       gap: Spacing.two,

@@ -214,6 +214,16 @@ export async function getRecentMemories(days = 7) {
 }
 
 /**
+ * Parse JSON body; treat empty / literal null as null (flashback & roulette).
+ * @param {Response} res
+ */
+async function readJsonOrNull(res) {
+  const text = await res.text();
+  if (!text || text === 'null') return null;
+  return JSON.parse(text);
+}
+
+/**
  * Fetch a round of "Guess the Year" quiz items built from backed-up photos.
  * @param {number} [count=10]
  * @returns {Promise<{items: Array<{source_type: string, source_id: string, relative_path: string, correct_year: number, options: number[]}>}>}
@@ -239,7 +249,7 @@ export async function getRouletteItem() {
     { headers: { Authorization: `Bearer ${key}` } },
   );
   if (!res.ok) throw new Error(`Failed to fetch roulette item (${res.status})`);
-  return await res.json();
+  return await readJsonOrNull(res);
 }
 
 /**
@@ -269,7 +279,7 @@ export async function getRandomFlashback() {
     { headers: { Authorization: `Bearer ${key}` } },
   );
   if (!res.ok) throw new Error(`Failed to fetch flashback (${res.status})`);
-  return await res.json();
+  return await readJsonOrNull(res);
 }
 
 /**

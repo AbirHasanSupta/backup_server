@@ -1091,6 +1091,8 @@ async def get_memories_wrapped(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
+    if year < 1970 or year > 2100:
+        raise HTTPException(status_code=400, detail="Invalid year")
     return memories.get_wrapped(device_id, year)
 
 
@@ -1103,6 +1105,7 @@ async def get_memories_quiz(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
+    count = max(1, min(count, 30))
     return memories.get_quiz_round(device_id, count)
 
 
@@ -1131,6 +1134,10 @@ async def generate_rewind_reel(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
+    if year < 1970 or year > 2100:
+        raise HTTPException(status_code=400, detail="Invalid year")
+    if month is not None and (month < 1 or month > 12):
+        raise HTTPException(status_code=400, detail="Invalid month")
     return rewind.start_rewind_build(device_id, year, month)
 
 
@@ -1144,6 +1151,10 @@ async def get_rewind_reel_status(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
+    if year < 1970 or year > 2100:
+        raise HTTPException(status_code=400, detail="Invalid year")
+    if month is not None and (month < 1 or month > 12):
+        raise HTTPException(status_code=400, detail="Invalid month")
     return rewind.get_rewind_status(device_id, year, month)
 
 
@@ -1158,6 +1169,10 @@ async def stream_rewind_reel(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
+    if year < 1970 or year > 2100:
+        raise HTTPException(status_code=400, detail="Invalid year")
+    if month is not None and (month < 1 or month > 12):
+        raise HTTPException(status_code=400, detail="Invalid month")
     path = rewind.get_rewind_path(device_id, year, month)
     if not path:
         raise HTTPException(status_code=404, detail="Reel not ready")

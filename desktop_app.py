@@ -2371,6 +2371,14 @@ class BackupServerApp(ctk.CTk):
         """Reload modules in dependency order and start uvicorn."""
         import importlib
 
+        # Kill any in-flight rewind ffmpeg before reload so orphaned encodes
+        # from a previous session cannot outlive the new module-level job state.
+        try:
+            from rewind import terminate_active_rewind_ffmpeg
+            terminate_active_rewind_ffmpeg()
+        except Exception:
+            pass
+
         for mod_name in (
             "config",
             "storage",
@@ -2695,6 +2703,11 @@ class BackupServerApp(ctk.CTk):
 # ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Required for PyInstaller onefile builds if any dependency (or future code)
+    # uses multiprocessing; harmless for the threading/subprocess paths we use.
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     init_db()
     _cfg = load_config()
     if bool(_cfg.get("START_WITH_WINDOWS", False)) != is_autostart_enabled():

@@ -94,6 +94,9 @@ async function checkAndNotifyFlashback() {
   if (item) {
     await showFlashbackNotification(item);
     await setLastFlashbackNotifiedAt(Date.now());
+  } else if (!lastNotifiedAt) {
+    // Empty library: avoid re-hitting the API on every cold start before any media exists.
+    await setLastFlashbackNotifiedAt(Date.now());
   }
 }
 
