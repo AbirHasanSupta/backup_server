@@ -296,8 +296,10 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
     device_ip = request.client.host
     device_id = body.device_id
     verify_known_device(device_ip, device_id)
+    return await asyncio.to_thread(_check_files_sync, body, device_ip, device_id)
 
-    # Convert body items to list of dicts for batch check
+
+def _check_files_sync(body: FileCheckRequest, device_ip: str, device_id: str | None) -> dict:
     items = []
     for item in body.files:
         items.append({
@@ -308,10 +310,8 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
             "device_id": device_id,
         })
 
-    # Get all that ARE in database
     present_in_db = batch_check_files(items)
 
-    # Debug logging for check
     if len(items) > 0:
         add_log(f"🔍 Checking {len(items)} files for {device_id or device_ip}. Found in DB: {len(present_in_db)}")
 
@@ -343,7 +343,6 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
             "status": "present" if is_present else "missing",
         })
 
-    device_ip = request.client.host
     touch_device(device_ip, device_id=device_id, files_delta=0)
     device_stats = get_device_stats(device_ip, device_id=device_id)
 
@@ -425,8 +424,8 @@ async def upload_file_raw(
     device_ip = request.client.host
     verify_known_device(device_ip, device_id)
 
-    if should_skip_upload(relative_path, size, modified_time, external_id, device_id, verify_disk):
-        return skipped_upload_response(device_ip, device_id)
+    if await asyncio.to_thread(should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
+        return await asyncio.to_thread(skipped_upload_response, device_ip, device_id)
 
     set_current_activity(f"Uploading {relative_path}", device_ip)
     add_log(f"Uploading: {relative_path} ({device_id or device_ip})")
@@ -447,7 +446,7 @@ async def upload_file_raw(
     if not sha256:
         sha256 = saved_sha256
 
-    return finish_upload_record(relative_path, size, modified_time, device_ip, external_id, sha256, device_id)
+    return await asyncio.to_thread(finish_upload_record, relative_path, size, modified_time, device_ip, external_id, sha256, device_id)
 
 
 @router.post("/upload")
@@ -468,8 +467,8 @@ async def upload_file(
     device_ip = request.client.host
     verify_known_device(device_ip, device_id)
 
-    if should_skip_upload(relative_path, size, modified_time, external_id, device_id, verify_disk):
-        return skipped_upload_response(device_ip, device_id)
+    if await asyncio.to_thread(should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
+        return await asyncio.to_thread(skipped_upload_response, device_ip, device_id)
 
     set_current_activity(f"Uploading {relative_path}", device_ip)
     add_log(f"Uploading: {relative_path} ({device_id or device_ip})")
@@ -492,7 +491,7 @@ async def upload_file(
     if not sha256:
         sha256 = saved_sha256
 
-    return finish_upload_record(relative_path, size, modified_time, device_ip, external_id, sha256, device_id)
+    return await asyncio.to_thread(finish_upload_record, relative_path, size, modified_time, device_ip, external_id, sha256, device_id)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -697,7 +696,7 @@ async def thumbnail_file(
     if not is_video_path(path):
         media_type = guess_type(path)[0] or "image/jpeg"
         return FileResponse(path, media_type=media_type, headers={"Cache-Control": "public, max-age=86400"})
-    thumb_path = get_video_thumbnail_path(path)
+    thumb_path = await asyncio.to_thread(get_video_thumbnail_path, path)
     if not thumb_path:
         raise HTTPException(status_code=500, detail="Failed to generate thumbnail")
     return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
@@ -1084,7 +1083,7 @@ async def thumbnail_shared_file(
     if not is_video_path(full_path):
         media_type = guess_type(full_path)[0] or "image/jpeg"
         return FileResponse(full_path, media_type=media_type, headers={"Cache-Control": "public, max-age=86400"})
-    thumb_path = get_video_thumbnail_path(full_path)
+    thumb_path = await asyncio.to_thread(get_video_thumbnail_path, full_path)
     if not thumb_path:
         raise HTTPException(status_code=500, detail="Failed to generate thumbnail")
     return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
@@ -1102,7 +1101,7 @@ async def get_memories_today(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return memories.get_todays_memories(device_id)
+    return await asyncio.to_thread(memories.get_todays_memories, device_id)
 
 
 @router.get("/memories/recent")
@@ -1114,7 +1113,7 @@ async def get_memories_recent(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return memories.get_recent_memories(device_id, days=days)
+    return await asyncio.to_thread(memories.get_recent_memories, device_id, days)
 
 
 @router.post("/memories/reindex")
@@ -1137,7 +1136,7 @@ async def get_memories_flashback(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return memories.get_random_flashback(device_id)
+    return await asyncio.to_thread(memories.get_random_flashback, device_id)
 
 
 @router.get("/memories/wrapped")
@@ -1151,7 +1150,7 @@ async def get_memories_wrapped(
     verify_known_device_by_id(device_id)
     if year < 1970 or year > 2100:
         raise HTTPException(status_code=400, detail="Invalid year")
-    return memories.get_wrapped(device_id, year)
+    return await asyncio.to_thread(memories.get_wrapped, device_id, year)
 
 
 @router.get("/memories/quiz")
@@ -1164,7 +1163,7 @@ async def get_memories_quiz(
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
     count = max(1, min(count, 30))
-    return memories.get_quiz_round(device_id, count)
+    return await asyncio.to_thread(memories.get_quiz_round, device_id, count)
 
 
 @router.get("/memories/roulette")
@@ -1175,7 +1174,7 @@ async def get_memories_roulette(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return memories.get_roulette_item(device_id)
+    return await asyncio.to_thread(memories.get_roulette_item, device_id)
 
 
 @router.get("/memories/places")
@@ -1186,7 +1185,7 @@ async def get_memories_places(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return memories.get_place_clusters(device_id)
+    return await asyncio.to_thread(memories.get_place_clusters, device_id)
 
 
 @router.get("/memories/places/{cluster_key}")
@@ -1198,7 +1197,7 @@ async def get_memories_place_items(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return memories.get_place_items(device_id, cluster_key)
+    return await asyncio.to_thread(memories.get_place_items, device_id, cluster_key)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 import re
@@ -83,7 +84,7 @@ def file_exists(relative_path: str, size: int | None = None, device_id: str | No
         full_path = full_path_for(relative_path, device_id=device_id)
         if not os.path.isfile(full_path):
             return False
-        if size is not None and size >= 0:
+        if size is not None and size > 0:
             return os.path.getsize(full_path) == size
         return True
     except Exception:
@@ -120,7 +121,7 @@ def save_fileobj(
                 bytes_written += len(chunk)
                 if sha256_hash:
                     sha256_hash.update(chunk)
-        if expected_size is not None and expected_size >= 0 and bytes_written != expected_size:
+        if expected_size is not None and expected_size > 0 and bytes_written != expected_size:
             raise ValueError(f"Uploaded file size mismatch: expected {expected_size}, wrote {bytes_written}")
         os.replace(tmp_path, full_path)
     except Exception:
@@ -141,23 +142,28 @@ async def save_upload_stream(
     expected_size: int | None = None,
 ) -> tuple[str, str]:
     full_path = full_path_for(relative_path, device_id=device_id)
-    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    await asyncio.to_thread(os.makedirs, os.path.dirname(full_path), exist_ok=True)
     tmp_path = f"{full_path}.tmp-{os.getpid()}-{threading.get_ident()}"
     sha256_hash = hashlib.sha256() if compute_sha256 else None
     bytes_written = 0
+    out = await asyncio.to_thread(open, tmp_path, "wb", buffer_size)
     try:
-        with open(tmp_path, "wb", buffering=buffer_size) as out:
-            async for chunk in chunks:
-                if not chunk:
-                    continue
-                out.write(chunk)
-                bytes_written += len(chunk)
-                if sha256_hash:
-                    sha256_hash.update(chunk)
-        if expected_size is not None and expected_size >= 0 and bytes_written != expected_size:
+        async for chunk in chunks:
+            if not chunk:
+                continue
+            await asyncio.to_thread(out.write, chunk)
+            bytes_written += len(chunk)
+            if sha256_hash:
+                sha256_hash.update(chunk)
+        await asyncio.to_thread(out.close)
+        if expected_size is not None and expected_size > 0 and bytes_written != expected_size:
             raise ValueError(f"Uploaded file size mismatch: expected {expected_size}, wrote {bytes_written}")
-        os.replace(tmp_path, full_path)
+        await asyncio.to_thread(os.replace, tmp_path, full_path)
     except Exception:
+        try:
+            out.close()
+        except Exception:
+            pass
         try:
             os.remove(tmp_path)
         except OSError:
