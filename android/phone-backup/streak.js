@@ -3,8 +3,11 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const STREAK_KEY = 'backup_streak_v1';
 const RISK_NOTIFIED_KEY = 'backup_streak_risk_notified_date';
 
-function todayStr(d = new Date()) {
-  return d.toISOString().slice(0, 10);
+export function todayStr(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
 }
 
 function daysBetween(fromStr, toStr) {

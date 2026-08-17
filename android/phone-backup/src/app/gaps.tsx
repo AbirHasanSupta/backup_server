@@ -247,7 +247,7 @@ export default function GapsScreen() {
 
   const pendingTotal = (data?.newCount ?? 0) + (data?.changedCount ?? 0);
   const isFiltering = searchQuery.trim().length > 0 || categoryFilter !== 'all';
-  const listBottomPad = insets.bottom + Spacing.eight + (pendingTotal > 0 && !syncing ? 72 : Spacing.four);
+  const listBottomPad = insets.bottom + Spacing.eight + (syncing ? 60 : pendingTotal > 0 ? 72 : Spacing.four);
 
   return (
     <View style={[styles.root, { backgroundColor: colors.bg }]}>

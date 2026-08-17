@@ -26,6 +26,7 @@ import {
   getStreakData,
   getLastStreakRiskNotifiedDate,
   setLastStreakRiskNotifiedDate,
+  todayStr as streakTodayStr,
 } from '../../streak';
 import { AppColors, Radius, Shadows, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
@@ -107,7 +108,7 @@ async function checkAndNotifyFlashback() {
 }
 
 async function checkAndNotifyStreakRisk() {
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = streakTodayStr();
   const lastNotified = await getLastStreakRiskNotifiedDate();
   if (lastNotified === todayStr) return;
 
@@ -252,6 +253,10 @@ function RootLayoutContent() {
         />
         <Tabs.Screen
           name="gaps"
+          options={{ href: null, tabBarStyle: { display: 'none' } }}
+        />
+        <Tabs.Screen
+          name="goals"
           options={{ href: null, tabBarStyle: { display: 'none' } }}
         />
       </Tabs>

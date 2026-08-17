@@ -247,11 +247,13 @@ export async function refreshPendingPreview(options = {}) {
 
 export function invalidatePendingPreviewCache() {
   lastScanAt = 0;
+  lastFileList = null;
   cacheEpoch += 1;
 }
 
 let listInFlight = null;
 let listInFlightEpoch = -1;
+let lastFileList = null;
 
 /**
  * Returns individual local files not yet backed up (new or changed).
@@ -275,6 +277,11 @@ export async function listPendingFiles({ shouldStop, skipScan = false } = {}) {
 
   if (skipScan) {
     return summarizePendingFiles(files, { scanned: false, aborted: false, noFolders: false });
+  }
+
+  const now = Date.now();
+  if (lastScanAt && now - lastScanAt < STALE_MS && lastFileList) {
+    return { ...lastFileList, scanned: true };
   }
 
   if (shouldStop?.()) {
@@ -306,7 +313,9 @@ export async function listPendingFiles({ shouldStop, skipScan = false } = {}) {
   }
 
   lastScanAt = Date.now();
-  return summarizePendingFiles(files, { scanned: true, aborted: false, noFolders: false });
+  const result = summarizePendingFiles(files, { scanned: true, aborted: false, noFolders: false });
+  lastFileList = result;
+  return result;
 }
 
 export async function refreshPendingFileList(options = {}) {

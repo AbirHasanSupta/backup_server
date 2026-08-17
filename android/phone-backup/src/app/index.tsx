@@ -55,6 +55,7 @@ import {
 } from '../../storageSavingsPreview';
 import { getStreakData } from '../../streak';
 import { StreakBadge } from '@/components/StreakBadge';
+import { getGoals, invalidateGoalsFileCache } from '../../goals';
 import { hapticMedium, hapticWarning, hapticError } from '@/utils/haptics';
 
 function formatRelativeTime(ts: number | null): string {
@@ -176,6 +177,7 @@ export default function HomeScreen() {
     currentStreak: 0,
     atRisk: false,
   });
+  const [activeGoalsCount, setActiveGoalsCount] = useState(0);
 
   const DOUBLE_TAP_WINDOW_MS = 1200;
 
@@ -296,6 +298,15 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const loadGoalsSummary = useCallback(async () => {
+    try {
+      const goals = await getGoals();
+      setActiveGoalsCount(goals.filter((g: any) => !g.completedAt).length);
+    } catch {
+      // Goals summary is optional — dashboard still works without it.
+    }
+  }, []);
+
   const applySyncSnapshot = useCallback((snapshot: any) => {
     if (!snapshot?.active) {
       setSyncing(false);
@@ -332,6 +343,7 @@ export default function HomeScreen() {
       savingsAbortRef.current = false;
       loadAll();
       loadStreak();
+      loadGoalsSummary();
       getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
       (async () => {
         try {
@@ -353,7 +365,7 @@ export default function HomeScreen() {
         savingsAbortRef.current = true;
         savingsGenRef.current += 1;
       };
-    }, [applySyncSnapshot, loadAll, loadStreak, loadPendingPreview, loadStorageSavings])
+    }, [applySyncSnapshot, loadAll, loadStreak, loadGoalsSummary, loadPendingPreview, loadStorageSavings])
   );
 
   useEffect(() => {
@@ -452,9 +464,12 @@ export default function HomeScreen() {
       invalidatePendingPreviewCache();
       invalidateStorageSavingsCache();
       loadPendingPreview();
-      loadStorageSavings({ skipServerCheck: true });
-      loadStorageSavings({ skipServerCheck: false });
+      loadStorageSavings({ skipServerCheck: true }).then(() =>
+        loadStorageSavings({ skipServerCheck: false })
+      );
       loadStreak();
+      invalidateGoalsFileCache();
+      loadGoalsSummary();
     };
 
     const onFailed = ({ message }: { message?: string }) => {
@@ -479,13 +494,14 @@ export default function HomeScreen() {
         loadAll();
         invalidatePendingPreviewCache();
         invalidateStorageSavingsCache();
+        invalidateGoalsFileCache();
         loadPendingPreview();
         loadStorageSavings({ skipServerCheck: true });
       }),
     ];
 
     return () => subs.forEach((sub) => sub.remove());
-  }, [applySyncSnapshot, loadAll, loadPendingPreview, loadStorageSavings]);
+  }, [applySyncSnapshot, loadAll, loadPendingPreview, loadStorageSavings, loadGoalsSummary]);
 
   const handleSync = async () => {
     const snapshot = await getCurrentSyncState().catch(() => null);
@@ -758,6 +774,31 @@ export default function HomeScreen() {
           </Animated.View>
         ) : null}
 
+        {!syncing && (
+          <Animated.View entering={FadeInDown.duration(400).delay(285)} style={styles.pendingSection}>
+            <Text style={styles.sectionKicker}>Backup goals</Text>
+            <AnimatedPressable
+              style={styles.goalsCard}
+              onPress={() => { hapticMedium(); router.push('/goals'); }}
+              scaleDown={0.98}
+              accessibilityLabel="Open backup goals"
+            >
+              <View style={[styles.goalsIconWrap, { backgroundColor: colors.primarySoft }]}>
+                <AppIcon androidName="flag" iosName="flag.fill" color={colors.primary} size={18} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.goalsTitle}>
+                  {activeGoalsCount > 0 ? `${activeGoalsCount} active ${activeGoalsCount === 1 ? 'goal' : 'goals'}` : 'Set a backup goal'}
+                </Text>
+                <Text style={styles.goalsSubtitle}>
+                  {activeGoalsCount > 0 ? 'Tap to view progress' : 'Track a year until it\u2019s fully backed up'}
+                </Text>
+              </View>
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
+            </AnimatedPressable>
+          </Animated.View>
+        )}
+
         <Animated.View entering={FadeInDown.duration(400).delay(300)}>
           <AnimatedPressable
             id="sync-now-button"
@@ -975,6 +1016,34 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     color: colors.textMuted,
     letterSpacing: 0.6,
     textTransform: 'uppercase',
+  },
+  goalsCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    backgroundColor: colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: colors.surfaceBorder,
+    padding: Spacing.four,
+  },
+  goalsIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: Radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  goalsTitle: {
+    fontSize: TextScale.base,
+    fontWeight: '800',
+    color: colors.text,
+  },
+  goalsSubtitle: {
+    fontSize: TextScale.sm,
+    color: colors.textSecondary,
+    fontWeight: '600',
+    marginTop: 2,
   },
   syncBtn: {
     minHeight: 56,
