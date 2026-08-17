@@ -34,6 +34,7 @@ import {
   buildSyncProgressText,
 } from './notificationService';
 import { appendSyncSession } from './syncHistory';
+import { recordSyncCompleted } from './streak';
 
 /**
  * Converts any raw error message to a short, user-readable string.
@@ -978,6 +979,10 @@ export async function runSync(onProgress, runOptions = {}) {
       total_files: totalSynced,
     }).catch(() => {});
     // ─────────────────────────────────────────────────────────────────────────
+
+    if (outcome === 'completed' && result.errors === 0) {
+      await recordSyncCompleted().catch(() => {});
+    }
 
     if ((!isBackgroundFetch || result.uploaded > 0) && !result.stopped && !wasForceStopped) {
       await showSyncCompleteNotification(result.uploaded, result.skipped);

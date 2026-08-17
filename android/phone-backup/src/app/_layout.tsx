@@ -13,6 +13,7 @@ import {
   showFlashbackNotification,
   addFlashbackTapListener,
   getInitialFlashbackTap,
+  showStreakRiskNotification,
 } from '../../notificationService';
 import {
   getLastMemoryNotifiedDate,
@@ -21,6 +22,11 @@ import {
   setLastFlashbackNotifiedAt,
 } from '../../settings';
 import { getTodaysMemories, getRandomFlashback } from '../../downloader';
+import {
+  getStreakData,
+  getLastStreakRiskNotifiedDate,
+  setLastStreakRiskNotifiedDate,
+} from '../../streak';
 import { AppColors, Radius, Shadows, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { AppThemeProvider, useAppTheme } from '@/hooks/use-app-theme';
@@ -100,6 +106,21 @@ async function checkAndNotifyFlashback() {
   }
 }
 
+async function checkAndNotifyStreakRisk() {
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const lastNotified = await getLastStreakRiskNotifiedDate();
+  if (lastNotified === todayStr) return;
+
+  const hourNow = new Date().getHours();
+  if (hourNow < 18) return; // only warn in the evening, once the day's sync window is closing
+
+  const streak = await getStreakData();
+  if (streak.atRisk && streak.currentStreak > 0) {
+    await showStreakRiskNotification(streak.currentStreak);
+    await setLastStreakRiskNotifiedDate(todayStr);
+  }
+}
+
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -124,6 +145,7 @@ function RootLayoutContent() {
       await registerBackgroundTask();
       checkAndNotifyMemories().catch(() => {});
       checkAndNotifyFlashback().catch(() => {});
+      checkAndNotifyStreakRisk().catch(() => {});
     })();
   }, []);
 

@@ -19,6 +19,8 @@ const MEMORIES_CHANNEL_ID = 'memories';
 const MEMORIES_NOTIFICATION_ID = 'memories-today';
 const FLASHBACK_CHANNEL_ID = 'flashback';
 const FLASHBACK_NOTIFICATION_ID = 'memories-flashback';
+const STREAK_CHANNEL_ID = 'streak';
+const STREAK_NOTIFICATION_ID = 'streak-risk';
 const APP_PRIMARY_COLOR = '#2563EB';
 
 function immediateNotificationTrigger() {
@@ -87,6 +89,12 @@ export async function setupNotifications() {
       });
       await N.setNotificationChannelAsync(FLASHBACK_CHANNEL_ID, {
         name: 'Flashback',
+        importance: N.AndroidImportance.DEFAULT,
+        lightColor: APP_PRIMARY_COLOR,
+        showBadge: false,
+      });
+      await N.setNotificationChannelAsync(STREAK_CHANNEL_ID, {
+        name: 'Streak',
         importance: N.AndroidImportance.DEFAULT,
         lightColor: APP_PRIMARY_COLOR,
         showBadge: false,
@@ -223,6 +231,10 @@ function flashbackNotificationTrigger() {
   return Platform.OS === 'android' ? { channelId: FLASHBACK_CHANNEL_ID } : null;
 }
 
+function streakNotificationTrigger() {
+  return Platform.OS === 'android' ? { channelId: STREAK_CHANNEL_ID } : null;
+}
+
 export async function showMemoriesNotification(count) {
   if (!N) return;
   try {
@@ -270,6 +282,23 @@ export async function showFlashbackNotification(item) {
     });
   } catch (e) {
     console.warn('[Notifications] showFlashbackNotification failed:', e?.message);
+  }
+}
+
+export async function showStreakRiskNotification(streak) {
+  if (!N) return;
+  try {
+    await N.scheduleNotificationAsync({
+      identifier: STREAK_NOTIFICATION_ID,
+      content: {
+        title: '🔥 Your streak is at risk',
+        body: `You've backed up ${streak} day${streak !== 1 ? 's' : ''} in a row. Sync today to keep it going!`,
+        data: { type: 'streak_risk' },
+      },
+      trigger: streakNotificationTrigger(),
+    });
+  } catch (e) {
+    console.warn('[Notifications] showStreakRiskNotification failed:', e?.message);
   }
 }
 

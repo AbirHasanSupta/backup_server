@@ -53,6 +53,8 @@ import {
   refreshStorageSavingsPreview,
   invalidateStorageSavingsCache,
 } from '../../storageSavingsPreview';
+import { getStreakData } from '../../streak';
+import { StreakBadge } from '@/components/StreakBadge';
 import { hapticMedium, hapticWarning, hapticError } from '@/utils/haptics';
 
 function formatRelativeTime(ts: number | null): string {
@@ -170,6 +172,10 @@ export default function HomeScreen() {
   const [storageLoading, setStorageLoading] = useState(false);
   const savingsAbortRef = useRef(false);
   const savingsGenRef = useRef(0);
+  const [streakData, setStreakData] = useState<{ currentStreak: number; atRisk: boolean }>({
+    currentStreak: 0,
+    atRisk: false,
+  });
 
   const DOUBLE_TAP_WINDOW_MS = 1200;
 
@@ -281,6 +287,15 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const loadStreak = useCallback(async () => {
+    try {
+      const data = await getStreakData();
+      setStreakData({ currentStreak: data.currentStreak, atRisk: data.atRisk });
+    } catch {
+      // Streak is optional — dashboard still works without it.
+    }
+  }, []);
+
   const applySyncSnapshot = useCallback((snapshot: any) => {
     if (!snapshot?.active) {
       setSyncing(false);
@@ -316,6 +331,7 @@ export default function HomeScreen() {
       previewAbortRef.current = false;
       savingsAbortRef.current = false;
       loadAll();
+      loadStreak();
       getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
       (async () => {
         try {
@@ -337,7 +353,7 @@ export default function HomeScreen() {
         savingsAbortRef.current = true;
         savingsGenRef.current += 1;
       };
-    }, [applySyncSnapshot, loadAll, loadPendingPreview, loadStorageSavings])
+    }, [applySyncSnapshot, loadAll, loadStreak, loadPendingPreview, loadStorageSavings])
   );
 
   useEffect(() => {
@@ -438,6 +454,7 @@ export default function HomeScreen() {
       loadPendingPreview();
       loadStorageSavings({ skipServerCheck: true });
       loadStorageSavings({ skipServerCheck: false });
+      loadStreak();
     };
 
     const onFailed = ({ message }: { message?: string }) => {
@@ -631,10 +648,13 @@ export default function HomeScreen() {
         onLayout={onHeaderLayout}
         style={[styles.header, headerAnimatedStyle, { backgroundColor: colors.bg }]}
       >
-        <View style={styles.titleBlock}>
-          <Text style={styles.kicker}>Private phone backup</Text>
-          <Text style={styles.appTitle}>Everything safe, quietly.</Text>
-          <Text style={styles.appSubtitle}>Your folders sync to your own computer.</Text>
+        <View style={styles.headerTopRow}>
+          <View style={styles.titleBlock}>
+            <Text style={styles.kicker}>Private phone backup</Text>
+            <Text style={styles.appTitle}>Everything safe, quietly.</Text>
+            <Text style={styles.appSubtitle}>Your folders sync to your own computer.</Text>
+          </View>
+          <StreakBadge colors={colors} streak={streakData.currentStreak} atRisk={streakData.atRisk} />
         </View>
         <AnimatedPressable style={[styles.serverPill, { borderColor: serverColor }]} onPress={loadAll}>
           <View style={[styles.statusDot, { backgroundColor: serverColor }]} />
@@ -864,6 +884,13 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   },
   titleBlock: {
     gap: Spacing.one,
+    flexShrink: 1,
+  },
+  headerTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: Spacing.three,
   },
   kicker: {
     color: colors.primary,
