@@ -8,6 +8,7 @@ import Animated, {
   runOnJS,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { hapticLight, hapticLongPress } from '@/utils/haptics';
 
 /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
 
@@ -23,6 +24,7 @@ interface AnimatedPressableProps {
   accessibilityRole?: 'button' | 'link' | 'checkbox' | 'radio';
   delayLongPress?: number;
   id?: string;
+  haptic?: boolean;
 }
 
 const SPRING_CONFIG = { damping: 15, stiffness: 400, mass: 0.5 };
@@ -36,15 +38,20 @@ export function AnimatedPressable({
   disabled = false,
   hitSlop = 0,
   accessibilityLabel,
+  accessibilityRole = 'button',
   delayLongPress = 350,
+  id,
+  haptic = false,
 }: AnimatedPressableProps) {
   const pressed = useSharedValue(0);
 
   const invokePress = useCallback(() => {
+    if (haptic) hapticLight();
     onPress?.();
-  }, [onPress]);
+  }, [haptic, onPress]);
 
   const invokeLongPress = useCallback(() => {
+    hapticLongPress();
     onLongPress?.();
   }, [onLongPress]);
 
@@ -91,10 +98,13 @@ export function AnimatedPressable({
   return (
     <GestureDetector gesture={gesture}>
       <Animated.View
+        nativeID={id}
+        testID={id}
         style={[style, animatedStyle, disabled && { opacity: 0.45 }]}
         accessible
         accessibilityLabel={accessibilityLabel}
-        accessibilityRole="button"
+        accessibilityRole={accessibilityRole}
+        accessibilityState={{ disabled }}
       >
         {children}
       </Animated.View>

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -41,6 +41,13 @@ import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
+import { PendingSyncCard, type PendingPreview } from '@/components/PendingSyncCard';
+import {
+  getCachedPendingPreview,
+  refreshPendingPreview,
+  invalidatePendingPreviewCache,
+} from '../../pendingPreview';
+import { hapticMedium, hapticWarning, hapticError } from '@/utils/haptics';
 
 function formatRelativeTime(ts: number | null): string {
   if (!ts) return 'Never';
@@ -148,6 +155,10 @@ export default function HomeScreen() {
   const [forceStopPressedAt, setForceStopPressedAt] = useState<number | null>(null);
   const [, setRelativeTimeTick] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [pendingPreview, setPendingPreview] = useState<PendingPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const previewAbortRef = useRef(false);
+  const previewGenRef = useRef(0);
 
   const DOUBLE_TAP_WINDOW_MS = 1200;
 
@@ -211,6 +222,30 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const loadPendingPreview = useCallback(async (opts: { skipScan?: boolean } = {}) => {
+    const gen = ++previewGenRef.current;
+    previewAbortRef.current = false;
+    const snapshot = await getCurrentSyncState().catch(() => null);
+    if (gen !== previewGenRef.current) return;
+    if (snapshot?.active) {
+      setPreviewLoading(false);
+      return;
+    }
+    setPreviewLoading(true);
+    try {
+      const result = await refreshPendingPreview({
+        skipScan: !!opts.skipScan,
+        shouldStop: () => previewAbortRef.current || previewGenRef.current !== gen,
+      });
+      if (gen !== previewGenRef.current || result.aborted) return;
+      setPendingPreview(result.noFolders ? null : result);
+    } catch {
+      // Local estimate is optional — dashboard still works without it.
+    } finally {
+      if (gen === previewGenRef.current) setPreviewLoading(false);
+    }
+  }, []);
+
   const applySyncSnapshot = useCallback((snapshot: any) => {
     if (!snapshot?.active) {
       setSyncing(false);
@@ -242,9 +277,23 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      let alive = true;
+      previewAbortRef.current = false;
       loadAll();
       getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
-    }, [applySyncSnapshot, loadAll])
+      (async () => {
+        try {
+          const cached = await getCachedPendingPreview();
+          if (alive && cached) setPendingPreview(cached);
+        } catch {}
+        if (alive) await loadPendingPreview();
+      })();
+      return () => {
+        alive = false;
+        previewAbortRef.current = true;
+        previewGenRef.current += 1;
+      };
+    }, [applySyncSnapshot, loadAll, loadPendingPreview])
   );
 
   useEffect(() => {
@@ -268,6 +317,8 @@ export default function HomeScreen() {
 
   useEffect(() => {
     const onStarted = () => {
+      previewAbortRef.current = true;
+      previewGenRef.current += 1;
       setSyncing(true);
       setStopRequested(false);
       setForceStopPressedAt(null);
@@ -336,6 +387,8 @@ export default function HomeScreen() {
             : 'Everything is already up to date'
         );
       }
+      invalidatePendingPreviewCache();
+      loadPendingPreview();
     };
 
     const onFailed = ({ message }: { message?: string }) => {
@@ -344,6 +397,8 @@ export default function HomeScreen() {
       setForceStopPressedAt(null);
       setPhase('idle');
       setStatusMessage(message || 'Backup failed. Check your connection.');
+      invalidatePendingPreviewCache();
+      loadPendingPreview();
     };
 
     const subs = [
@@ -352,11 +407,15 @@ export default function HomeScreen() {
       DeviceEventEmitter.addListener('sync-state', applySyncSnapshot),
       DeviceEventEmitter.addListener('sync-completed', onCompleted),
       DeviceEventEmitter.addListener('sync-failed', onFailed),
-      DeviceEventEmitter.addListener('settings-updated', loadAll),
+      DeviceEventEmitter.addListener('settings-updated', () => {
+        loadAll();
+        invalidatePendingPreviewCache();
+        loadPendingPreview();
+      }),
     ];
 
     return () => subs.forEach((sub) => sub.remove());
-  }, [applySyncSnapshot, loadAll]);
+  }, [applySyncSnapshot, loadAll, loadPendingPreview]);
 
   const handleSync = async () => {
     const snapshot = await getCurrentSyncState().catch(() => null);
@@ -374,15 +433,21 @@ export default function HomeScreen() {
           setSyncing(false);
           setPhase('idle');
           setStatusMessage('Backup force-stopped');
+          hapticError();
+          invalidatePendingPreviewCache();
           await forceStopCurrentSync();
+          previewAbortRef.current = false;
+          loadPendingPreview();
         } else {
           setForceStopPressedAt(now);
+          hapticWarning();
         }
         return;
       }
 
       const changed = await stopCurrentSync();
       if (changed) {
+        hapticWarning();
         setStopRequested(true);
         setForceStopPressedAt(null);
         setPhase('stopping');
@@ -450,15 +515,25 @@ export default function HomeScreen() {
     }
 
     try {
+      previewAbortRef.current = true;
+      previewGenRef.current += 1;
+      hapticMedium();
       await runSync();
-    } catch {}
+    } catch {
+      previewAbortRef.current = false;
+      loadPendingPreview();
+    }
   };
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await loadAll();
-    setRefreshing(false);
-  }, [loadAll]);
+    invalidatePendingPreviewCache();
+    try {
+      await Promise.all([loadAll(), loadPendingPreview()]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadAll, loadPendingPreview]);
 
   const statusColors: Record<ServerStatus, string> = {
     connected: colors.success,
@@ -566,6 +641,18 @@ export default function HomeScreen() {
             dimColor={colors.warningSoft}
           />
         </Animated.View>
+
+        {(pendingPreview || previewLoading) && !syncing ? (
+          <Animated.View entering={FadeInDown.duration(400).delay(250)}>
+            <PendingSyncCard
+              colors={colors}
+              preview={pendingPreview}
+              loading={previewLoading}
+              syncing={syncing}
+              onPress={isOffline ? undefined : handleSync}
+            />
+          </Animated.View>
+        ) : null}
 
         <Animated.View entering={FadeInDown.duration(400).delay(300)}>
           <AnimatedPressable

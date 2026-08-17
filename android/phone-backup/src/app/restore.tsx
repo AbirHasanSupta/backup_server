@@ -15,6 +15,9 @@ import {
   Animated,
   Easing,
   Linking,
+  TextInput,
+  RefreshControl,
+  ScrollView,
 } from 'react-native';
 import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
@@ -45,6 +48,7 @@ import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
 import { prunePreviewCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
+import { hapticSelection, hapticLongPress, hapticSuccess, hapticError } from '@/utils/haptics';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
@@ -119,6 +123,15 @@ type SortDir   = 'asc' | 'desc';
 type SortPreference = { field: SortField; dir: SortDir };
 
 type FileCategory = 'image' | 'video' | 'audio' | 'other';
+type RestoreFilter = 'all' | FileCategory;
+
+const RESTORE_FILTERS: { id: RestoreFilter; label: string; icon: string; iosIcon: string }[] = [
+  { id: 'all', label: 'All', icon: 'select_all', iosIcon: 'square.grid.2x2' },
+  { id: 'image', label: 'Photos', icon: 'image', iosIcon: 'photo' },
+  { id: 'video', label: 'Videos', icon: 'videocam', iosIcon: 'video' },
+  { id: 'audio', label: 'Audio', icon: 'music_note', iosIcon: 'music.note' },
+  { id: 'other', label: 'Other', icon: 'insert_drive_file', iosIcon: 'doc' },
+];
 
 const RESTORE_SORT_PREFERENCE_KEY = 'restore_sort_preference_v1';
 
@@ -306,6 +319,23 @@ function sortTreeChildren(node: TreeNode, field: SortField, dir: SortDir): TreeN
     return dir === 'asc' ? cmp : -cmp;
   });
   return { ...node, children: sorted.map(c => sortTreeChildren(c, field, dir)) };
+}
+
+function compareRemoteFiles(a: RemoteFile, b: RemoteFile, field: SortField, dir: SortDir): number {
+  const nameA = a.path.split(/[/\\]/).pop() ?? a.path;
+  const nameB = b.path.split(/[/\\]/).pop() ?? b.path;
+  let cmp = 0;
+  if (field === 'name') {
+    cmp = nameA.localeCompare(nameB);
+  } else if (field === 'size') {
+    cmp = (a.size ?? 0) - (b.size ?? 0);
+  } else if (field === 'date') {
+    cmp = (a.uploaded_time ?? a.modified_time ?? 0) - (b.uploaded_time ?? b.modified_time ?? 0);
+  } else if (field === 'type') {
+    cmp = getExt(a.path).localeCompare(getExt(b.path));
+    if (cmp === 0) cmp = nameA.localeCompare(nameB);
+  }
+  return dir === 'asc' ? cmp : -cmp;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -577,6 +607,129 @@ const srcStyles = StyleSheet.create({
     paddingVertical: Spacing.three,
   },
   sourceMenuItemText: { flex: 1, fontSize: TextScale.sm, fontWeight: '500' },
+});
+
+function LibraryFilterBar({
+  query,
+  onQueryChange,
+  category,
+  onCategoryChange,
+  matchCount,
+  totalCount,
+  colors,
+}: {
+  query: string;
+  onQueryChange: (value: string) => void;
+  category: RestoreFilter;
+  onCategoryChange: (value: RestoreFilter) => void;
+  matchCount: number;
+  totalCount: number;
+  colors: AppColors;
+}) {
+  const isFiltering = query.trim().length > 0 || category !== 'all';
+  return (
+    <View style={[filterStyles.wrap, { borderBottomColor: colors.surfaceBorder }]}>
+      <View style={[filterStyles.searchBox, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}>
+        <AppIcon androidName="search" iosName="magnifyingglass" color={colors.textMuted} size={16} />
+        <TextInput
+          style={[filterStyles.searchInput, { color: colors.text }]}
+          value={query}
+          onChangeText={onQueryChange}
+          placeholder="Search files by name"
+          placeholderTextColor={colors.textMuted}
+          autoCapitalize="none"
+          autoCorrect={false}
+          returnKeyType="search"
+          underlineColorAndroid="transparent"
+          accessibilityLabel="Search files by name"
+        />
+        {query.length > 0 && (
+          <TouchableOpacity onPress={() => onQueryChange('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <AppIcon androidName="close" iosName="xmark.circle.fill" color={colors.textMuted} size={16} />
+          </TouchableOpacity>
+        )}
+      </View>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={filterStyles.chipRow}
+      >
+        {RESTORE_FILTERS.map(chip => {
+          const active = category === chip.id;
+          return (
+            <TouchableOpacity
+              key={chip.id}
+              onPress={() => onCategoryChange(chip.id)}
+              style={[
+                filterStyles.chip,
+                {
+                  borderColor: active ? colors.primary : colors.surfaceBorder,
+                  backgroundColor: active ? colors.primarySoft : colors.surface,
+                },
+              ]}
+              activeOpacity={0.75}
+            >
+              <AppIcon
+                androidName={chip.icon}
+                iosName={chip.iosIcon}
+                color={active ? colors.primary : colors.textSecondary}
+                size={14}
+              />
+              <Text style={[filterStyles.chipText, { color: active ? colors.primary : colors.textSecondary }]}>
+                {chip.label}
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+      {isFiltering && (
+        <Text style={[filterStyles.matchLabel, { color: colors.textMuted }]}>
+          {matchCount.toLocaleString()} of {totalCount.toLocaleString()} files
+        </Text>
+      )}
+    </View>
+  );
+}
+
+const filterStyles = StyleSheet.create({
+  wrap: {
+    paddingHorizontal: Spacing.four,
+    paddingTop: Spacing.two,
+    paddingBottom: Spacing.two,
+    gap: Spacing.two,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  searchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    paddingHorizontal: Spacing.three,
+    minHeight: 40,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: TextScale.sm,
+    fontWeight: '600',
+    paddingVertical: 8,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    gap: Spacing.two,
+    paddingBottom: 2,
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: 6,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+  },
+  chipText: { fontSize: TextScale.xs, fontWeight: '700' },
+  matchLabel: { fontSize: TextScale.xs, fontWeight: '600' },
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1993,6 +2146,7 @@ export default function RestoreScreen() {
   const [downloadProgress, setDownloadProgress] = useState<{ current: number; total: number; fileName: string; bytesWritten: number; bytesTotal: number } | null>(null);
   const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
   const downloadActiveRef = useRef(false);
+  const fetchingRef = useRef(false);
   const downloadSingleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restoreMountedRef = useRef(true);
 
@@ -2017,6 +2171,9 @@ export default function RestoreScreen() {
 
   // Selection mode state
   const [selectionMode, setSelectionMode] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState<RestoreFilter>('all');
+  const [refreshing, setRefreshing] = useState(false);
 
   // Preview state
   const [previewFile, setPreviewFile] = useState<RemoteFile | null>(null);
@@ -2144,6 +2301,8 @@ export default function RestoreScreen() {
     setExpandedKeys(new Set());
     setSelectedPaths(new Set());
     setSelectionMode(false);
+    setSearchQuery('');
+    setCategoryFilter('all');
     if (mode !== 'shared') {
       sharedSourcesGen.current += 1;
       setIsLoadingSources(false);
@@ -2163,6 +2322,8 @@ export default function RestoreScreen() {
     setTree(null);
     setExpandedKeys(new Set());
     setSelectedPaths(new Set());
+    setSearchQuery('');
+    setCategoryFilter('all');
   }, []);
 
   // Sorted tree — only recomputed when the file list or sort choice changes,
@@ -2179,8 +2340,43 @@ export default function RestoreScreen() {
     return out;
   }, [sortedTree, expandedKeys]);
 
+  const isFiltering = searchQuery.trim().length > 0 || categoryFilter !== 'all';
+
+  const filteredFiles = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const matched = files.filter(f => {
+      if (categoryFilter !== 'all' && getFileCategory(f.path) !== categoryFilter) return false;
+      if (!q) return true;
+      const name = f.path.split(/[/\\]/).pop() ?? f.path;
+      return name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q);
+    });
+    if (searchQuery.trim().length === 0 && categoryFilter === 'all') return matched;
+    return matched.sort((a, b) => compareRemoteFiles(a, b, sortField, sortDir));
+  }, [files, searchQuery, categoryFilter, sortField, sortDir]);
+
+  const listRows = useMemo<FlatRow[]>(() => {
+    if (!isFiltering) return visibleRows;
+    return filteredFiles.map(file => {
+      const name = file.path.split(/[/\\]/).pop() ?? file.path;
+      return {
+        depth: 0,
+        node: {
+          name,
+          key: file.path,
+          isFolder: false,
+          file,
+          children: [],
+          totalSize: file.size,
+          fileCount: 1,
+          filePaths: [file.path],
+        },
+      };
+    });
+  }, [isFiltering, visibleRows, filteredFiles]);
+
   // Flat ordered list of previewable files
   const previewableFiles = useMemo<RemoteFile[]>(() => {
+    if (isFiltering) return filteredFiles;
     const result: RemoteFile[] = [];
     function collect(node: TreeNode) {
       if (!node.isFolder && node.file) {
@@ -2191,15 +2387,19 @@ export default function RestoreScreen() {
     }
     if (sortedTree) sortedTree.children.forEach(collect);
     return result;
-  }, [sortedTree]);
+  }, [isFiltering, filteredFiles, sortedTree]);
 
   // Fetch files from server
-  const handleFetch = async () => {
-    if (isOffline || isFetching || isDownloading) return;
+  const handleFetch = useCallback(async (opts?: { quiet?: boolean; ignoreOffline?: boolean; preserveSelection?: boolean }) => {
+    if (fetchingRef.current || isDownloading) return;
+    if (!opts?.ignoreOffline && isOffline) return;
     if (sourceMode === 'shared' && !selectedSourceId) {
-      Alert.alert('No Source', 'Please select a shared folder first.');
+      if (!opts?.quiet) {
+        Alert.alert('No Source', 'Please select a shared folder first.');
+      }
       return;
     }
+    fetchingRef.current = true;
     setIsFetching(true);
     try {
       await loadServerConfig();
@@ -2209,6 +2409,7 @@ export default function RestoreScreen() {
       } else {
         serverFiles = await listServerFiles();
       }
+      if (!restoreMountedRef.current) return;
       setFiles(serverFiles);
 
       // After a successful fetch, warm a few of the largest video previews in the background.
@@ -2226,14 +2427,38 @@ export default function RestoreScreen() {
 
       const newTree = buildTree(serverFiles);
       setTree(newTree);
-      setExpandedKeys(new Set());
-      setSelectedPaths(new Set());
+      if (opts?.preserveSelection) {
+        const valid = new Set(serverFiles.map(f => f.path));
+        setSelectedPaths(prev => {
+          const next = new Set([...prev].filter(p => valid.has(p)));
+          if (next.size === 0) setSelectionMode(false);
+          return next;
+        });
+      } else {
+        setExpandedKeys(new Set());
+        setSelectedPaths(new Set());
+        setSelectionMode(false);
+      }
     } catch (error: any) {
-      Alert.alert('Fetch Failed', sanitizeErrorMessage(error, 'Could not fetch files from server.'));
+      if (restoreMountedRef.current && !opts?.quiet) {
+        Alert.alert('Fetch Failed', sanitizeErrorMessage(error, 'Could not fetch files from server.'));
+      }
     } finally {
-      setIsFetching(false);
+      fetchingRef.current = false;
+      if (restoreMountedRef.current) setIsFetching(false);
     }
-  };
+  }, [isOffline, isDownloading, sourceMode, selectedSourceId, loadServerConfig]);
+
+  const onRefreshLibrary = useCallback(async () => {
+    if (isDownloading) return;
+    setRefreshing(true);
+    try {
+      await checkServer();
+      await handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
+    } finally {
+      if (restoreMountedRef.current) setRefreshing(false);
+    }
+  }, [checkServer, handleFetch, isDownloading]);
 
   // Sort handler
   const handleSortChange = useCallback((field: SortField, dir: SortDir) => {
@@ -2284,6 +2509,7 @@ export default function RestoreScreen() {
 
   // Selection mode handlers
   const handleEnterSelectionMode = useCallback((node: TreeNode) => {
+    hapticLongPress();
     setSelectionMode(true);
     const paths = collectFilePaths(node);
     setSelectedPaths(prev => {
@@ -2296,6 +2522,7 @@ export default function RestoreScreen() {
   }, []);
 
   const handleToggleNode = useCallback((node: TreeNode) => {
+    hapticSelection();
     const paths = collectFilePaths(node);
     setSelectedPaths(prev => {
       const next = new Set(prev);
@@ -2308,12 +2535,30 @@ export default function RestoreScreen() {
   }, []);
 
   const selectAll = () => {
-    if (selectedPaths.size === files.length) {
+    const target = isFiltering ? filteredFiles : files;
+    if (target.length === 0) return;
+    if (isFiltering) {
+      const allVisibleSelected = target.every(f => selectedPaths.has(f.path));
+      setSelectedPaths(prev => {
+        const next = new Set(prev);
+        if (allVisibleSelected) {
+          target.forEach(f => next.delete(f.path));
+        } else {
+          target.forEach(f => next.add(f.path));
+        }
+        if (next.size === 0) setSelectionMode(false);
+        else setSelectionMode(true);
+        return next;
+      });
+      return;
+    }
+    const allVisibleSelected = target.every(f => selectedPaths.has(f.path));
+    if (allVisibleSelected) {
       setSelectedPaths(new Set());
       setSelectionMode(false);
     } else {
       setSelectionMode(true);
-      setSelectedPaths(new Set(files.map(f => f.path)));
+      setSelectedPaths(new Set(target.map(f => f.path)));
     }
   };
 
@@ -2462,12 +2707,15 @@ export default function RestoreScreen() {
       if (saved > 0) parts.push(`${saved} saved to gallery / storage`);
       if (skipped > 0) parts.push(`${skipped} already present`);
       if (failed > 0) parts.push(`${failed} failed`);
+      if (saved > 0) hapticSuccess();
+      else if (failed > 0) hapticError();
       Alert.alert('Restore Complete', parts.join('\n') || 'Nothing was downloaded.');
       setSelectedPaths(new Set());
       setSelectionMode(false);
     } catch (e) {
       if (!downloadActiveRef.current || !restoreMountedRef.current) return;
       console.warn('Restore download aborted:', e);
+      hapticError();
       Alert.alert('Restore Failed', sanitizeErrorMessage(e, 'Could not complete the download.'));
     } finally {
       downloadActiveRef.current = false;
@@ -2566,7 +2814,11 @@ export default function RestoreScreen() {
               </AnimatedPressable>
             </View>
             <Text style={styles.pageSubtitle}>
-              {files.length > 0 ? `${files.length} files on server` : 'Download files from server'}
+              {files.length > 0
+                ? isFiltering
+                  ? `${filteredFiles.length.toLocaleString()} matching of ${files.length.toLocaleString()} files`
+                  : `${files.length.toLocaleString()} files on server`
+                : 'Download files from server'}
             </Text>
           </View>
           <View style={styles.headerButtons}>
@@ -2575,6 +2827,7 @@ export default function RestoreScreen() {
               style={[styles.actionBtn, fetchDisabled && styles.disabledBtn]}
               disabled={fetchDisabled}
               scaleDown={0.92}
+              haptic
               accessibilityLabel="Fetch files from server"
             >
               {isFetching ? (
@@ -2587,10 +2840,12 @@ export default function RestoreScreen() {
               )}
             </AnimatedPressable>
             {files.length > 0 && (
-              <AnimatedPressable onPress={selectAll} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isDownloading || isOffline} scaleDown={0.92}>
+              <AnimatedPressable onPress={selectAll} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isDownloading || isOffline} scaleDown={0.92} haptic>
                 <AppIcon androidName="select_all" iosName="checkmark.circle" color={isOffline ? colors.textMuted : colors.primary} size={16} />
                 <Text style={[styles.actionBtnText, { color: isOffline ? colors.textMuted : colors.primary }]}>
-                  {selectedPaths.size === files.length ? 'Deselect All' : 'Select All'}
+                  {isFiltering
+                    ? (filteredFiles.length > 0 && filteredFiles.every(f => selectedPaths.has(f.path)) ? 'Deselect' : 'Select visible')
+                    : (selectedPaths.size === files.length ? 'Deselect All' : 'Select All')}
                 </Text>
               </AnimatedPressable>
             )}
@@ -2613,6 +2868,22 @@ export default function RestoreScreen() {
           onModeChange={handleModeChange}
           onSourceSelect={handleSourceSelect}
           onSortChange={handleSortChange}
+          colors={colors}
+        />
+      )}
+
+      {files.length > 0 && !isDownloading && (
+        <LibraryFilterBar
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          category={categoryFilter}
+          onCategoryChange={(next) => {
+            if (next === categoryFilter) return;
+            hapticSelection();
+            setCategoryFilter(next);
+          }}
+          matchCount={filteredFiles.length}
+          totalCount={files.length}
           colors={colors}
         />
       )}
@@ -2646,7 +2917,7 @@ export default function RestoreScreen() {
       {/* File Tree List */}
       <FlatList
         style={{ flex: 1 }}
-        data={visibleRows}
+        data={listRows}
         keyExtractor={row => row.node.key}
         renderItem={({ item }) => (
           <TreeNodeView
@@ -2666,6 +2937,19 @@ export default function RestoreScreen() {
         showsVerticalScrollIndicator={false}
         onScroll={isDownloading ? undefined : onListScroll}
         scrollEventThrottle={16}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        extraData={selectedPaths}
+        refreshControl={
+          isDownloading ? undefined : (
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefreshLibrary}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+            />
+          )
+        }
         removeClippedSubviews
         initialNumToRender={24}
         maxToRenderPerBatch={24}
@@ -2675,13 +2959,21 @@ export default function RestoreScreen() {
           !isFetching ? (
             <View style={styles.emptyContainer}>
               <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft }]}>
-                <AppIcon androidName="cloud_download" iosName="icloud.and.arrow.down" color={colors.primary} size={36} fallback="⬇️" />
+                <AppIcon
+                  androidName={isFiltering ? 'search' : 'cloud_download'}
+                  iosName={isFiltering ? 'magnifyingglass' : 'icloud.and.arrow.down'}
+                  color={colors.primary}
+                  size={36}
+                  fallback={isFiltering ? '?' : '⬇️'}
+                />
               </View>
-              <Text style={styles.emptyTitle}>No files fetched</Text>
+              <Text style={styles.emptyTitle}>{isFiltering ? 'No matching files' : 'No files fetched'}</Text>
               <Text style={styles.emptySubtitle}>
-                {sourceMode === 'shared' && !selectedSourceId
-                  ? 'Select a shared folder above, then tap Fetch.'
-                  : 'Tap Fetch to see files available on the server.'}
+                {isFiltering
+                  ? 'Try a different name or file type filter.'
+                  : sourceMode === 'shared' && !selectedSourceId
+                    ? 'Select a shared folder above, then tap Fetch.'
+                    : 'Tap Fetch to see files available on the server.'}
               </Text>
             </View>
           ) : null

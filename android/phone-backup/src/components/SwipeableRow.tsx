@@ -11,6 +11,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { AppIcon } from '@/components/AppIcon';
+import { hapticMedium } from '@/utils/haptics';
 
 /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
 
@@ -53,10 +54,12 @@ export function SwipeableRow({
   const canSwipeRight = !!onSwipeRight;
 
   const invokeLeft = useCallback(() => {
+    hapticMedium();
     onSwipeLeft?.();
   }, [onSwipeLeft]);
 
   const invokeRight = useCallback(() => {
+    hapticMedium();
     onSwipeRight?.();
   }, [onSwipeRight]);
 

@@ -13,6 +13,7 @@ import {
   StatusBar,
   ScrollView,
   AppState,
+  RefreshControl,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
@@ -25,6 +26,7 @@ import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
+import { hapticLight, hapticMedium, hapticSelection, hapticSuccess, hapticError } from '@/utils/haptics';
 import {
   getRecentMemories,
   getConfig,
@@ -154,6 +156,7 @@ export default function MemoriesScreen() {
   const styles = useMemo(() => createStyles(colors, insets), [colors, insets]);
 
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<MemoriesResponse | null>(null);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
@@ -182,19 +185,33 @@ export default function MemoriesScreen() {
   const [rewindSaving, setRewindSaving] = useState(false);
   const rewindPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const fetchMemories = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const fetchMemories = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const [cfg, res] = await Promise.all([getConfig(), getRecentMemories(7)]);
       setServerConfig(cfg);
       setData(res);
+      setError(null);
     } catch (err: any) {
-      setError(sanitizeErrorMessage(err, 'Could not load your memories right now.'));
+      if (!opts?.silent) {
+        setError(sanitizeErrorMessage(err, 'Could not load your memories right now.'));
+      }
     } finally {
-      setLoading(false);
+      if (!opts?.silent) setLoading(false);
     }
   }, []);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await fetchMemories({ silent: true });
+    } finally {
+      setRefreshing(false);
+    }
+  }, [fetchMemories]);
 
   useEffect(() => {
     let active = true;
@@ -227,6 +244,7 @@ export default function MemoriesScreen() {
   const currentItem = activeItems[activeItemIdx] ?? null;
 
   const openDayStory = useCallback((dayIdx: number, startOffset: number = 0) => {
+    hapticMedium();
     setActiveDayIdx(dayIdx);
     setActiveItemIdx(startOffset);
     setProgressRatio(0);
@@ -353,8 +371,10 @@ export default function MemoriesScreen() {
 
       await MediaLibrary.saveToLibraryAsync(tmpUri);
       await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+      hapticSuccess();
       Alert.alert('Saved', 'Photo/Video saved to your gallery!');
     } catch (err: any) {
+      hapticError();
       Alert.alert('Save Failed', sanitizeErrorMessage(err, 'Could not save file to device.'));
     } finally {
       setFlashbackSaving(false);
@@ -490,8 +510,10 @@ export default function MemoriesScreen() {
       await downloadRewindReel(rewindYear, undefined, tmpUri);
       await MediaLibrary.saveToLibraryAsync(tmpUri);
       await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+      hapticSuccess();
       Alert.alert('Saved', 'Rewind Reel saved to your gallery!');
     } catch (err: any) {
+      hapticError();
       Alert.alert('Save Failed', sanitizeErrorMessage(err, 'Could not save the reel to device.'));
     } finally {
       setRewindSaving(false);
@@ -522,8 +544,10 @@ export default function MemoriesScreen() {
 
       await MediaLibrary.saveToLibraryAsync(tmpUri);
       await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+      hapticSuccess();
       Alert.alert('Saved', 'Photo/Video saved to your gallery!');
     } catch (err: any) {
+      hapticError();
       Alert.alert('Save Failed', sanitizeErrorMessage(err, 'Could not save file to device.'));
     } finally {
       setSavingItem(false);
@@ -537,6 +561,7 @@ export default function MemoriesScreen() {
         onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 20 && Math.abs(g.dx) > Math.abs(g.dy),
         onPanResponderRelease: (_, g) => {
           if (Math.abs(g.dx) > 60 && !flashbackLoading) {
+            hapticLight();
             openFlashback();
           }
         },
@@ -551,6 +576,7 @@ export default function MemoriesScreen() {
         onMoveShouldSetPanResponder: (_, gestureState) => gestureState.dy > 30 && Math.abs(gestureState.dx) < 40,
         onPanResponderRelease: (_, gestureState) => {
           if (gestureState.dy > 50) {
+            hapticMedium();
             setActiveDayIdx(null);
           }
         },
@@ -596,13 +622,13 @@ export default function MemoriesScreen() {
           <Text style={styles.headerSubtitle}>{todayDateStr}</Text>
         </View>
         <View style={styles.headerActionsRow}>
-          <TouchableOpacity style={styles.surpriseBtn} onPress={() => openFlashback()}>
+          <TouchableOpacity style={styles.surpriseBtn} onPress={() => { hapticLight(); openFlashback(); }}>
             <AppIcon androidName="shuffle" iosName="shuffle" color={colors.primary} size={18} />
           </TouchableOpacity>
           <TouchableOpacity style={styles.surpriseBtn} onPress={() => router.push('/wrapped')}>
             <AppIcon androidName="insights" iosName="chart.bar.fill" color={colors.primary} size={18} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.refreshBtn} onPress={fetchMemories} disabled={loading}>
+          <TouchableOpacity style={styles.refreshBtn} onPress={() => fetchMemories()} disabled={loading}>
             <AppIcon androidName="refresh" iosName="arrow.clockwise" color={colors.primary} size={20} />
           </TouchableOpacity>
         </View>
@@ -615,16 +641,37 @@ export default function MemoriesScreen() {
           <Text style={styles.loadingText}>Finding your memories…</Text>
         </View>
       ) : error ? (
-        <View style={styles.centered}>
+        <ScrollView
+          contentContainerStyle={[styles.centered, { flexGrow: 1 }]}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+            />
+          }
+        >
           <AppIcon androidName="cloud_off" iosName="wifi.slash" color={colors.error} size={48} />
           <Text style={styles.errorText}>Server Unreachable</Text>
           <Text style={styles.errorSubtext}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={fetchMemories}>
+          <TouchableOpacity style={styles.retryBtn} onPress={() => fetchMemories()}>
             <Text style={styles.retryBtnText}>Retry</Text>
           </TouchableOpacity>
-        </View>
+        </ScrollView>
       ) : !data || !data.days || data.days.length === 0 || totalItemsAcrossAllDays === 0 ? (
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContent}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+            />
+          }
+        >
           <View style={styles.gamesRow}>
             <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/roulette')} activeOpacity={0.85}>
               <View style={[styles.gameIconWrap, { backgroundColor: '#F59E0B22' }]}>
@@ -658,7 +705,18 @@ export default function MemoriesScreen() {
           </View>
         </ScrollView>
       ) : (
-        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollContent}>
+        <ScrollView
+          showsVerticalScrollIndicator={false}
+          contentContainerStyle={styles.scrollContent}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+            />
+          }
+        >
           {/* Games Shelf */}
           <View style={styles.gamesRow}>
             <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/roulette')} activeOpacity={0.85}>
@@ -845,13 +903,25 @@ export default function MemoriesScreen() {
 
             {/* Touch Areas: Left (Prev), Right (Next), Center Hold (Pause) */}
             <View style={styles.touchAreaContainer}>
-              <Pressable style={styles.touchLeft} onPress={prevItem} />
+              <Pressable
+                style={styles.touchLeft}
+                onPress={() => {
+                  hapticSelection();
+                  prevItem();
+                }}
+              />
               <Pressable
                 style={styles.touchCenter}
                 onPressIn={() => setIsPaused(true)}
                 onPressOut={() => setIsPaused(false)}
               />
-              <Pressable style={styles.touchRight} onPress={advanceItem} />
+              <Pressable
+                style={styles.touchRight}
+                onPress={() => {
+                  hapticSelection();
+                  advanceItem();
+                }}
+              />
             </View>
 
             {/* Top Bar: Progress Segments + Close Button */}
@@ -887,7 +957,10 @@ export default function MemoriesScreen() {
                 </View>
                 <TouchableOpacity
                   style={styles.closeBtn}
-                  onPress={() => setActiveDayIdx(null)}
+                  onPress={() => {
+                    hapticLight();
+                    setActiveDayIdx(null);
+                  }}
                   hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                 >
                   <AppIcon androidName="close" iosName="xmark" color="#fff" size={24} />
@@ -979,7 +1052,10 @@ export default function MemoriesScreen() {
                   </View>
                   <TouchableOpacity
                     style={styles.closeBtn}
-                    onPress={closeFlashback}
+                    onPress={() => {
+                      hapticLight();
+                      closeFlashback();
+                    }}
                     hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                   >
                     <AppIcon androidName="close" iosName="xmark" color="#fff" size={24} />
