@@ -232,14 +232,14 @@ async def connect_device(
 async def list_devices(authorization: str = Header(None)):
     """Returns the list of accepted connected devices."""
     verify_auth(authorization)
-    return {"devices": get_devices()}
+    return {"devices": await asyncio.to_thread(get_devices)}
 
 
 @router.delete("/devices/{device_id}")
 async def delete_device(device_id: int, authorization: str = Header(None)):
     """Removes a device from the connected-devices list."""
     verify_auth(authorization)
-    remove_device(device_id)
+    await asyncio.to_thread(remove_device, device_id)
     add_log(f"🗑️ Device #{device_id} removed via API")
     return {"status": "removed"}
 
@@ -255,9 +255,9 @@ async def status(request: Request, device_id: str | None = None, authorization: 
     Intended for the future desktop UI or monitoring scripts.
     """
     verify_auth(authorization, device_id)
-    stats = get_stats()
-    devices = get_devices()
-    device_connected = is_device_known(request.client.host, device_id) if device_id else None
+    stats = await asyncio.to_thread(get_stats)
+    devices = await asyncio.to_thread(get_devices)
+    device_connected = await asyncio.to_thread(is_device_known, request.client.host, device_id) if device_id else None
     return {
         **stats,
         "connected_devices": len(devices),

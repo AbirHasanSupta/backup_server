@@ -9,6 +9,7 @@ The GUI (tkinter thread) and the API (asyncio thread) communicate via:
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -34,23 +35,24 @@ def resolve_connection(req_id: str, accepted: bool) -> None:
 # ─── Activity log ─────────────────────────────────────────────────────────────
 _LOG_LIMIT = 200
 _logs: list[dict] = []
+_logs_lock = threading.Lock()
 _current_activity: dict[str, Any] | None = None
 
 
 def add_log(message: str) -> None:
-    global _logs
-    _logs.append({"time": int(time.time()), "message": message})
-    if len(_logs) > _LOG_LIMIT:
-        _logs = _logs[-_LOG_LIMIT:]
+    with _logs_lock:
+        _logs.append({"time": int(time.time()), "message": message})
+        del _logs[:-_LOG_LIMIT]
 
 
 def get_logs() -> list[dict]:
-    return list(_logs)
+    with _logs_lock:
+        return list(_logs)
 
 
 def clear_logs() -> None:
-    global _logs
-    _logs = []
+    with _logs_lock:
+        _logs.clear()
 
 
 def set_current_activity(message: str | None, device_ip: str | None = None) -> None:

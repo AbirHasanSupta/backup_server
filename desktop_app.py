@@ -2521,6 +2521,12 @@ class BackupServerApp(ctk.CTk):
         except Exception:
             pass
 
+        try:
+            if "video_preview" in sys.modules:
+                sys.modules["video_preview"].stop_preview_scheduler()
+        except Exception:
+            pass
+
         for mod_name in (
             "config",
             "storage",

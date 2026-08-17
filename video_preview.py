@@ -582,8 +582,16 @@ class _PreviewScheduler:
         self._known_keys: set[str] = set()
         self._running_job: _PreviewJob | None = None
         self._discard_keys: set[str] = set()
+        self._stop_event = threading.Event()
         self._worker = threading.Thread(target=self._run, name="video-preview-worker", daemon=True)
         self._worker.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop_event.set()
+        with self._condition:
+            self._condition.notify_all()
+        terminated = _terminate_active_ffmpeg()
+        self._worker.join(timeout=timeout if not terminated else timeout + 3)
 
     def submit(self, source_path: str, *, priority: bool) -> str:
         if not _is_preview_candidate(source_path):
@@ -660,10 +668,12 @@ class _PreviewScheduler:
                 self._known_keys.discard(cache_key)
             return removed
 
-    def _take_next_job(self) -> _PreviewJob:
+    def _take_next_job(self) -> _PreviewJob | None:
         with self._condition:
-            while not self._priority_jobs and not self._warm_jobs:
+            while not self._stop_event.is_set() and not self._priority_jobs and not self._warm_jobs:
                 self._condition.wait()
+            if self._stop_event.is_set():
+                return None
             job = self._priority_jobs.popleft() if self._priority_jobs else self._warm_jobs.popleft()
             self._running_job = job
             return job
@@ -679,6 +689,8 @@ class _PreviewScheduler:
     def _run(self) -> None:
         while True:
             job = self._take_next_job()
+            if job is None:
+                return
             discard = False
             try:
                 # Do not populate an old cache key if a shared source changed
@@ -711,6 +723,10 @@ class _PreviewScheduler:
 
 _preview_scheduler = _PreviewScheduler()
 _active_preview_intents = _ActivePreviewIntentTracker()
+
+
+def stop_preview_scheduler() -> None:
+    _preview_scheduler.stop()
 
 # v2 used unversioned names and v3 could contain full-size fast-start rewrites.
 # Neither can be selected by v4, so reclaim them once when this module starts.
