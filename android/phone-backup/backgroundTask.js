@@ -12,6 +12,7 @@ import {
   setLastSyncTime,
   setSyncRuntimeState,
   setTotalSynced,
+  setTotalSyncedBytes,
   getServerIp,
   getLastSyncTime,
   getApiKey,
@@ -939,6 +940,7 @@ export async function runSync(onProgress, runOptions = {}) {
 
     const totalSynced = result.deviceTotalFiles > 0 ? result.deviceTotalFiles : (result.uploaded + result.skipped);
     if (totalSynced > 0) await setTotalSynced(totalSynced);
+    if (result.deviceTotalSize > 0) await setTotalSyncedBytes(result.deviceTotalSize);
 
     // ── Persist sync session history ─────────────────────────────────────────
     const folders = await getFolders().catch(() => []);

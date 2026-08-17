@@ -42,11 +42,17 @@ import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 import { PendingSyncCard, type PendingPreview } from '@/components/PendingSyncCard';
+import { StorageSavingsCard, type StorageSavingsPreview } from '@/components/StorageSavingsCard';
 import {
   getCachedPendingPreview,
   refreshPendingPreview,
   invalidatePendingPreviewCache,
 } from '../../pendingPreview';
+import {
+  getCachedStorageSavingsPreview,
+  refreshStorageSavingsPreview,
+  invalidateStorageSavingsCache,
+} from '../../storageSavingsPreview';
 import { hapticMedium, hapticWarning, hapticError } from '@/utils/haptics';
 
 function formatRelativeTime(ts: number | null): string {
@@ -160,6 +166,10 @@ export default function HomeScreen() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const previewAbortRef = useRef(false);
   const previewGenRef = useRef(0);
+  const [storagePreview, setStoragePreview] = useState<StorageSavingsPreview | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const savingsAbortRef = useRef(false);
+  const savingsGenRef = useRef(0);
 
   const DOUBLE_TAP_WINDOW_MS = 1200;
 
@@ -247,6 +257,30 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const loadStorageSavings = useCallback(async (opts: { skipServerCheck?: boolean } = {}) => {
+    const gen = ++savingsGenRef.current;
+    savingsAbortRef.current = false;
+    const snapshot = await getCurrentSyncState().catch(() => null);
+    if (gen !== savingsGenRef.current) return;
+    if (snapshot?.active) {
+      setStorageLoading(false);
+      return;
+    }
+    setStorageLoading(true);
+    try {
+      const result = await refreshStorageSavingsPreview({
+        skipServerCheck: !!opts.skipServerCheck,
+        shouldStop: () => savingsAbortRef.current || savingsGenRef.current !== gen,
+      });
+      if (gen !== savingsGenRef.current || result.aborted) return;
+      setStoragePreview(result.noFolders ? null : result);
+    } catch {
+      // Storage insight is optional — dashboard still works without it.
+    } finally {
+      if (gen === savingsGenRef.current) setStorageLoading(false);
+    }
+  }, []);
+
   const applySyncSnapshot = useCallback((snapshot: any) => {
     if (!snapshot?.active) {
       setSyncing(false);
@@ -280,21 +314,30 @@ export default function HomeScreen() {
     useCallback(() => {
       let alive = true;
       previewAbortRef.current = false;
+      savingsAbortRef.current = false;
       loadAll();
       getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
       (async () => {
         try {
-          const cached = await getCachedPendingPreview();
-          if (alive && cached) setPendingPreview(cached);
+          const [cachedPending, cachedSavings] = await Promise.all([
+            getCachedPendingPreview(),
+            getCachedStorageSavingsPreview(),
+          ]);
+          if (alive && cachedPending) setPendingPreview(cachedPending);
+          if (alive && cachedSavings) setStoragePreview(cachedSavings);
         } catch {}
         if (alive) await loadPendingPreview();
+        if (alive) await loadStorageSavings({ skipServerCheck: true });
+        if (alive) await loadStorageSavings({ skipServerCheck: false });
       })();
       return () => {
         alive = false;
         previewAbortRef.current = true;
         previewGenRef.current += 1;
+        savingsAbortRef.current = true;
+        savingsGenRef.current += 1;
       };
-    }, [applySyncSnapshot, loadAll, loadPendingPreview])
+    }, [applySyncSnapshot, loadAll, loadPendingPreview, loadStorageSavings])
   );
 
   useEffect(() => {
@@ -320,6 +363,8 @@ export default function HomeScreen() {
     const onStarted = () => {
       previewAbortRef.current = true;
       previewGenRef.current += 1;
+      savingsAbortRef.current = true;
+      savingsGenRef.current += 1;
       setSyncing(true);
       setStopRequested(false);
       setForceStopPressedAt(null);
@@ -389,7 +434,10 @@ export default function HomeScreen() {
         );
       }
       invalidatePendingPreviewCache();
+      invalidateStorageSavingsCache();
       loadPendingPreview();
+      loadStorageSavings({ skipServerCheck: true });
+      loadStorageSavings({ skipServerCheck: false });
     };
 
     const onFailed = ({ message }: { message?: string }) => {
@@ -399,7 +447,9 @@ export default function HomeScreen() {
       setPhase('idle');
       setStatusMessage(message || 'Backup failed. Check your connection.');
       invalidatePendingPreviewCache();
+      invalidateStorageSavingsCache();
       loadPendingPreview();
+      loadStorageSavings({ skipServerCheck: true });
     };
 
     const subs = [
@@ -411,12 +461,14 @@ export default function HomeScreen() {
       DeviceEventEmitter.addListener('settings-updated', () => {
         loadAll();
         invalidatePendingPreviewCache();
+        invalidateStorageSavingsCache();
         loadPendingPreview();
+        loadStorageSavings({ skipServerCheck: true });
       }),
     ];
 
     return () => subs.forEach((sub) => sub.remove());
-  }, [applySyncSnapshot, loadAll, loadPendingPreview]);
+  }, [applySyncSnapshot, loadAll, loadPendingPreview, loadStorageSavings]);
 
   const handleSync = async () => {
     const snapshot = await getCurrentSyncState().catch(() => null);
@@ -436,9 +488,12 @@ export default function HomeScreen() {
           setStatusMessage('Backup force-stopped');
           hapticError();
           invalidatePendingPreviewCache();
+          invalidateStorageSavingsCache();
           await forceStopCurrentSync();
           previewAbortRef.current = false;
+          savingsAbortRef.current = false;
           loadPendingPreview();
+          loadStorageSavings({ skipServerCheck: true });
         } else {
           setForceStopPressedAt(now);
           hapticWarning();
@@ -518,23 +573,33 @@ export default function HomeScreen() {
     try {
       previewAbortRef.current = true;
       previewGenRef.current += 1;
+      savingsAbortRef.current = true;
+      savingsGenRef.current += 1;
       hapticMedium();
       await runSync();
     } catch {
       previewAbortRef.current = false;
+      savingsAbortRef.current = false;
       loadPendingPreview();
+      loadStorageSavings({ skipServerCheck: true });
     }
   };
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     invalidatePendingPreviewCache();
+    invalidateStorageSavingsCache();
     try {
-      await Promise.all([loadAll(), loadPendingPreview()]);
+      await Promise.all([
+        loadAll(),
+        loadPendingPreview(),
+        loadStorageSavings({ skipServerCheck: true }),
+      ]);
+      await loadStorageSavings({ skipServerCheck: false });
     } finally {
       setRefreshing(false);
     }
-  }, [loadAll, loadPendingPreview]);
+  }, [loadAll, loadPendingPreview, loadStorageSavings]);
 
   const statusColors: Record<ServerStatus, string> = {
     connected: colors.success,
@@ -644,15 +709,31 @@ export default function HomeScreen() {
         </Animated.View>
 
         {(pendingPreview || previewLoading) && !syncing ? (
-          <Animated.View entering={FadeInDown.duration(400).delay(250)}>
+          <Animated.View entering={FadeInDown.duration(400).delay(250)} style={styles.pendingSection}>
+            <Text style={styles.sectionKicker}>On this device</Text>
             <PendingSyncCard
               colors={colors}
               preview={pendingPreview}
               loading={previewLoading}
               syncing={syncing}
               onPress={pendingPreview && (pendingPreview.newCount + pendingPreview.changedCount) > 0
-                ? () => router.push('/gaps')
+                ? () => {
+                    hapticMedium();
+                    router.push('/gaps');
+                  }
                 : undefined}
+            />
+          </Animated.View>
+        ) : null}
+
+        {(storagePreview || storageLoading) && !syncing ? (
+          <Animated.View entering={FadeInDown.duration(400).delay(275)} style={styles.pendingSection}>
+            <Text style={styles.sectionKicker}>Storage insight</Text>
+            <StorageSavingsCard
+              colors={colors}
+              preview={storagePreview}
+              loading={storageLoading}
+              syncing={syncing}
             />
           </Animated.View>
         ) : null}
@@ -857,6 +938,16 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   statsRow: {
     flexDirection: 'row',
     gap: Spacing.three,
+  },
+  pendingSection: {
+    gap: Spacing.two,
+  },
+  sectionKicker: {
+    fontSize: TextScale.xs,
+    fontWeight: '800',
+    color: colors.textMuted,
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
   },
   syncBtn: {
     minHeight: 56,

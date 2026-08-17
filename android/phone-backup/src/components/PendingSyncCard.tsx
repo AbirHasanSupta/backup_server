@@ -47,7 +47,7 @@ export function PendingSyncCard({ colors, preview, loading, syncing, onPress }: 
   const sizeLabel = formatPendingBytes(preview?.pendingBytes);
 
   const title = upToDate
-    ? 'Nothing waiting'
+    ? 'All backed up'
     : pending > 0
       ? formatCounts(preview as PendingPreview)
       : 'Checking folders';

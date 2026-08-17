@@ -12,6 +12,7 @@ const KEYS = {
   SYNC_PAUSED:    'sync_paused',
   LAST_SYNC_TIME: 'last_sync_time',
   TOTAL_SYNCED:   'total_synced',
+  TOTAL_SYNCED_BYTES: 'total_synced_bytes',
   SYNC_RUNTIME_STATE: 'sync_runtime_state',
   DEVICE_ID:      'device_id',
   FORCE_REFRESH_ALL: 'force_refresh_all',
@@ -300,6 +301,14 @@ export async function getTotalSynced() {
 }
 export async function setTotalSynced(count) {
   await AsyncStorage.setItem(KEYS.TOTAL_SYNCED, String(Math.max(0, count || 0)));
+  DeviceEventEmitter.emit('settings-updated');
+}
+
+export async function getTotalSyncedBytes() {
+  return Math.max(0, parseStoredInteger(await AsyncStorage.getItem(KEYS.TOTAL_SYNCED_BYTES), 0));
+}
+export async function setTotalSyncedBytes(bytes) {
+  await AsyncStorage.setItem(KEYS.TOTAL_SYNCED_BYTES, String(Math.max(0, bytes || 0)));
   DeviceEventEmitter.emit('settings-updated');
 }
 

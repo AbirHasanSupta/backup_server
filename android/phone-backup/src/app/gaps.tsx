@@ -15,7 +15,7 @@ import {
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
+import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { AnimatedListItem } from '@/components/AnimatedListItem';
@@ -236,8 +236,18 @@ export default function GapsScreen() {
     });
   }, [data?.files, searchQuery, categoryFilter]);
 
+  const categoryCounts = useMemo(() => {
+    const counts: Record<GapCategory, number> = { all: 0, image: 0, video: 0, audio: 0, other: 0 };
+    for (const file of data?.files ?? []) {
+      counts.all += 1;
+      counts[getFileCategory(file.name)] += 1;
+    }
+    return counts;
+  }, [data?.files]);
+
   const pendingTotal = (data?.newCount ?? 0) + (data?.changedCount ?? 0);
   const isFiltering = searchQuery.trim().length > 0 || categoryFilter !== 'all';
+  const listBottomPad = insets.bottom + Spacing.eight + (pendingTotal > 0 && !syncing ? 72 : Spacing.four);
 
   return (
     <View style={[styles.root, { backgroundColor: colors.bg }]}>
@@ -250,13 +260,15 @@ export default function GapsScreen() {
         <View style={styles.headerCenter}>
           <Text style={styles.headerTitle}>Backup Gaps</Text>
           <Text style={styles.headerSubtitle}>
-            {loading && !data
-              ? 'Scanning your folders…'
-              : data?.noFolders
-                ? 'No folders selected'
-                : pendingTotal > 0
-                  ? `${pendingTotal.toLocaleString()} on device, not backed up`
-                  : 'Everything is backed up'}
+            {syncing && !data
+              ? 'Backup running…'
+              : loading && !data
+                ? 'Scanning your folders…'
+                : data?.noFolders
+                  ? 'No folders selected'
+                  : pendingTotal > 0
+                    ? `${pendingTotal.toLocaleString()} on device, not backed up`
+                    : 'Everything is backed up'}
           </Text>
         </View>
         <TouchableOpacity
@@ -280,7 +292,24 @@ export default function GapsScreen() {
           </View>
           <Text style={styles.emptyTitle}>No folders selected</Text>
           <Text style={styles.emptySubtitle}>
-            Open Folders and choose at least one folder to see what still needs backing up.
+            Choose at least one folder to scan for files that still need backing up.
+          </Text>
+          <AnimatedPressable
+            style={[styles.emptyCta, { backgroundColor: colors.primary }]}
+            onPress={() => router.push('/folders')}
+            scaleDown={0.96}
+            accessibilityLabel="Open folder selection"
+          >
+            <AppIcon androidName="folder_open" iosName="folder" color={colors.white} size={18} />
+            <Text style={styles.emptyCtaText}>Open Folders</Text>
+          </AnimatedPressable>
+        </View>
+      ) : syncing && !data && !loading ? (
+        <View style={styles.centered}>
+          <ActivityIndicator size="large" color={colors.primary} />
+          <Text style={styles.loadingText}>Backup in progress…</Text>
+          <Text style={[styles.loadingHint, { color: colors.textMuted }]}>
+            This list will refresh when the sync finishes.
           </Text>
         </View>
       ) : (
@@ -288,6 +317,8 @@ export default function GapsScreen() {
           {pendingTotal > 0 && (
             <Animated.View entering={FadeInDown.duration(350).delay(80)} style={styles.summaryBanner}>
               <SummaryChip
+                icon="fiber_new"
+                iosIcon="sparkle"
                 value={(data?.newCount ?? 0).toLocaleString()}
                 label="new"
                 color={colors.primary}
@@ -295,6 +326,8 @@ export default function GapsScreen() {
               />
               <View style={styles.bannerDivider} />
               <SummaryChip
+                icon="edit"
+                iosIcon="pencil"
                 value={(data?.changedCount ?? 0).toLocaleString()}
                 label="changed"
                 color={colors.warning}
@@ -302,6 +335,8 @@ export default function GapsScreen() {
               />
               <View style={styles.bannerDivider} />
               <SummaryChip
+                icon="storage"
+                iosIcon="internaldrive"
                 value={formatPendingBytes(data?.pendingBytes ?? 0) || '0 B'}
                 label="waiting"
                 color={colors.text}
@@ -341,6 +376,7 @@ export default function GapsScreen() {
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
                 {CATEGORY_CHIPS.map((chip) => {
                   const active = categoryFilter === chip.id;
+                  const count = categoryCounts[chip.id];
                   return (
                     <TouchableOpacity
                       key={chip.id}
@@ -353,6 +389,7 @@ export default function GapsScreen() {
                         },
                       ]}
                       activeOpacity={0.75}
+                      accessibilityLabel={`${chip.label}, ${count} files`}
                     >
                       <AppIcon
                         androidName={chip.icon}
@@ -362,6 +399,7 @@ export default function GapsScreen() {
                       />
                       <Text style={[styles.chipText, { color: active ? colors.primary : colors.textSecondary }]}>
                         {chip.label}
+                        {count > 0 ? ` · ${count.toLocaleString()}` : ''}
                       </Text>
                     </TouchableOpacity>
                   );
@@ -384,14 +422,17 @@ export default function GapsScreen() {
             <FlatList
               data={filteredFiles}
               keyExtractor={(item) => item.relativePath}
+              style={pendingTotal > 0 ? styles.listCard : undefined}
               renderItem={({ item, index }) => (
                 <AnimatedListItem index={index}>
                   <GapFileRow file={item} colors={colors} styles={styles} />
                 </AnimatedListItem>
               )}
+              ItemSeparatorComponent={() => <View style={styles.rowSeparator} />}
               contentContainerStyle={[
                 styles.listContent,
-                { paddingBottom: BottomTabInset + Spacing.eight + (pendingTotal > 0 ? 72 : 0) },
+                pendingTotal > 0 && styles.listContentCard,
+                { paddingBottom: listBottomPad },
               ]}
               refreshControl={
                 <RefreshControl
@@ -453,12 +494,13 @@ export default function GapsScreen() {
 }
 
 function SummaryChip({
-  value, label, color, colors,
+  icon, iosIcon, value, label, color, colors,
 }: {
-  value: string; label: string; color: string; colors: AppColors;
+  icon: string; iosIcon: string; value: string; label: string; color: string; colors: AppColors;
 }) {
   return (
     <View style={{ alignItems: 'center', flex: 1, gap: 3 }}>
+      <AppIcon androidName={icon} iosName={iosIcon} color={color} size={18} fallback="." />
       <Text style={{ fontSize: TextScale.md, fontWeight: '800', color }}>{value}</Text>
       <Text style={{ fontSize: TextScale.xs, color: colors.textMuted, fontWeight: '500' }}>{label}</Text>
     </View>
@@ -562,14 +604,29 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     paddingTop: Spacing.two,
     flexGrow: 1,
   },
+  listCard: {
+    marginHorizontal: Spacing.four,
+    backgroundColor: colors.surface,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    borderColor: colors.surfaceBorder,
+    overflow: 'hidden',
+  },
+  listContentCard: {
+    paddingHorizontal: 0,
+    paddingTop: 0,
+  },
+  rowSeparator: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: colors.surfaceBorder,
+    marginLeft: Spacing.two + 32 + Spacing.two,
+  },
   fileRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
     paddingVertical: Spacing.two + 2,
-    paddingHorizontal: Spacing.two,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.surfaceBorder,
+    paddingHorizontal: Spacing.three,
   },
   fileIconWrap: {
     width: 32,
@@ -594,6 +651,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   statusText: { fontSize: 10, fontWeight: '800', textTransform: 'uppercase', letterSpacing: 0.3 },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.five },
   loadingText: { marginTop: Spacing.three, fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '600' },
+  loadingHint: { marginTop: Spacing.two, fontSize: TextScale.xs, fontWeight: '500', textAlign: 'center', maxWidth: 260 },
   emptyContainer: { alignItems: 'center', padding: Spacing.six, paddingTop: Spacing.eight },
   emptyIconWrap: {
     width: 72,
@@ -611,6 +669,21 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     textAlign: 'center',
     lineHeight: 22,
     maxWidth: 300,
+  },
+  emptyCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    marginTop: Spacing.five,
+    paddingHorizontal: Spacing.five,
+    paddingVertical: Spacing.three,
+    borderRadius: Radius.full,
+    ...Shadows.soft,
+  },
+  emptyCtaText: {
+    fontSize: TextScale.sm,
+    fontWeight: '800',
+    color: colors.white,
   },
   fab: {
     position: 'absolute',
