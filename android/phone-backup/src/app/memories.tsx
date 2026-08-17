@@ -105,6 +105,10 @@ interface FlashbackItem extends MemoryItem {
 
 type RewindStatus = 'idle' | 'checking' | 'generating' | 'ready' | 'none' | 'error';
 const REWIND_POLL_MAX_ATTEMPTS = 45;
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
 
 function dayItemCount(day: DayMemory): number {
   return day.groups.reduce((sum, g) => sum + g.items.length, 0);
@@ -171,7 +175,7 @@ export default function MemoriesScreen() {
   const [progressRatio, setProgressRatio] = useState<number>(0);
 
   // Flashback state
-  const params = useLocalSearchParams<{ flashback?: string }>();
+  const params = useLocalSearchParams<{ flashback?: string; recap?: string; recapYear?: string; recapMonth?: string }>();
   const [flashbackVisible, setFlashbackVisible] = useState(false);
   const [flashbackLoading, setFlashbackLoading] = useState(false);
   const [flashbackItem, setFlashbackItem] = useState<FlashbackItem | null>(null);
@@ -181,6 +185,7 @@ export default function MemoriesScreen() {
   // Rewind Reel state
   const [rewindVisible, setRewindVisible] = useState(false);
   const [rewindYear, setRewindYear] = useState<number | null>(null);
+  const [rewindMonth, setRewindMonth] = useState<number | null>(null);
   const [rewindStatus, setRewindStatus] = useState<RewindStatus>('idle');
   const [rewindSaving, setRewindSaving] = useState(false);
   const rewindPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -349,6 +354,19 @@ export default function MemoriesScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.flashback]);
 
+  useEffect(() => {
+    if (params.recap === '1' && params.recapYear) {
+      const year = Number(params.recapYear);
+      const month = params.recapMonth ? Number(params.recapMonth) : undefined;
+      if (Number.isFinite(year)) {
+        // Deep-link / notification entry — intentionally kick off async fetch.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        openRewind(year, month);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params.recap, params.recapYear, params.recapMonth]);
+
   const handleSaveFlashback = async () => {
     if (!flashbackItem || flashbackSaving) return;
     setFlashbackSaving(true);
@@ -388,9 +406,10 @@ export default function MemoriesScreen() {
     }
   }, []);
 
-  const openRewind = useCallback(async (year: number) => {
+  const openRewind = useCallback(async (year: number, month?: number) => {
     setRewindVisible(true);
     setRewindYear(year);
+    setRewindMonth(month ?? null);
     setRewindStatus('checking');
     if (!serverConfig) {
       try {
@@ -399,7 +418,7 @@ export default function MemoriesScreen() {
       } catch {}
     }
     try {
-      let status = await getRewindReelStatus(year);
+      let status = await getRewindReelStatus(year, month);
       if (status.ready) {
         setRewindStatus('ready');
         return;
@@ -410,7 +429,7 @@ export default function MemoriesScreen() {
       }
       // Start (or restart after a prior failure) unless already generating.
       if (status.status !== 'generating') {
-        const started = await generateRewindReel(year);
+        const started = await generateRewindReel(year, month);
         if (started?.status === 'none') {
           setRewindStatus('none');
           return;
@@ -426,7 +445,7 @@ export default function MemoriesScreen() {
       rewindPollRef.current = setInterval(async () => {
         attempts += 1;
         try {
-          const poll = await getRewindReelStatus(year);
+          const poll = await getRewindReelStatus(year, month);
           if (poll.ready) {
             setRewindStatus('ready');
             clearRewindPoll();
@@ -457,6 +476,7 @@ export default function MemoriesScreen() {
     clearRewindPoll();
     setRewindVisible(false);
     setRewindYear(null);
+    setRewindMonth(null);
     setRewindStatus('idle');
   }, [clearRewindPoll]);
 
@@ -475,6 +495,7 @@ export default function MemoriesScreen() {
     setFlashbackError(null);
     setRewindVisible(false);
     setRewindYear(null);
+    setRewindMonth(null);
     setRewindStatus('idle');
   }, [clearRewindPoll]);
 
@@ -506,8 +527,8 @@ export default function MemoriesScreen() {
         return;
       }
       const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
-      const tmpUri = `${cacheDir}rewind_${rewindYear}_${Date.now()}.mp4`;
-      await downloadRewindReel(rewindYear, undefined, tmpUri);
+      const tmpUri = `${cacheDir}rewind_${rewindYear}_${rewindMonth || 'y'}_${Date.now()}.mp4`;
+      await downloadRewindReel(rewindYear, rewindMonth ?? undefined, tmpUri);
       await MediaLibrary.saveToLibraryAsync(tmpUri);
       await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
       hapticSuccess();
@@ -1105,7 +1126,7 @@ export default function MemoriesScreen() {
 
           {rewindStatus === 'ready' && serverConfig && rewindYear ? (
             <RewindVideoPlayer
-              uri={buildRewindReelStreamUrl(serverConfig, rewindYear)}
+              uri={buildRewindReelStreamUrl(serverConfig, rewindYear, rewindMonth ?? undefined)}
               styles={styles}
             />
           ) : (
@@ -1122,7 +1143,7 @@ export default function MemoriesScreen() {
                 <>
                   <AppIcon androidName="movie" iosName="film" color="#fff" size={40} />
                   <Text style={[styles.errorSubtext, { color: '#fff', marginTop: Spacing.three }]}>
-                    Not enough photos from {rewindYear} yet to build a reel.
+                    Not enough photos from {rewindMonth ? `${MONTH_NAMES[rewindMonth - 1]} ` : ''}{rewindYear} yet to build a reel.
                   </Text>
                 </>
               )}
@@ -1135,7 +1156,7 @@ export default function MemoriesScreen() {
                   {rewindYear != null && (
                     <TouchableOpacity
                       style={[styles.retryBtn, { marginTop: Spacing.four }]}
-                      onPress={() => openRewind(rewindYear)}
+                      onPress={() => openRewind(rewindYear, rewindMonth ?? undefined)}
                     >
                       <Text style={styles.retryBtnText}>Try Again</Text>
                     </TouchableOpacity>
@@ -1149,9 +1170,11 @@ export default function MemoriesScreen() {
             <View style={styles.storyHeaderRow}>
               <View style={styles.storyHeaderInfo}>
                 <View style={styles.storyDayPill}>
-                  <Text style={styles.storyDayPillText}>REWIND REEL</Text>
+                  <Text style={styles.storyDayPillText}>{rewindMonth ? 'RECAP' : 'REWIND REEL'}</Text>
                 </View>
-                <Text style={styles.storyYearTitle}>{rewindYear}</Text>
+                <Text style={styles.storyYearTitle}>
+                  {rewindMonth ? `${MONTH_NAMES[rewindMonth - 1]} ${rewindYear}` : rewindYear}
+                </Text>
               </View>
               <TouchableOpacity
                 style={styles.closeBtn}

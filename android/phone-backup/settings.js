@@ -24,6 +24,7 @@ const KEYS = {
   AUTO_SYNC_SUPPRESSED_UNTIL: 'auto_sync_suppressed_until',
   LAST_MEMORY_NOTIFIED_DATE: 'last_memory_notified_date',
   LAST_FLASHBACK_NOTIFIED_AT: 'last_flashback_notified_at',
+  LAST_RECAP_NOTIFIED_MONTH: 'last_recap_notified_month',
 };
 
 export async function getLastMemoryNotifiedDate() { return (await AsyncStorage.getItem(KEYS.LAST_MEMORY_NOTIFIED_DATE)) || ''; }
@@ -35,6 +36,13 @@ export async function getLastFlashbackNotifiedAt() {
 }
 export async function setLastFlashbackNotifiedAt(ts) {
   await AsyncStorage.setItem(KEYS.LAST_FLASHBACK_NOTIFIED_AT, String(ts));
+}
+
+export async function getLastRecapNotifiedMonth() {
+  return (await AsyncStorage.getItem(KEYS.LAST_RECAP_NOTIFIED_MONTH)) || '';
+}
+export async function setLastRecapNotifiedMonth(monthKey) {
+  await AsyncStorage.setItem(KEYS.LAST_RECAP_NOTIFIED_MONTH, monthKey);
 }
 
 function safeJsonParse(raw, fallback) {

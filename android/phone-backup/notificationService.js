@@ -23,7 +23,14 @@ const STREAK_CHANNEL_ID = 'streak';
 const STREAK_NOTIFICATION_ID = 'streak-risk';
 const GOAL_CHANNEL_ID = 'backup-goals';
 const GOAL_NOTIFICATION_ID = 'backup-goal-complete';
+const RECAP_CHANNEL_ID = 'recap';
+const RECAP_NOTIFICATION_ID = 'monthly-recap-ready';
 const APP_PRIMARY_COLOR = '#2563EB';
+
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
 
 function immediateNotificationTrigger() {
   return Platform.OS === 'android' ? { channelId: SYNC_CHANNEL_ID } : null;
@@ -103,6 +110,12 @@ export async function setupNotifications() {
       });
       await N.setNotificationChannelAsync(GOAL_CHANNEL_ID, {
         name: 'Backup Goals',
+        importance: N.AndroidImportance.DEFAULT,
+        lightColor: APP_PRIMARY_COLOR,
+        showBadge: false,
+      });
+      await N.setNotificationChannelAsync(RECAP_CHANNEL_ID, {
+        name: 'Monthly Recap',
         importance: N.AndroidImportance.DEFAULT,
         lightColor: APP_PRIMARY_COLOR,
         showBadge: false,
@@ -247,6 +260,10 @@ function goalNotificationTrigger() {
   return Platform.OS === 'android' ? { channelId: GOAL_CHANNEL_ID } : null;
 }
 
+function recapNotificationTrigger() {
+  return Platform.OS === 'android' ? { channelId: RECAP_CHANNEL_ID } : null;
+}
+
 export async function showMemoriesNotification(count) {
   if (!N) return;
   try {
@@ -328,6 +345,24 @@ export async function showGoalCompleteNotification(goal) {
     });
   } catch (e) {
     console.warn('[Notifications] showGoalCompleteNotification failed:', e?.message);
+  }
+}
+
+export async function showRecapReadyNotification(year, month) {
+  if (!N) return;
+  try {
+    const monthLabel = MONTH_NAMES[(month || 1) - 1] || 'Monthly';
+    await N.scheduleNotificationAsync({
+      identifier: RECAP_NOTIFICATION_ID,
+      content: {
+        title: '🎬 Your recap is ready',
+        body: `Your ${monthLabel} ${year} Recap has been stitched together. Tap to watch and share.`,
+        data: { type: 'recap', year, month },
+      },
+      trigger: recapNotificationTrigger(),
+    });
+  } catch (e) {
+    console.warn('[Notifications] showRecapReadyNotification failed:', e?.message);
   }
 }
 
@@ -463,6 +498,44 @@ export function addMemoriesTapListener(onTap) {
     return () => sub.remove();
   } catch (e) {
     console.warn('[Notifications] addMemoriesTapListener failed:', e?.message);
+    return () => {};
+  }
+}
+
+function recapTargetFromNotificationData(data) {
+  if (!data || data.type !== 'recap' || data.year == null) return null;
+  return { year: Number(data.year), month: data.month != null ? Number(data.month) : null };
+}
+
+export async function getInitialRecapTap() {
+  if (!N) return null;
+  try {
+    const response = await Promise.resolve(readLastNotificationResponse());
+    const data = response?.notification?.request?.content?.data;
+    const target = recapTargetFromNotificationData(data);
+    if (!target) return null;
+    clearHandledNotificationResponse();
+    return target;
+  } catch (e) {
+    console.warn('[Notifications] getInitialRecapTap failed:', e?.message);
+    return null;
+  }
+}
+
+export function addRecapTapListener(onTap) {
+  if (!N) return () => {};
+  try {
+    const sub = N.addNotificationResponseReceivedListener(response => {
+      const data = response.notification.request.content.data;
+      const target = recapTargetFromNotificationData(data);
+      if (target) {
+        clearHandledNotificationResponse();
+        onTap(target);
+      }
+    });
+    return () => sub.remove();
+  } catch (e) {
+    console.warn('[Notifications] addRecapTapListener failed:', e?.message);
     return () => {};
   }
 }

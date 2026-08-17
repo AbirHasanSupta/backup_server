@@ -14,14 +14,19 @@ import {
   addFlashbackTapListener,
   getInitialFlashbackTap,
   showStreakRiskNotification,
+  showRecapReadyNotification,
+  addRecapTapListener,
+  getInitialRecapTap,
 } from '../../notificationService';
 import {
   getLastMemoryNotifiedDate,
   setLastMemoryNotifiedDate,
   getLastFlashbackNotifiedAt,
   setLastFlashbackNotifiedAt,
+  getLastRecapNotifiedMonth,
+  setLastRecapNotifiedMonth,
 } from '../../settings';
-import { getTodaysMemories, getRandomFlashback } from '../../downloader';
+import { getTodaysMemories, getRandomFlashback, generateRewindReel, getRewindReelStatus } from '../../downloader';
 import {
   getStreakData,
   getLastStreakRiskNotifiedDate,
@@ -107,6 +112,41 @@ async function checkAndNotifyFlashback() {
   }
 }
 
+// Recap covers the prior calendar month, so it's only worth checking once
+// that month is fully over — otherwise the reel would be built from a
+// partial month and rebuilt again once more files land.
+function previousMonthKey(now: Date): { year: number; month: number; key: string } {
+  const year = now.getMonth() === 0 ? now.getFullYear() - 1 : now.getFullYear();
+  const month = now.getMonth() === 0 ? 12 : now.getMonth();
+  return { year, month, key: `${year}-${String(month).padStart(2, '0')}` };
+}
+
+async function checkAndNotifyRecap() {
+  const { year, month, key } = previousMonthKey(new Date());
+  const lastNotified = await getLastRecapNotifiedMonth();
+  if (lastNotified === key) return;
+
+  try {
+    const status = await getRewindReelStatus(year, month);
+    if (status.ready) {
+      await showRecapReadyNotification(year, month);
+      await setLastRecapNotifiedMonth(key);
+      return;
+    }
+    if (status.status === 'none') {
+      // Not enough media that month — stop checking so it doesn't retry every launch.
+      await setLastRecapNotifiedMonth(key);
+      return;
+    }
+    if (status.status !== 'generating') {
+      await generateRewindReel(year, month).catch(() => {});
+    }
+    // Still building — leave lastNotified unset so a future app open checks again.
+  } catch {
+    // Offline or server unreachable — try again next launch.
+  }
+}
+
 async function checkAndNotifyStreakRisk() {
   const todayStr = streakTodayStr();
   const lastNotified = await getLastStreakRiskNotifiedDate();
@@ -147,6 +187,7 @@ function RootLayoutContent() {
       checkAndNotifyMemories().catch(() => {});
       checkAndNotifyFlashback().catch(() => {});
       checkAndNotifyStreakRisk().catch(() => {});
+      checkAndNotifyRecap().catch(() => {});
     })();
   }, []);
 
@@ -163,14 +204,23 @@ function RootLayoutContent() {
       const isMemories = await getInitialMemoriesTap();
       if (active && isMemories) {
         router.push('/memories');
+        return;
+      }
+      const recapTarget = await getInitialRecapTap();
+      if (active && recapTarget) {
+        router.push(`/memories?recap=1&recapYear=${recapTarget.year}&recapMonth=${recapTarget.month ?? ''}`);
       }
     })();
     const unsubscribeMemories = addMemoriesTapListener(() => router.push('/memories'));
     const unsubscribeFlashback = addFlashbackTapListener(() => router.push('/memories?flashback=1'));
+    const unsubscribeRecap = addRecapTapListener((target) =>
+      router.push(`/memories?recap=1&recapYear=${target.year}&recapMonth=${target.month ?? ''}`)
+    );
     return () => {
       active = false;
       unsubscribeMemories();
       unsubscribeFlashback();
+      unsubscribeRecap();
     };
   }, [router]);
 
