@@ -50,11 +50,6 @@ const DAY_CARD_W = 132;
 const DAY_CARD_H = 208;
 const DAY_CARD_GAP = 14;
 
-// Captured once at module load so the rewind picker month grid can compare
-// against the current calendar month without calling `new Date()` inside a
-// map() on every render. This value is stable for the lifetime of the JS
-// bundle (the app is typically reloaded at most once per day).
-const now = new Date();
 
 type ExpoVideoModule = typeof import('expo-video');
 type VideoSource = import('expo-video').VideoSource;
@@ -172,6 +167,7 @@ export default function MemoriesScreen() {
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<MemoriesResponse | null>(null);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
+  const serverConfigRef = useRef<ServerConfig | null>(null);
 
   // Story Viewer state
   const [activeDayIdx, setActiveDayIdx] = useState<number | null>(null);
@@ -181,6 +177,19 @@ export default function MemoriesScreen() {
 
   const photoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [progressRatio, setProgressRatio] = useState<number>(0);
+
+  // Refs that mirror modal-open state so the BackHandler can read current
+  // values without being listed as effect dependencies (which would cause
+  // the effect to re-register on every open/close and run the cleanup
+  // prematurely, instantly dismissing whatever just opened).
+  const activeDayIdxRef = useRef<number | null>(null);
+  const flashbackVisibleRef = useRef(false);
+  const rewindVisibleRef = useRef(false);
+  const rewindPickerVisibleRef = useRef(false);
+  const stopAllPlaybackRef = useRef<() => void>(() => {});
+  const closeFlashbackRef = useRef<() => void>(() => {});
+  const closeRewindRef = useRef<() => void>(() => {});
+  const routerRef = useRef(router);
 
   // Flashback state
   const params = useLocalSearchParams<{ flashback?: string; recap?: string; recapYear?: string; recapMonth?: string }>();
@@ -352,9 +361,10 @@ export default function MemoriesScreen() {
     setFlashbackLoading(true);
     setFlashbackError(null);
     try {
-      if (!serverConfig) {
+      if (!serverConfigRef.current) {
         const cfg = await getConfig();
         setServerConfig(cfg);
+        serverConfigRef.current = cfg;
       }
       const pending = prefetched || consumePendingFlashbackItem();
       if (pending?.relative_path) {
@@ -375,7 +385,7 @@ export default function MemoriesScreen() {
     } finally {
       setFlashbackLoading(false);
     }
-  }, [serverConfig]);
+  }, []);
 
   const handleNextSurprise = useCallback(async () => {
     if (flashbackLoading) return;
@@ -428,10 +438,11 @@ export default function MemoriesScreen() {
     setRewindYear(year);
     setRewindMonth(month ?? null);
     setRewindStatus('checking');
-    if (!serverConfig) {
+    if (!serverConfigRef.current) {
       try {
         const cfg = await getConfig();
         setServerConfig(cfg);
+        serverConfigRef.current = cfg;
       } catch {}
     }
     try {
@@ -487,7 +498,7 @@ export default function MemoriesScreen() {
     } catch {
       setRewindStatus('error');
     }
-  }, [serverConfig, clearRewindPoll]);
+  }, [clearRewindPoll]);
 
   const closeRewind = useCallback(() => {
     clearRewindPoll();
@@ -499,22 +510,29 @@ export default function MemoriesScreen() {
 
   useEffect(() => () => clearRewindPoll(), [clearRewindPoll]);
 
+  const handledFlashbackParamRef = useRef(false);
   useEffect(() => {
-    if (params.flashback === '1') {
+    if (params.flashback === '1' && !handledFlashbackParamRef.current) {
+      handledFlashbackParamRef.current = true;
       queueMicrotask(() => {
         openFlashback();
       });
     }
   }, [params.flashback, openFlashback]);
 
+  const handledRecapParamRef = useRef<string | null>(null);
   useEffect(() => {
     if (params.recap === '1' && params.recapYear) {
-      const year = Number(params.recapYear);
-      const month = params.recapMonth ? Number(params.recapMonth) : undefined;
-      if (Number.isFinite(year)) {
-        queueMicrotask(() => {
-          openRewind(year, month);
-        });
+      const paramKey = `${params.recapYear}-${params.recapMonth ?? ''}`;
+      if (handledRecapParamRef.current !== paramKey) {
+        handledRecapParamRef.current = paramKey;
+        const year = Number(params.recapYear);
+        const month = params.recapMonth ? Number(params.recapMonth) : undefined;
+        if (Number.isFinite(year)) {
+          queueMicrotask(() => {
+            openRewind(year, month);
+          });
+        }
       }
     }
   }, [params.recap, params.recapYear, params.recapMonth, openRewind]);
@@ -568,46 +586,74 @@ export default function MemoriesScreen() {
     setRewindYear(null);
     setRewindMonth(null);
     setRewindStatus('idle');
+    setRewindPickerVisible(false);
   }, [clearRewindPoll]);
 
+  // Keep all mutable refs in sync with React state and callbacks outside of render.
+  useEffect(() => {
+    activeDayIdxRef.current = activeDayIdx;
+    flashbackVisibleRef.current = flashbackVisible;
+    rewindVisibleRef.current = rewindVisible;
+    rewindPickerVisibleRef.current = rewindPickerVisible;
+    serverConfigRef.current = serverConfig;
+    stopAllPlaybackRef.current = stopAllPlayback;
+    closeFlashbackRef.current = closeFlashback;
+    closeRewindRef.current = closeRewind;
+    routerRef.current = router;
+  }, [
+    activeDayIdx,
+    flashbackVisible,
+    rewindVisible,
+    rewindPickerVisible,
+    serverConfig,
+    stopAllPlayback,
+    closeFlashback,
+    closeRewind,
+    router,
+  ]);
+
+  // Simple focus-blur guard: stop all playback when the screen loses focus
+  // (e.g. navigating to Roulette, Quiz, etc.). Kept dependency-free so it
+  // does NOT re-register — and does NOT fire its cleanup — every time a modal
+  // opens or closes (which would instantly dismiss the just-opened modal).
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        stopAllPlaybackRef.current();
+      };
+    }, []),
+  );
+
+  // Hardware back-button: dismiss modals in order of priority.
+  // Reads modal state via refs so this effect NEVER needs to re-register
+  // (empty dep array). Without refs the handler would be stale, and with
+  // state deps it would re-register on every open/close — both broken.
   useFocusEffect(
     useCallback(() => {
       const onBackPress = () => {
-        if (rewindPickerVisible) {
+        if (rewindPickerVisibleRef.current) {
           setRewindPickerVisible(false);
           return true;
         }
-        if (flashbackVisible) {
-          closeFlashback();
+        if (flashbackVisibleRef.current) {
+          closeFlashbackRef.current();
           return true;
         }
-        if (rewindVisible) {
-          closeRewind();
+        if (rewindVisibleRef.current) {
+          closeRewindRef.current();
           return true;
         }
-        if (activeDayIdx !== null) {
+        if (activeDayIdxRef.current !== null) {
           setActiveDayIdx(null);
           return true;
         }
-        router.navigate('/');
+        routerRef.current.navigate('/');
         return true;
       };
 
       const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
-      return () => {
-        sub.remove();
-        stopAllPlayback();
-      };
-    }, [
-      rewindPickerVisible,
-      flashbackVisible,
-      closeFlashback,
-      rewindVisible,
-      closeRewind,
-      activeDayIdx,
-      router,
-      stopAllPlayback,
-    ]),
+      return () => sub.remove();
+    }, []),
   );
 
   useEffect(() => {
@@ -1478,7 +1524,9 @@ export default function MemoriesScreen() {
                 {MONTH_NAMES.map((name, idx) => {
                   const mNum = idx + 1;
                   const isSelected = pickerMonth === mNum;
-                  const isFuture = pickerYear >= now.getFullYear() && mNum > (now.getMonth() + 1);
+                  const currentYear = new Date().getFullYear();
+                  const currentMonth = new Date().getMonth() + 1;
+                  const isFuture = pickerYear > currentYear || (pickerYear === currentYear && mNum > currentMonth);
                   const shortName = name.slice(0, 3);
                   return (
                     <TouchableOpacity
@@ -1871,7 +1919,8 @@ const createStyles = (colors: AppColors, insets: any) =>
       position: 'absolute',
       top: Spacing.three,
       right: Spacing.four + Spacing.two,
-      zIndex: 5,
+      zIndex: 10,
+      elevation: 10,
       flexDirection: 'row',
       alignItems: 'center',
       gap: 5,
@@ -2005,6 +2054,7 @@ const createStyles = (colors: AppColors, insets: any) =>
       left: 0,
       right: 0,
       zIndex: 20,
+      elevation: 20,
       paddingHorizontal: Spacing.four,
       backgroundColor: 'rgba(0,0,0,0.4)',
     },
@@ -2054,6 +2104,7 @@ const createStyles = (colors: AppColors, insets: any) =>
       left: 0,
       right: 0,
       zIndex: 20,
+      elevation: 20,
       paddingHorizontal: Spacing.five,
       paddingTop: Spacing.three,
       flexDirection: 'row',
