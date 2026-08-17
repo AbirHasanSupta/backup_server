@@ -3,7 +3,7 @@ import { getFolders, loadScanSnapshot } from './settings';
 import { scan, hasProperExtension } from './scanner';
 
 const CACHE_KEY = 'pending_preview_cache_v1';
-const MULTI_GET_CHUNK = 80;
+const MULTI_GET_CHUNK = 500;
 const STALE_MS = 2 * 60 * 1000;
 
 let inFlight = null;
@@ -21,12 +21,13 @@ export function formatPendingBytes(bytes) {
 }
 
 async function multiGetChunked(keys) {
-  const pairs = [];
+  if (!keys.length) return [];
+  const chunks = [];
   for (let i = 0; i < keys.length; i += MULTI_GET_CHUNK) {
-    const chunk = await AsyncStorage.multiGet(keys.slice(i, i + MULTI_GET_CHUNK));
-    pairs.push(...chunk);
+    chunks.push(keys.slice(i, i + MULTI_GET_CHUNK));
   }
-  return pairs;
+  const chunkResults = await Promise.all(chunks.map((c) => AsyncStorage.multiGet(c)));
+  return chunkResults.flat();
 }
 
 function emptyPreview(extra = {}) {
@@ -89,7 +90,7 @@ async function collectPendingFromSnapshot(snapshotCache, shouldStop) {
 
   const files = [];
   for (let i = 0; i < entries.length; i++) {
-    if (i % 250 === 0 && shouldStop?.()) return null;
+    if (i % 500 === 0 && shouldStop?.()) return null;
     const [path, meta] = entries[i];
     const val = valueByKey.get(`uploaded_${path}`);
     const mtime = String(meta?.mtime || 0);
@@ -102,7 +103,7 @@ async function collectPendingFromSnapshot(snapshotCache, shouldStop) {
         modifiedTime: Number(meta?.mtime) || 0,
         status: 'new',
       });
-    } else if (val !== mtime) {
+    } else if (val !== mtime && meta?.mtime) {
       files.push({
         relativePath: path,
         name: fileNameFromPath(path),
@@ -197,8 +198,10 @@ export async function previewPendingSync({ shouldStop, skipScan = false } = {}) 
 
   if (shouldStop?.()) return { ...snapshotResult, aborted: true };
 
-  const scanned = await scan(null, null, snapshotCache, {
-    incremental: true,
+  const isInitial = snapshotCache.size === 0;
+  const scanned = await scan(null, null, isInitial ? null : snapshotCache, {
+    incremental: !isInitial,
+    noMetadata: true,
     shouldStop: () => !!shouldStop?.(),
   });
 
@@ -208,8 +211,19 @@ export async function previewPendingSync({ shouldStop, skipScan = false } = {}) 
 
   const files = Array.isArray(scanned) ? scanned : [];
   const fresh = files.filter((file) => file?.name && hasProperExtension(file.name));
-  const newFromScan = fresh.length;
-  const bytesFromScan = fresh.reduce((sum, file) => sum + (file.size || 0), 0);
+
+  let newFromScan = fresh.length;
+  let bytesFromScan = fresh.reduce((sum, file) => sum + (file.size || 0), 0);
+
+  if (isInitial && fresh.length > 0) {
+    // On first scan before snapshot exists, check uploaded keys in batch
+    const keys = fresh.map((f) => `uploaded_${f.relativePath}`);
+    const pairs = await multiGetChunked(keys);
+    const valueByKey = new Map(pairs);
+    const unuploaded = fresh.filter((f) => !valueByKey.has(`uploaded_${f.relativePath}`));
+    newFromScan = unuploaded.length;
+    bytesFromScan = unuploaded.reduce((sum, file) => sum + (file.size || 0), 0);
+  }
 
   lastScanAt = Date.now();
   const result = {
@@ -288,8 +302,10 @@ export async function listPendingFiles({ shouldStop, skipScan = false } = {}) {
     return summarizePendingFiles(files, { aborted: true, scanned: false, noFolders: false });
   }
 
-  const scanned = await scan(null, null, snapshotCache, {
-    incremental: true,
+  const isInitial = snapshotCache.size === 0;
+  const scanned = await scan(null, null, isInitial ? null : snapshotCache, {
+    incremental: !isInitial,
+    noMetadata: true,
     shouldStop: () => !!shouldStop?.(),
   });
 
@@ -300,7 +316,16 @@ export async function listPendingFiles({ shouldStop, skipScan = false } = {}) {
   const scanFiles = Array.isArray(scanned) ? scanned : [];
   const fresh = scanFiles.filter((file) => file?.name && hasProperExtension(file.name));
   const seen = new Set(files.map((file) => file.relativePath));
-  for (const file of fresh) {
+
+  let freshToAdd = fresh;
+  if (isInitial && fresh.length > 0) {
+    const keys = fresh.map((f) => `uploaded_${f.relativePath}`);
+    const pairs = await multiGetChunked(keys);
+    const valueByKey = new Map(pairs);
+    freshToAdd = fresh.filter((f) => !valueByKey.has(`uploaded_${f.relativePath}`));
+  }
+
+  for (const file of freshToAdd) {
     if (seen.has(file.relativePath)) continue;
     files.push({
       relativePath: file.relativePath,

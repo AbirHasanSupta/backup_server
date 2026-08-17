@@ -14,6 +14,7 @@ import {
   ScrollView,
   AppState,
   RefreshControl,
+  BackHandler,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
@@ -179,9 +180,12 @@ export default function MemoriesScreen() {
   const params = useLocalSearchParams<{ flashback?: string; recap?: string; recapYear?: string; recapMonth?: string }>();
   const [flashbackVisible, setFlashbackVisible] = useState(false);
   const [flashbackLoading, setFlashbackLoading] = useState(false);
-  const [flashbackItem, setFlashbackItem] = useState<FlashbackItem | null>(null);
+  const [flashbackHistory, setFlashbackHistory] = useState<FlashbackItem[]>([]);
+  const [flashbackIndex, setFlashbackIndex] = useState<number>(0);
   const [flashbackError, setFlashbackError] = useState<string | null>(null);
   const [flashbackSaving, setFlashbackSaving] = useState(false);
+
+  const flashbackItem = flashbackHistory[flashbackIndex] || null;
 
   // Rewind Reel state
   const [rewindVisible, setRewindVisible] = useState(false);
@@ -191,6 +195,26 @@ export default function MemoriesScreen() {
   const [rewindSaving, setRewindSaving] = useState(false);
   const [rewindSharing, setRewindSharing] = useState(false);
   const rewindPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Rewind & Recap Picker state
+  const [rewindPickerVisible, setRewindPickerVisible] = useState(false);
+  const [pickerType, setPickerType] = useState<'monthly' | 'yearly'>('monthly');
+  const initialDate = useMemo(() => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth() - 1, 1);
+  }, []);
+  const [pickerYear, setPickerYear] = useState(initialDate.getFullYear());
+  const [pickerMonth, setPickerMonth] = useState(initialDate.getMonth() + 1);
+
+  const openRewindPicker = useCallback((type?: 'monthly' | 'yearly', year?: number, month?: number) => {
+    hapticMedium();
+    const d = new Date();
+    const prevMonthDate = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+    setPickerType(type || 'monthly');
+    setPickerYear(year ?? (type === 'yearly' ? d.getFullYear() - 1 : prevMonthDate.getFullYear()));
+    setPickerMonth(month ?? (prevMonthDate.getMonth() + 1));
+    setRewindPickerVisible(true);
+  }, []);
 
   const fetchMemories = useCallback(async (opts?: { silent?: boolean }) => {
     if (!opts?.silent) {
@@ -328,12 +352,18 @@ export default function MemoriesScreen() {
       }
       const pending = prefetched || consumePendingFlashbackItem();
       if (pending?.relative_path) {
-        setFlashbackItem(pending as FlashbackItem);
+        const item = pending as FlashbackItem;
+        setFlashbackHistory([item]);
+        setFlashbackIndex(0);
         return;
       }
       const item = await getRandomFlashback();
-      setFlashbackItem(item);
-      if (!item) setFlashbackError('No flashback available yet — keep backing up!');
+      if (item) {
+        setFlashbackHistory([item]);
+        setFlashbackIndex(0);
+      } else {
+        setFlashbackError('No flashback available yet — keep backing up!');
+      }
     } catch (err: any) {
       setFlashbackError(sanitizeErrorMessage(err, 'Could not load a flashback right now.'));
     } finally {
@@ -341,9 +371,42 @@ export default function MemoriesScreen() {
     }
   }, [serverConfig]);
 
+  const handleNextSurprise = useCallback(async () => {
+    if (flashbackLoading) return;
+    hapticLight();
+    if (flashbackIndex < flashbackHistory.length - 1) {
+      setFlashbackIndex((idx) => idx + 1);
+      return;
+    }
+    setFlashbackLoading(true);
+    setFlashbackError(null);
+    try {
+      const item = await getRandomFlashback();
+      if (item) {
+        setFlashbackHistory((prev) => [...prev, item]);
+        setFlashbackIndex((idx) => idx + 1);
+      } else {
+        setFlashbackError('No more surprise memories available right now.');
+      }
+    } catch (err: any) {
+      setFlashbackError(sanitizeErrorMessage(err, 'Could not load next surprise.'));
+    } finally {
+      setFlashbackLoading(false);
+    }
+  }, [flashbackLoading, flashbackIndex, flashbackHistory.length]);
+
+  const handlePrevSurprise = useCallback(() => {
+    if (flashbackLoading) return;
+    if (flashbackIndex > 0) {
+      hapticLight();
+      setFlashbackIndex((idx) => idx - 1);
+    }
+  }, [flashbackLoading, flashbackIndex]);
+
   const closeFlashback = useCallback(() => {
     setFlashbackVisible(false);
-    setFlashbackItem(null);
+    setFlashbackHistory([]);
+    setFlashbackIndex(0);
     setFlashbackError(null);
   }, []);
 
@@ -454,15 +517,16 @@ export default function MemoriesScreen() {
     if (!flashbackItem || flashbackSaving) return;
     setFlashbackSaving(true);
     try {
-      const { status } = await MediaLibrary.requestPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission Needed', 'Media library permission is required to save photos and videos.');
-        setFlashbackSaving(false);
+      const hasPerm = await requestMediaPermissions();
+      if (!hasPerm) {
+        Alert.alert('Permission Denied', 'Storage permission is required to save photos.');
         return;
       }
-      const displayName = flashbackItem.relative_path.split(/[/\\]/).pop() ?? `flashback_${Date.now()}`;
-      const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
-      const tmpUri = `${cacheDir}flashback_save_${Date.now()}_${displayName}`;
+
+      const cacheDir = FileSystem.cacheDirectory ?? '';
+      const displayName = flashbackItem.relative_path.split(/[/\\\\]/).pop() ?? `flashback_${Date.now()}`;
+      const safeName = displayName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const tmpUri = `${cacheDir}flashback_save_${Date.now()}_${safeName}`;
 
       if (flashbackItem.source_type === 'shared') {
         await downloadSharedFile(flashbackItem.source_id, flashbackItem.relative_path, tmpUri);
@@ -491,7 +555,8 @@ export default function MemoriesScreen() {
     setActiveItemIdx(0);
     setIsPaused(false);
     setFlashbackVisible(false);
-    setFlashbackItem(null);
+    setFlashbackHistory([]);
+    setFlashbackIndex(0);
     setFlashbackError(null);
     setRewindVisible(false);
     setRewindYear(null);
@@ -501,10 +566,42 @@ export default function MemoriesScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      const onBackPress = () => {
+        if (rewindPickerVisible) {
+          setRewindPickerVisible(false);
+          return true;
+        }
+        if (flashbackVisible) {
+          closeFlashback();
+          return true;
+        }
+        if (rewindVisible) {
+          closeRewind();
+          return true;
+        }
+        if (activeDayIdx !== null) {
+          setActiveDayIdx(null);
+          return true;
+        }
+        router.navigate('/');
+        return true;
+      };
+
+      const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
       return () => {
+        sub.remove();
         stopAllPlayback();
       };
-    }, [stopAllPlayback]),
+    }, [
+      rewindPickerVisible,
+      flashbackVisible,
+      closeFlashback,
+      rewindVisible,
+      closeRewind,
+      activeDayIdx,
+      router,
+      stopAllPlayback,
+    ]),
   );
 
   useEffect(() => {
@@ -555,11 +652,12 @@ export default function MemoriesScreen() {
       }
       await Sharing.shareAsync(tmpUri, {
         mimeType: 'video/mp4',
-        dialogTitle: rewindMonth ? `${MONTH_NAMES[rewindMonth - 1]} ${rewindYear} Recap` : `${rewindYear} Rewind Reel`,
+        dialogTitle: `Share Recap (${rewindMonth ? MONTH_NAMES[rewindMonth - 1] + ' ' : ''}${rewindYear})`,
       });
       await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
     } catch (err: any) {
-      Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not share the reel to device.'));
+      hapticError();
+      Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not share the reel.'));
     } finally {
       setRewindSharing(false);
     }
@@ -599,19 +697,28 @@ export default function MemoriesScreen() {
     }
   };
 
-  // PanResponder for swipe to fetch a new random flashback item
+  // PanResponder for swipe gestures in flashback:
+  // Swipe right (dx > 50) -> next surprise
+  // Swipe left (dx < -50) -> previous surprise
+  // Swipe down (dy > 50) -> dismiss flashback modal
   const flashbackPanResponder = useMemo(
     () =>
       PanResponder.create({
-        onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 20 && Math.abs(g.dx) > Math.abs(g.dy),
+        onMoveShouldSetPanResponder: (_, g) =>
+          (Math.abs(g.dx) > 20 && Math.abs(g.dx) > Math.abs(g.dy)) ||
+          (g.dy > 30 && Math.abs(g.dy) > Math.abs(g.dx)),
         onPanResponderRelease: (_, g) => {
-          if (Math.abs(g.dx) > 60 && !flashbackLoading) {
-            hapticLight();
-            openFlashback();
+          if (g.dy > 50 && Math.abs(g.dy) > Math.abs(g.dx)) {
+            hapticMedium();
+            closeFlashback();
+          } else if (g.dx > 50 && Math.abs(g.dx) > Math.abs(g.dy) && !flashbackLoading) {
+            handleNextSurprise();
+          } else if (g.dx < -50 && Math.abs(g.dx) > Math.abs(g.dy) && !flashbackLoading) {
+            handlePrevSurprise();
           }
         },
       }),
-    [flashbackLoading, openFlashback],
+    [flashbackLoading, handleNextSurprise, handlePrevSurprise, closeFlashback],
   );
 
   // PanResponder for swipe down to dismiss story
@@ -732,7 +839,7 @@ export default function MemoriesScreen() {
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.gameCard}
-              onPress={() => openRewind(new Date().getFullYear() - 1)}
+              onPress={() => openRewindPicker()}
               activeOpacity={0.85}
             >
               <View style={[styles.gameIconWrap, { backgroundColor: '#06B6D422' }]}>
@@ -784,7 +891,7 @@ export default function MemoriesScreen() {
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.gameCard}
-              onPress={() => openRewind(new Date().getFullYear() - 1)}
+              onPress={() => openRewindPicker()}
               activeOpacity={0.85}
             >
               <View style={[styles.gameIconWrap, { backgroundColor: '#06B6D422' }]}>
@@ -1096,7 +1203,11 @@ export default function MemoriesScreen() {
                 <View style={styles.storyHeaderRow}>
                   <View style={styles.storyHeaderInfo}>
                     <View style={styles.storyDayPill}>
-                      <Text style={styles.storyDayPillText}>FLASHBACK</Text>
+                      <Text style={styles.storyDayPillText}>
+                        {flashbackHistory.length > 1
+                          ? `FLASHBACK ${flashbackIndex + 1}/${flashbackHistory.length}`
+                          : 'FLASHBACK'}
+                      </Text>
                     </View>
                     <Text style={styles.storyYearTitle}>
                       {flashbackItem.years_ago} {flashbackItem.years_ago === 1 ? 'Year' : 'Years'} Ago ({flashbackItem.year})
@@ -1121,9 +1232,20 @@ export default function MemoriesScreen() {
               </View>
 
               <View style={[styles.storyBottomBar, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+                {flashbackIndex > 0 && (
+                  <TouchableOpacity
+                    style={[styles.nextSurpriseBtn, { backgroundColor: 'rgba(255,255,255,0.2)' }]}
+                    onPress={handlePrevSurprise}
+                    disabled={flashbackLoading}
+                    activeOpacity={0.8}
+                  >
+                    <AppIcon androidName="arrow_back" iosName="arrow.left" color="#fff" size={16} />
+                    <Text style={styles.nextSurpriseBtnText}>Previous</Text>
+                  </TouchableOpacity>
+                )}
                 <TouchableOpacity
                   style={styles.nextSurpriseBtn}
-                  onPress={() => openFlashback()}
+                  onPress={handleNextSurprise}
                   disabled={flashbackLoading}
                   activeOpacity={0.8}
                 >
@@ -1254,6 +1376,182 @@ export default function MemoriesScreen() {
               </TouchableOpacity>
             </View>
           )}
+        </View>
+      </Modal>
+
+      {/* Rewind & Recap Selector Modal */}
+      <Modal
+        visible={rewindPickerVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRewindPickerVisible(false)}
+      >
+        <View style={styles.pickerOverlay}>
+          <View style={[styles.pickerCard, { backgroundColor: colors.surface }]}>
+            <View style={styles.pickerHeader}>
+              <Text style={[styles.pickerTitle, { color: colors.text }]}>Rewind & Recaps</Text>
+              <TouchableOpacity
+                style={styles.pickerCloseBtn}
+                onPress={() => setRewindPickerVisible(false)}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
+                <AppIcon androidName="close" iosName="xmark" color={colors.textMuted} size={20} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Segmented Type Control */}
+            <View style={[styles.pickerSegmentRow, { backgroundColor: colors.surfaceSoft }]}>
+              <TouchableOpacity
+                style={[
+                  styles.pickerSegmentBtn,
+                  pickerType === 'monthly' && [styles.pickerSegmentBtnActive, { backgroundColor: colors.primary }],
+                ]}
+                onPress={() => { hapticLight(); setPickerType('monthly'); }}
+              >
+                <AppIcon
+                  androidName="calendar_month"
+                  iosName="calendar"
+                  color={pickerType === 'monthly' ? '#fff' : colors.textSecondary}
+                  size={16}
+                />
+                <Text
+                  style={[
+                    styles.pickerSegmentText,
+                    { color: pickerType === 'monthly' ? '#fff' : colors.textSecondary },
+                  ]}
+                >
+                  Monthly Recap
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.pickerSegmentBtn,
+                  pickerType === 'yearly' && [styles.pickerSegmentBtnActive, { backgroundColor: colors.primary }],
+                ]}
+                onPress={() => { hapticLight(); setPickerType('yearly'); }}
+              >
+                <AppIcon
+                  androidName="movie"
+                  iosName="film"
+                  color={pickerType === 'yearly' ? '#fff' : colors.textSecondary}
+                  size={16}
+                />
+                <Text
+                  style={[
+                    styles.pickerSegmentText,
+                    { color: pickerType === 'yearly' ? '#fff' : colors.textSecondary },
+                  ]}
+                >
+                  Yearly Rewind
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Year Stepper */}
+            <View style={styles.pickerYearRow}>
+              <TouchableOpacity
+                style={[styles.pickerArrowBtn, { backgroundColor: colors.surfaceSoft }]}
+                onPress={() => setPickerYear((y) => Math.max(2000, y - 1))}
+                disabled={pickerYear <= 2000}
+              >
+                <AppIcon androidName="chevron_left" iosName="chevron.left" color={pickerYear <= 2000 ? colors.textMuted : colors.text} size={22} />
+              </TouchableOpacity>
+              <Text style={[styles.pickerYearText, { color: colors.text }]}>{pickerYear}</Text>
+              <TouchableOpacity
+                style={[styles.pickerArrowBtn, { backgroundColor: colors.surfaceSoft }]}
+                onPress={() => setPickerYear((y) => Math.min(new Date().getFullYear(), y + 1))}
+                disabled={pickerYear >= new Date().getFullYear()}
+              >
+                <AppIcon androidName="chevron_right" iosName="chevron.right" color={pickerYear >= new Date().getFullYear() ? colors.textMuted : colors.text} size={22} />
+              </TouchableOpacity>
+            </View>
+
+            {/* If Monthly, Month Grid (Jan..Dec) */}
+            {pickerType === 'monthly' && (
+              <View style={styles.pickerMonthsGrid}>
+                {MONTH_NAMES.map((name, idx) => {
+                  const mNum = idx + 1;
+                  const isSelected = pickerMonth === mNum;
+                  const isFuture = pickerYear >= now.getFullYear() && mNum > (now.getMonth() + 1);
+                  const shortName = name.slice(0, 3);
+                  return (
+                    <TouchableOpacity
+                      key={name}
+                      style={[
+                        styles.pickerMonthChip,
+                        {
+                          backgroundColor: isSelected
+                            ? colors.primary
+                            : colors.surfaceSoft,
+                          opacity: isFuture ? 0.35 : 1,
+                        },
+                      ]}
+                      onPress={() => {
+                        if (!isFuture) {
+                          hapticLight();
+                          setPickerMonth(mNum);
+                        }
+                      }}
+                      disabled={isFuture}
+                    >
+                      <Text
+                        style={[
+                          styles.pickerMonthChipText,
+                          { color: isSelected ? '#fff' : colors.text },
+                          isSelected && { fontWeight: '800' },
+                        ]}
+                      >
+                        {shortName}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+
+            {/* Quick Shortcuts */}
+            <View style={styles.pickerShortcutsRow}>
+              <TouchableOpacity
+                style={[styles.pickerShortcutChip, { backgroundColor: colors.primarySoft }]}
+                onPress={() => {
+                  hapticLight();
+                  const d = new Date();
+                  const prevMonthDate = new Date(d.getFullYear(), d.getMonth() - 1, 1);
+                  setPickerType('monthly');
+                  setPickerYear(prevMonthDate.getFullYear());
+                  setPickerMonth(prevMonthDate.getMonth() + 1);
+                }}
+              >
+                <Text style={[styles.pickerShortcutText, { color: colors.primary }]}>⚡ Last Month</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.pickerShortcutChip, { backgroundColor: colors.primarySoft }]}
+                onPress={() => {
+                  hapticLight();
+                  setPickerType('yearly');
+                  setPickerYear(new Date().getFullYear() - 1);
+                }}
+              >
+                <Text style={[styles.pickerShortcutText, { color: colors.primary }]}>⚡ Last Year</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Action CTA Button */}
+            <TouchableOpacity
+              style={[styles.pickerPlayBtn, { backgroundColor: colors.primary }]}
+              onPress={() => {
+                setRewindPickerVisible(false);
+                openRewind(pickerYear, pickerType === 'monthly' ? pickerMonth : undefined);
+              }}
+            >
+              <AppIcon androidName="play_arrow" iosName="play.fill" color="#fff" size={20} />
+              <Text style={styles.pickerPlayBtnText}>
+                {pickerType === 'monthly'
+                  ? `Play ${MONTH_NAMES[pickerMonth - 1]} ${pickerYear} Recap`
+                  : `Play ${pickerYear} Rewind Reel`}
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
       </Modal>
     </View>
@@ -1775,4 +2073,129 @@ const createStyles = (colors: AppColors, insets: any) =>
     videoFull: { width: '100%', height: '100%' },
     videoFallbackContainer: { flex: 1, alignItems: 'center', justifyContent: 'center' },
     videoFallbackText: { color: '#fff', fontSize: TextScale.sm, marginTop: Spacing.two, fontWeight: '600' },
+
+    /* Rewind & Recap Picker Styles */
+    pickerOverlay: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.6)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: Spacing.four,
+    },
+    pickerCard: {
+      width: '100%',
+      maxWidth: 380,
+      borderRadius: Radius.xl,
+      padding: Spacing.five,
+      gap: Spacing.four,
+      borderWidth: 1,
+      borderColor: colors.surfaceBorder,
+      elevation: 8,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 6 },
+      shadowOpacity: 0.25,
+      shadowRadius: 12,
+    },
+    pickerHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    pickerTitle: {
+      fontSize: TextScale.lg,
+      fontWeight: '800',
+    },
+    pickerCloseBtn: {
+      width: 32,
+      height: 32,
+      borderRadius: 16,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    pickerSegmentRow: {
+      flexDirection: 'row',
+      padding: 3,
+      borderRadius: Radius.lg,
+      gap: 4,
+    },
+    pickerSegmentBtn: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      paddingVertical: Spacing.two,
+      borderRadius: Radius.md,
+    },
+    pickerSegmentBtnActive: {
+      elevation: 2,
+    },
+    pickerSegmentText: {
+      fontSize: TextScale.xs,
+      fontWeight: '700',
+    },
+    pickerYearRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: Spacing.five,
+    },
+    pickerArrowBtn: {
+      width: 40,
+      height: 40,
+      borderRadius: Radius.full,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    pickerYearText: {
+      fontSize: TextScale.xl,
+      fontWeight: '900',
+      minWidth: 80,
+      textAlign: 'center',
+    },
+    pickerMonthsGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: Spacing.two,
+      justifyContent: 'space-between',
+    },
+    pickerMonthChip: {
+      width: '23%',
+      paddingVertical: Spacing.two,
+      borderRadius: Radius.md,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    pickerMonthChipText: {
+      fontSize: TextScale.xs,
+      fontWeight: '600',
+    },
+    pickerShortcutsRow: {
+      flexDirection: 'row',
+      gap: Spacing.two,
+      justifyContent: 'center',
+    },
+    pickerShortcutChip: {
+      paddingHorizontal: Spacing.three,
+      paddingVertical: 6,
+      borderRadius: Radius.full,
+    },
+    pickerShortcutText: {
+      fontSize: TextScale.xs,
+      fontWeight: '700',
+    },
+    pickerPlayBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: Spacing.two,
+      paddingVertical: Spacing.three,
+      borderRadius: Radius.lg,
+      marginTop: 2,
+    },
+    pickerPlayBtnText: {
+      color: '#fff',
+      fontSize: TextScale.sm,
+      fontWeight: '800',
+    },
   });

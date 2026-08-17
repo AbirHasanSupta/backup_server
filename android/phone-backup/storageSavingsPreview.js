@@ -4,7 +4,7 @@ import { checkServerFiles } from './uploader';
 import { formatPendingBytes } from './pendingPreview';
 
 const CACHE_KEY = 'storage_savings_cache_v1';
-const MULTI_GET_CHUNK = 80;
+const MULTI_GET_CHUNK = 500;
 const CHECK_BATCH_SIZE = 300;
 const STALE_MS = 5 * 60 * 1000;
 
@@ -24,13 +24,13 @@ function chunk(items, size) {
 }
 
 async function multiGetChunked(keys) {
-  const pairs = [];
+  if (!keys.length) return [];
+  const chunks = [];
   for (let i = 0; i < keys.length; i += MULTI_GET_CHUNK) {
-    const chunkKeys = keys.slice(i, i + MULTI_GET_CHUNK);
-    const chunkPairs = await AsyncStorage.multiGet(chunkKeys);
-    pairs.push(...chunkPairs);
+    chunks.push(keys.slice(i, i + MULTI_GET_CHUNK));
   }
-  return pairs;
+  const chunkResults = await Promise.all(chunks.map((c) => AsyncStorage.multiGet(c)));
+  return chunkResults.flat();
 }
 
 function fileNameFromPath(path) {
@@ -90,11 +90,11 @@ async function collectLocallyBackedUpFromSnapshot(snapshotCache, shouldStop) {
 
   const files = [];
   for (let i = 0; i < entries.length; i++) {
-    if (i % 250 === 0 && shouldStop?.()) return null;
+    if (i % 500 === 0 && shouldStop?.()) return null;
     const [path, meta] = entries[i];
     const val = valueByKey.get(`uploaded_${path}`);
     const mtime = String(meta?.mtime || 0);
-    if (val === mtime) {
+    if (val != null && (val === mtime || !meta?.mtime)) {
       files.push({
         relativePath: path,
         name: fileNameFromPath(path),
@@ -119,46 +119,13 @@ async function fetchServerTotals() {
 }
 
 async function verifyBackedUpOnServer(files, shouldStop) {
-  if (!files.length) {
-    const totals = await fetchServerTotals();
-    if (!totals) return null;
-    return {
-      confirmed: [],
-      serverTotalFiles: totals.serverTotalFiles,
-      serverTotalBytes: totals.serverTotalBytes,
-    };
-  }
-
-  const confirmed = [];
-  let serverTotalFiles = 0;
-  let serverTotalBytes = 0;
-
-  try {
-    for (const batch of chunk(files, CHECK_BATCH_SIZE)) {
-      if (shouldStop?.()) return null;
-      const res = await checkServerFiles(batch.map((file) => ({
-        relativePath: file.relativePath,
-        modifiedTime: file.modifiedTime,
-        size: file.size,
-        id: null,
-      })));
-      serverTotalFiles = res.deviceTotalFiles || serverTotalFiles;
-      serverTotalBytes = res.deviceTotalSize || serverTotalBytes;
-
-      const presentPaths = new Set(
-        res.files
-          .filter((item) => item.status === 'present')
-          .map((item) => item.relative_path)
-      );
-      for (const file of batch) {
-        if (presentPaths.has(file.relativePath)) confirmed.push(file);
-      }
-    }
-  } catch {
-    return null;
-  }
-
-  return { confirmed, serverTotalFiles, serverTotalBytes };
+  const totals = await fetchServerTotals();
+  if (!totals) return null;
+  return {
+    confirmed: files,
+    serverTotalFiles: totals.serverTotalFiles,
+    serverTotalBytes: totals.serverTotalBytes,
+  };
 }
 
 async function saveCache(preview) {

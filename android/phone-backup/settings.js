@@ -204,11 +204,18 @@ export async function markUploadedBatch(files) {
 export async function isUploadedBatch(files) {
   const trusted = new Set();
   if (!files.length) return trusted;
-  const pairs = await AsyncStorage.multiGet(files.map((file) => `uploaded_${file.relativePath}`));
+  const CHUNK_SIZE = 500;
+  const keys = files.map((file) => `uploaded_${file.relativePath}`);
+  const chunks = [];
+  for (let i = 0; i < keys.length; i += CHUNK_SIZE) {
+    chunks.push(keys.slice(i, i + CHUNK_SIZE));
+  }
+  const chunkResults = await Promise.all(chunks.map((c) => AsyncStorage.multiGet(c)));
+  const pairs = chunkResults.flat();
   const valueByKey = new Map(pairs);
   for (const file of files) {
     const val = valueByKey.get(`uploaded_${file.relativePath}`);
-    if (val === String(file.modifiedTime)) {
+    if (val != null && (val === String(file.modifiedTime) || !file.modifiedTime)) {
       trusted.add(`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`);
     }
   }

@@ -125,7 +125,10 @@ export async function enrichFileMetadata(file) {
 
   let info = { size: 0, modificationTime: 0 };
   try {
-    info = await FileSystem.getInfoAsync(file.uri, { size: true }) || info;
+    const infoPromise = FileSystem.getInfoAsync(file.uri, { size: true });
+    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 3000));
+    const res = await Promise.race([infoPromise, timeoutPromise]);
+    if (res) info = res;
   } catch {}
 
   return {
@@ -165,7 +168,7 @@ function addFile(uri, relativePath, name, result, shouldInclude, reportActivity,
   counters.files++;
   if (cached) {
     counters.snapshotHits = (counters.snapshotHits || 0) + 1;
-  } else {
+  } else if (!options.noMetadata) {
     metadataScheduler.add(file);
   }
   reportActivity({ phase: 'scanning', files: counters.files, currentFile: relativePath });
@@ -205,6 +208,12 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
         skipped: counters.skippedFromSnapshot,
         currentFile: newBase,
       });
+      return;
+    }
+
+    // Fast-path: files with valid extensions are never subdirectories, avoiding expensive native SAF exceptions
+    if (hasProperExtension(name)) {
+      addFile(itemUri, newBase, name, result, shouldInclude, reportActivity, counters, metadataScheduler, snapshotCache, options);
       return;
     }
 
@@ -256,7 +265,7 @@ export async function scan(onActivity, targetFolderUri, snapshotCache = null, op
     await walk(folder.uri, folder.name, result, shouldInclude, reportActivity, counters, metadataScheduler, null, snapshotCache, scanOptions);
     if (scanOptions.stopped) break;
   }
-  if (!scanOptions.stopped) {
+  if (!scanOptions.stopped && !scanOptions.noMetadata) {
     await metadataScheduler.drain();
   }
   reportActivity({

@@ -372,7 +372,7 @@ export default function GapsScreen() {
           )}
 
           <View style={[styles.hintBar, { borderBottomColor: colors.surfaceBorder }]}>
-            <AppIcon androidName="info_outline" iosName="info.circle" color={colors.textMuted} size={14} />
+            <AppIcon androidName="info" iosName="info.circle" color={colors.textMuted} size={14} />
             <Text style={[styles.hintText, { color: colors.textMuted }]}>
               Local estimate — sync verifies with your server.
             </Text>

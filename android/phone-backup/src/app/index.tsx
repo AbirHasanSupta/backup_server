@@ -744,62 +744,7 @@ export default function HomeScreen() {
           />
         </Animated.View>
 
-        {(pendingPreview || previewLoading) && !syncing ? (
-          <Animated.View entering={FadeInDown.duration(400).delay(250)} style={styles.pendingSection}>
-            <Text style={styles.sectionKicker}>On this device</Text>
-            <PendingSyncCard
-              colors={colors}
-              preview={pendingPreview}
-              loading={previewLoading}
-              syncing={syncing}
-              onPress={pendingPreview && (pendingPreview.newCount + pendingPreview.changedCount) > 0
-                ? () => {
-                    hapticMedium();
-                    router.push('/gaps');
-                  }
-                : undefined}
-            />
-          </Animated.View>
-        ) : null}
-
-        {(storagePreview || storageLoading) && !syncing ? (
-          <Animated.View entering={FadeInDown.duration(400).delay(275)} style={styles.pendingSection}>
-            <Text style={styles.sectionKicker}>Storage insight</Text>
-            <StorageSavingsCard
-              colors={colors}
-              preview={storagePreview}
-              loading={storageLoading}
-              syncing={syncing}
-            />
-          </Animated.View>
-        ) : null}
-
-        {!syncing && (
-          <Animated.View entering={FadeInDown.duration(400).delay(285)} style={styles.pendingSection}>
-            <Text style={styles.sectionKicker}>Backup goals</Text>
-            <AnimatedPressable
-              style={styles.goalsCard}
-              onPress={() => { hapticMedium(); router.push('/goals'); }}
-              scaleDown={0.98}
-              accessibilityLabel="Open backup goals"
-            >
-              <View style={[styles.goalsIconWrap, { backgroundColor: colors.primarySoft }]}>
-                <AppIcon androidName="flag" iosName="flag.fill" color={colors.primary} size={18} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.goalsTitle}>
-                  {activeGoalsCount > 0 ? `${activeGoalsCount} active ${activeGoalsCount === 1 ? 'goal' : 'goals'}` : 'Set a backup goal'}
-                </Text>
-                <Text style={styles.goalsSubtitle}>
-                  {activeGoalsCount > 0 ? 'Tap to view progress' : 'Track a year until it\u2019s fully backed up'}
-                </Text>
-              </View>
-              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
-            </AnimatedPressable>
-          </Animated.View>
-        )}
-
-        <Animated.View entering={FadeInDown.duration(400).delay(300)}>
+        <Animated.View entering={FadeInDown.duration(400).delay(230)}>
           <AnimatedPressable
             id="sync-now-button"
             style={[
@@ -863,6 +808,61 @@ export default function HomeScreen() {
             )}
           </AnimatedPressable>
         </Animated.View>
+
+        {(pendingPreview || previewLoading) && !syncing ? (
+          <Animated.View entering={FadeInDown.duration(400).delay(250)} style={styles.pendingSection}>
+            <Text style={styles.sectionKicker}>On this device</Text>
+            <PendingSyncCard
+              colors={colors}
+              preview={pendingPreview}
+              loading={previewLoading}
+              syncing={syncing}
+              onPress={pendingPreview && (pendingPreview.newCount + pendingPreview.changedCount) > 0
+                ? () => {
+                    hapticMedium();
+                    router.push('/gaps');
+                  }
+                : undefined}
+            />
+          </Animated.View>
+        ) : null}
+
+        {(storagePreview || storageLoading) && !syncing ? (
+          <Animated.View entering={FadeInDown.duration(400).delay(275)} style={styles.pendingSection}>
+            <Text style={styles.sectionKicker}>Storage insight</Text>
+            <StorageSavingsCard
+              colors={colors}
+              preview={storagePreview}
+              loading={storageLoading}
+              syncing={syncing}
+            />
+          </Animated.View>
+        ) : null}
+
+        {!syncing && (
+          <Animated.View entering={FadeInDown.duration(400).delay(285)} style={styles.pendingSection}>
+            <Text style={styles.sectionKicker}>Backup goals</Text>
+            <AnimatedPressable
+              style={styles.goalsCard}
+              onPress={() => { hapticMedium(); router.push('/goals'); }}
+              scaleDown={0.98}
+              accessibilityLabel="Open backup goals"
+            >
+              <View style={[styles.goalsIconWrap, { backgroundColor: colors.primarySoft }]}>
+                <AppIcon androidName="flag" iosName="flag.fill" color={colors.primary} size={18} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.goalsTitle}>
+                  {activeGoalsCount > 0 ? `${activeGoalsCount} active ${activeGoalsCount === 1 ? 'goal' : 'goals'}` : 'Set a backup goal'}
+                </Text>
+                <Text style={styles.goalsSubtitle}>
+                  {activeGoalsCount > 0 ? 'Tap to view progress' : 'Track a year until it\u2019s fully backed up'}
+                </Text>
+              </View>
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
+            </AnimatedPressable>
+          </Animated.View>
+        )}
 
         {serverStatus === 'unknown' && (
           <Animated.View entering={FadeIn.duration(300)} style={styles.noticeCard}>

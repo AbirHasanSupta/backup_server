@@ -104,7 +104,7 @@ export function StorageSavingsCard({ colors, preview, loading, syncing }: Props)
               <ActivityIndicator size="small" color={colors.textMuted} style={styles.footnoteSpinner} />
             ) : (
               <AppIcon
-                androidName={serverVerified ? 'verified' : 'info_outline'}
+                androidName={serverVerified ? 'verified' : 'info'}
                 iosName={serverVerified ? 'checkmark.seal.fill' : 'info.circle'}
                 color={serverVerified ? colors.success : colors.textMuted}
                 size={12}

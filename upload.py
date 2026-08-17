@@ -695,7 +695,8 @@ async def thumbnail_file(
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
     if not is_video_path(path):
-        raise HTTPException(status_code=400, detail="Thumbnail is only available for video files")
+        media_type = guess_type(path)[0] or "image/jpeg"
+        return FileResponse(path, media_type=media_type, headers={"Cache-Control": "public, max-age=86400"})
     thumb_path = get_video_thumbnail_path(path)
     if not thumb_path:
         raise HTTPException(status_code=500, detail="Failed to generate thumbnail")
@@ -1081,7 +1082,8 @@ async def thumbnail_shared_file(
     if not os.path.isfile(full_path):
         raise HTTPException(status_code=404, detail="File not found")
     if not is_video_path(full_path):
-        raise HTTPException(status_code=400, detail="Thumbnail is only available for video files")
+        media_type = guess_type(full_path)[0] or "image/jpeg"
+        return FileResponse(full_path, media_type=media_type, headers={"Cache-Control": "public, max-age=86400"})
     thumb_path = get_video_thumbnail_path(full_path)
     if not thumb_path:
         raise HTTPException(status_code=500, detail="Failed to generate thumbnail")

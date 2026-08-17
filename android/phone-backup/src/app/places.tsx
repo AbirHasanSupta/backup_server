@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, FlatList, Modal, Alert, useWindowDimensions } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -68,7 +68,7 @@ export default function PlacesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useAppTheme();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   const [serverConfig, setServerConfig] = useState<any>(null);
@@ -79,7 +79,8 @@ export default function PlacesScreen() {
   const [activeCluster, setActiveCluster] = useState<PlaceCluster | null>(null);
   const [clusterItems, setClusterItems] = useState<PlaceItem[]>([]);
   const [clusterLoading, setClusterLoading] = useState(false);
-  const [viewerItem, setViewerItem] = useState<PlaceItem | null>(null);
+  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
+  const viewerListRef = useRef<FlatList<PlaceItem>>(null);
   const [saving, setSaving] = useState(false);
   const [sharing, setSharing] = useState(false);
 
@@ -119,10 +120,12 @@ export default function PlacesScreen() {
     setClusterItems([]);
   }, []);
 
-  const closeViewer = useCallback(() => setViewerItem(null), []);
+  const closeViewer = useCallback(() => setViewerIndex(null), []);
+
+  const activeViewerItem = viewerIndex != null && clusterItems[viewerIndex] ? clusterItems[viewerIndex] : null;
 
   const handleSaveViewerItem = async () => {
-    if (!viewerItem || saving) return;
+    if (!activeViewerItem || saving) return;
     setSaving(true);
     try {
       const { status } = await MediaLibrary.requestPermissionsAsync();
@@ -130,13 +133,13 @@ export default function PlacesScreen() {
         Alert.alert('Permission Needed', 'Media library permission is required to save photos and videos.');
         return;
       }
-      const displayName = viewerItem.relative_path.split(/[/\\]/).pop() ?? `place_${Date.now()}`;
+      const displayName = activeViewerItem.relative_path.split(/[/\\]/).pop() ?? `place_${Date.now()}`;
       const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
       const tmpUri = `${cacheDir}place_save_${Date.now()}_${displayName}`;
-      if (viewerItem.source_type === 'shared') {
-        await downloadSharedFile(viewerItem.source_id, viewerItem.relative_path, tmpUri);
+      if (activeViewerItem.source_type === 'shared') {
+        await downloadSharedFile(activeViewerItem.source_id, activeViewerItem.relative_path, tmpUri);
       } else {
-        await downloadFile(viewerItem.relative_path, tmpUri);
+        await downloadFile(activeViewerItem.relative_path, tmpUri);
       }
       await MediaLibrary.saveToLibraryAsync(tmpUri);
       await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
@@ -149,16 +152,16 @@ export default function PlacesScreen() {
   };
 
   const handleShareViewerItem = async () => {
-    if (!viewerItem || sharing) return;
+    if (!activeViewerItem || sharing) return;
     setSharing(true);
     try {
-      const displayName = viewerItem.relative_path.split(/[/\\]/).pop() ?? `place_${Date.now()}`;
+      const displayName = activeViewerItem.relative_path.split(/[/\\]/).pop() ?? `place_${Date.now()}`;
       const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
       const tmpUri = `${cacheDir}place_share_${Date.now()}_${displayName}`;
-      if (viewerItem.source_type === 'shared') {
-        await downloadSharedFile(viewerItem.source_id, viewerItem.relative_path, tmpUri);
+      if (activeViewerItem.source_type === 'shared') {
+        await downloadSharedFile(activeViewerItem.source_id, activeViewerItem.relative_path, tmpUri);
       } else {
-        await downloadFile(viewerItem.relative_path, tmpUri);
+        await downloadFile(activeViewerItem.relative_path, tmpUri);
       }
       const canShare = await Sharing.isAvailableAsync();
       if (!canShare) {
@@ -174,15 +177,25 @@ export default function PlacesScreen() {
     }
   };
 
+  const goToPrevious = () => {
+    if (viewerIndex != null && viewerIndex > 0) {
+      const nextIdx = viewerIndex - 1;
+      setViewerIndex(nextIdx);
+      viewerListRef.current?.scrollToIndex({ index: nextIdx, animated: true });
+    }
+  };
+
+  const goToNext = () => {
+    if (viewerIndex != null && viewerIndex < clusterItems.length - 1) {
+      const nextIdx = viewerIndex + 1;
+      setViewerIndex(nextIdx);
+      viewerListRef.current?.scrollToIndex({ index: nextIdx, animated: true });
+    }
+  };
+
   const gridGap = Spacing.two;
   const cols = 3;
   const cellSize = (width - Spacing.four * 2 - gridGap * (cols - 1)) / cols;
-
-  const viewerUrl = viewerItem && serverConfig
-    ? (viewerItem.is_video
-      ? buildVideoPreviewUrl(serverConfig, viewerItem.relative_path, viewerItem.source_type, viewerItem.source_id)
-      : buildPreviewUrl(serverConfig, viewerItem.relative_path, viewerItem.source_type, viewerItem.source_id))
-    : '';
 
   return (
     <View style={[styles.root, { backgroundColor: colors.bg }]}>
@@ -227,29 +240,38 @@ export default function PlacesScreen() {
           numColumns={3}
           contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: gridGap }}
           columnWrapperStyle={{ gap: gridGap }}
-          renderItem={({ item, index }) => (
-            <AnimatedListItem index={index}>
-              <TouchableOpacity
-                style={[styles.placeCell, { width: cellSize, height: cellSize }]}
-                onPress={() => openCluster(item)}
-                activeOpacity={0.85}
-              >
-                <Image
-                  source={{ uri: serverConfig ? buildThumbnailUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id) : undefined }}
-                  style={styles.placeCellImage}
-                  contentFit="cover"
-                  transition={150}
-                />
-                <View style={styles.placeCellOverlay}>
-                  <Text style={styles.placeCellCount}>{item.count}</Text>
-                </View>
-              </TouchableOpacity>
-            </AnimatedListItem>
-          )}
+          renderItem={({ item, index }) => {
+            const thumbUrl = serverConfig
+              ? (item.cover.is_video
+                ? buildThumbnailUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id)
+                : buildPreviewUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id))
+              : undefined;
+
+            return (
+              <AnimatedListItem index={index}>
+                <TouchableOpacity
+                  style={[styles.placeCell, { width: cellSize, height: cellSize }]}
+                  onPress={() => openCluster(item)}
+                  activeOpacity={0.85}
+                >
+                  <Image
+                    source={{ uri: thumbUrl }}
+                    style={styles.placeCellImage}
+                    contentFit="cover"
+                    transition={150}
+                  />
+                  <View style={styles.placeCellOverlay}>
+                    <Text style={styles.placeCellCount}>{item.count}</Text>
+                  </View>
+                </TouchableOpacity>
+              </AnimatedListItem>
+            );
+          }}
           showsVerticalScrollIndicator={false}
         />
       )}
 
+      {/* Cluster Items Grid Modal */}
       <Modal visible={!!activeCluster} animationType="slide" onRequestClose={closeCluster}>
         <View style={[styles.root, { backgroundColor: colors.bg }]}>
           <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
@@ -279,45 +301,128 @@ export default function PlacesScreen() {
               numColumns={3}
               contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: gridGap }}
               columnWrapperStyle={{ gap: gridGap }}
-              renderItem={({ item, index }) => (
-                <AnimatedListItem index={index}>
-                  <TouchableOpacity
-                    style={[styles.placeCell, { width: cellSize, height: cellSize }]}
-                    onPress={() => { hapticLight(); setViewerItem(item); }}
-                    activeOpacity={0.85}
-                  >
-                    <Image
-                      source={{ uri: serverConfig ? buildThumbnailUrl(serverConfig, item.relative_path, item.source_type, item.source_id) : undefined }}
-                      style={styles.placeCellImage}
-                      contentFit="cover"
-                      transition={150}
-                    />
-                    {item.is_video && (
-                      <View style={styles.videoBadge}>
-                        <AppIcon androidName="play_arrow" iosName="play.fill" color="#fff" size={14} />
-                      </View>
-                    )}
-                  </TouchableOpacity>
-                </AnimatedListItem>
-              )}
+              renderItem={({ item, index }) => {
+                const itemThumbUrl = serverConfig
+                  ? (item.is_video
+                    ? buildThumbnailUrl(serverConfig, item.relative_path, item.source_type, item.source_id)
+                    : buildPreviewUrl(serverConfig, item.relative_path, item.source_type, item.source_id))
+                  : undefined;
+
+                return (
+                  <AnimatedListItem index={index}>
+                    <TouchableOpacity
+                      style={[styles.placeCell, { width: cellSize, height: cellSize }]}
+                      onPress={() => { hapticLight(); setViewerIndex(index); }}
+                      activeOpacity={0.85}
+                    >
+                      <Image
+                        source={{ uri: itemThumbUrl }}
+                        style={styles.placeCellImage}
+                        contentFit="cover"
+                        transition={150}
+                      />
+                      {item.is_video && (
+                        <View style={styles.videoBadge}>
+                          <AppIcon androidName="play_arrow" iosName="play.fill" color="#fff" size={14} />
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                  </AnimatedListItem>
+                );
+              }}
               showsVerticalScrollIndicator={false}
             />
           )}
         </View>
       </Modal>
 
-      <Modal visible={!!viewerItem} transparent animationType="fade" onRequestClose={closeViewer}>
+      {/* Full-Screen Swipable Viewer Modal */}
+      <Modal visible={viewerIndex !== null} transparent animationType="fade" onRequestClose={closeViewer}>
         <View style={styles.viewerOverlay}>
-          <TouchableOpacity style={[styles.viewerCloseBtn, { top: insets.top + Spacing.three }]} onPress={closeViewer} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-            <AppIcon androidName="close" iosName="xmark" color="#fff" size={24} />
-          </TouchableOpacity>
-          {viewerItem && (
-            viewerItem.is_video ? (
-              <PlacesVideoPlayer uri={viewerUrl} />
-            ) : (
-              <Image source={{ uri: viewerUrl }} style={styles.viewerImage} contentFit="contain" transition={150} />
-            )
+          {/* Top Bar with Title, Index & Close */}
+          <View style={[styles.viewerTopBar, { top: insets.top + Spacing.two }]}>
+            <View style={styles.viewerHeaderInfo}>
+              <Text style={styles.viewerIndexText}>
+                {viewerIndex !== null ? `${viewerIndex + 1} / ${clusterItems.length}` : ''}
+              </Text>
+              {activeViewerItem?.source_label ? (
+                <Text style={styles.viewerSubText} numberOfLines={1}>
+                  {activeViewerItem.source_label}
+                </Text>
+              ) : null}
+            </View>
+            <TouchableOpacity style={styles.viewerCloseBtn} onPress={closeViewer} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+              <AppIcon androidName="close" iosName="xmark" color="#fff" size={24} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Horizontal Swipable Paging FlatList */}
+          {viewerIndex !== null && (
+            <FlatList
+              ref={viewerListRef}
+              data={clusterItems}
+              keyExtractor={(item, idx) => `viewer_${item.source_type}_${item.source_id}_${item.relative_path}_${idx}`}
+              horizontal
+              pagingEnabled
+              showsHorizontalScrollIndicator={false}
+              initialScrollIndex={viewerIndex}
+              getItemLayout={(_data, index) => ({ length: width, offset: width * index, index })}
+              onScrollToIndexFailed={(info) => {
+                setTimeout(() => {
+                  viewerListRef.current?.scrollToOffset({ offset: info.index * width, animated: false });
+                }, 100);
+              }}
+              onMomentumScrollEnd={(e) => {
+                const idx = Math.round(e.nativeEvent.contentOffset.x / width);
+                if (idx >= 0 && idx < clusterItems.length) {
+                  setViewerIndex(idx);
+                }
+              }}
+              renderItem={({ item, index }) => {
+                const isCurrent = index === viewerIndex;
+                const mediaUrl = serverConfig
+                  ? (item.is_video
+                    ? buildVideoPreviewUrl(serverConfig, item.relative_path, item.source_type, item.source_id)
+                    : buildPreviewUrl(serverConfig, item.relative_path, item.source_type, item.source_id))
+                  : '';
+
+                return (
+                  <View style={{ width, height, alignItems: 'center', justifyContent: 'center' }}>
+                    {item.is_video ? (
+                      isCurrent ? (
+                        <PlacesVideoPlayer uri={mediaUrl} />
+                      ) : (
+                        <View style={fallbackStyles.wrap}>
+                          <AppIcon androidName="videocam" iosName="video" color="#fff" size={40} />
+                        </View>
+                      )
+                    ) : (
+                      <Image
+                        source={{ uri: mediaUrl }}
+                        style={styles.viewerImage}
+                        contentFit="contain"
+                        transition={150}
+                      />
+                    )}
+                  </View>
+                );
+              }}
+            />
           )}
+
+          {/* Left / Right Quick Navigation Chevrons */}
+          {viewerIndex !== null && viewerIndex > 0 && (
+            <TouchableOpacity style={[styles.navChevronBtn, styles.navChevronLeft]} onPress={goToPrevious}>
+              <AppIcon androidName="chevron_left" iosName="chevron.left" color="#fff" size={28} />
+            </TouchableOpacity>
+          )}
+          {viewerIndex !== null && viewerIndex < clusterItems.length - 1 && (
+            <TouchableOpacity style={[styles.navChevronBtn, styles.navChevronRight]} onPress={goToNext}>
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color="#fff" size={28} />
+            </TouchableOpacity>
+          )}
+
+          {/* Bottom Actions Bar */}
           <View style={[styles.viewerActions, { bottom: insets.bottom + Spacing.five }]}>
             <TouchableOpacity onPress={handleShareViewerItem} disabled={sharing} style={styles.viewerActionBtn}>
               {sharing ? <ActivityIndicator size="small" color="#fff" /> : <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={20} />}
@@ -381,9 +486,22 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   placeCellCount: { color: '#fff', fontSize: TextScale.xs, fontWeight: '800' },
   videoBadge: { position: 'absolute', top: 4, right: 4, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: Radius.full, width: 22, height: 22, alignItems: 'center', justifyContent: 'center' },
   viewerOverlay: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
-  viewerCloseBtn: { position: 'absolute', right: Spacing.four, zIndex: 20, width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
+  viewerTopBar: {
+    position: 'absolute', left: Spacing.four, right: Spacing.four, zIndex: 20,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+  },
+  viewerHeaderInfo: { flexDirection: 'column' },
+  viewerIndexText: { color: '#fff', fontSize: TextScale.sm, fontWeight: '700' },
+  viewerSubText: { color: 'rgba(255,255,255,0.7)', fontSize: TextScale.xs, fontWeight: '500', marginTop: 2 },
+  viewerCloseBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 20 },
   viewerImage: { width: '100%', height: '100%' },
-  viewerActions: { position: 'absolute', flexDirection: 'row', gap: Spacing.four, alignSelf: 'center' },
+  navChevronBtn: {
+    position: 'absolute', top: '50%', marginTop: -24, width: 48, height: 48, borderRadius: 24,
+    backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center', zIndex: 15,
+  },
+  navChevronLeft: { left: Spacing.three },
+  navChevronRight: { right: Spacing.three },
+  viewerActions: { position: 'absolute', flexDirection: 'row', gap: Spacing.four, alignSelf: 'center', zIndex: 20 },
   viewerActionBtn: {
     width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.2)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.35)',

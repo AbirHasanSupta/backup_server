@@ -15,6 +15,7 @@ type Goal = {
   year: number;
   createdAt: number;
   completedAt: number | null;
+  lastProgress?: GoalProgress;
 };
 
 type GoalProgress = { total: number; backedUp: number; percent: number };
@@ -40,15 +41,17 @@ export default function GoalsScreen() {
   const load = useCallback(async () => {
     const gen = ++genRef.current;
     abortRef.current = false;
-    setLoading(true);
     try {
       const goals: Goal[] = await getGoals();
       if (gen !== genRef.current) return;
       if (!goals.length) {
         setRows([]);
+        setLoading(false);
+        setComputing(false);
         return;
       }
-      setRows(goals.map((goal) => ({ goal, progress: null })));
+      setRows(goals.map((goal) => ({ goal, progress: goal.lastProgress || null })));
+      setLoading(false);
       setComputing(true);
       const results = await computeAllGoalsProgress(() => abortRef.current || genRef.current !== gen);
       if (gen !== genRef.current) return;

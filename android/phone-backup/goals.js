@@ -77,28 +77,79 @@ async function collectAllLocalFiles(shouldStop) {
   if (!folders.length) return [];
 
   const snapshotCache = await loadScanSnapshot();
-  const scanned = await scan(null, null, snapshotCache, {
+  const filesMap = new Map();
+  for (const [path, meta] of snapshotCache.entries()) {
+    filesMap.set(path, {
+      relativePath: path,
+      modifiedTime: meta.mtime,
+      size: meta.size,
+    });
+  }
+
+  // If snapshot exists, populate cachedFiles instantly so UI renders immediately
+  if (snapshotCache.size > 0) {
+    cachedFiles = Array.from(filesMap.values());
+    cachedAt = Date.now();
+    // Refresh newly added files in non-blocking scan
+    scan(null, null, snapshotCache, { incremental: true, noMetadata: true }).then((scanned) => {
+      if (Array.isArray(scanned) && scanned.length > 0) {
+        for (const f of scanned) {
+          if (f?.relativePath && !filesMap.has(f.relativePath)) {
+            filesMap.set(f.relativePath, {
+              relativePath: f.relativePath,
+              modifiedTime: f.modifiedTime || 0,
+              size: f.size || 0,
+            });
+          }
+        }
+        cachedFiles = Array.from(filesMap.values());
+        cachedAt = Date.now();
+      }
+    }).catch(() => {});
+    return cachedFiles;
+  }
+
+  // Initial scan before any snapshot
+  const scanned = await scan(null, null, null, {
     incremental: false,
+    noMetadata: true,
     shouldStop: () => !!shouldStop?.(),
   });
-  if (scanned?.stopped || shouldStop?.()) return cachedFiles || [];
 
-  cachedFiles = Array.isArray(scanned) ? scanned : [];
+  if (Array.isArray(scanned)) {
+    for (const f of scanned) {
+      if (f?.relativePath && !filesMap.has(f.relativePath)) {
+        filesMap.set(f.relativePath, {
+          relativePath: f.relativePath,
+          modifiedTime: f.modifiedTime || 0,
+          size: f.size || 0,
+        });
+      }
+    }
+  }
+
+  cachedFiles = Array.from(filesMap.values());
   cachedAt = Date.now();
   return cachedFiles;
+}
+
+function getFileYear(file) {
+  const mtime = file?.modifiedTime;
+  if (mtime && mtime > 0) {
+    const ms = mtime > 1e11 ? mtime : mtime * 1000;
+    const y = new Date(ms).getFullYear();
+    if (y >= 1990 && y <= 2100) return y;
+  }
+  const match = String(file?.relativePath || file?.name || '').match(/\b(20[0-2][0-9])\b/);
+  if (match) return parseInt(match[1], 10);
+  return null;
 }
 
 export async function computeGoalProgress(goal, shouldStop) {
   const files = await collectAllLocalFiles(shouldStop);
   if (shouldStop?.()) return null;
 
-  const getYear = (mtime) => {
-    if (!mtime) return null;
-    const ms = mtime > 1e11 ? mtime : mtime * 1000;
-    return new Date(ms).getFullYear();
-  };
-
-  const inYear = files.filter((f) => getYear(f.modifiedTime) === goal.year);
+  const inYear = files.filter((f) => getFileYear(f) === goal.year);
   if (!inYear.length) return { total: 0, backedUp: 0, percent: 0 };
 
   const trusted = await isUploadedBatch(inYear);
@@ -117,18 +168,49 @@ export async function computeGoalProgress(goal, shouldStop) {
 
 export async function computeAllGoalsProgress(shouldStop) {
   const goals = await readGoals();
+  if (!goals.length) return [];
+  const files = await collectAllLocalFiles(shouldStop);
+  if (shouldStop?.()) return [];
+
   const results = [];
+  let goalsChanged = false;
+
   for (const goal of goals) {
     if (shouldStop?.()) break;
-    const progress = await computeGoalProgress(goal, shouldStop);
-    if (!progress) break;
+    const inYear = files.filter((f) => getFileYear(f) === goal.year);
+    if (!inYear.length) {
+      const progress = { total: 0, backedUp: 0, percent: 0 };
+      goal.lastProgress = progress;
+      results.push({ goal, progress });
+      continue;
+    }
+
+    const trusted = await isUploadedBatch(inYear);
+    if (shouldStop?.()) break;
+
+    const backedUp = inYear.filter((f) =>
+      trusted.has(`${f.relativePath}|${f.modifiedTime}|${f.size || 0}`)
+    ).length;
+
+    const progress = {
+      total: inYear.length,
+      backedUp,
+      percent: Math.round((backedUp / inYear.length) * 100),
+    };
+
+    goal.lastProgress = progress;
+    goalsChanged = true;
+
     if (progress.percent >= 100 && progress.total > 0 && !goal.completedAt) {
-      await markGoalCompleted(goal.id);
       goal.completedAt = Date.now();
       goal.notifiedComplete = true;
       await showGoalCompleteNotification(goal).catch(() => {});
     }
     results.push({ goal, progress });
+  }
+
+  if (goalsChanged) {
+    await writeGoals(goals);
   }
   return results;
 }
