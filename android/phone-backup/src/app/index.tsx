@@ -14,7 +14,7 @@ import Animated, {
   FadeInDown,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import {
   getCurrentSyncState,
   stopCurrentSync,
@@ -134,6 +134,7 @@ type ServerStatus = 'connected' | 'disconnected' | 'removed' | 'unknown' | 'chec
 const HEADER_HEIGHT = 140;
 
 export default function HomeScreen() {
+  const router = useRouter();
   const insets = useSafeAreaInsets();
   const { colors, isDark } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -649,7 +650,9 @@ export default function HomeScreen() {
               preview={pendingPreview}
               loading={previewLoading}
               syncing={syncing}
-              onPress={isOffline ? undefined : handleSync}
+              onPress={pendingPreview && (pendingPreview.newCount + pendingPreview.changedCount) > 0
+                ? () => router.push('/gaps')
+                : undefined}
             />
           </Animated.View>
         ) : null}

@@ -53,44 +53,84 @@ export function isValidPendingPreview(parsed) {
   );
 }
 
+function fileNameFromPath(path) {
+  const parts = String(path || '').split('/');
+  return parts[parts.length - 1] || path;
+}
+
+function summarizePendingFiles(files, extra = {}) {
+  let newCount = 0;
+  let changedCount = 0;
+  let pendingBytes = 0;
+  for (const file of files) {
+    pendingBytes += Number(file.size) || 0;
+    if (file.status === 'changed') changedCount += 1;
+    else newCount += 1;
+  }
+  return {
+    files,
+    newCount,
+    changedCount,
+    pendingBytes,
+    ...extra,
+  };
+}
+
+async function collectPendingFromSnapshot(snapshotCache, shouldStop) {
+  const entries = [...snapshotCache.entries()];
+  if (entries.length === 0) return [];
+
+  if (shouldStop?.()) return null;
+
+  const keys = entries.map(([path]) => `uploaded_${path}`);
+  const pairs = await multiGetChunked(keys);
+  if (shouldStop?.()) return null;
+  const valueByKey = new Map(pairs);
+
+  const files = [];
+  for (let i = 0; i < entries.length; i++) {
+    if (i % 250 === 0 && shouldStop?.()) return null;
+    const [path, meta] = entries[i];
+    const val = valueByKey.get(`uploaded_${path}`);
+    const mtime = String(meta?.mtime || 0);
+    const size = Number(meta?.size) || 0;
+    if (val == null) {
+      files.push({
+        relativePath: path,
+        name: fileNameFromPath(path),
+        size,
+        modifiedTime: Number(meta?.mtime) || 0,
+        status: 'new',
+      });
+    } else if (val !== mtime) {
+      files.push({
+        relativePath: path,
+        name: fileNameFromPath(path),
+        size,
+        modifiedTime: Number(meta?.mtime) || 0,
+        status: 'changed',
+      });
+    }
+  }
+  return files;
+}
+
 async function classifySnapshot(snapshotCache, shouldStop) {
   const entries = [...snapshotCache.entries()];
   if (entries.length === 0) {
     return emptyPreview({ snapshotFiles: 0 });
   }
 
-  if (shouldStop?.()) return emptyPreview({ aborted: true, snapshotFiles: entries.length });
-
-  const keys = entries.map(([path]) => `uploaded_${path}`);
-  const pairs = await multiGetChunked(keys);
-  if (shouldStop?.()) return emptyPreview({ aborted: true, snapshotFiles: entries.length });
-  const valueByKey = new Map(pairs);
-
-  let newCount = 0;
-  let changedCount = 0;
-  let pendingBytes = 0;
-
-  for (let i = 0; i < entries.length; i++) {
-    if (i % 250 === 0 && shouldStop?.()) {
-      return emptyPreview({ aborted: true, snapshotFiles: entries.length });
-    }
-    const [path, meta] = entries[i];
-    const val = valueByKey.get(`uploaded_${path}`);
-    const mtime = String(meta?.mtime || 0);
-    const size = Number(meta?.size) || 0;
-    if (val == null) {
-      newCount += 1;
-      pendingBytes += size;
-    } else if (val !== mtime) {
-      changedCount += 1;
-      pendingBytes += size;
-    }
+  const files = await collectPendingFromSnapshot(snapshotCache, shouldStop);
+  if (files == null) {
+    return emptyPreview({ aborted: true, snapshotFiles: entries.length });
   }
 
+  const summary = summarizePendingFiles(files);
   return {
-    newCount,
-    changedCount,
-    pendingBytes,
+    newCount: summary.newCount,
+    changedCount: summary.changedCount,
+    pendingBytes: summary.pendingBytes,
     snapshotFiles: entries.length,
     scanned: false,
     aborted: false,
@@ -208,4 +248,81 @@ export async function refreshPendingPreview(options = {}) {
 export function invalidatePendingPreviewCache() {
   lastScanAt = 0;
   cacheEpoch += 1;
+}
+
+let listInFlight = null;
+let listInFlightEpoch = -1;
+
+/**
+ * Returns individual local files not yet backed up (new or changed).
+ * Uses the same snapshot + incremental scan logic as previewPendingSync.
+ */
+export async function listPendingFiles({ shouldStop, skipScan = false } = {}) {
+  const folders = await getFolders();
+  if (!folders.length) {
+    return summarizePendingFiles([], { noFolders: true, aborted: false, scanned: false });
+  }
+
+  if (shouldStop?.()) {
+    return summarizePendingFiles([], { aborted: true, scanned: false, noFolders: false });
+  }
+
+  const snapshotCache = await loadScanSnapshot();
+  let files = await collectPendingFromSnapshot(snapshotCache, shouldStop);
+  if (files == null || shouldStop?.()) {
+    return summarizePendingFiles(files || [], { aborted: true, scanned: false, noFolders: false });
+  }
+
+  if (skipScan) {
+    return summarizePendingFiles(files, { scanned: false, aborted: false, noFolders: false });
+  }
+
+  if (shouldStop?.()) {
+    return summarizePendingFiles(files, { aborted: true, scanned: false, noFolders: false });
+  }
+
+  const scanned = await scan(null, null, snapshotCache, {
+    incremental: true,
+    shouldStop: () => !!shouldStop?.(),
+  });
+
+  if (scanned?.stopped || shouldStop?.()) {
+    return summarizePendingFiles(files, { aborted: true, scanned: false, noFolders: false });
+  }
+
+  const scanFiles = Array.isArray(scanned) ? scanned : [];
+  const fresh = scanFiles.filter((file) => file?.name && hasProperExtension(file.name));
+  const seen = new Set(files.map((file) => file.relativePath));
+  for (const file of fresh) {
+    if (seen.has(file.relativePath)) continue;
+    files.push({
+      relativePath: file.relativePath,
+      name: file.name,
+      size: file.size || 0,
+      modifiedTime: file.modifiedTime || 0,
+      status: 'new',
+    });
+    seen.add(file.relativePath);
+  }
+
+  lastScanAt = Date.now();
+  return summarizePendingFiles(files, { scanned: true, aborted: false, noFolders: false });
+}
+
+export async function refreshPendingFileList(options = {}) {
+  const epoch = cacheEpoch;
+  if (listInFlight && listInFlightEpoch === epoch && !options.force && !options.shouldStop) {
+    return listInFlight;
+  }
+
+  const startedEpoch = cacheEpoch;
+  listInFlightEpoch = startedEpoch;
+  const promise = listPendingFiles({
+    skipScan: !!options.skipScan,
+    shouldStop: () => cacheEpoch !== startedEpoch || !!options.shouldStop?.(),
+  }).finally(() => {
+    if (listInFlight === promise) listInFlight = null;
+  });
+  listInFlight = promise;
+  return promise;
 }

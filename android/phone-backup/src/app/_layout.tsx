@@ -228,6 +228,10 @@ function RootLayoutContent() {
           name="roulette"
           options={{ href: null, tabBarStyle: { display: 'none' }, freezeOnBlur: true }}
         />
+        <Tabs.Screen
+          name="gaps"
+          options={{ href: null, tabBarStyle: { display: 'none' } }}
+        />
       </Tabs>
     </SafeAreaProvider>
   );

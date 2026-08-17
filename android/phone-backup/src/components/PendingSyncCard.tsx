@@ -55,7 +55,7 @@ export function PendingSyncCard({ colors, preview, loading, syncing, onPress }: 
   const body = upToDate
     ? 'Everything in your selected folders is already backed up.'
     : pending > 0
-      ? `${sizeLabel ? `${sizeLabel} ready · ` : ''}Tap Sync Now to back these up.`
+      ? `${sizeLabel ? `${sizeLabel} waiting · ` : ''}Tap to see what's not backed up yet.`
       : 'Counting new and changed files before you sync.';
 
   const content = (
@@ -77,6 +77,9 @@ export function PendingSyncCard({ colors, preview, loading, syncing, onPress }: 
         <Text style={[styles.title, upToDate && { color: colors.success }]}>{title}</Text>
         <Text style={styles.body}>{body}</Text>
       </View>
+      {onPress && pending > 0 ? (
+        <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
+      ) : null}
     </>
   );
 
@@ -86,7 +89,7 @@ export function PendingSyncCard({ colors, preview, loading, syncing, onPress }: 
         style={styles.card}
         onPress={onPress}
         scaleDown={0.98}
-        accessibilityLabel="Sync pending files now"
+        accessibilityLabel="View files not yet backed up"
       >
         {content}
       </AnimatedPressable>
