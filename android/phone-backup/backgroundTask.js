@@ -43,7 +43,6 @@ import {
   setLastStreakRiskNotifiedDate,
 } from './streak';
 import { computeAllGoalsProgress, invalidateGoalsFileCache } from './goals';
-import { triggerWidgetRefresh } from './widget';
 
 /**
  * Converts any raw error message to a short, user-readable string.
@@ -1014,7 +1013,6 @@ export async function runSync(onProgress, runOptions = {}) {
     if (outcome === 'completed' && !result.stopped && !wasForceStopped) {
       invalidateGoalsFileCache();
       computeAllGoalsProgress(() => false).catch(() => {});
-      triggerWidgetRefresh().catch(() => {});
     }
 
     if ((!isBackgroundFetch || result.uploaded > 0) && !result.stopped && !wasForceStopped) {

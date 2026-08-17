@@ -33,7 +33,6 @@ import {
   setLastStreakRiskNotifiedDate,
   todayStr as streakTodayStr,
 } from '../../streak';
-import { syncWidgetServerConfig } from '../../widget';
 import { AppColors, Radius, Shadows, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { AppThemeProvider, useAppTheme } from '@/hooks/use-app-theme';
@@ -185,7 +184,6 @@ function RootLayoutContent() {
       } catch {}
       await setupNotifications().catch(() => {});
       await registerBackgroundTask();
-      syncWidgetServerConfig().catch(() => {});
       checkAndNotifyMemories().catch(() => {});
       checkAndNotifyFlashback().catch(() => {});
       checkAndNotifyStreakRisk().catch(() => {});

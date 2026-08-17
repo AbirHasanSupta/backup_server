@@ -151,9 +151,7 @@ import java.util.List;
 public class BackupWakeLockPackage implements ReactPackage {
   @Override
   public List<NativeModule> createNativeModules(ReactApplicationContext reactContext) {
-    return Arrays.<NativeModule>asList(
-      new BackupWakeLockModule(reactContext),
-      new BackupWidgetModule(reactContext));
+    return Arrays.<NativeModule>asList(new BackupWakeLockModule(reactContext));
   }
 
   @Override
