@@ -27,6 +27,8 @@ import {
   invalidatePendingPreviewCache,
 } from '../../pendingPreview';
 import { hapticMedium } from '@/utils/haptics';
+import { getServerIp } from '../../settings';
+import { checkDeviceConnection } from '../../uploader';
 
 type GapStatus = 'new' | 'changed';
 type GapCategory = 'all' | 'image' | 'video' | 'audio' | 'other';
@@ -148,9 +150,27 @@ export default function GapsScreen() {
   const [syncing, setSyncing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<GapCategory>('all');
+  const [offline, setOffline] = useState(false);
 
   const abortRef = useRef(false);
   const genRef = useRef(0);
+
+  const checkOffline = useCallback(async () => {
+    try {
+      const ip = await getServerIp();
+      if (!ip) {
+        setOffline(true);
+        return;
+      }
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const result = await checkDeviceConnection({ signal: controller.signal });
+      clearTimeout(timeout);
+      setOffline(!result.connected);
+    } catch {
+      setOffline(true);
+    }
+  }, []);
 
   const load = useCallback(async (opts: { skipScan?: boolean } = {}) => {
     const gen = ++genRef.current;
@@ -184,11 +204,12 @@ export default function GapsScreen() {
     useCallback(() => {
       abortRef.current = false;
       load();
+      checkOffline();
       return () => {
         abortRef.current = true;
         genRef.current += 1;
       };
-    }, [load])
+    }, [load, checkOffline])
   );
 
   useEffect(() => {
@@ -202,10 +223,11 @@ export default function GapsScreen() {
       DeviceEventEmitter.addListener('sync-failed', () => {
         setSyncing(false);
         load();
+        checkOffline();
       }),
     ];
     return () => subs.forEach((sub) => sub.remove());
-  }, [load]);
+  }, [load, checkOffline]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -215,13 +237,17 @@ export default function GapsScreen() {
   }, [load]);
 
   const handleBackUp = useCallback(async () => {
+    if (offline) {
+      checkOffline();
+      return;
+    }
     hapticMedium();
     try {
       await runSync();
     } catch {
       load();
     }
-  }, [load]);
+  }, [load, offline, checkOffline]);
 
   const filteredFiles = useMemo(() => {
     const files = data?.files ?? [];
@@ -467,7 +493,7 @@ export default function GapsScreen() {
             />
           )}
 
-          {pendingTotal > 0 && !syncing && (
+          {pendingTotal > 0 && !syncing && !offline && (
             <AnimatedPressable
               style={[styles.fab, { bottom: insets.bottom + Spacing.four }]}
               onPress={handleBackUp}
@@ -479,6 +505,17 @@ export default function GapsScreen() {
                 Back Up {pendingTotal.toLocaleString()} {pendingTotal === 1 ? 'File' : 'Files'}
               </Text>
             </AnimatedPressable>
+          )}
+
+          {pendingTotal > 0 && !syncing && offline && (
+            <TouchableOpacity
+              style={[styles.syncBanner, { bottom: insets.bottom + Spacing.four, backgroundColor: colors.surface }]}
+              onPress={checkOffline}
+              accessibilityLabel="Server unreachable, tap to retry"
+            >
+              <AppIcon androidName="cloud_off" iosName="wifi.slash" color={colors.textMuted} size={16} />
+              <Text style={[styles.syncBannerText, { color: colors.textMuted }]}>Server unreachable — tap to retry</Text>
+            </TouchableOpacity>
           )}
 
           {syncing && (
