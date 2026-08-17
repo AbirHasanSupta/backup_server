@@ -86,10 +86,7 @@ function toUserFriendlyError(err) {
   return raw || 'Upload failed';
 }
 
-function sanitizeJavaException(msg) {
-  // Strip Java class prefixes like "java.io.FileNotFoundException: "
-  return msg.replace(/^[a-z][a-zA-Z0-9_.]+Exception:\s*/i, '').trim() || msg;
-}
+
 
 async function readJsonResponse(res, context) {
   try {

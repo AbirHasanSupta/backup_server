@@ -139,7 +139,7 @@ export default function GoalsScreen() {
           </View>
           <Text style={styles.emptyTitle}>No goals yet</Text>
           <Text style={styles.emptySubtitle}>
-            Set a target year and we&apos;ll track how much of it is backed up.
+            Pick a year (e.g. 2023) and we&apos;ll track how many of that year&apos;s photos and videos are backed up. We&apos;ll notify you when you reach 100%.
           </Text>
           <AnimatedPressable style={[styles.emptyCta, { backgroundColor: colors.primary }]} onPress={openPicker} scaleDown={0.96}>
             <AppIcon androidName="add" iosName="plus" color={colors.white} size={18} />
@@ -164,6 +164,7 @@ export default function GoalsScreen() {
         <View style={styles.modalOverlay}>
           <View style={[styles.modalCard, { backgroundColor: colors.surface }]}>
             <Text style={styles.modalTitle}>Track a year</Text>
+            <Text style={styles.modalDesc}>Choose a year — we’ll count how many photos and videos from that year are backed up and notify you when you hit 100%.</Text>
             <View style={styles.yearPickerRow}>
               <TouchableOpacity
                 style={styles.yearArrowBtn}
@@ -316,7 +317,8 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     alignItems: 'center', justifyContent: 'center', padding: Spacing.five,
   },
   modalCard: { width: '100%', maxWidth: 340, borderRadius: Radius.xl, padding: Spacing.five, ...Shadows.card },
-  modalTitle: { fontSize: TextScale.md, fontWeight: '800', color: colors.text, textAlign: 'center', marginBottom: Spacing.four },
+  modalTitle: { fontSize: TextScale.md, fontWeight: '800', color: colors.text, textAlign: 'center', marginBottom: Spacing.two },
+  modalDesc: { fontSize: TextScale.xs, color: colors.textSecondary, fontWeight: '500', textAlign: 'center', marginBottom: Spacing.two, lineHeight: 18 },
   yearPickerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: Spacing.five, marginBottom: Spacing.two },
   yearArrowBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
   yearPickerText: { fontSize: 32, fontWeight: '800', color: colors.text, minWidth: 90, textAlign: 'center' },

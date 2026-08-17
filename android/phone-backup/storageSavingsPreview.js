@@ -5,7 +5,6 @@ import { formatPendingBytes } from './pendingPreview';
 
 const CACHE_KEY = 'storage_savings_cache_v1';
 const MULTI_GET_CHUNK = 500;
-const CHECK_BATCH_SIZE = 300;
 const STALE_MS = 5 * 60 * 1000;
 
 let inFlight = null;
@@ -14,14 +13,6 @@ let cacheEpoch = 0;
 let lastRefreshAt = 0;
 
 export { formatPendingBytes as formatStorageBytes };
-
-function chunk(items, size) {
-  const batches = [];
-  for (let i = 0; i < items.length; i += size) {
-    batches.push(items.slice(i, i + size));
-  }
-  return batches;
-}
 
 async function multiGetChunked(keys) {
   if (!keys.length) return [];

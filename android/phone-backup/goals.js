@@ -181,6 +181,7 @@ export async function computeAllGoalsProgress(shouldStop) {
     if (!inYear.length) {
       const progress = { total: 0, backedUp: 0, percent: 0 };
       goal.lastProgress = progress;
+      goalsChanged = true;
       results.push({ goal, progress });
       continue;
     }

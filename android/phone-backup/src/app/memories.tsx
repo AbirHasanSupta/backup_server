@@ -50,6 +50,12 @@ const DAY_CARD_W = 132;
 const DAY_CARD_H = 208;
 const DAY_CARD_GAP = 14;
 
+// Captured once at module load so the rewind picker month grid can compare
+// against the current calendar month without calling `new Date()` inside a
+// map() on every render. This value is stable for the lifetime of the JS
+// bundle (the app is typically reloaded at most once per day).
+const now = new Date();
+
 type ExpoVideoModule = typeof import('expo-video');
 type VideoSource = import('expo-video').VideoSource;
 
@@ -517,8 +523,8 @@ export default function MemoriesScreen() {
     if (!flashbackItem || flashbackSaving) return;
     setFlashbackSaving(true);
     try {
-      const hasPerm = await requestMediaPermissions();
-      if (!hasPerm) {
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
         Alert.alert('Permission Denied', 'Storage permission is required to save photos.');
         return;
       }
