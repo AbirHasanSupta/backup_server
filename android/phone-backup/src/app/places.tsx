@@ -57,6 +57,13 @@ function safeCall(fn: () => void): void {
   try { fn(); } catch (e) { console.warn('[Places] player error:', e); }
 }
 
+function formatCoordinates(lat?: number, lon?: number): string {
+  if (lat == null || lon == null || isNaN(lat) || isNaN(lon)) return '';
+  const latDir = lat >= 0 ? 'N' : 'S';
+  const lonDir = lon >= 0 ? 'E' : 'W';
+  return `${Math.abs(lat).toFixed(2)}° ${latDir}, ${Math.abs(lon).toFixed(2)}° ${lonDir}`;
+}
+
 export default function PlacesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -251,7 +258,9 @@ export default function PlacesScreen() {
               <AppIcon androidName="close" iosName="xmark" color={colors.text} size={22} />
             </TouchableOpacity>
             <View style={styles.headerCenter}>
-              <Text style={styles.headerTitle}>This Place</Text>
+              <Text style={styles.headerTitle}>
+                {activeCluster ? formatCoordinates(activeCluster.lat, activeCluster.lon) || 'This Place' : 'This Place'}
+              </Text>
               <Text style={styles.headerSubtitle}>
                 {clusterLoading ? 'Loading…' : `${clusterItems.length} ${clusterItems.length === 1 ? 'memory' : 'memories'}`}
               </Text>

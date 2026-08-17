@@ -31,10 +31,17 @@ import {
   showSyncProgressNotification,
   showSyncCompleteNotification,
   showSyncErrorNotification,
+  showStreakRiskNotification,
   buildSyncProgressText,
 } from './notificationService';
 import { appendSyncSession } from './syncHistory';
-import { recordSyncCompleted } from './streak';
+import {
+  recordSyncCompleted,
+  getStreakData,
+  todayStr as streakTodayStr,
+  getLastStreakRiskNotifiedDate,
+  setLastStreakRiskNotifiedDate,
+} from './streak';
 import { computeAllGoalsProgress, invalidateGoalsFileCache } from './goals';
 
 /**
@@ -209,6 +216,7 @@ try {
 
   TaskManager.defineTask(TASK_NAME, async () => {
     try {
+      checkStreakRiskInBackground().catch(() => {});
       const result = await runSync(null, { isBackgroundFetch: true });
       return result.uploaded > 0
         ? BackgroundFetch.BackgroundFetchResult.NewData
@@ -220,6 +228,23 @@ try {
   });
 } catch (e) {
   console.warn('[BackgroundTask] Native modules not available.', e?.message);
+}
+
+async function checkStreakRiskInBackground() {
+  try {
+    const todayStr = streakTodayStr();
+    const lastNotified = await getLastStreakRiskNotifiedDate();
+    if (lastNotified === todayStr) return;
+
+    const hourNow = new Date().getHours();
+    if (hourNow < 18) return; // only warn in the evening, once the day's sync window is closing
+
+    const streak = await getStreakData();
+    if (streak.atRisk && streak.currentStreak > 0) {
+      await showStreakRiskNotification(streak.currentStreak);
+      await setLastStreakRiskNotifiedDate(todayStr);
+    }
+  } catch {}
 }
 
 let lastIdleDesc = null;
@@ -985,7 +1010,7 @@ export async function runSync(onProgress, runOptions = {}) {
       await recordSyncCompleted().catch(() => {});
     }
 
-    if (outcome === 'completed' && result.uploaded > 0) {
+    if (outcome === 'completed' && !result.stopped && !wasForceStopped) {
       invalidateGoalsFileCache();
       computeAllGoalsProgress(() => false).catch(() => {});
     }
@@ -1101,6 +1126,7 @@ async function persistentSyncLoop(taskDataArguments) {
         } else {
           await updateIdleNotification();
         }
+        checkStreakRiskInBackground().catch(() => {});
       }
     } catch (err) {
       console.warn('[BackgroundTask] Persistent loop tick failed:', err?.message);

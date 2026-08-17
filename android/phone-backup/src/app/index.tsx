@@ -501,7 +501,7 @@ export default function HomeScreen() {
     ];
 
     return () => subs.forEach((sub) => sub.remove());
-  }, [applySyncSnapshot, loadAll, loadPendingPreview, loadStorageSavings, loadGoalsSummary]);
+  }, [applySyncSnapshot, loadAll, loadPendingPreview, loadStorageSavings, loadGoalsSummary, loadStreak]);
 
   const handleSync = async () => {
     const snapshot = await getCurrentSyncState().catch(() => null);

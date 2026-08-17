@@ -92,9 +92,13 @@ export async function computeGoalProgress(goal, shouldStop) {
   const files = await collectAllLocalFiles(shouldStop);
   if (shouldStop?.()) return null;
 
-  const inYear = files.filter(
-    (f) => f.modifiedTime && new Date(f.modifiedTime * 1000).getFullYear() === goal.year
-  );
+  const getYear = (mtime) => {
+    if (!mtime) return null;
+    const ms = mtime > 1e11 ? mtime : mtime * 1000;
+    return new Date(ms).getFullYear();
+  };
+
+  const inYear = files.filter((f) => getYear(f.modifiedTime) === goal.year);
   if (!inYear.length) return { total: 0, backedUp: 0, percent: 0 };
 
   const trusted = await isUploadedBatch(inYear);
@@ -118,7 +122,7 @@ export async function computeAllGoalsProgress(shouldStop) {
     if (shouldStop?.()) break;
     const progress = await computeGoalProgress(goal, shouldStop);
     if (!progress) break;
-    if (progress.percent >= 100 && !goal.completedAt) {
+    if (progress.percent >= 100 && progress.total > 0 && !goal.completedAt) {
       await markGoalCompleted(goal.id);
       goal.completedAt = Date.now();
       goal.notifiedComplete = true;

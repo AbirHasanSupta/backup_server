@@ -20,6 +20,7 @@ import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
+import * as Sharing from 'expo-sharing';
 
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
@@ -188,6 +189,7 @@ export default function MemoriesScreen() {
   const [rewindMonth, setRewindMonth] = useState<number | null>(null);
   const [rewindStatus, setRewindStatus] = useState<RewindStatus>('idle');
   const [rewindSaving, setRewindSaving] = useState(false);
+  const [rewindSharing, setRewindSharing] = useState(false);
   const rewindPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchMemories = useCallback(async (opts?: { silent?: boolean }) => {
@@ -345,60 +347,6 @@ export default function MemoriesScreen() {
     setFlashbackError(null);
   }, []);
 
-  useEffect(() => {
-    if (params.flashback === '1') {
-      // Deep-link / notification entry — intentionally kick off async fetch.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      openFlashback();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.flashback]);
-
-  useEffect(() => {
-    if (params.recap === '1' && params.recapYear) {
-      const year = Number(params.recapYear);
-      const month = params.recapMonth ? Number(params.recapMonth) : undefined;
-      if (Number.isFinite(year)) {
-        // Deep-link / notification entry — intentionally kick off async fetch.
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        openRewind(year, month);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.recap, params.recapYear, params.recapMonth]);
-
-  const handleSaveFlashback = async () => {
-    if (!flashbackItem || flashbackSaving) return;
-    setFlashbackSaving(true);
-    try {
-      const { status } = await MediaLibrary.requestPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission Needed', 'Media library permission is required to save photos and videos.');
-        setFlashbackSaving(false);
-        return;
-      }
-      const displayName = flashbackItem.relative_path.split(/[/\\]/).pop() ?? `flashback_${Date.now()}`;
-      const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
-      const tmpUri = `${cacheDir}flashback_save_${Date.now()}_${displayName}`;
-
-      if (flashbackItem.source_type === 'shared') {
-        await downloadSharedFile(flashbackItem.source_id, flashbackItem.relative_path, tmpUri);
-      } else {
-        await downloadFile(flashbackItem.relative_path, tmpUri);
-      }
-
-      await MediaLibrary.saveToLibraryAsync(tmpUri);
-      await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
-      hapticSuccess();
-      Alert.alert('Saved', 'Photo/Video saved to your gallery!');
-    } catch (err: any) {
-      hapticError();
-      Alert.alert('Save Failed', sanitizeErrorMessage(err, 'Could not save file to device.'));
-    } finally {
-      setFlashbackSaving(false);
-    }
-  };
-
   const clearRewindPoll = useCallback(() => {
     if (rewindPollRef.current) {
       clearInterval(rewindPollRef.current);
@@ -482,6 +430,58 @@ export default function MemoriesScreen() {
 
   useEffect(() => () => clearRewindPoll(), [clearRewindPoll]);
 
+  useEffect(() => {
+    if (params.flashback === '1') {
+      queueMicrotask(() => {
+        openFlashback();
+      });
+    }
+  }, [params.flashback, openFlashback]);
+
+  useEffect(() => {
+    if (params.recap === '1' && params.recapYear) {
+      const year = Number(params.recapYear);
+      const month = params.recapMonth ? Number(params.recapMonth) : undefined;
+      if (Number.isFinite(year)) {
+        queueMicrotask(() => {
+          openRewind(year, month);
+        });
+      }
+    }
+  }, [params.recap, params.recapYear, params.recapMonth, openRewind]);
+
+  const handleSaveFlashback = async () => {
+    if (!flashbackItem || flashbackSaving) return;
+    setFlashbackSaving(true);
+    try {
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Needed', 'Media library permission is required to save photos and videos.');
+        setFlashbackSaving(false);
+        return;
+      }
+      const displayName = flashbackItem.relative_path.split(/[/\\]/).pop() ?? `flashback_${Date.now()}`;
+      const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
+      const tmpUri = `${cacheDir}flashback_save_${Date.now()}_${displayName}`;
+
+      if (flashbackItem.source_type === 'shared') {
+        await downloadSharedFile(flashbackItem.source_id, flashbackItem.relative_path, tmpUri);
+      } else {
+        await downloadFile(flashbackItem.relative_path, tmpUri);
+      }
+
+      await MediaLibrary.saveToLibraryAsync(tmpUri);
+      await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+      hapticSuccess();
+      Alert.alert('Saved', 'Photo/Video saved to your gallery!');
+    } catch (err: any) {
+      hapticError();
+      Alert.alert('Save Failed', sanitizeErrorMessage(err, 'Could not save file to device.'));
+    } finally {
+      setFlashbackSaving(false);
+    }
+  };
+
   // Stop any story/flashback/rewind video and dismiss their modals so audio
   // never keeps playing behind another tab (e.g. navigating to Guess the
   // Year or Roulette) or behind the OS when the app is backgrounded.
@@ -538,6 +538,30 @@ export default function MemoriesScreen() {
       Alert.alert('Save Failed', sanitizeErrorMessage(err, 'Could not save the reel to device.'));
     } finally {
       setRewindSaving(false);
+    }
+  };
+
+  const handleShareRewind = async () => {
+    if (!rewindYear || rewindSharing) return;
+    setRewindSharing(true);
+    try {
+      const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
+      const tmpUri = `${cacheDir}recap_${rewindYear}_${rewindMonth || 'y'}_${Date.now()}.mp4`;
+      await downloadRewindReel(rewindYear, rewindMonth ?? undefined, tmpUri);
+      const canShare = await Sharing.isAvailableAsync();
+      if (!canShare) {
+        Alert.alert('Sharing Unavailable', 'Sharing is not available on this device.');
+        return;
+      }
+      await Sharing.shareAsync(tmpUri, {
+        mimeType: 'video/mp4',
+        dialogTitle: rewindMonth ? `${MONTH_NAMES[rewindMonth - 1]} ${rewindYear} Recap` : `${rewindYear} Rewind Reel`,
+      });
+      await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+    } catch (err: any) {
+      Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not share the reel to device.'));
+    } finally {
+      setRewindSharing(false);
     }
   };
 
@@ -716,13 +740,19 @@ export default function MemoriesScreen() {
               </View>
               <Text style={styles.gameCardText}>Rewind Reel</Text>
             </TouchableOpacity>
+            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/places')} activeOpacity={0.85}>
+              <View style={[styles.gameIconWrap, { backgroundColor: '#10B98122' }]}>
+                <AppIcon androidName="place" iosName="mappin.and.ellipse" color="#10B981" size={20} />
+              </View>
+              <Text style={styles.gameCardText}>Places</Text>
+            </TouchableOpacity>
           </View>
           <View style={styles.centeredEmpty}>
             <View style={styles.emptyIconBg}>
               <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={40} />
             </View>
             <Text style={styles.emptyTitle}>No Memories Yet</Text>
-            <Text style={styles.emptySubtitle}>Check back over the next few days to relive photos and videos from past years — or try Roulette, Guess the Year, and Rewind above.</Text>
+            <Text style={styles.emptySubtitle}>Check back over the next few days to relive photos and videos from past years — or try Roulette, Guess the Year, Rewind, and Places above.</Text>
           </View>
         </ScrollView>
       ) : (
@@ -761,6 +791,12 @@ export default function MemoriesScreen() {
                 <AppIcon androidName="movie" iosName="film" color="#06B6D4" size={20} />
               </View>
               <Text style={styles.gameCardText}>Rewind Reel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/places')} activeOpacity={0.85}>
+              <View style={[styles.gameIconWrap, { backgroundColor: '#10B98122' }]}>
+                <AppIcon androidName="place" iosName="mappin.and.ellipse" color="#10B981" size={20} />
+              </View>
+              <Text style={styles.gameCardText}>Places</Text>
             </TouchableOpacity>
           </View>
 
@@ -1188,6 +1224,20 @@ export default function MemoriesScreen() {
 
           {rewindStatus === 'ready' && (
             <View style={[styles.storyBottomBar, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+              <TouchableOpacity
+                style={styles.saveBtn}
+                onPress={handleShareRewind}
+                disabled={rewindSharing}
+              >
+                {rewindSharing ? (
+                  <ActivityIndicator size="small" color="#fff" />
+                ) : (
+                  <>
+                    <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={20} />
+                    <Text style={styles.saveBtnText}>Share</Text>
+                  </>
+                )}
+              </TouchableOpacity>
               <TouchableOpacity
                 style={styles.saveBtn}
                 onPress={handleSaveRewind}
@@ -1702,8 +1752,10 @@ const createStyles = (colors: AppColors, insets: any) =>
       zIndex: 20,
       paddingHorizontal: Spacing.five,
       paddingTop: Spacing.three,
+      flexDirection: 'row',
       alignItems: 'center',
-      gap: Spacing.two,
+      justifyContent: 'center',
+      gap: Spacing.three,
       backgroundColor: 'rgba(0,0,0,0.4)',
     },
     saveBtn: {
