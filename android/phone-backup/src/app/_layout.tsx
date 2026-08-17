@@ -213,7 +213,7 @@ function RootLayoutContent() {
     })();
     const unsubscribeMemories = addMemoriesTapListener(() => router.push('/memories'));
     const unsubscribeFlashback = addFlashbackTapListener(() => router.push('/memories?flashback=1'));
-    const unsubscribeRecap = addRecapTapListener((target) =>
+    const unsubscribeRecap = addRecapTapListener((target: { year: number; month: number | null }) =>
       router.push(`/memories?recap=1&recapYear=${target.year}&recapMonth=${target.month ?? ''}`)
     );
     return () => {
