@@ -1176,6 +1176,29 @@ async def get_memories_roulette(
     return memories.get_roulette_item(device_id)
 
 
+@router.get("/memories/places")
+async def get_memories_places(
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    return memories.get_place_clusters(device_id)
+
+
+@router.get("/memories/places/{cluster_key}")
+async def get_memories_place_items(
+    device_id: str,
+    cluster_key: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    return memories.get_place_items(device_id, cluster_key)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Rewind Reel Endpoints
 # ──────────────────────────────────────────────────────────────────────────────

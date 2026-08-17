@@ -261,6 +261,33 @@ export async function getRouletteItem() {
 }
 
 /**
+ * Fetch clustered "Memories from this place" groups (GPS EXIF-derived).
+ */
+export async function getPlaceClusters() {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/memories/places?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch places (${res.status})`);
+  return await readJsonOrNull(res);
+}
+
+/**
+ * Fetch all items within a single place cluster.
+ * @param {string} clusterKey
+ */
+export async function getPlaceItems(clusterKey) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/memories/places/${encodeURIComponent(clusterKey)}?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch place items (${res.status})`);
+  return await readJsonOrNull(res);
+}
+
+/**
  * Trigger media reindexing on the server.
  */
 export async function triggerMemoriesReindex() {

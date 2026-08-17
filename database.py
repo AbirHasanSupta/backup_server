@@ -362,6 +362,19 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_media_lookup ON media_index(source_type, source_key, cap_month, cap_day)"
     )
 
+    # 6b. Add cap_lat / cap_lon columns to media_index for place clustering
+    cursor = conn.execute("PRAGMA table_info(media_index)")
+    media_cols = {row['name'] for row in cursor.fetchall()}
+    if 'cap_lat' not in media_cols:
+        conn.execute("ALTER TABLE media_index ADD COLUMN cap_lat REAL")
+    if 'cap_lon' not in media_cols:
+        conn.execute("ALTER TABLE media_index ADD COLUMN cap_lon REAL")
+    if 'gps_checked' not in media_cols:
+        conn.execute("ALTER TABLE media_index ADD COLUMN gps_checked INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_media_geo ON media_index(source_type, source_key, cap_lat, cap_lon)"
+    )
+
     # 7. One-time cleanup: remove stale duplicate file rows that may have
     #    accumulated from phone reinstalls before the insert_file deduplication
     #    fix was applied.  For each (device_ip, path) pair we keep only the row
@@ -941,13 +954,17 @@ def upsert_media_index_row(
         cap_day: int | None,
         cap_year: int | None,
         indexed_at: int,
+        cap_lat: float | None = None,
+        cap_lon: float | None = None,
+        gps_checked: bool = False,
 ) -> None:
     conn = get_conn()
     conn.execute(
         """
         INSERT INTO media_index (source_type, source_key, relative_path, size, modified_time,
-                                 capture_time, capture_source, cap_month, cap_day, cap_year, indexed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_type, source_key, relative_path) DO
+                                 capture_time, capture_source, cap_month, cap_day, cap_year, indexed_at,
+                                 cap_lat, cap_lon, gps_checked)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_type, source_key, relative_path) DO
         UPDATE SET
             size =excluded.size,
             modified_time=excluded.modified_time,
@@ -956,7 +973,10 @@ def upsert_media_index_row(
             cap_month=excluded.cap_month,
             cap_day=excluded.cap_day,
             cap_year=excluded.cap_year,
-            indexed_at=excluded.indexed_at
+            indexed_at=excluded.indexed_at,
+            cap_lat=excluded.cap_lat,
+            cap_lon=excluded.cap_lon,
+            gps_checked=excluded.gps_checked
         """,
         (
             source_type,
@@ -970,21 +990,24 @@ def upsert_media_index_row(
             cap_day,
             cap_year,
             indexed_at,
+            cap_lat,
+            cap_lon,
+            1 if gps_checked else 0,
         ),
     )
     conn.commit()
     conn.close()
 
 
-def get_media_index_cache(source_type: str, source_key: str) -> dict[str, tuple[int, int, str | None]]:
-    """Return {relative_path: (size, modified_time, capture_source)} for a given source."""
+def get_media_index_cache(source_type: str, source_key: str) -> dict[str, tuple[int, int, str | None, float | None, bool]]:
+    """Return {relative_path: (size, modified_time, capture_source, cap_lat, gps_checked)} for a given source."""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT relative_path, size, modified_time, capture_source FROM media_index WHERE source_type = ? AND source_key = ?",
+        "SELECT relative_path, size, modified_time, capture_source, cap_lat, gps_checked FROM media_index WHERE source_type = ? AND source_key = ?",
         (source_type, source_key),
     ).fetchall()
     conn.close()
-    return {r["relative_path"]: (r["size"], r["modified_time"], r["capture_source"]) for r in rows}
+    return {r["relative_path"]: (r["size"], r["modified_time"], r["capture_source"], r["cap_lat"], bool(r["gps_checked"])) for r in rows}
 
 
 def get_media_for_day(
@@ -1249,6 +1272,33 @@ def get_random_media_row(
 def get_random_media_item(source_type: str, source_key: str) -> dict | None:
     """Public alias matching the feature-spec name."""
     return get_random_media_row([(source_type, source_key)])
+
+
+def get_geotagged_media(
+        source_type_and_keys: list[tuple[str, str]],
+        limit: int = 5000,
+) -> list[dict]:
+    if not source_type_and_keys:
+        return []
+    conn = get_conn()
+    or_clauses = []
+    params: list = []
+    for stype, skey in source_type_and_keys:
+        or_clauses.append("(source_type = ? AND source_key = ?)")
+        params.extend([stype, skey])
+    where_source = " OR ".join(or_clauses)
+    params.append(max(1, limit))
+
+    sql = f"""
+        SELECT source_type, source_key, relative_path, size, capture_time, cap_year, cap_lat, cap_lon
+        FROM media_index
+        WHERE ({where_source}) AND cap_lat IS NOT NULL AND cap_lon IS NOT NULL
+        ORDER BY capture_time DESC
+        LIMIT ?
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def prune_media_index(source_type: str, source_key: str, keep_paths: set[str]) -> None:

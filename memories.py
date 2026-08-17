@@ -28,6 +28,7 @@ from database import (
     get_devices,
     get_distinct_cap_years,
     get_files_for_device,
+    get_geotagged_media,
     get_media_for_day,
     get_media_for_ymd_list,
     get_media_index_cache,
@@ -113,6 +114,46 @@ def _extract_image_exif_time(full_path: str) -> int | None:
                     ts = _parse_date_str(str(raw_val))
                     if ts is not None:
                         return ts
+    except Exception:
+        pass
+    return None
+
+
+def _gps_dms_to_decimal(dms, ref: str) -> float | None:
+    try:
+        degrees, minutes, seconds = float(dms[0]), float(dms[1]), float(dms[2])
+        decimal = degrees + minutes / 60.0 + seconds / 3600.0
+        if ref in ("S", "W"):
+            decimal = -decimal
+        return decimal
+    except Exception:
+        return None
+
+
+def _extract_image_gps(full_path: str) -> tuple[float, float] | None:
+    try:
+        with Image.open(full_path) as img:
+            exif = img.getexif()
+            if not exif:
+                return None
+            # GPSInfo (tag 0x8825) is itself an IFD pointer, same pattern as
+            # the Exif sub-IFD used for capture time above.
+            gps = exif.get_ifd(0x8825)
+            if not gps:
+                return None
+            lat_dms = gps.get(2)
+            lat_ref = gps.get(1)
+            lon_dms = gps.get(4)
+            lon_ref = gps.get(3)
+            if not (lat_dms and lat_ref and lon_dms and lon_ref):
+                return None
+            lat = _gps_dms_to_decimal(lat_dms, lat_ref)
+            lon = _gps_dms_to_decimal(lon_dms, lon_ref)
+            if lat is None or lon is None:
+                return None
+            if lat == 0 and lon == 0:
+                return None
+            return round(lat, 6), round(lon, 6)
     except Exception:
         pass
     return None
@@ -217,11 +258,13 @@ def reindex_device(device_id: str) -> None:
 
         cached_entry = cache.get(rel_path)
         unchanged = cached_entry and cached_entry[0] == size and cached_entry[1] == mtime
-        # Retry extraction if we previously only got the fallback timestamp —
-        # covers files re-indexed after fixing HEIC support or after ffmpeg
-        # becomes available, for both images and videos.
+        # Retry extraction if we previously only got the fallback timestamp, or
+        # if this is an image whose GPS extraction was never attempted —
+        # covers files re-indexed after fixing HEIC support, after ffmpeg
+        # becomes available, or after place-clustering GPS support was added.
         stale_fallback = cached_entry and cached_entry[2] == "fs_ctime" and (ext in IMAGE_EXTS or ext in VIDEO_EXTS)
-        if unchanged and not stale_fallback:
+        missing_gps = cached_entry and ext in IMAGE_EXTS and not cached_entry[4]
+        if unchanged and not stale_fallback and not missing_gps:
             continue
 
         cap_time, cap_source = extract_capture_time(full_path, ext, fallback_mtime=mtime)
@@ -232,6 +275,13 @@ def reindex_device(device_id: str) -> None:
                 cap_month, cap_day, cap_year = dt.month, dt.day, dt.year
             except Exception:
                 pass
+
+        cap_lat, cap_lon = (None, None)
+        gps_checked = ext in IMAGE_EXTS
+        if gps_checked:
+            gps = _extract_image_gps(full_path)
+            if gps:
+                cap_lat, cap_lon = gps
 
         upsert_media_index_row(
             source_type="phone",
@@ -245,6 +295,9 @@ def reindex_device(device_id: str) -> None:
             cap_day=cap_day,
             cap_year=cap_year,
             indexed_at=now_ts,
+            cap_lat=cap_lat,
+            cap_lon=cap_lon,
+            gps_checked=gps_checked,
         )
 
     prune_media_index("phone", device_id, seen_paths)
@@ -277,7 +330,8 @@ def reindex_shared(source_id: str, root_path: str) -> None:
             cached_entry = cache.get(rel_path)
             unchanged = cached_entry and cached_entry[0] == size and cached_entry[1] == mtime
             stale_fallback = cached_entry and cached_entry[2] == "fs_ctime" and (ext in IMAGE_EXTS or ext in VIDEO_EXTS)
-            if unchanged and not stale_fallback:
+            missing_gps = cached_entry and ext in IMAGE_EXTS and not cached_entry[4]
+            if unchanged and not stale_fallback and not missing_gps:
                 continue
 
             cap_time, cap_source = extract_capture_time(full_path, ext, fallback_mtime=mtime)
@@ -288,6 +342,13 @@ def reindex_shared(source_id: str, root_path: str) -> None:
                     cap_month, cap_day, cap_year = dt.month, dt.day, dt.year
                 except Exception:
                     pass
+
+            cap_lat, cap_lon = (None, None)
+            gps_checked = ext in IMAGE_EXTS
+            if gps_checked:
+                gps = _extract_image_gps(full_path)
+                if gps:
+                    cap_lat, cap_lon = gps
 
             upsert_media_index_row(
                 source_type="shared",
@@ -301,6 +362,9 @@ def reindex_shared(source_id: str, root_path: str) -> None:
                 cap_day=cap_day,
                 cap_year=cap_year,
                 indexed_at=now_ts,
+                cap_lat=cap_lat,
+                cap_lon=cap_lon,
+                gps_checked=gps_checked,
             )
 
     prune_media_index("shared", source_id, seen_paths)
@@ -638,3 +702,82 @@ def get_roulette_item(device_id: str) -> dict | None:
         "is_video": is_video,
         "year": row["cap_year"],
     }
+
+
+# ─── Place Clustering ──────────────────────────────────────────────────────────
+
+PLACE_GRID_PRECISION = 2  # ~1.1km grid cells at the equator
+PLACE_MIN_ITEMS = 2
+PLACE_MAX_CLUSTERS = 40
+
+
+def _place_key(lat: float, lon: float) -> tuple[float, float]:
+    return (round(lat, PLACE_GRID_PRECISION), round(lon, PLACE_GRID_PRECISION))
+
+
+def get_place_clusters(device_id: str) -> dict:
+    shared_dirs = load_config().get("SHARED_DIRS", [])
+    sources, _ = _shared_sources_for_device(device_id, shared_dirs)
+    rows = get_geotagged_media(sources)
+
+    clusters: dict[tuple[float, float], list[dict]] = {}
+    for r in rows:
+        key = _place_key(r["cap_lat"], r["cap_lon"])
+        clusters.setdefault(key, []).append(r)
+
+    results = []
+    for (lat, lon), items in clusters.items():
+        if len(items) < PLACE_MIN_ITEMS:
+            continue
+        items.sort(key=lambda it: it.get("capture_time") or 0, reverse=True)
+        cover = items[0]
+        ext = os.path.splitext(cover["relative_path"])[1].lower()
+        results.append({
+            "cluster_key": f"{lat}:{lon}",
+            "lat": lat,
+            "lon": lon,
+            "count": len(items),
+            "cover": {
+                "source_type": cover["source_type"],
+                "source_id": cover["source_key"],
+                "relative_path": cover["relative_path"],
+                "is_video": ext in VIDEO_EXTS,
+            },
+        })
+
+    results.sort(key=lambda c: c["count"], reverse=True)
+    return {"places": results[:PLACE_MAX_CLUSTERS]}
+
+
+def get_place_items(device_id: str, cluster_key: str) -> dict:
+    shared_dirs = load_config().get("SHARED_DIRS", [])
+    sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
+    rows = get_geotagged_media(sources)
+
+    try:
+        lat_str, lon_str = cluster_key.split(":")
+        target = (round(float(lat_str), PLACE_GRID_PRECISION), round(float(lon_str), PLACE_GRID_PRECISION))
+    except Exception:
+        return {"items": []}
+
+    items = []
+    for r in rows:
+        if _place_key(r["cap_lat"], r["cap_lon"]) != target:
+            continue
+        ext = os.path.splitext(r["relative_path"])[1].lower()
+        s_type = r["source_type"]
+        s_key = r["source_key"]
+        s_label = "Phone Backup" if s_type == "phone" else shared_labels.get(s_key, "Shared Folder")
+        items.append({
+            "source_type": s_type,
+            "source_id": s_key,
+            "source_label": s_label,
+            "relative_path": r["relative_path"],
+            "size": r["size"],
+            "capture_time": r["capture_time"],
+            "is_video": ext in VIDEO_EXTS,
+            "year": r["cap_year"],
+        })
+
+    items.sort(key=lambda it: it.get("capture_time") or 0, reverse=True)
+    return {"items": items}

@@ -35,6 +35,7 @@ import {
 } from './notificationService';
 import { appendSyncSession } from './syncHistory';
 import { recordSyncCompleted } from './streak';
+import { computeAllGoalsProgress, invalidateGoalsFileCache } from './goals';
 
 /**
  * Converts any raw error message to a short, user-readable string.
@@ -982,6 +983,11 @@ export async function runSync(onProgress, runOptions = {}) {
 
     if (outcome === 'completed' && result.errors === 0) {
       await recordSyncCompleted().catch(() => {});
+    }
+
+    if (outcome === 'completed' && result.uploaded > 0) {
+      invalidateGoalsFileCache();
+      computeAllGoalsProgress(() => false).catch(() => {});
     }
 
     if ((!isBackgroundFetch || result.uploaded > 0) && !result.stopped && !wasForceStopped) {
