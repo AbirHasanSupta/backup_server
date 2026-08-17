@@ -6,7 +6,6 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Modal,
-  Dimensions,
   Pressable,
   PanResponder,
   Alert,
@@ -45,7 +44,6 @@ import {
 } from '../../downloader';
 import { consumePendingFlashbackItem } from '../../notificationService';
 
-const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 const DAY_CARD_W = 132;
 const DAY_CARD_H = 208;
 const DAY_CARD_GAP = 14;
@@ -2037,8 +2035,8 @@ const createStyles = (colors: AppColors, insets: any) =>
     dayCardDate: { color: 'rgba(255,255,255,0.85)', fontWeight: '600', fontSize: TextScale.xs, marginTop: 1 },
 
     /* Story Modal Styles */
-    storyContainer: { flex: 1, backgroundColor: '#000' },
-    storyMedia: { width: SCREEN_W, height: SCREEN_H },
+    storyContainer: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
+    storyMedia: { flex: 1, width: '100%', height: '100%' },
     touchAreaContainer: {
       ...StyleSheet.absoluteFill,
       flexDirection: 'row',
@@ -2126,7 +2124,7 @@ const createStyles = (colors: AppColors, insets: any) =>
     },
     saveBtnText: { color: '#fff', fontWeight: '700', fontSize: TextScale.sm },
 
-    videoContainer: { width: SCREEN_W, height: SCREEN_H, justifyContent: 'center', alignItems: 'center' },
+    videoContainer: { flex: 1, width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' },
     videoFull: { width: '100%', height: '100%' },
     videoFallbackContainer: { flex: 1, alignItems: 'center', justifyContent: 'center' },
     videoFallbackText: { color: '#fff', fontSize: TextScale.sm, marginTop: Spacing.two, fontWeight: '600' },
