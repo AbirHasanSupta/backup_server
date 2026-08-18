@@ -262,7 +262,7 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     color: colors.white,
   },
   filterSection: {
-    marginHorizontal: Spacing.six,
+    marginBottom: Spacing.four,
     padding: Spacing.four,
     borderRadius: Radius.lg,
     backgroundColor: colors.surfaceSoft,

@@ -1,6 +1,6 @@
-# Phone Backup Server (v3.1.0)
+# Phone Backup Server (v3.4.1)
 
-A self-hosted, high-performance photo, video, and file backup & restore ecosystem over LAN. The project consists of a feature-rich **Windows Desktop Control Center** (FastAPI backend + CustomTkinter GUI) and a **React Native / Expo Android App** that provides automatic background synchronization, differential file transfers, cross-device file restoration, an "On This Day" media memories feed, and shared desktop folder access.
+A self-hosted, high-performance photo, video, and file backup & restore ecosystem over LAN. The project consists of a feature-rich **Windows Desktop Control Center** (FastAPI backend + CustomTkinter GUI) and a **React Native / Expo Android App** that provides automatic background synchronization, differential file transfers, cross-device file restoration, an "On This Day" media memories feed, video rewind reels, photo quizzes, location clusters, and shared desktop folder access.
 
 ---
 
@@ -12,18 +12,27 @@ A self-hosted, high-performance photo, video, and file backup & restore ecosyste
 - **Shared Desktop Folders**: Expose local PC directories to connected mobile clients, with per-folder device tagging (`device_ids` / `all`) so each shared folder is only visible to the phones it's meant for.
 - **TLS / HTTPS Encryption**: Built-in automatic self-signed X.509 certificate and private key generation using `cryptography` (no external OpenSSL binary required) with SHA-256 fingerprint verification.
 - **Live Colored Logs & Sync History**: Real-time streaming log viewer (INFO, WARNING, ERROR) with search filtering and session-by-session backup activity history per device.
-- **Background Media Indexer**: A daemon thread (`memories.py`) scans phone backups and tagged shared folders daily, extracting capture dates from EXIF/`ffprobe`/filesystem metadata into a SQLite cache to power the Android app's Memories feed.
+- **Background Media Indexer**: A daemon thread (`memories.py`) scans phone backups and tagged shared folders daily, extracting capture dates from EXIF/`ffprobe`/filesystem metadata into a SQLite cache to power Memories, Flashbacks, Places, and Rewind reels.
 - **On-Demand Video Preview Cache**: `video_preview.py` streams the original file immediately over HTTP range requests while transcoding an optimized, Android-compatible MP4 in the background only when needed, so opening a large video never blocks on a full conversion.
+- **Automated Video Rewind Reels**: `rewind.py` creates monthly video recap montages with dynamic background soundtrack selection and Ken Burns transitions.
 - **Light & Dark Theme Modes**: Theme switcher in settings with live UI restyling.
 - **Standalone Executable**: Built-in PyInstaller script (`build.py` / `build.bat`) to compile the desktop control panel into a single Windows `.exe`.
 
 ### 📱 Android Client (Expo & React Native)
 - **Differential Backup Engine**: Scans selected phone directories and sends lightweight metadata (`/files/check`) to compare against the server database and physical disk before uploading. Only missing or modified files are transferred.
 - **Background Auto-Sync & WakeLock**: Continuous background service loop (`react-native-background-actions`) running on a configurable schedule (15m to 24h) with CPU `WakeLock` to prevent Wi-Fi dropouts during large transfers.
-- **Restore & Cross-Device Downloader**: Browse and restore backed-up files back to local device storage, stream-preview media (images, audio, video), and download files from shared PC directories. The file tree is rendered as a flattened, virtualized list so browsing, sorting, and expanding folders stays smooth even with several thousand files.
-- **On This Day — Memories**: A dedicated tab surfaces photos and videos from past years on today's date and the last several days, with a story-style full-screen viewer and save-to-device support, for both phone backups and tagged shared folders.
-- **Sync History & Session Logging**: View detailed sync logs (duration, transfer size, file counts) stored locally and synced with the server.
-- **Single Live Notification**: Persistent Android notification updated in real time with batch transfer progress, eliminating notification spam. Tapping a Memories notification deep-links straight into the Memories tab.
+- **Library & Cross-Device Downloader**: Browse and restore backed-up files back to local device storage, stream-preview media (images, audio, video), and download files from shared PC directories. The file tree is rendered as a flattened, virtualized list for smooth scrolling even with thousands of files.
+- **Folder & File Type Filtering**: Dedicated Folders tab with type filters (All, Photos, Videos, PDFs, Docs, Others) and swipe gestures (swipe left to remove, right to refresh backup).
+- **On This Day — Memories**: Story-style full-screen viewer for photos and videos from past years on today's date and recent days, with tap-to-advance, hold-to-pause, and save-to-device support.
+- **Surprise Flashbacks & Monthly Rewind Reels**: Automated video recap montages with background music and surprise flashback photo cards.
+- **Interactive Media Experiences**:
+  - 🏆 **Backup Goals & Streaks**: Daily backup streak tracking with evening reminders if a sync is at risk.
+  - 🗺️ **Places**: Geotagged photo map and location clusters.
+  - 🎲 **Photo Roulette**: Random memory wheel spinner.
+  - 🧠 **Memory Trivia Quiz**: Interactive guessing game testing memory dates and locations.
+  - 🎁 **Backup Wrapped**: Annual and periodic backup summary insights and statistics.
+- **Sync History & Session Logging**: Detailed sync logs (duration, transfer size, file counts) stored locally and synchronized with the server.
+- **Smart Notification System**: Real-time batch progress notification without spam, plus actionable alerts for Memories, Flashbacks, Streak Risks, and Rewind Reels.
 
 ---
 
@@ -32,25 +41,42 @@ A self-hosted, high-performance photo, video, and file backup & restore ecosyste
 ```
 .
 ├── server.py               FastAPI application entrypoint & uvicorn runner
-├── desktop_app.py          CustomTkinter GUI (Dashboard, Devices, Settings, Logs, History)
-├── upload.py               FastAPI router endpoints for backup, restore, shared folders, memories, previews & auth
+├── desktop_app.py          CustomTkinter GUI (Dashboard, Devices, Shared Folders, Settings, Logs, History)
+├── upload.py               FastAPI router endpoints for backup, restore, shared folders, memories, rewinds & auth
 ├── database.py             SQLite schema, device tokens, sync session tracking, media index cache & migrations
 ├── storage.py               Disk storage management, per-device paths, SHA-256 verification
-├── memories.py              Media capture-date indexing daemon & "On This Day" query builder
+├── memories.py              Media capture-date indexing daemon, EXIF extraction & "On This Day" queries
+├── rewind.py                Automated monthly video rewind reel generator with background music
 ├── video_preview.py         Background video transcode + range-request preview cache manager
+├── thumbnail.py             Fast on-demand image & video thumbnail generator
+├── ffmpeg_utils.py          FFmpeg executable resolver and validation helper
 ├── state.py                 Thread-safe in-memory state, live log buffers & approval queue
 ├── config.py                 Configuration manager (server_config.json loader/saver & themes)
 ├── build.py / build.bat      PyInstaller build script packaging into standalone Windows EXE
 ├── requirements.txt          Python dependencies (fastapi, uvicorn, customtkinter, cryptography, Pillow, etc.)
-└── android/phone-backup/     Expo Android App (see details below)
-    ├── src/app/              Expo Router screens (index, restore, memories, history, folders, settings)
-    ├── src/components/       UI components (FolderCard, ServerDiscoverySheet, SyncProgressRing, StatCard, HistorySessionCard, SwipeableRow, AppIcon, ...)
+└── android/phone-backup/     Expo Android App
+    ├── src/app/              Expo Router screens:
+    │   ├── index.tsx         Backup Dashboard with live progress ring & quick access widgets
+    │   ├── folders.tsx       Folders & File Types configuration with swipe actions
+    │   ├── restore.tsx       Library / Restore tree browser for backed-up & PC-shared files
+    │   ├── history.tsx       Sync history session logger
+    │   ├── settings.tsx      Server connection, sync schedule & preference settings
+    │   ├── memories.tsx      Full-screen story viewer & "On This Day" recap
+    │   ├── goals.tsx         Backup streak tracker & milestone goals
+    │   ├── places.tsx        Geotagged photo location clustering
+    │   ├── quiz.tsx          Photo trivia guessing game
+    │   ├── roulette.tsx      Photo roulette random memory spinner
+    │   └── wrapped.tsx       Backup Wrapped summary recap
+    ├── src/components/       Reusable UI components (FolderCard, ServerDiscoverySheet, SyncProgressRing, ...)
     ├── uploader.js            Differential sync orchestrator & chunked upload handler
     ├── downloader.js          Restore manager, file streams, shared folder browser & memories API client
     ├── scanner.js             Recursive storage scanner & file extension filter
     ├── crypto.js              Pure-JS SHA-256 file hashing used by the differential engine
     ├── backgroundTask.js      Foreground service auto-sync engine & WakeLock execution
-    ├── notificationService.js Android persistent notification manager (incl. Memories tap deep-link)
+    ├── notificationService.js Android persistent & interactive notification manager
+    ├── streak.js              Daily backup streak calculation and risk monitoring
+    ├── goals.js               Backup goals storage & milestone evaluation
+    ├── widget.js              Home screen widget synchronization helper
     ├── serverDiscovery.js     Subnet LAN scanner for automatic server discovery
     ├── connectToServer.js     Device pairing & token negotiation logic
     ├── syncHistory.js         Local session logging & server synchronization
@@ -67,9 +93,13 @@ A self-hosted, high-performance photo, video, and file backup & restore ecosyste
 2. **Device Pairing**: When connecting for the first time, the Android app sends device details to `/connect`. If `REQUIRE_APPROVAL` is enabled, the desktop app prompts the user to Accept or Reject the connection within 30 seconds and issues a scoped device token upon approval.
 3. **Differential Check**: On sync, the phone recursively scans configured folders and posts metadata (relative path, size, modified time, SHA-256) to `/files/check`. The server verifies both the SQLite DB records and physical disk files, returning only missing or changed items.
 4. **File Transfer**: The Android client uploads missing files via `/upload` (multipart) or `/upload/raw` (chunked stream with SHA-256 header validation).
-5. **Restore & Distribution**: Mobile users can switch to the **Restore** tab to browse backed-up files or access PC-shared directories configured on the desktop server, downloading files back to phone storage.
-6. **Media Indexing & Memories**: A background daemon thread walks phone backups and tagged shared folders daily, extracting each photo/video's capture date and caching it in SQLite. The **Memories** tab queries this cache to surface "On This Day" photos/videos from past years and recent days.
-7. **Video Preview Streaming**: Opening a video in Restore or Memories streams the original file immediately via HTTP range requests; the server only builds an optimized cached copy in the background if the source isn't already an Android-friendly progressive MP4.
+5. **Library & Restore**: Mobile users can switch to the **Library** tab to browse backed-up files or access PC-shared directories configured on the desktop server, previewing media and downloading files back to phone storage.
+6. **Media Indexing & Memories**: A background daemon thread walks phone backups and tagged shared folders daily, extracting capture dates from EXIF/metadata into SQLite. This powers:
+   - **Memories**: "On This Day" photo/video stories from past years.
+   - **Flashbacks**: Surprise photo cards served periodically.
+   - **Rewind Reels**: Automated video montages generated on the server with background music.
+   - **Places & Quizzes**: Location-based photo clustering and trivia guessing games.
+7. **Video Preview Streaming**: Opening a video in Library or Memories streams the original file immediately via HTTP range requests; the server builds an optimized cached copy in the background only when needed.
 8. **Background Maintenance**: A background task maintains periodic sync execution even when the screen is off or the app is closed, acquiring a CPU WakeLock during transfers.
 
 ---
@@ -82,7 +112,7 @@ A self-hosted, high-performance photo, video, and file backup & restore ecosyste
   ```bash
   pip install -r requirements.txt
   ```
-- **FFmpeg / ffprobe** on `PATH` (optional but recommended): enables video capture-date extraction for Memories and background video preview transcoding. Without it, video files fall back to filesystem timestamps and stream unmodified.
+- **FFmpeg / ffprobe** on `PATH` (optional but recommended): enables video capture-date extraction for Memories, video rewind reel generation, and background video preview transcoding.
 
 ### Android Client
 - **Node.js (v18+) & npm**
@@ -145,7 +175,7 @@ After installing the APK on your device:
 
 ## API Surface Specification
 
-All endpoints except `/ping` require authentication via `Authorization: Bearer <TOKEN>` (accepting global API Key or issued device token, or a `?token=` query parameter for clients like media players that cannot set custom headers).
+All endpoints except `/ping` require authentication via `Authorization: Bearer <TOKEN>` (accepting global API Key or issued device token, or a `?token=` query parameter for media streaming clients).
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -161,7 +191,8 @@ All endpoints except `/ping` require authentication via `Authorization: Bearer <
 | `/files/list` | `GET` | Paginated/filtered file index for a specific device |
 | `/files/download` | `GET` | Download backed-up file from server to device |
 | `/files/preview` | `GET` | Range-request video preview stream (auto-transcoded cache when needed) |
-| `/files/warm_previews` | `POST` | Arm the active video in a Restore browsing session for background preview caching |
+| `/files/thumbnail` | `GET` | Fast on-demand thumbnail generation for images and videos |
+| `/files/warm_previews` | `POST` | Arm the active video in a browsing session for background preview caching |
 | `/sync/session` | `POST` | Record a completed sync session log |
 | `/sync/sessions` | `GET` | Retrieve sync session history logs |
 | `/sync/sessions` | `DELETE` | Clear all recorded sync session history |
@@ -169,9 +200,19 @@ All endpoints except `/ping` require authentication via `Authorization: Bearer <
 | `/shared/{source_id}/files` | `GET` | Browse files inside a PC shared directory |
 | `/shared/{source_id}/download` | `GET` | Download file from a shared desktop directory |
 | `/shared/{source_id}/preview` | `GET` | Range-request video preview stream for a shared-folder video |
-| `/shared/{source_id}/warm_previews` | `POST` | Arm the active video in a shared-folder browsing session for background preview caching |
+| `/shared/{source_id}/thumbnail` | `GET` | Fast thumbnail generation for shared folder media |
+| `/shared/{source_id}/warm_previews` | `POST` | Arm the active video in a shared-folder browsing session for preview caching |
 | `/memories/today` | `GET` | "On This Day" photos/videos from past years for today's date |
 | `/memories/recent` | `GET` | Memories grouped by day for the last N days (default 7) |
+| `/memories/flashback` | `GET` | Random surprise flashback media item |
+| `/memories/wrapped` | `GET` | Annual and monthly backup insights, format breakdown, and top stats |
+| `/memories/quiz` | `GET` | Photo trivia questions generated from backed-up media |
+| `/memories/roulette` | `GET` | Random photo selection for roulette memory spinner |
+| `/memories/places` | `GET` | Geotagged photo location clusters and summaries |
+| `/memories/places/{cluster_key}` | `GET` | List photos/videos within a specific geographic location cluster |
+| `/memories/rewind/generate` | `POST` | Start background generation of a monthly video rewind montage with soundtrack |
+| `/memories/rewind/status` | `GET` | Query generation status and progress of a video rewind reel |
+| `/memories/rewind/stream` | `GET` | Stream the finished MP4 video rewind reel |
 | `/memories/reindex` | `POST` | Trigger an immediate background re-scan of the media capture-date index |
 
 ---
@@ -179,4 +220,3 @@ All endpoints except `/ping` require authentication via `Authorization: Bearer <
 ## License
 
 MIT License. Free for personal and self-hosted open-source use.
-

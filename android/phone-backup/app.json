@@ -3,7 +3,7 @@
     "name": "Phone Backup",
     "slug": "phone-backup",
     "scheme": "phonebackup",
-    "version": "3.2.0",
+    "version": "3.4.1",
     "icon": "./assets/images/icon.png",
     "plugins": [
       "expo-media-library",

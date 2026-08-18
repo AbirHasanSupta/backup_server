@@ -1,4 +1,4 @@
-# Phone Backup - Android Client (v3.1.0)
+# Phone Backup - Android Client (v3.4.1)
 
 React Native & Expo client app for the **Phone Backup Server**. Built with Expo SDK 57, React Native 0.86, TypeScript, and Expo Router.
 
@@ -6,38 +6,51 @@ React Native & Expo client app for the **Phone Backup Server**. Built with Expo 
 
 ## Features & App Structure
 
-- 📊 **Dashboard Screen (`src/app/index.tsx`)**:
-  - Live progress ring displaying backup state.
-  - Quick action buttons (Manual Sync, Server Discovery, Pairing).
-  - Storage statistics cards (Backed-up files count, transferred bytes, server connection state).
-  - Fast LAN server discovery modal (`serverDiscovery.js`).
+### 🗂️ Core Tab Navigation
+- 📊 **Backup Dashboard (`src/app/index.tsx`)**:
+  - Live animated circular progress ring with sync state.
+  - One-tap quick actions: Manual Sync, Server Discovery, Pairing.
+  - Storage statistics cards (backed-up files count, transferred bytes, server connection state).
+  - Quick launch widgets for Memories, Rewind Reels, Wrapped, Goals, Places, Quiz, and Roulette.
+  - Subnet LAN server discovery modal (`serverDiscovery.js`).
 
-- 📥 **Restore & Download Screen (`src/app/restore.tsx`)**:
-  - Browse all files backed up on the server for this device, or a shared PC directory (`/shared/list`).
-  - The folder tree is flattened into a virtualized row list (instead of recursively mounting whole subtrees), so expanding, sorting, and scrolling stay smooth even with several thousand files.
-  - Multi-select with folder-level checkboxes (none/partial/all state), long-press to enter selection mode, and a "Select All" action.
-  - Directly restore files back into Android storage with progress updates.
-  - In-app media previewer (Images, Videos via `expo-video`, Audio via `expo-audio`) with swipe navigation across all fetched files, and background warm-up of upcoming video previews for near-instant playback.
+- 📁 **Folder & File Type Configuration (`src/app/folders.tsx`)**:
+  - Select device folders to back up via Android Storage Access Framework.
+  - File type category filters (All, Photos, Videos, PDFs, Docs, Others) matching folder card width with responsive spacing.
+  - Interactive swipe gestures: Swipe left to remove a folder from sync, swipe right to trigger an instant re-sync.
 
-- ✨ **Memories Screen (`src/app/memories.tsx`)**:
-  - "On This Day" story-style feed of photos and videos from past years, plus a scrollable row of recent days.
-  - Full-screen story viewer with tap-to-advance, hold-to-pause, swipe-down-to-dismiss, and save-to-device.
-  - Pulls from both phone backups and any shared PC folders tagged for this device.
-  - Deep-linkable from the persistent Android notification when new memories are available.
+- 📥 **Library & Restore (`src/app/restore.tsx`)**:
+  - Dual source support: Browse phone backup archives or access PC-shared folders (`/shared/list`).
+  - Virtualized, flattened tree view for lag-free expansion, sorting, and navigation across thousands of files.
+  - Folder-level selection states (none / partial / all) and batch download restore engine with progress tracking.
+  - In-app media player: Photo gallery, audio playback (`expo-audio`), and video streaming (`expo-video`) with on-demand range requests and video preview pre-warming.
 
 - 📜 **Sync History Screen (`src/app/history.tsx`)**:
-  - Session-by-session backup history list (Duration, files uploaded, bytes transferred, status).
-  - Sync session history management and clearing.
-
-- 📁 **Folder & Filter Configuration (`src/app/folders.tsx`)**:
-  - Select device media folders to include/exclude.
-  - File extension filters (Images, Videos, Audio, Documents, Custom extensions).
+  - Detailed session-by-session backup history list (duration, uploaded files, transfer size, timestamp, status).
+  - Local and remote server history synchronization and clearing.
 
 - ⚙️ **Settings Screen (`src/app/settings.tsx`)**:
-  - Server connection settings (IP address, Port, API key, scoped Device Token).
-  - Background auto-sync interval (15m, 30m, 1h, 6h, 12h, 24h).
+  - Server connection parameters (IP, Port, API Key, Device Token).
+  - Background auto-sync interval selection (15m, 30m, 1h, 6h, 12h, 24h).
   - Wi-Fi only sync enforcement toggle.
-  - WakeLock execution toggle (`wakeLock.js`).
+  - Android CPU WakeLock toggle.
+  - "Refresh All Backups" cache reset utility.
+  - Light & dark theme mode switcher.
+
+---
+
+### ✨ Memories & Interactive Story Suite
+- 📖 **On This Day Stories (`src/app/memories.tsx`)**:
+  - Story-style full-screen viewer for photos and videos captured on today's date in past years, plus a recent-days carousel.
+  - Interactive controls: Tap to advance, press and hold to pause, swipe down to dismiss, and save media directly to device.
+- ⚡ **Surprise Flashbacks**: Periodic unexpected photo memory cards served at random intervals.
+- 🎬 **Monthly Rewind Reels**: Automated video montages generated by the server with soundtrack accompaniment.
+- 🏆 **Backup Goals & Streaks (`src/app/goals.tsx`, `streak.js`)**: Daily backup streak tracking, milestone badges, and evening streak-risk notifications if a sync has not yet occurred.
+- 🗺️ **Places (`src/app/places.tsx`)**: Geotagged photo map and geographic location cluster viewer.
+- 🧠 **Memory Trivia Quiz (`src/app/quiz.tsx`)**: Interactive quiz testing your memory of dates, months, and locations of past photos.
+- 🎲 **Photo Roulette (`src/app/roulette.tsx`)**: Random memory wheel spinner.
+- 🎁 **Backup Wrapped (`src/app/wrapped.tsx`)**: Annual and periodic backup infographic recap.
+- 📱 **Home Screen Widget (`widget.js`)**: Server configuration sync for companion Android widgets.
 
 ---
 
@@ -45,9 +58,9 @@ React Native & Expo client app for the **Phone Backup Server**. Built with Expo 
 
 - **Foreground Service Loop (`backgroundTask.js`)**: Powered by `react-native-background-actions`, ensuring continuous timer-based differential syncs even when the app is minimized or the screen is turned off.
 - **Android CPU WakeLock (`wakeLock.js`)**: Prevents CPU throttling or Wi-Fi radio sleep during active bulk uploads.
-- **Single Live Notification (`notificationService.js`)**: Real-time batch progress updates via `expo-notifications` without sending individual per-file notifications; also surfaces and deep-links a daily Memories notification.
+- **Single Live Notification (`notificationService.js`)**: Real-time batch progress updates via `expo-notifications` without sending individual per-file notifications; also handles actionable notifications and deep links for Memories, Flashbacks, Streak Risks, and Rewind Reels.
 - **Differential Engine (`uploader.js`, `scanner.js` & `crypto.js`)**: Walks Android media storage, generates relative paths & modified timestamps, hashes file contents (pure-JS SHA-256), and sends the payload to `/files/check` before transferring missing files via `/upload` or `/upload/raw`.
-- **Restore & Memories Client (`downloader.js`)**: Wraps `/files/*`, `/shared/*`, and `/memories/*` endpoints — file listing, ranged preview URLs, downloads, and video preview warm-up requests.
+- **Restore & Memories Client (`downloader.js`)**: Wraps `/files/*`, `/shared/*`, and `/memories/*` endpoints — file listing, ranged preview URLs, downloads, thumbnails, and video preview warm-up requests.
 
 ---
 
@@ -81,4 +94,3 @@ eas build --profile preview --platform android
 - `npm start`: Runs `expo start`
 - `npm run android`: Runs `expo run:android`
 - `npm run lint`: Runs `expo lint`
-
