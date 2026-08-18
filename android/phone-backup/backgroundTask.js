@@ -250,6 +250,8 @@ async function checkStreakRiskInBackground() {
 
 let lastIdleDesc = null;
 let currentSyncState = { active: false, phase: 'idle', stopRequested: false, stopping: false, forceStop: false };
+let lastPersistedSyncStateAt = 0;
+const SYNC_STATE_PERSIST_INTERVAL_MS = 800;
 let isSyncInProgress = false;
 let syncRunsInOneOffService = false;
 let forceStopRequested = false;
@@ -279,13 +281,28 @@ function emitSyncFailed(message) {
 }
 
 async function writeSyncState(patch = {}) {
+  const prevPhase = currentSyncState.phase;
+  const prevActive = currentSyncState.active;
+  const prevStopping = currentSyncState.stopping;
   currentSyncState = {
     ...currentSyncState,
     ...patch,
     updatedAt: Date.now(),
   };
-  await setSyncRuntimeState(currentSyncState).catch(() => {});
   emitSyncState(currentSyncState);
+
+  // Persisting to AsyncStorage on every file's progress tick (thousands of
+  // times for a large library) is what makes the sync feel like it slows
+  // down over time. Only persist on meaningful transitions or throttled.
+  const now = Date.now();
+  const structuralChange =
+    currentSyncState.phase !== prevPhase ||
+    currentSyncState.active !== prevActive ||
+    currentSyncState.stopping !== prevStopping;
+  if (structuralChange || now - lastPersistedSyncStateAt >= SYNC_STATE_PERSIST_INTERVAL_MS) {
+    lastPersistedSyncStateAt = now;
+    await setSyncRuntimeState(currentSyncState).catch(() => {});
+  }
   return currentSyncState;
 }
 

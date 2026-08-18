@@ -2609,7 +2609,25 @@ class BackupServerApp(ctk.CTk):
 
     def _restart_server(self):
         self._stop_server()
-        self.after(3500, self._start_server)
+        self._wait_for_server_thread_exit(self._start_server)
+
+    def _wait_for_server_thread_exit(self, on_stopped, deadline=None):
+        """Poll until the previous uvicorn thread has actually exited before
+        continuing. _start_server reloads the rewind/upload/server modules
+        and rebinds the port; racing that against a still-running old
+        instance hands in-flight threads stale lock/semaphore objects and
+        can collide on the socket. Falls back to a hard cutoff so a hung
+        shutdown can't wedge the app forever.
+        """
+        if deadline is None:
+            deadline = time.time() + 8.0
+        thread = self._server_thread
+        if thread is None or not thread.is_alive() or time.time() >= deadline:
+            if thread is not None and thread.is_alive():
+                add_log("Warning: previous server thread did not exit in time; restarting anyway.")
+            self.after(100, on_stopped)
+            return
+        self.after(150, lambda: self._wait_for_server_thread_exit(on_stopped, deadline))
 
     def _toggle_server(self):
         if self._server_running:

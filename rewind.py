@@ -56,6 +56,12 @@ _build_semaphore = threading.Semaphore(2)
 _ffmpeg_process_guard = threading.Lock()
 _active_ffmpeg_processes: set[subprocess.Popen] = set()
 
+# Concurrent rewind builds (up to _build_semaphore's limit) can each reach
+# _get_or_fetch_background_music at the same time; without this lock they'd
+# race to write the same cache file and could hand each other a truncated
+# or partially-downloaded track.
+_music_fetch_lock = threading.Lock()
+
 
 def _cache_dir() -> str:
     directory = DEFAULT_REWIND_CACHE_DIR
@@ -264,43 +270,60 @@ def _get_or_fetch_background_music(ffmpeg: str) -> str | None:
     if os.path.isfile(synth_path) and os.path.getsize(synth_path) > 1000:
         return synth_path
 
-    # 1. Try downloading royalty-free CC0 music
-    for url in FREE_MUSIC_URLS:
-        try:
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "PhoneBackupServer/3.1 (https://github.com)"},
-            )
-            with urllib.request.urlopen(req, timeout=15) as response:
-                if response.status == 200:
-                    with open(downloaded_path, "wb") as f:
-                        f.write(response.read())
-                    if os.path.isfile(downloaded_path) and os.path.getsize(downloaded_path) > 1000:
-                        add_log("[Rewind] fetched live royalty-free background music")
-                        return downloaded_path
-        except Exception:
-            continue
-
-    # 2. Fallback to gentle ambient harmonic chord audio generation using ffmpeg
-    try:
-        synth_cmd = [
-            ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "sine=frequency=261.63:sample_rate=44100:duration=45",
-            "-f", "lavfi", "-i", "sine=frequency=329.63:sample_rate=44100:duration=45",
-            "-f", "lavfi", "-i", "sine=frequency=392.00:sample_rate=44100:duration=45",
-            "-filter_complex", "[0:a][1:a][2:a]amix=inputs=3:dropout_transition=0,lowpass=f=1200,volume=0.3[a]",
-            "-map", "[a]",
-            "-c:a", "aac", "-b:a", "128k",
-            synth_path,
-        ]
-        _run_ffmpeg(synth_cmd, timeout=15)
+    with _music_fetch_lock:
+        # Re-check: another concurrent build may have finished fetching while
+        # this thread was waiting on the lock.
+        if os.path.isfile(downloaded_path) and os.path.getsize(downloaded_path) > 1000:
+            return downloaded_path
         if os.path.isfile(synth_path) and os.path.getsize(synth_path) > 1000:
-            add_log("[Rewind] generated ambient background soundtrack")
             return synth_path
-    except Exception as e:
-        add_log(f"[Rewind] ambient soundtrack synthesis failed: {e}")
 
-    return None
+        tmp_download_path = f"{downloaded_path}.part-{os.getpid()}-{threading.get_ident()}"
+
+        # 1. Try downloading royalty-free CC0 music
+        for url in FREE_MUSIC_URLS:
+            try:
+                req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "PhoneBackupServer/3.1 (https://github.com)"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    if response.status == 200:
+                        with open(tmp_download_path, "wb") as f:
+                            f.write(response.read())
+                        if os.path.isfile(tmp_download_path) and os.path.getsize(tmp_download_path) > 1000:
+                            os.replace(tmp_download_path, downloaded_path)
+                            add_log("[Rewind] fetched live royalty-free background music")
+                            return downloaded_path
+            except Exception:
+                continue
+            finally:
+                if os.path.isfile(tmp_download_path):
+                    try:
+                        os.remove(tmp_download_path)
+                    except OSError:
+                        pass
+
+        # 2. Fallback to gentle ambient harmonic chord audio generation using ffmpeg
+        try:
+            synth_cmd = [
+                ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "sine=frequency=261.63:sample_rate=44100:duration=45",
+                "-f", "lavfi", "-i", "sine=frequency=329.63:sample_rate=44100:duration=45",
+                "-f", "lavfi", "-i", "sine=frequency=392.00:sample_rate=44100:duration=45",
+                "-filter_complex", "[0:a][1:a][2:a]amix=inputs=3:dropout_transition=0,lowpass=f=1200,volume=0.3[a]",
+                "-map", "[a]",
+                "-c:a", "aac", "-b:a", "128k",
+                synth_path,
+            ]
+            _run_ffmpeg(synth_cmd, timeout=15)
+            if os.path.isfile(synth_path) and os.path.getsize(synth_path) > 1000:
+                add_log("[Rewind] generated ambient background soundtrack")
+                return synth_path
+        except Exception as e:
+            add_log(f"[Rewind] ambient soundtrack synthesis failed: {e}")
+
+        return None
 
 
 def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:

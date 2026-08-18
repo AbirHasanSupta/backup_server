@@ -1224,7 +1224,7 @@ async def generate_rewind_reel(
         raise HTTPException(status_code=400, detail="Invalid year")
     if month is not None and (month < 1 or month > 12):
         raise HTTPException(status_code=400, detail="Invalid month")
-    return rewind.start_rewind_build(device_id, year, month)
+    return await asyncio.to_thread(rewind.start_rewind_build, device_id, year, month)
 
 
 @router.get("/memories/rewind/status")
@@ -1241,7 +1241,7 @@ async def get_rewind_reel_status(
         raise HTTPException(status_code=400, detail="Invalid year")
     if month is not None and (month < 1 or month > 12):
         raise HTTPException(status_code=400, detail="Invalid month")
-    return rewind.get_rewind_status(device_id, year, month)
+    return await asyncio.to_thread(rewind.get_rewind_status, device_id, year, month)
 
 
 @router.get("/memories/rewind/stream")
@@ -1259,7 +1259,7 @@ async def stream_rewind_reel(
         raise HTTPException(status_code=400, detail="Invalid year")
     if month is not None and (month < 1 or month > 12):
         raise HTTPException(status_code=400, detail="Invalid month")
-    path = rewind.get_rewind_path(device_id, year, month)
+    path = await asyncio.to_thread(rewind.get_rewind_path, device_id, year, month)
     if not path:
         raise HTTPException(status_code=404, detail="Reel not ready")
     return _file_range_response(path, request)
