@@ -667,21 +667,6 @@ const filterStyles = StyleSheet.create({
     fontWeight: '600',
     paddingVertical: 8,
   },
-  chipRow: {
-    flexDirection: 'row',
-    gap: Spacing.two,
-    paddingBottom: 2,
-  },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: 6,
-    borderRadius: Radius.full,
-    borderWidth: 1,
-  },
-  chipText: { fontSize: TextScale.xs, fontWeight: '700' },
   matchLabel: { fontSize: TextScale.xs, fontWeight: '600' },
 });
 
@@ -2912,7 +2897,7 @@ export default function RestoreScreen() {
               <Text style={styles.emptyTitle}>{isFiltering ? 'No matching files' : 'No files fetched'}</Text>
               <Text style={styles.emptySubtitle}>
                 {isFiltering
-                  ? 'Try a different name or file type filter.'
+                  ? 'Try a different name.'
                   : sourceMode === 'shared' && !selectedSourceId
                     ? 'Select a shared folder above, then tap Fetch.'
                     : 'Tap Fetch to see files available on the server.'}

@@ -39,11 +39,13 @@ FFMPEG_CONCAT_TIMEOUT_SEC = 90
 # Stills Android + typical ffmpeg builds can encode without extra codecs.
 REWIND_STILL_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 
-# Public domain / CC0 background music tracks (Free Music Archive / Wikimedia Commons)
+# Royalty-free (CC-BY 3.0) background music tracks, resolved through Wikimedia
+# Commons' stable Special:FilePath redirect so we never have to guess the
+# MD5 hash-bucket directory the file actually lives under.
 FREE_MUSIC_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/4/4b/Kevin_MacLeod_-_Carefree.ogg",
-    "https://upload.wikimedia.org/wikipedia/commons/7/77/Kevin_MacLeod_-_Life_of_Riley.ogg",
-    "https://upload.wikimedia.org/wikipedia/commons/2/21/Kevin_MacLeod_-_Daily_Beetle.ogg",
+    "https://commons.wikimedia.org/wiki/Special:FilePath/Kevin_MacLeod_-_Carefree.ogg",
+    "https://commons.wikimedia.org/wiki/Special:FilePath/Kevin_MacLeod_-_Autumn_Day.ogg",
+    "https://commons.wikimedia.org/wiki/Special:FilePath/Life_of_Riley_(ISRC_USUAN1400054).mp3",
 ]
 
 _generation_lock = threading.Lock()
@@ -269,7 +271,7 @@ def _get_or_fetch_background_music(ffmpeg: str) -> str | None:
                 url,
                 headers={"User-Agent": "PhoneBackupServer/3.1 (https://github.com)"},
             )
-            with urllib.request.urlopen(req, timeout=4) as response:
+            with urllib.request.urlopen(req, timeout=15) as response:
                 if response.status == 200:
                     with open(downloaded_path, "wb") as f:
                         f.write(response.read())

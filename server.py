@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from database import init_db
 from upload import router
-from config import load_config, HOST, PORT
+from config import load_config
 import memories
 
 
@@ -18,7 +18,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Phone Backup Server", version="2.4.0", lifespan=lifespan)
+app = FastAPI(title="Phone Backup Server", version="3.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

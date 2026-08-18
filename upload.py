@@ -1,5 +1,6 @@
 import asyncio
 from email.utils import formatdate
+from mimetypes import guess_type
 import os
 import re
 import socket
@@ -503,7 +504,8 @@ async def list_files(device_id: str, authorization: str = Header(None), token: s
     # Accept auth either via Authorization header or ?token= query param
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return {"files": get_files_for_device(device_id)}
+    files = await asyncio.to_thread(get_files_for_device, device_id)
+    return {"files": files}
 
 
 _MIME_MAP = {
@@ -950,6 +952,11 @@ async def list_shared_files(
     if not os.path.isdir(root):
         return {"files": [], "warning": "Directory does not exist on server"}
 
+    files = await asyncio.to_thread(_walk_shared_dir, root)
+    return {"files": files, "source_id": source_id, "label": entry["label"]}
+
+
+def _walk_shared_dir(root: str) -> list[dict]:
     files = []
     for dirpath, _dirnames, filenames in os.walk(root):
         for fname in filenames:
@@ -964,8 +971,7 @@ async def list_shared_files(
                 })
             except OSError:
                 continue
-
-    return {"files": files, "source_id": source_id, "label": entry["label"]}
+    return files
 
 
 @router.get("/shared/{source_id}/download")

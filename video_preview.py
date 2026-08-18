@@ -19,12 +19,10 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from functools import lru_cache
 
 from config import APP_DATA_DIR, load_config
 from ffmpeg_utils import resolve_ffmpeg_path, resolve_ffprobe_path
