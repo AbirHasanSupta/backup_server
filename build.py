@@ -107,8 +107,16 @@ def main() -> None:
         "pystray._win32",
         "PIL",
         "PIL.Image",
+        "pillow_heif",
+        "config",
+        "database",
+        "state",
+        "storage",
+        "upload",
+        "server",
         "memories",
         "rewind",
+        "thumbnail",
         "video_preview",
         "ffmpeg_utils",
     ]
@@ -122,9 +130,11 @@ def main() -> None:
         "server.py",
         "memories.py",
         "rewind.py",
+        "thumbnail.py",
         "video_preview.py",
         "ffmpeg_utils.py",
     ]
+
 
     cmd = [
         python, "-m", "PyInstaller",

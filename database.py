@@ -1,19 +1,89 @@
 import sqlite3
 import secrets
+import threading
 import time as _time
 from config import DB_PATH
 
+_local = threading.local()
 
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15.0)
+
+class _PooledConnection:
+    """Thread-local connection wrapper that keeps connections open across calls
+
+    within the same thread while exposing standard sqlite3.Connection methods.
+    """
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn: sqlite3.Connection):
+        self._conn = conn
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __setattr__(self, name, value):
+        if name == "_conn":
+            super().__setattr__(name, value)
+        else:
+            setattr(self._conn, name, value)
+
+    def cursor(self, *args, **kwargs):
+        return self._conn.cursor(*args, **kwargs)
+
+    def execute(self, *args, **kwargs):
+        return self._conn.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        return self._conn.executemany(*args, **kwargs)
+
+    def commit(self):
+        return self._conn.commit()
+
+    def rollback(self):
+        return self._conn.rollback()
+
+    def close(self):
+        # Do not destroy connection; retain in thread-local cache for reuse
+        pass
+
+    def real_close(self):
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+
+
+def _create_raw_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    # Background reindex / rewind threads share the DB with FastAPI workers.
-    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA cache_size=-64000")
+    conn.execute("PRAGMA mmap_size=268435456")
     conn.execute("PRAGMA temp_store=MEMORY")
     return conn
+
+
+def get_conn() -> _PooledConnection:
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            # Health check to ensure connection is live
+            conn._conn.total_changes
+            return conn
+        except Exception:
+            try:
+                conn.real_close()
+            except Exception:
+                pass
+            _local.conn = None
+
+    raw_conn = _create_raw_conn()
+    pooled = _PooledConnection(raw_conn)
+    _local.conn = pooled
+    return pooled
+
 
 
 def init_db():
@@ -478,62 +548,57 @@ def batch_check_files(items: list[dict]):
     conn = get_conn()
     present_keys = set()
 
-    # Check by (device_id, path) - most efficient if device_id is present
-    device_groups = {}
+    # Group by device_id
+    device_groups: dict[str, list[dict]] = {}
     for item in items:
         did = item.get("device_id") or ""
-        if did not in device_groups:
-            device_groups[did] = []
-        device_groups[did].append(item)
+        device_groups.setdefault(did, []).append(item)
 
+    CHUNK_SIZE = 400
     for did, group in device_groups.items():
-        paths = [i["path"] for i in group]
-        placeholders = ",".join(["?"] * len(paths))
-        if did:
-            # Check with device_id OR where device_id is NULL (for legacy migration)
-            rows = conn.execute(
-                f"SELECT path, size, modified_time, external_id FROM files WHERE (device_id=? OR device_id IS NULL) AND path IN ({placeholders})",
-                [did] + paths
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                f"SELECT path, size, modified_time, external_id FROM files WHERE device_id IS NULL AND path IN ({placeholders})",
-                paths
-            ).fetchall()
+        for chunk_idx in range(0, len(group), CHUNK_SIZE):
+            chunk = group[chunk_idx:chunk_idx + CHUNK_SIZE]
+            paths = [i["path"] for i in chunk]
+            placeholders = ",".join(["?"] * len(paths))
+            if did:
+                query = f"SELECT path, size, modified_time, external_id FROM files WHERE (device_id=? OR device_id IS NULL) AND path IN ({placeholders})"
+                params = [did] + paths
+            else:
+                query = f"SELECT path, size, modified_time, external_id FROM files WHERE device_id IS NULL AND path IN ({placeholders})"
+                params = paths
 
-        # Match rows back to items
-        row_map = {}  # path -> list of rows
-        eid_map = {}  # external_id -> list of rows
-        for r in rows:
-            p = (r["path"] or "").replace("\\", "/")
-            if p not in row_map: row_map[p] = []
-            row_map[p].append(r)
-            if r["external_id"]:
-                if r["external_id"] not in eid_map: eid_map[r["external_id"]] = []
-                eid_map[r["external_id"]].append(r)
+            rows = conn.execute(query, params).fetchall()
 
-        for item in group:
-            p = (item["path"] or "").replace("\\", "/")
-            s, m, eid = item["size"], item["modified_time"], item.get("external_id")
-            found = False
-            if eid and eid in eid_map:
-                found = any(
-                    (r["path"] or "").replace("\\", "/") == p and _metadata_matches(r, s, m)
-                    for r in eid_map[eid]
-                )
-            elif p in row_map:
-                for r in row_map[p]:
-                    if _metadata_matches(r, s, m):
-                        found = True
-                        break
+            # Match rows back to items
+            row_map: dict[str, list] = {}
+            eid_map: dict[str, list] = {}
+            for r in rows:
+                p = (r["path"] or "").replace("\\", "/")
+                row_map.setdefault(p, []).append(r)
+                if r["external_id"]:
+                    eid_map.setdefault(r["external_id"], []).append(r)
 
-            if found:
-                # We use the ORIGINAL item["path"] for the key to match what upload.py expects,
-                # but it should be consistent anyway.
-                present_keys.add(f"{item['path']}|{m}|{s}")
+            for item in chunk:
+                p = (item["path"] or "").replace("\\", "/")
+                s, m, eid = item["size"], item["modified_time"], item.get("external_id")
+                found = False
+                if eid and eid in eid_map:
+                    found = any(
+                        (r["path"] or "").replace("\\", "/") == p and _metadata_matches(r, s, m)
+                        for r in eid_map[eid]
+                    )
+                elif p in row_map:
+                    for r in row_map[p]:
+                        if _metadata_matches(r, s, m):
+                            found = True
+                            break
+
+                if found:
+                    present_keys.add(f"{item['path']}|{m}|{s}")
 
     conn.close()
     return present_keys
+
 
 
 def insert_file(path, size, modified_time, uploaded_time, device_ip=None, external_id=None, sha256=None,
@@ -1008,7 +1073,57 @@ def upsert_media_index_row(
     conn.close()
 
 
+def batch_upsert_media_index_rows(rows: list[dict]) -> None:
+    """Bulk insert or update media_index entries in a single transaction."""
+    if not rows:
+        return
+    conn = get_conn()
+    params = [
+        (
+            r["source_type"],
+            r["source_key"],
+            r["relative_path"],
+            r["size"],
+            r["modified_time"],
+            r.get("capture_time"),
+            r.get("capture_source"),
+            r.get("cap_month"),
+            r.get("cap_day"),
+            r.get("cap_year"),
+            r.get("indexed_at"),
+            r.get("cap_lat"),
+            r.get("cap_lon"),
+            1 if r.get("gps_checked") else 0,
+        )
+        for r in rows
+    ]
+    conn.executemany(
+        """
+        INSERT INTO media_index (source_type, source_key, relative_path, size, modified_time,
+                                 capture_time, capture_source, cap_month, cap_day, cap_year, indexed_at,
+                                 cap_lat, cap_lon, gps_checked)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_type, source_key, relative_path) DO UPDATE SET
+            size = excluded.size,
+            modified_time = excluded.modified_time,
+            capture_time = excluded.capture_time,
+            capture_source = excluded.capture_source,
+            cap_month = excluded.cap_month,
+            cap_day = excluded.cap_day,
+            cap_year = excluded.cap_year,
+            indexed_at = excluded.indexed_at,
+            cap_lat = excluded.cap_lat,
+            cap_lon = excluded.cap_lon,
+            gps_checked = excluded.gps_checked
+        """,
+        params,
+    )
+    conn.commit()
+    conn.close()
+
+
 def get_media_index_cache(source_type: str, source_key: str) -> dict[str, tuple[int, int, str | None, float | None, bool]]:
+
     """Return {relative_path: (size, modified_time, capture_source, cap_lat, gps_checked)} for a given source."""
     conn = get_conn()
     rows = conn.execute(
@@ -1044,6 +1159,39 @@ def get_media_for_day(
           AND cap_month = ?
           AND cap_day = ?
           AND (cap_year IS NULL OR cap_year != ?)
+        ORDER BY capture_time DESC, relative_path ASC
+    """
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_media_for_days_multi(
+        source_type_and_keys: list[tuple[str, str]],
+        month_day_pairs: list[tuple[int, int]],
+) -> list[dict]:
+    """Fetch media records for multiple (month, day) pairs in a single batched SQL query."""
+    if not source_type_and_keys or not month_day_pairs:
+        return []
+    conn = get_conn()
+    or_clauses = []
+    params: list = []
+    for stype, skey in source_type_and_keys:
+        or_clauses.append("(source_type = ? AND source_key = ?)")
+        params.extend([stype, skey])
+    where_source = " OR ".join(or_clauses)
+
+    day_clauses = []
+    for m, d in month_day_pairs:
+        day_clauses.append("(cap_month = ? AND cap_day = ?)")
+        params.extend([m, d])
+    where_days = " OR ".join(day_clauses)
+
+    sql = f"""
+        SELECT source_type, source_key, relative_path, size, modified_time, capture_time, capture_source, cap_month, cap_day, cap_year
+        FROM media_index
+        WHERE ({where_source})
+          AND ({where_days})
         ORDER BY capture_time DESC, relative_path ASC
     """
     rows = conn.execute(sql, params).fetchall()

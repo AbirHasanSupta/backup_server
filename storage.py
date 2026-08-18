@@ -146,15 +146,34 @@ async def save_upload_stream(
     tmp_path = f"{full_path}.tmp-{os.getpid()}-{threading.get_ident()}"
     sha256_hash = hashlib.sha256() if compute_sha256 else None
     bytes_written = 0
+
+    # Aggregate incoming chunks into 2-4MB blocks to eliminate thread-pool starvation
+    flush_threshold = max(1024 * 1024, buffer_size)
+    write_buf = bytearray()
+
+    def _sync_write_block(f, data: bytes | bytearray) -> None:
+        f.write(data)
+
     out = await asyncio.to_thread(open, tmp_path, "wb", buffer_size)
     try:
         async for chunk in chunks:
             if not chunk:
                 continue
-            await asyncio.to_thread(out.write, chunk)
+            write_buf.extend(chunk)
             bytes_written += len(chunk)
             if sha256_hash:
                 sha256_hash.update(chunk)
+
+            if len(write_buf) >= flush_threshold:
+                data_to_write = bytes(write_buf)
+                write_buf.clear()
+                await asyncio.to_thread(_sync_write_block, out, data_to_write)
+
+        if write_buf:
+            data_to_write = bytes(write_buf)
+            write_buf.clear()
+            await asyncio.to_thread(_sync_write_block, out, data_to_write)
+
         await asyncio.to_thread(out.close)
         if expected_size is not None and expected_size > 0 and bytes_written != expected_size:
             raise ValueError(f"Uploaded file size mismatch: expected {expected_size}, wrote {bytes_written}")
@@ -169,4 +188,4 @@ async def save_upload_stream(
         except OSError:
             pass
         raise
-    return full_path, sha256_hash.hexdigest() if sha256_hash else ""
+    return full_path, sha256_hash.hexdigest() if sha256_hash else ""

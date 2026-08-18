@@ -36,7 +36,9 @@ def resolve_connection(req_id: str, accepted: bool) -> None:
 _LOG_LIMIT = 200
 _logs: list[dict] = []
 _logs_lock = threading.Lock()
-_current_activity: dict[str, Any] | None = None
+
+_activity_lock = threading.Lock()
+_active_activities: dict[str, dict[str, Any]] = {}
 
 
 def add_log(message: str) -> None:
@@ -55,17 +57,37 @@ def clear_logs() -> None:
         _logs.clear()
 
 
-def set_current_activity(message: str | None, device_ip: str | None = None) -> None:
-    global _current_activity
-    if message:
-        _current_activity = {
-            "time": int(time.time()),
-            "message": message,
-            "device_ip": device_ip,
-        }
-    else:
-        _current_activity = None
+def set_current_activity(
+    message: str | None,
+    device_ip: str | None = None,
+    device_id: str | None = None,
+) -> None:
+    key = device_id or device_ip or "default"
+    with _activity_lock:
+        if message:
+            _active_activities[key] = {
+                "time": int(time.time()),
+                "message": message,
+                "device_ip": device_ip,
+                "device_id": device_id,
+            }
+        else:
+            _active_activities.pop(key, None)
 
 
 def get_current_activity() -> dict[str, Any] | None:
-    return dict(_current_activity) if _current_activity else None
+    with _activity_lock:
+        if not _active_activities:
+            return None
+        # Return the most recent activity
+        latest = max(_active_activities.values(), key=lambda a: a.get("time", 0))
+        active_count = len(_active_activities)
+        res = dict(latest)
+        if active_count > 1:
+            res["active_devices_count"] = active_count
+        return res
+
+
+def get_all_active_activities() -> list[dict[str, Any]]:
+    with _activity_lock:
+        return [dict(a) for a in _active_activities.values()]

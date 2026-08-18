@@ -1,3 +1,4 @@
+import os
 import threading
 from contextlib import asynccontextmanager
 
@@ -14,7 +15,8 @@ import memories
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    anyio.to_thread.current_default_thread_limiter().total_tokens = 100
+    token_limit = max(200, (os.cpu_count() or 4) * 30)
+    anyio.to_thread.current_default_thread_limiter().total_tokens = token_limit
     yield
 
 

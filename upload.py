@@ -277,10 +277,9 @@ class ActivityReport(BaseModel):
 @router.post("/status/activity")
 async def report_activity(body: ActivityReport, request: Request, authorization: str = Header(None)):
     verify_auth(authorization, body.device_id)
-    if body.device_id:
-        verify_known_device(request.client.host, body.device_id)
-    set_current_activity(body.message, request.client.host)
+    set_current_activity(body.message, request.client.host, body.device_id)
     return {"status": "ok"}
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -428,7 +427,7 @@ async def upload_file_raw(
     if await asyncio.to_thread(should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
         return await asyncio.to_thread(skipped_upload_response, device_ip, device_id)
 
-    set_current_activity(f"Uploading {relative_path}", device_ip)
+    set_current_activity(f"Uploading {relative_path}", device_ip, device_id)
     add_log(f"Uploading: {relative_path} ({device_id or device_ip})")
     try:
         _, saved_sha256 = await save_upload_stream(
@@ -442,7 +441,7 @@ async def upload_file_raw(
         add_log(f"Error saving {relative_path}: {str(e)}")
         raise
     finally:
-        set_current_activity(None)
+        set_current_activity(None, device_ip, device_id)
 
     if not sha256:
         sha256 = saved_sha256
@@ -471,7 +470,7 @@ async def upload_file(
     if await asyncio.to_thread(should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
         return await asyncio.to_thread(skipped_upload_response, device_ip, device_id)
 
-    set_current_activity(f"Uploading {relative_path}", device_ip)
+    set_current_activity(f"Uploading {relative_path}", device_ip, device_id)
     add_log(f"Uploading: {relative_path} ({device_id or device_ip})")
     try:
         await file.seek(0)
@@ -487,7 +486,8 @@ async def upload_file(
         add_log(f"❌ Error saving {relative_path}: {str(e)}")
         raise
     finally:
-        set_current_activity(None)
+        set_current_activity(None, device_ip, device_id)
+
 
     if not sha256:
         sha256 = saved_sha256

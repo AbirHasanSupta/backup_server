@@ -6,6 +6,7 @@ into SQLite media_index cache for phone backups and tagged shared folders.
 
 from datetime import date, datetime, timedelta
 import calendar
+import concurrent.futures
 import json
 import os
 import random
@@ -25,11 +26,13 @@ except Exception:
 
 from config import load_config
 from database import (
+    batch_upsert_media_index_rows,
     get_devices,
     get_distinct_cap_years,
     get_files_for_device,
     get_geotagged_media,
     get_media_for_day,
+    get_media_for_days_multi,
     get_media_for_ymd_list,
     get_media_index_cache,
     get_quiz_photo_pool,
@@ -232,11 +235,54 @@ def extract_capture_time(full_path: str, ext: str, fallback_mtime: int | None = 
     return min(candidates), "fs_ctime"
 
 
+def _extract_media_row_metadata(item: dict) -> dict:
+    """Extract EXIF/GPS/video timestamp metadata for a single media file."""
+    full_path = item["full_path"]
+    ext = item["ext"]
+    mtime = item["modified_time"]
+    size = item["size"]
+    now_ts = item["now_ts"]
+
+    cap_time, cap_source = extract_capture_time(full_path, ext, fallback_mtime=mtime)
+    cap_month, cap_day, cap_year = None, None, None
+    if cap_time is not None:
+        try:
+            dt = datetime.fromtimestamp(cap_time)
+            cap_month, cap_day, cap_year = dt.month, dt.day, dt.year
+        except Exception:
+            pass
+
+    cap_lat, cap_lon = (None, None)
+    gps_checked = ext in IMAGE_EXTS
+    if gps_checked:
+        gps = _extract_image_gps(full_path)
+        if gps:
+            cap_lat, cap_lon = gps
+
+    return {
+        "source_type": item["source_type"],
+        "source_key": item["source_key"],
+        "relative_path": item["relative_path"],
+        "size": size,
+        "modified_time": mtime,
+        "capture_time": cap_time,
+        "capture_source": cap_source,
+        "cap_month": cap_month,
+        "cap_day": cap_day,
+        "cap_year": cap_year,
+        "indexed_at": now_ts,
+        "cap_lat": cap_lat,
+        "cap_lon": cap_lon,
+        "gps_checked": gps_checked,
+    }
+
+
 def reindex_device(device_id: str) -> None:
     files = get_files_for_device(device_id)
     cache = get_media_index_cache("phone", device_id)
     seen_paths: set[str] = set()
     now_ts = int(time_module.time())
+    to_process: list[dict] = []
 
     for f in files:
         rel_path = f["path"]
@@ -258,47 +304,29 @@ def reindex_device(device_id: str) -> None:
 
         cached_entry = cache.get(rel_path)
         unchanged = cached_entry and cached_entry[0] == size and cached_entry[1] == mtime
-        # Retry extraction if we previously only got the fallback timestamp, or
-        # if this is an image whose GPS extraction was never attempted —
-        # covers files re-indexed after fixing HEIC support, after ffmpeg
-        # becomes available, or after place-clustering GPS support was added.
         stale_fallback = cached_entry and cached_entry[2] == "fs_ctime" and (ext in IMAGE_EXTS or ext in VIDEO_EXTS)
         missing_gps = cached_entry and ext in IMAGE_EXTS and not cached_entry[4]
         if unchanged and not stale_fallback and not missing_gps:
             continue
 
-        cap_time, cap_source = extract_capture_time(full_path, ext, fallback_mtime=mtime)
-        cap_month, cap_day, cap_year = None, None, None
-        if cap_time is not None:
-            try:
-                dt = datetime.fromtimestamp(cap_time)
-                cap_month, cap_day, cap_year = dt.month, dt.day, dt.year
-            except Exception:
-                pass
+        to_process.append({
+            "source_type": "phone",
+            "source_key": device_id,
+            "relative_path": rel_path,
+            "full_path": full_path,
+            "size": size,
+            "modified_time": mtime,
+            "ext": ext,
+            "now_ts": now_ts,
+        })
 
-        cap_lat, cap_lon = (None, None)
-        gps_checked = ext in IMAGE_EXTS
-        if gps_checked:
-            gps = _extract_image_gps(full_path)
-            if gps:
-                cap_lat, cap_lon = gps
-
-        upsert_media_index_row(
-            source_type="phone",
-            source_key=device_id,
-            relative_path=rel_path,
-            size=size,
-            modified_time=mtime,
-            capture_time=cap_time,
-            capture_source=cap_source,
-            cap_month=cap_month,
-            cap_day=cap_day,
-            cap_year=cap_year,
-            indexed_at=now_ts,
-            cap_lat=cap_lat,
-            cap_lon=cap_lon,
-            gps_checked=gps_checked,
-        )
+    if to_process:
+        max_workers = min(8, max(2, os.cpu_count() or 4))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            rows = list(executor.map(_extract_media_row_metadata, to_process))
+        batch_size = 500
+        for i in range(0, len(rows), batch_size):
+            batch_upsert_media_index_rows(rows[i:i + batch_size])
 
     prune_media_index("phone", device_id, seen_paths)
 
@@ -309,6 +337,7 @@ def reindex_shared(source_id: str, root_path: str) -> None:
     cache = get_media_index_cache("shared", source_id)
     seen_paths: set[str] = set()
     now_ts = int(time_module.time())
+    to_process: list[dict] = []
 
     for root, _, filenames in os.walk(root_path):
         for name in filenames:
@@ -334,38 +363,24 @@ def reindex_shared(source_id: str, root_path: str) -> None:
             if unchanged and not stale_fallback and not missing_gps:
                 continue
 
-            cap_time, cap_source = extract_capture_time(full_path, ext, fallback_mtime=mtime)
-            cap_month, cap_day, cap_year = None, None, None
-            if cap_time is not None:
-                try:
-                    dt = datetime.fromtimestamp(cap_time)
-                    cap_month, cap_day, cap_year = dt.month, dt.day, dt.year
-                except Exception:
-                    pass
+            to_process.append({
+                "source_type": "shared",
+                "source_key": source_id,
+                "relative_path": rel_path,
+                "full_path": full_path,
+                "size": size,
+                "modified_time": mtime,
+                "ext": ext,
+                "now_ts": now_ts,
+            })
 
-            cap_lat, cap_lon = (None, None)
-            gps_checked = ext in IMAGE_EXTS
-            if gps_checked:
-                gps = _extract_image_gps(full_path)
-                if gps:
-                    cap_lat, cap_lon = gps
-
-            upsert_media_index_row(
-                source_type="shared",
-                source_key=source_id,
-                relative_path=rel_path,
-                size=size,
-                modified_time=mtime,
-                capture_time=cap_time,
-                capture_source=cap_source,
-                cap_month=cap_month,
-                cap_day=cap_day,
-                cap_year=cap_year,
-                indexed_at=now_ts,
-                cap_lat=cap_lat,
-                cap_lon=cap_lon,
-                gps_checked=gps_checked,
-            )
+    if to_process:
+        max_workers = min(8, max(2, os.cpu_count() or 4))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            rows = list(executor.map(_extract_media_row_metadata, to_process))
+        batch_size = 500
+        for i in range(0, len(rows), batch_size):
+            batch_upsert_media_index_rows(rows[i:i + batch_size])
 
     prune_media_index("shared", source_id, seen_paths)
 
@@ -486,15 +501,64 @@ def get_recent_memories(device_id: str, days: int = 7) -> dict:
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
 
+    num_days = max(1, days)
+    target_dates = [today - timedelta(days=offset) for offset in range(num_days)]
+    month_day_pairs = [(d.month, d.day) for d in target_dates]
+
+    # Fetch media for all requested days in a single batched query
+    all_rows = get_media_for_days_multi(sources, month_day_pairs)
+
+    rows_by_md: dict[tuple[int, int], list[dict]] = {}
+    for r in all_rows:
+        m = r.get("cap_month")
+        d = r.get("cap_day")
+        if m is not None and d is not None:
+            rows_by_md.setdefault((m, d), []).append(r)
+
     result_days = []
-    for offset in range(max(1, days)):
-        target_date = today - timedelta(days=offset)
-        day_data = _build_day_memories(device_id, target_date, sources, shared_labels)
+    for offset, target_date in enumerate(target_dates):
+        day_rows = rows_by_md.get((target_date.month, target_date.day), [])
+        valid_rows = [
+            r for r in day_rows
+            if r.get("cap_year") is None or r.get("cap_year") != target_date.year
+        ]
+
+        grouped: dict[int, list[dict]] = {}
+        for r in valid_rows:
+            yr = r.get("cap_year")
+            if yr is None:
+                continue
+            ext = os.path.splitext(r["relative_path"])[1].lower()
+            is_video = ext in VIDEO_EXTS
+            s_type = r["source_type"]
+            s_key = r["source_key"]
+            s_label = "Phone Backup" if s_type == "phone" else shared_labels.get(s_key, "Shared Folder")
+
+            item = {
+                "source_type": s_type,
+                "source_id": s_key,
+                "source_label": s_label,
+                "relative_path": r["relative_path"],
+                "size": r["size"],
+                "capture_time": r["capture_time"],
+                "is_video": is_video,
+            }
+            grouped.setdefault(yr, []).append(item)
+
+        sorted_years = sorted(grouped.keys(), reverse=True)
+        groups = []
+        for yr in sorted_years:
+            groups.append({
+                "year": yr,
+                "years_ago": target_date.year - yr,
+                "items": grouped[yr],
+            })
+
         result_days.append({
-            "date": day_data["date"],
+            "date": {"month": target_date.month, "day": target_date.day, "year": target_date.year},
             "days_ago": offset,
             "is_today": offset == 0,
-            "groups": day_data["groups"],
+            "groups": groups,
         })
 
     return {"days": result_days}

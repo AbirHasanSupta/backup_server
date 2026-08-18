@@ -12,7 +12,14 @@ from ffmpeg_utils import resolve_ffmpeg_path
 from state import add_log
 
 DEFAULT_THUMBNAIL_CACHE_DIR = os.path.join(APP_DATA_DIR, "thumbnail_cache")
-_lock = threading.Lock()
+
+# Bounded semaphore allows multiple video thumbnails to generate in parallel
+_max_thumbnail_workers = max(2, min(8, os.cpu_count() or 4))
+_thumbnail_semaphore = threading.Semaphore(_max_thumbnail_workers)
+
+# In-flight deduplication so concurrent requests for the exact same video share results
+_inflight_lock = threading.Lock()
+_inflight: dict[str, threading.Event] = {}
 
 
 def _cache_dir() -> str:
@@ -40,7 +47,11 @@ def _run_options() -> dict:
 def get_video_thumbnail_path(source_path: str) -> str | None:
     if not os.path.isfile(source_path):
         return None
-    stat = os.stat(source_path)
+    try:
+        stat = os.stat(source_path)
+    except OSError:
+        return None
+
     key = _cache_key(source_path, stat.st_mtime, stat.st_size)
     out_path = os.path.join(_cache_dir(), f"{key}.jpg")
     if os.path.isfile(out_path):
@@ -50,40 +61,65 @@ def get_video_thumbnail_path(source_path: str) -> str | None:
     if not ffmpeg:
         return None
 
-    with _lock:
+    # Deduplicate concurrent requests for the identical video
+    event = None
+    with _inflight_lock:
         if os.path.isfile(out_path):
             return out_path
-        partial = out_path + ".partial"
-        last_err = None
-        for seek in ("0.5", "0"):
-            cmd = [
-                ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-                "-ss", seek, "-i", source_path,
-                "-frames:v", "1", "-vf", "scale=480:-2",
-                # ".partial" isn't a recognized image extension — without an
-                # explicit muxer, ffmpeg can't guess the output format and
-                # exits before writing anything.
-                "-f", "mjpeg",
-                partial,
-            ]
-            try:
-                subprocess.run(cmd, **_run_options(), check=True)
-            except Exception as e:
-                last_err = e
-                continue
-            if os.path.isfile(partial) and os.path.getsize(partial) > 0:
-                os.replace(partial, out_path)
+        if key in _inflight:
+            event = _inflight[key]
+        else:
+            event = threading.Event()
+            _inflight[key] = event
+
+    # If another thread is already building this exact thumbnail, wait for it
+    if event and not _inflight.get(key) is event:
+        event.wait(timeout=20)
+        return out_path if os.path.isfile(out_path) else None
+
+    # We are the worker for this key
+    try:
+        with _thumbnail_semaphore:
+            if os.path.isfile(out_path):
                 return out_path
-        if last_err is not None:
-            stderr = getattr(last_err, "stderr", None)
-            stderr_text = stderr.decode("utf-8", "replace").strip()[-500:] if isinstance(stderr, bytes) else ""
-            add_log(f"[Thumbnail] failed for {source_path}: {last_err} :: {stderr_text}")
-        if os.path.isfile(partial):
-            try:
-                os.remove(partial)
-            except OSError:
-                pass
-        return None
+
+            partial = f"{out_path}.part-{os.getpid()}-{threading.get_ident()}"
+            last_err = None
+            for seek in ("0.5", "0"):
+                cmd = [
+                    ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+                    "-ss", seek, "-i", source_path,
+                    "-frames:v", "1",
+                    "-vf", "scale=480:-2:flags=fast_bilinear",
+                    "-threads", "1",
+                    "-f", "mjpeg",
+                    partial,
+                ]
+                try:
+                    subprocess.run(cmd, **_run_options(), check=True)
+                except Exception as e:
+                    last_err = e
+                    continue
+                if os.path.isfile(partial) and os.path.getsize(partial) > 0:
+                    os.replace(partial, out_path)
+                    return out_path
+
+            if last_err is not None:
+                stderr = getattr(last_err, "stderr", None)
+                stderr_text = stderr.decode("utf-8", "replace").strip()[-500:] if isinstance(stderr, bytes) else ""
+                add_log(f"[Thumbnail] failed for {source_path}: {last_err} :: {stderr_text}")
+            if os.path.isfile(partial):
+                try:
+                    os.remove(partial)
+                except OSError:
+                    pass
+            return None
+    finally:
+        with _inflight_lock:
+            evt = _inflight.pop(key, None)
+            if evt:
+                evt.set()
+
 
 
 # ─── Cache management helpers (used by desktop_app settings + shutdown) ────────

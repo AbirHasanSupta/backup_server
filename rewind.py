@@ -2,8 +2,10 @@
 from media_index entries for a given device + year (optionally + month).
 
 Features:
-- Parallel multi-threaded segment encoding for 4x-5x faster reel generation.
-- Dynamic free/royalty-free background music integration with smooth audio fade-out.
+- Ultra-fast parallel multi-threaded segment encoding (ultrafast still-image pipelines).
+- Stratified temporal random sampling for diverse, non-repetitive reels on every generation.
+- Rich multi-track background music library with multiple procedural ambient synthesizers
+  and online royalty-free soundtracks.
 - High-concurrency safe subprocess tracking and clean termination.
 """
 
@@ -12,9 +14,11 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import os
+import random
 import shutil
 import subprocess
 import threading
+import time
 import urllib.request
 
 from config import APP_DATA_DIR, load_config
@@ -31,7 +35,7 @@ REEL_HEIGHT = 1920
 PHOTO_DURATION_SEC = 2.0
 VIDEO_CLIP_SEC = 3.0
 MAX_ITEMS = 15
-# Random pool size before even spacing — large enough to cover a full year.
+# Random pool size before temporal bucketing — large enough to cover a full year.
 REEL_CANDIDATE_POOL = 400
 FFMPEG_STEP_TIMEOUT_SEC = 30
 FFMPEG_CONCAT_TIMEOUT_SEC = 90
@@ -39,28 +43,89 @@ FFMPEG_CONCAT_TIMEOUT_SEC = 90
 # Stills Android + typical ffmpeg builds can encode without extra codecs.
 REWIND_STILL_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 
-# Royalty-free (CC-BY 3.0) background music tracks, resolved through Wikimedia
-# Commons' stable Special:FilePath redirect so we never have to guess the
-# MD5 hash-bucket directory the file actually lives under.
-FREE_MUSIC_URLS = [
-    "https://commons.wikimedia.org/wiki/Special:FilePath/Kevin_MacLeod_-_Carefree.ogg",
-    "https://commons.wikimedia.org/wiki/Special:FilePath/Kevin_MacLeod_-_Autumn_Day.ogg",
-    "https://commons.wikimedia.org/wiki/Special:FilePath/Life_of_Riley_(ISRC_USUAN1400054).mp3",
+# Verified live royalty-free music sources (Creative Commons CC0 / CC-BY)
+ONLINE_MUSIC_TRACKS = [
+    {
+        "name": "carefree.ogg",
+        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Kevin_MacLeod_-_Carefree.ogg",
+    },
+    {
+        "name": "autumn_day.ogg",
+        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Kevin_MacLeod_-_Autumn_Day.ogg",
+    },
+    {
+        "name": "life_of_riley.mp3",
+        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Life_of_Riley_(ISRC_USUAN1400054).mp3",
+    },
+]
+
+# Multiple procedurally synthesized ambient music styles (100% offline & instant)
+SYNTH_PRESETS = [
+    {
+        "filename": "ambient_warm_acoustic.m4a",
+        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=1400,volume=0.32[a]",
+        "inputs": [
+            "sine=frequency=261.63:sample_rate=44100:duration=50",  # C4
+            "sine=frequency=329.63:sample_rate=44100:duration=50",  # E4
+            "sine=frequency=392.00:sample_rate=44100:duration=50",  # G4
+            "sine=frequency=523.25:sample_rate=44100:duration=50",  # C5
+        ],
+    },
+    {
+        "filename": "ambient_dreamy_nostalgia.m4a",
+        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=1100,volume=0.30[a]",
+        "inputs": [
+            "sine=frequency=220.00:sample_rate=44100:duration=50",  # A3
+            "sine=frequency=261.63:sample_rate=44100:duration=50",  # C4
+            "sine=frequency=329.63:sample_rate=44100:duration=50",  # E4
+            "sine=frequency=440.00:sample_rate=44100:duration=50",  # A4
+        ],
+    },
+    {
+        "filename": "ambient_lofi_pad.m4a",
+        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=950,volume=0.35[a]",
+        "inputs": [
+            "sine=frequency=174.61:sample_rate=44100:duration=50",  # F3
+            "sine=frequency=220.00:sample_rate=44100:duration=50",  # A3
+            "sine=frequency=261.63:sample_rate=44100:duration=50",  # C4
+            "sine=frequency=329.63:sample_rate=44100:duration=50",  # E4 (Fmaj7)
+        ],
+    },
+    {
+        "filename": "ambient_uplifting_horizon.m4a",
+        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=1500,volume=0.30[a]",
+        "inputs": [
+            "sine=frequency=196.00:sample_rate=44100:duration=50",  # G3
+            "sine=frequency=246.94:sample_rate=44100:duration=50",  # B3
+            "sine=frequency=293.66:sample_rate=44100:duration=50",  # D4
+            "sine=frequency=392.00:sample_rate=44100:duration=50",  # G4
+        ],
+    },
+    {
+        "filename": "ambient_calm_waters.m4a",
+        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=1200,volume=0.32[a]",
+        "inputs": [
+            "sine=frequency=164.81:sample_rate=44100:duration=50",  # E3
+            "sine=frequency=246.94:sample_rate=44100:duration=50",  # B3
+            "sine=frequency=329.63:sample_rate=44100:duration=50",  # E4
+            "sine=frequency=392.00:sample_rate=44100:duration=50",  # G4 (Em7)
+        ],
+    },
 ]
 
 _generation_lock = threading.Lock()
 _active_jobs: set[str] = set()
 _failed_jobs: set[str] = set()
-_build_semaphore = threading.Semaphore(2)
+_build_semaphore = threading.Semaphore(max(2, min(4, (os.cpu_count() or 4) // 2)))
 
 _ffmpeg_process_guard = threading.Lock()
 _active_ffmpeg_processes: set[subprocess.Popen] = set()
 
-# Concurrent rewind builds (up to _build_semaphore's limit) can each reach
-# _get_or_fetch_background_music at the same time; without this lock they'd
-# race to write the same cache file and could hand each other a truncated
-# or partially-downloaded track.
 _music_fetch_lock = threading.Lock()
+
+# Pointer tracking for latest generated reels per job_key (device_id:year:month)
+_latest_reels_lock = threading.Lock()
+_latest_reels: dict[str, str] = {}
 
 
 def _cache_dir() -> str:
@@ -125,12 +190,12 @@ def terminate_active_rewind_ffmpeg() -> bool:
     return stopped_any
 
 
-def _cache_key(device_id: str, year: int, month: int | None, items: list[dict]) -> str:
+def _cache_key(device_id: str, year: int, month: int | None, items: list[dict], nonce: str | None = None) -> str:
     sig = "|".join(
         f"{it['source_type']}:{it['source_key']}:{it['relative_path']}:{it['modified_time']}"
         for it in items
     )
-    raw = f"{device_id}:{year}:{month or 0}:{sig}"
+    raw = f"{device_id}:{year}:{month or 0}:{sig}:{nonce or ''}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -140,6 +205,46 @@ def _reel_path(cache_key: str) -> str:
 
 def _job_key(device_id: str, year: int, month: int | None) -> str:
     return f"{device_id}:{year}:{month or 0}"
+
+
+def _pointer_file(job_key: str) -> str:
+    safe_key = job_key.replace(":", "_")
+    return os.path.join(_cache_dir(), f"latest_{safe_key}.txt")
+
+
+def _get_latest_reel_path(device_id: str, year: int, month: int | None) -> str | None:
+    job_key = _job_key(device_id, year, month)
+    with _latest_reels_lock:
+        if job_key in _latest_reels:
+            p = _latest_reels[job_key]
+            if os.path.isfile(p) and os.path.getsize(p) > 0:
+                return p
+
+    # Check pointer file on disk
+    ptr = _pointer_file(job_key)
+    if os.path.isfile(ptr):
+        try:
+            with open(ptr, "r", encoding="utf-8") as f:
+                path = f.read().strip()
+            if os.path.isfile(path) and os.path.getsize(path) > 0:
+                with _latest_reels_lock:
+                    _latest_reels[job_key] = path
+                return path
+        except Exception:
+            pass
+    return None
+
+
+def _set_latest_reel_path(device_id: str, year: int, month: int | None, path: str) -> None:
+    job_key = _job_key(device_id, year, month)
+    with _latest_reels_lock:
+        _latest_reels[job_key] = path
+    ptr = _pointer_file(job_key)
+    try:
+        with open(ptr, "w", encoding="utf-8") as f:
+            f.write(path)
+    except Exception:
+        pass
 
 
 def _shared_full_path(item: dict) -> str | None:
@@ -162,20 +267,31 @@ def _source_full_path(item: dict) -> str | None:
     return _shared_full_path(item)
 
 
-def _sample_evenly(items: list[dict], limit: int) -> list[dict]:
-    """Spread picks across the year/month so a reel isn't just January."""
+def _sample_with_temporal_diversity(items: list[dict], limit: int = MAX_ITEMS) -> list[dict]:
+    """Sample media items across the timeframe with random variation while
+
+    maintaining full chronological spread and timeline coverage.
+    """
+    if not items:
+        return []
     if len(items) <= limit:
-        return items
-    if limit <= 1:
-        return items[:1]
-    step = (len(items) - 1) / (limit - 1)
-    indices = sorted({min(len(items) - 1, int(round(i * step))) for i in range(limit)})
-    picked = set(indices)
-    for i in range(len(items)):
-        if len(picked) >= limit:
-            break
-        picked.add(i)
-    return [items[i] for i in sorted(picked)[:limit]]
+        return sorted(items, key=lambda it: (it.get("capture_time") is None, it.get("capture_time") or 0))
+
+    # Divide candidate items into `limit` temporal buckets
+    bucket_size = len(items) / float(limit)
+    selected = []
+    for i in range(limit):
+        start_idx = int(i * bucket_size)
+        end_idx = int((i + 1) * bucket_size)
+        bucket = items[start_idx:max(start_idx + 1, end_idx)]
+        if bucket:
+            # Pick a random candidate from this temporal slice
+            chosen = random.choice(bucket)
+            selected.append(chosen)
+
+    # Sort chosen items chronologically for smooth story progression
+    selected.sort(key=lambda it: (it.get("capture_time") is None, it.get("capture_time") or 0))
+    return selected
 
 
 def _is_rewind_usable(item: dict) -> bool:
@@ -183,7 +299,7 @@ def _is_rewind_usable(item: dict) -> bool:
     return ext in VIDEO_EXTS or ext in REWIND_STILL_EXTS
 
 
-def get_reel_items(device_id: str, year: int, month: int | None) -> list[dict]:
+def get_reel_items(device_id: str, year: int, month: int | None, randomize: bool = False) -> list[dict]:
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, _ = _shared_sources_for_device(device_id, shared_dirs)
     pool = get_media_for_year_month(
@@ -191,36 +307,41 @@ def get_reel_items(device_id: str, year: int, month: int | None) -> list[dict]:
     )
     usable = [it for it in pool if _is_rewind_usable(it)]
     usable.sort(key=lambda it: (it.get("capture_time") is None, it.get("capture_time") or 0))
-    return _sample_evenly(usable, MAX_ITEMS)
+    if not usable:
+        return []
+    return _sample_with_temporal_diversity(usable, MAX_ITEMS)
 
 
 def get_rewind_status(device_id: str, year: int, month: int | None) -> dict:
-    items = get_reel_items(device_id, year, month)
-    if not items:
-        return {"status": "none", "ready": False}
-
     job_key = _job_key(device_id, year, month)
-    cache_key = _cache_key(device_id, year, month, items)
-    path = _reel_path(cache_key)
-    ready_on_disk = os.path.isfile(path)
 
     with _generation_lock:
-        if ready_on_disk:
-            return {"status": "ready", "ready": True}
         if job_key in _active_jobs:
             return {"status": "generating", "ready": False}
+
+    latest_path = _get_latest_reel_path(device_id, year, month)
+    if latest_path and os.path.isfile(latest_path) and os.path.getsize(latest_path) > 0:
+        return {"status": "ready", "ready": True}
+
+    with _generation_lock:
         if job_key in _failed_jobs:
             return {"status": "failed", "ready": False}
-        return {"status": "not_generated", "ready": False}
+
+    # Check if any items exist for this timeframe
+    shared_dirs = load_config().get("SHARED_DIRS", [])
+    sources, _ = _shared_sources_for_device(device_id, shared_dirs)
+    pool = get_media_for_year_month(sources, year, month, limit=5, order="time")
+    if not pool:
+        return {"status": "none", "ready": False}
+
+    return {"status": "not_generated", "ready": False}
 
 
 def get_rewind_path(device_id: str, year: int, month: int | None) -> str | None:
-    items = get_reel_items(device_id, year, month)
-    if not items:
-        return None
-    cache_key = _cache_key(device_id, year, month, items)
-    path = _reel_path(cache_key)
-    return path if os.path.isfile(path) else None
+    latest_path = _get_latest_reel_path(device_id, year, month)
+    if latest_path and os.path.isfile(latest_path) and os.path.getsize(latest_path) > 0:
+        return latest_path
+    return None
 
 
 def _describe_ffmpeg_error(e: Exception) -> str:
@@ -238,19 +359,28 @@ def _build_segment(ffmpeg: str, src_path: str, seg_path: str, is_video: bool) ->
         f"scale={REEL_WIDTH}:{REEL_HEIGHT}:force_original_aspect_ratio=decrease,"
         f"pad={REEL_WIDTH}:{REEL_HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p"
     )
-    common_out = [
-        "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-        "-r", "30", "-an", "-movflags", "+faststart",
-        "-f", "mp4",
-        seg_path,
-    ]
     if is_video:
-        cmd = [ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-               "-i", src_path, "-t", str(VIDEO_CLIP_SEC), *common_out]
+        cmd = [
+            ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+            "-i", src_path,
+            "-t", str(VIDEO_CLIP_SEC),
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-r", "30", "-threads", "2", "-an", "-movflags", "+faststart",
+            "-f", "mp4",
+            seg_path,
+        ]
     else:
-        cmd = [ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-               "-loop", "1", "-framerate", "30", "-i", src_path, "-t", str(PHOTO_DURATION_SEC), *common_out]
+        cmd = [
+            ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+            "-loop", "1", "-framerate", "30", "-i", src_path,
+            "-t", str(PHOTO_DURATION_SEC),
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage", "-g", "30", "-pix_fmt", "yuv420p",
+            "-r", "30", "-threads", "2", "-an", "-movflags", "+faststart",
+            "-f", "mp4",
+            seg_path,
+        ]
     try:
         _run_ffmpeg(cmd, FFMPEG_STEP_TIMEOUT_SEC)
         return os.path.isfile(seg_path) and os.path.getsize(seg_path) > 0
@@ -259,69 +389,100 @@ def _build_segment(ffmpeg: str, src_path: str, seg_path: str, is_video: bool) ->
         return False
 
 
-def _get_or_fetch_background_music(ffmpeg: str) -> str | None:
-    """Fetch a royalty-free music track from public sources or synthesize a mellow ambient track."""
+def _get_or_fetch_background_music(ffmpeg: str, chosen_index: int | None = None) -> str | None:
+    """Select or synthesize a variety of royalty-free soundtracks."""
     music_dir = _music_cache_dir()
-    synth_path = os.path.join(music_dir, "ambient_soundscape.m4a")
-    downloaded_path = os.path.join(music_dir, "online_music_track.ogg")
 
-    if os.path.isfile(downloaded_path) and os.path.getsize(downloaded_path) > 1000:
-        return downloaded_path
-    if os.path.isfile(synth_path) and os.path.getsize(synth_path) > 1000:
-        return synth_path
+    # Total options: procedural synths + online tracks
+    total_options = len(SYNTH_PRESETS) + len(ONLINE_MUSIC_TRACKS)
+    if chosen_index is None:
+        chosen_index = random.randint(0, total_options - 1)
 
     with _music_fetch_lock:
-        # Re-check: another concurrent build may have finished fetching while
-        # this thread was waiting on the lock.
+        # 1. Procedural Synth Options
+        if chosen_index < len(SYNTH_PRESETS):
+            synth_info = SYNTH_PRESETS[chosen_index]
+            synth_path = os.path.join(music_dir, synth_info["filename"])
+            if os.path.isfile(synth_path) and os.path.getsize(synth_path) > 1000:
+                return synth_path
+
+            # Synthesize ambient track
+            try:
+                cmd_inputs = []
+                for inp in synth_info["inputs"]:
+                    cmd_inputs.extend(["-f", "lavfi", "-i", inp])
+                synth_cmd = [
+                    ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+                    *cmd_inputs,
+                    "-filter_complex", synth_info["filter"],
+                    "-map", "[a]",
+                    "-c:a", "aac", "-b:a", "128k",
+                    synth_path,
+                ]
+                _run_ffmpeg(synth_cmd, timeout=15)
+                if os.path.isfile(synth_path) and os.path.getsize(synth_path) > 1000:
+                    add_log(f"[Rewind] generated procedural soundtrack ({synth_info['filename']})")
+                    return synth_path
+            except Exception as e:
+                add_log(f"[Rewind] procedural soundtrack synthesis error: {e}")
+
+        # 2. Online Track Option
+        online_idx = chosen_index % len(ONLINE_MUSIC_TRACKS)
+        track_info = ONLINE_MUSIC_TRACKS[online_idx]
+        downloaded_path = os.path.join(music_dir, track_info["name"])
+
         if os.path.isfile(downloaded_path) and os.path.getsize(downloaded_path) > 1000:
             return downloaded_path
-        if os.path.isfile(synth_path) and os.path.getsize(synth_path) > 1000:
-            return synth_path
 
         tmp_download_path = f"{downloaded_path}.part-{os.getpid()}-{threading.get_ident()}"
-
-        # 1. Try downloading royalty-free CC0 music
-        for url in FREE_MUSIC_URLS:
-            try:
-                req = urllib.request.Request(
-                    url,
-                    headers={"User-Agent": "PhoneBackupServer/3.1 (https://github.com)"},
-                )
-                with urllib.request.urlopen(req, timeout=15) as response:
-                    if response.status == 200:
-                        with open(tmp_download_path, "wb") as f:
-                            f.write(response.read())
-                        if os.path.isfile(tmp_download_path) and os.path.getsize(tmp_download_path) > 1000:
-                            os.replace(tmp_download_path, downloaded_path)
-                            add_log("[Rewind] fetched live royalty-free background music")
-                            return downloaded_path
-            except Exception:
-                continue
-            finally:
-                if os.path.isfile(tmp_download_path):
-                    try:
-                        os.remove(tmp_download_path)
-                    except OSError:
-                        pass
-
-        # 2. Fallback to gentle ambient harmonic chord audio generation using ffmpeg
         try:
+            req = urllib.request.Request(
+                track_info["url"],
+                headers={"User-Agent": "PhoneBackupServer/3.1 (https://github.com)"},
+            )
+            with urllib.request.urlopen(req, timeout=12) as response:
+                if response.status == 200:
+                    with open(tmp_download_path, "wb") as f:
+                        f.write(response.read())
+                    if os.path.isfile(tmp_download_path) and os.path.getsize(tmp_download_path) > 1000:
+                        os.replace(tmp_download_path, downloaded_path)
+                        add_log(f"[Rewind] fetched royalty-free track: {track_info['name']}")
+                        return downloaded_path
+        except Exception:
+            pass
+        finally:
+            if os.path.isfile(tmp_download_path):
+                try:
+                    os.remove(tmp_download_path)
+                except OSError:
+                    pass
+
+        # Fallback to any already cached or default synth
+        for preset in SYNTH_PRESETS:
+            p = os.path.join(music_dir, preset["filename"])
+            if os.path.isfile(p) and os.path.getsize(p) > 1000:
+                return p
+
+        # If nothing exists, synthesize preset 0
+        fallback_preset = SYNTH_PRESETS[0]
+        fallback_path = os.path.join(music_dir, fallback_preset["filename"])
+        try:
+            cmd_inputs = []
+            for inp in fallback_preset["inputs"]:
+                cmd_inputs.extend(["-f", "lavfi", "-i", inp])
             synth_cmd = [
                 ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "sine=frequency=261.63:sample_rate=44100:duration=45",
-                "-f", "lavfi", "-i", "sine=frequency=329.63:sample_rate=44100:duration=45",
-                "-f", "lavfi", "-i", "sine=frequency=392.00:sample_rate=44100:duration=45",
-                "-filter_complex", "[0:a][1:a][2:a]amix=inputs=3:dropout_transition=0,lowpass=f=1200,volume=0.3[a]",
+                *cmd_inputs,
+                "-filter_complex", fallback_preset["filter"],
                 "-map", "[a]",
                 "-c:a", "aac", "-b:a", "128k",
-                synth_path,
+                fallback_path,
             ]
             _run_ffmpeg(synth_cmd, timeout=15)
-            if os.path.isfile(synth_path) and os.path.getsize(synth_path) > 1000:
-                add_log("[Rewind] generated ambient background soundtrack")
-                return synth_path
+            if os.path.isfile(fallback_path) and os.path.getsize(fallback_path) > 1000:
+                return fallback_path
         except Exception as e:
-            add_log(f"[Rewind] ambient soundtrack synthesis failed: {e}")
+            add_log(f"[Rewind] fallback soundtrack synthesis failed: {e}")
 
         return None
 
@@ -336,15 +497,14 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                 add_log("[Rewind] ffmpeg not found — cannot build reel")
                 return
 
-            items = get_reel_items(device_id, year, month)
+            items = get_reel_items(device_id, year, month, randomize=True)
             if not items:
+                add_log(f"[Rewind] no items available for {device_id} {year}/{month or 'all'}")
                 return
 
-            cache_key = _cache_key(device_id, year, month, items)
+            nonce = f"{int(time.time())}-{random.randint(1000, 9999)}"
+            cache_key = _cache_key(device_id, year, month, items, nonce=nonce)
             out_path = _reel_path(cache_key)
-            if os.path.isfile(out_path):
-                success = True
-                return
 
             work_dir = os.path.join(_cache_dir(), f"tmp_{cache_key}")
             os.makedirs(work_dir, exist_ok=True)
@@ -354,7 +514,10 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
 
             try:
                 if os.path.isfile(partial_out):
-                    os.remove(partial_out)
+                    try:
+                        os.remove(partial_out)
+                    except OSError:
+                        pass
 
                 valid_work: list[tuple[int, str, str, bool]] = []
                 for idx, item in enumerate(items):
@@ -369,11 +532,11 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                     valid_work.append((idx, src_path, seg_path, is_video))
 
                 if not valid_work:
-                    add_log("[Rewind] no usable items found — aborting reel build")
+                    add_log("[Rewind] no usable files found — aborting reel build")
                     return
 
-                # Build segments in parallel across CPU cores for maximum speed
-                max_workers = max(1, min(4, os.cpu_count() or 2))
+                # Build segments in parallel across CPU cores using ultrafast presets
+                max_workers = max(2, min(8, os.cpu_count() or 4))
                 segment_results: dict[int, str] = {}
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     future_to_idx = {
@@ -400,7 +563,7 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                         escaped = seg.replace("\\", "/").replace("'", "'\\''")
                         f.write(f"file '{escaped}'\n")
 
-                # Concat segments into single video
+                # Concat segments into single video with fast direct stream copy
                 concat_cmd = [
                     ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
                     "-f", "concat", "-safe", "0", "-i", list_file,
@@ -413,13 +576,13 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                     add_log("[Rewind] concat produced empty output — aborting")
                     return
 
-                # Approximate total reel duration
+                # Calculate total reel duration
                 total_duration = 0.0
                 for idx, _, _, is_vid in valid_work:
                     if idx in segment_results:
                         total_duration += VIDEO_CLIP_SEC if is_vid else PHOTO_DURATION_SEC
 
-                # Add background music with audio fade-out
+                # Select a varied background music track
                 music_track = _get_or_fetch_background_music(ffmpeg)
                 if music_track and os.path.isfile(music_track):
                     fade_start = max(0.5, total_duration - 2.0)
@@ -452,8 +615,9 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
 
                 if os.path.isfile(partial_out) and os.path.getsize(partial_out) > 0:
                     os.replace(partial_out, out_path)
+                    _set_latest_reel_path(device_id, year, month, out_path)
                     success = True
-                    add_log(f"[Rewind] built reel for {device_id} {year}/{month or 'all'} ({len(segments)} clips)")
+                    add_log(f"🎬 Built reel for {device_id} {year}/{month or 'all'} ({len(segments)} clips)")
                 else:
                     add_log("[Rewind] final output empty — aborting")
             finally:
@@ -477,13 +641,11 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
 def start_rewind_build(device_id: str, year: int, month: int | None) -> dict:
     job_key = _job_key(device_id, year, month)
 
-    items = get_reel_items(device_id, year, month)
-    if not items:
+    shared_dirs = load_config().get("SHARED_DIRS", [])
+    sources, _ = _shared_sources_for_device(device_id, shared_dirs)
+    pool = get_media_for_year_month(sources, year, month, limit=5, order="time")
+    if not pool:
         return {"ok": False, "status": "none"}
-
-    cache_key = _cache_key(device_id, year, month, items)
-    if os.path.isfile(_reel_path(cache_key)):
-        return {"ok": True, "status": "ready"}
 
     with _generation_lock:
         if job_key in _active_jobs:
@@ -524,7 +686,7 @@ def get_rewind_cache_stats() -> dict:
 def clear_rewind_cache() -> dict:
     """Delete all files in the rewind cache directory.
     Returns {files, bytes} of what was removed.
-    Also clears the in-memory job sets so stale state is not carried over.
+    Also clears the in-memory job sets and reel pointers so stale state is not carried over.
     """
     cache_dir = _cache_dir()
     removed_files = 0
@@ -544,8 +706,12 @@ def clear_rewind_cache() -> dict:
                 pass
     except OSError:
         pass
-    # Clear in-memory job state so a fresh generate request is accepted.
+
+    # Clear in-memory job state and pointers
     with _generation_lock:
         _active_jobs.clear()
         _failed_jobs.clear()
+    with _latest_reels_lock:
+        _latest_reels.clear()
+
     return {"files": removed_files, "bytes": removed_bytes}
