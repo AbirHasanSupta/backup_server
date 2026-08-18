@@ -15,13 +15,12 @@ import {
   clearFolderUploads,
   getServerIp,
 } from '../../settings';
-import { runSync } from '../../backgroundTask';
+import { runSync, getCurrentSyncState } from '../../backgroundTask';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { FolderCard, Folder } from '@/components/FolderCard';
 import { FileTypeSelector } from '@/components/FileTypeSelector';
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
-import { AnimatedListItem } from '@/components/AnimatedListItem';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 import { checkDeviceConnection } from '../../uploader';
@@ -48,9 +47,16 @@ export default function FoldersScreen() {
   const checkServer = useCallback(async () => {
     const ip = await getServerIp();
     if (!ip) { setServerStatus('unknown'); return; }
-    setServerStatus('checking');
+
+    const snapshot = await getCurrentSyncState().catch(() => null);
+    if (snapshot?.active) {
+      setServerStatus('connected');
+      return;
+    }
+
+    setServerStatus(prev => (prev === 'connected' ? prev : 'checking'));
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
+    const timeout = setTimeout(() => controller.abort(), 6000);
     try {
       const result = await checkDeviceConnection({ signal: controller.signal });
       clearTimeout(timeout);
@@ -174,10 +180,6 @@ export default function FoldersScreen() {
       </Animated.View>
 
       <Animated.View style={contentInsetStyle}>
-        <Animated.View entering={FadeInDown.duration(300).delay(100)} style={styles.filterSection}>
-          <FileTypeSelector selected={selectedTypes} onChange={handleTypeChange} />
-        </Animated.View>
-
         <FlatList
           style={{ flex: 1 }}
           data={folders}
@@ -187,13 +189,16 @@ export default function FoldersScreen() {
             folders.length === 0 && styles.listContentEmpty,
             { paddingBottom: BottomTabInset + insets.bottom + 24 },
           ]}
+          ListHeaderComponent={
+            <Animated.View entering={FadeInDown.duration(300).delay(100)} style={styles.filterSection}>
+              <FileTypeSelector selected={selectedTypes} onChange={handleTypeChange} />
+            </Animated.View>
+          }
           ListEmptyComponent={renderEmpty}
-          renderItem={({ item, index }) => (
-            <AnimatedListItem index={index}>
-              <View style={item.uri === refreshing ? styles.refreshingCard : undefined}>
-                <FolderCard folder={item} onRemove={handleRemove} onRefresh={handleRefresh} refreshDisabled={isOffline} />
-              </View>
-            </AnimatedListItem>
+          renderItem={({ item }) => (
+            <View style={item.uri === refreshing ? styles.refreshingCard : undefined}>
+              <FolderCard folder={item} onRemove={handleRemove} onRefresh={handleRefresh} refreshDisabled={isOffline} />
+            </View>
           )}
           onScroll={onScroll}
           scrollEventThrottle={16}

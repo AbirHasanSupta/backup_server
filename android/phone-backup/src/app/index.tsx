@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -35,6 +35,7 @@ import {
   getSyncPaused,
   getFolders,
   formatSyncIntervalLabel,
+  saveServerProfile,
 } from '../../settings';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { SyncProgressRing, SyncPhase } from '@/components/SyncProgressRing';
@@ -43,8 +44,6 @@ import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
-import { invalidatePendingPreviewCache } from '../../pendingPreview';
-import { invalidateStorageSavingsCache } from '../../storageSavingsPreview';
 import { getStreakData } from '../../streak';
 import { StreakBadge } from '@/components/StreakBadge';
 import { getGoals, invalidateGoalsFileCache } from '../../goals';
@@ -141,6 +140,8 @@ export default function HomeScreen() {
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   const [syncing, setSyncing] = useState(false);
+  const syncingRef = useRef(false);
+  useEffect(() => { syncingRef.current = syncing; }, [syncing]);
   const [phase, setPhase] = useState<SyncPhase>('idle');
   const [progress, setProgress] = useState(0);
   const [uploaded, setUploaded] = useState(0);
@@ -214,15 +215,20 @@ export default function HomeScreen() {
           if (data?.name) {
             await setServerName(data.name);
             setServerLabel(data.name);
+            await saveServerProfile({ ip, port: Number(port) || 8000, name: data.name }).catch(() => {});
           }
         }
       } catch {}
     }
 
-    // Keep connected status visible while re-probing to avoid Sync Now flicker.
+    if (syncingRef.current) {
+      setServerStatus('connected');
+      return;
+    }
+
     setServerStatus(prev => (prev === 'connected' ? prev : 'checking'));
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
+    const timeout = setTimeout(() => controller.abort(), 6000);
     try {
       const result = await checkDeviceConnection({ signal: controller.signal });
       clearTimeout(timeout);
@@ -287,7 +293,11 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      loadAll();
+      // Skip the heavy loadAll() (5 parallel AsyncStorage reads + server probe)
+      // if a sync is actively running. The sync events keep the UI up to date.
+      if (!syncingRef.current) {
+        loadAll();
+      }
       loadStreak();
       loadGoalsSummary();
       getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
@@ -300,16 +310,25 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
+    // Do not poll loadAll() while sync is active — it fires 5 parallel AsyncStorage
+    // reads every 15 s and competes with the sync engine's own throttled writes.
+    // The sync-completed / sync-failed events call loadAll() explicitly when needed.
+    if (syncing) return;
     const id = setInterval(() => {
       loadAll();
     }, 15000);
     return () => clearInterval(id);
-  }, [loadAll]);
+  }, [loadAll, syncing]);
 
   useEffect(() => {
+    // During active sync the UI is driven by DeviceEventEmitter events
+    // (sync-started / sync-progress / sync-state / sync-completed).
+    // We only keep a 5 s safety-net poll so cross-context syncs (background
+    // service in a separate JS context) still surface their state without
+    // flooding AsyncStorage on every second.
     const id = setInterval(() => {
       getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
-    }, syncing ? 1000 : 2500);
+    }, syncing ? 5000 : 3000);
     return () => clearInterval(id);
   }, [applySyncSnapshot, syncing]);
 
@@ -383,11 +402,12 @@ export default function HomeScreen() {
             : 'Everything is already up to date'
         );
       }
-      invalidatePendingPreviewCache();
-      invalidateStorageSavingsCache();
       loadStreak();
       invalidateGoalsFileCache();
       loadGoalsSummary();
+      // loadAll() was suppressed during sync — call it now to refresh last-sync
+      // time, total synced count, and re-probe the server connection.
+      loadAll();
     };
 
     const onFailed = ({ message }: { message?: string }) => {
@@ -396,8 +416,8 @@ export default function HomeScreen() {
       setForceStopPressedAt(null);
       setPhase('idle');
       setStatusMessage(message || 'Backup failed. Check your connection.');
-      invalidatePendingPreviewCache();
-      invalidateStorageSavingsCache();
+      // loadAll() was suppressed during sync — refresh server status now.
+      loadAll();
     };
 
     const subs = [
@@ -408,8 +428,6 @@ export default function HomeScreen() {
       DeviceEventEmitter.addListener('sync-failed', onFailed),
       DeviceEventEmitter.addListener('settings-updated', () => {
         loadAll();
-        invalidatePendingPreviewCache();
-        invalidateStorageSavingsCache();
         invalidateGoalsFileCache();
       }),
     ];
@@ -434,8 +452,6 @@ export default function HomeScreen() {
           setPhase('idle');
           setStatusMessage('Backup force-stopped');
           hapticError();
-          invalidatePendingPreviewCache();
-          invalidateStorageSavingsCache();
           await forceStopCurrentSync();
         } else {
           setForceStopPressedAt(now);
@@ -523,8 +539,6 @@ export default function HomeScreen() {
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    invalidatePendingPreviewCache();
-    invalidateStorageSavingsCache();
     try {
       await loadAll();
     } finally {
@@ -714,42 +728,6 @@ export default function HomeScreen() {
             )}
           </AnimatedPressable>
         </Animated.View>
-
-        {!syncing && (
-          <Animated.View entering={FadeInDown.duration(400).delay(250)} style={styles.pendingSection}>
-            <Text style={styles.sectionKicker}>Insights</Text>
-            <AnimatedPressable
-              style={styles.goalsCard}
-              onPress={() => { hapticMedium(); router.push('/gaps'); }}
-              scaleDown={0.98}
-              accessibilityLabel="Open on this device"
-            >
-              <View style={[styles.goalsIconWrap, { backgroundColor: colors.primarySoft }]}>
-                <AppIcon androidName="smartphone" iosName="iphone" color={colors.primary} size={18} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.goalsTitle}>On this device</Text>
-                <Text style={styles.goalsSubtitle}>See files not yet backed up</Text>
-              </View>
-              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
-            </AnimatedPressable>
-            <AnimatedPressable
-              style={[styles.goalsCard, { marginTop: Spacing.two }]}
-              onPress={() => { hapticMedium(); router.push('/storage-insight'); }}
-              scaleDown={0.98}
-              accessibilityLabel="Open storage insight"
-            >
-              <View style={[styles.goalsIconWrap, { backgroundColor: colors.primarySoft }]}>
-                <AppIcon androidName="cloud_done" iosName="checkmark.icloud.fill" color={colors.primary} size={18} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.goalsTitle}>Storage insight</Text>
-                <Text style={styles.goalsSubtitle}>Check server totals & reclaimable space</Text>
-              </View>
-              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
-            </AnimatedPressable>
-          </Animated.View>
-        )}
 
         {!syncing && (
           <Animated.View entering={FadeInDown.duration(400).delay(285)} style={styles.pendingSection}>

@@ -129,9 +129,9 @@ const BackgroundService = BackgroundServiceModule ? (BackgroundServiceModule.def
 
 const TASK_NAME = 'backup-task';
 const CHECK_BATCH_SIZE = 300;
-const DEFAULT_UPLOAD_CONCURRENCY = 4;
-const SMALL_FILE_UPLOAD_CONCURRENCY = 6;
-const LARGE_FILE_UPLOAD_CONCURRENCY = 2;
+const DEFAULT_UPLOAD_CONCURRENCY = 2;
+const SMALL_FILE_UPLOAD_CONCURRENCY = 3;
+const LARGE_FILE_UPLOAD_CONCURRENCY = 1;
 const SMALL_FILE_THRESHOLD = 25 * 1024 * 1024;
 const LARGE_FILE_THRESHOLD = 150 * 1024 * 1024;
 const SERVICE_LOOP_TICK_MS = 15000;
@@ -249,6 +249,10 @@ async function checkStreakRiskInBackground() {
 }
 
 let lastIdleDesc = null;
+let lastNotificationUpdateAt = 0;
+let lastProgressEmitAt = 0;
+const NOTIFICATION_THROTTLE_MS = 400;
+const PROGRESS_EMIT_THROTTLE_MS = 150;
 let currentSyncState = { active: false, phase: 'idle', stopRequested: false, stopping: false, forceStop: false };
 let lastPersistedSyncStateAt = 0;
 const SYNC_STATE_PERSIST_INTERVAL_MS = 800;
@@ -280,25 +284,35 @@ function emitSyncFailed(message) {
   DeviceEventEmitter.emit('sync-failed', { message });
 }
 
+let lastStateEmitAt = 0;
+const STATE_EMIT_THROTTLE_MS = 250;
+
 async function writeSyncState(patch = {}) {
   const prevPhase = currentSyncState.phase;
   const prevActive = currentSyncState.active;
   const prevStopping = currentSyncState.stopping;
+  const prevStopRequested = currentSyncState.stopRequested;
   currentSyncState = {
     ...currentSyncState,
     ...patch,
     updatedAt: Date.now(),
   };
-  emitSyncState(currentSyncState);
 
-  // Persisting to AsyncStorage on every file's progress tick (thousands of
-  // times for a large library) is what makes the sync feel like it slows
-  // down over time. Only persist on meaningful transitions or throttled.
   const now = Date.now();
   const structuralChange =
     currentSyncState.phase !== prevPhase ||
     currentSyncState.active !== prevActive ||
-    currentSyncState.stopping !== prevStopping;
+    currentSyncState.stopping !== prevStopping ||
+    currentSyncState.stopRequested !== prevStopRequested;
+
+  if (structuralChange || now - lastStateEmitAt >= STATE_EMIT_THROTTLE_MS) {
+    lastStateEmitAt = now;
+    emitSyncState(currentSyncState);
+  }
+
+  // Persisting to AsyncStorage on every file's progress tick (thousands of
+  // times for a large library) is what makes the sync feel like it slows
+  // down over time. Only persist on meaningful transitions or throttled.
   if (structuralChange || now - lastPersistedSyncStateAt >= SYNC_STATE_PERSIST_INTERVAL_MS) {
     lastPersistedSyncStateAt = now;
     await setSyncRuntimeState(currentSyncState).catch(() => {});
@@ -597,14 +611,26 @@ async function updateIdleNotification(force = false) {
 }
 
 async function reportProgress(current, total, detail) {
-  // Always propagate the stopping flag so the UI never flickers back to the
-  // active-syncing state after the user pressed Stop.
   const enrichedDetail = currentSyncState.stopping
     ? { ...detail, stopping: true }
     : detail;
 
+  const prevPhase = currentSyncState.phase;
   await writeSyncState(buildStateFromProgress(current, total, enrichedDetail));
-  emitSyncProgress(current, total, enrichedDetail);
+
+  const now = Date.now();
+  const isPhaseChange = enrichedDetail?.phase !== prevPhase;
+  const isTerminal = enrichedDetail?.phase === 'idle' || enrichedDetail?.stopping || total > 0 && current >= total;
+
+  const shouldEmitProgress = isPhaseChange || isTerminal || now - lastProgressEmitAt >= PROGRESS_EMIT_THROTTLE_MS;
+  if (shouldEmitProgress) {
+    lastProgressEmitAt = now;
+    emitSyncProgress(current, total, enrichedDetail);
+  }
+
+  const shouldUpdateNotification = isPhaseChange || isTerminal || now - lastNotificationUpdateAt >= NOTIFICATION_THROTTLE_MS;
+  if (!shouldUpdateNotification) return;
+  lastNotificationUpdateAt = now;
 
   if (Platform.OS === 'android' && BackgroundService && BackgroundService.isRunning()) {
     const desc = buildSyncProgressText(current, total, enrichedDetail);
@@ -666,7 +692,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   }
 
   if (onProgress) await onProgress(0, 0, { phase: 'checking', checked: 0, total: files.length });
-  await reportServerActivity('Checking server files');
+  await reportServerActivity(isTwoWay ? 'Checking server files' : 'Checking local files');
 
   const present = new Set();
   const presentFiles = [];
@@ -676,12 +702,9 @@ export async function performActualSync(onProgress, runOptions = {}) {
   let serverDeviceTotalSize = 0;
   let stoppedDuringCheck = false;
 
-  let filesToCheck = files;
   if (!isTwoWay) {
+    // Pure client-side check against cached upload keys (no HTTP request)
     const trusted = await isUploadedBatch(files);
-    filesToCheck = files.filter(
-      (file) => !trusted.has(`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`)
-    );
     for (const file of files) {
       const key = `${file.relativePath}|${file.modifiedTime}|${file.size || 0}`;
       if (trusted.has(key)) {
@@ -689,36 +712,39 @@ export async function performActualSync(onProgress, runOptions = {}) {
         trustedFiles.push(file);
       }
     }
-    checked = files.length - filesToCheck.length;
+    checked = files.length;
     if (onProgress) await onProgress(0, 0, { phase: 'checking', checked, total: files.length });
-  }
+  } else {
+    // Two-way server-side check for Refresh Folder / Refresh All Backups
+    for (const batch of chunk(files, CHECK_BATCH_SIZE)) {
+      if (await shouldAbortSync()) { stoppedDuringCheck = true; break; }
+      const res = await checkServerFiles(batch, { verifyDisk: true });
+      const statuses = res.files;
+      serverDeviceTotalFiles = res.deviceTotalFiles;
+      serverDeviceTotalSize = res.deviceTotalSize;
 
-  for (const batch of chunk(filesToCheck, CHECK_BATCH_SIZE)) {
-    if (await shouldAbortSync()) { stoppedDuringCheck = true; break; }
-    const res = await checkServerFiles(batch, { verifyDisk: isTwoWay });
-    const statuses = res.files;
-    serverDeviceTotalFiles = res.deviceTotalFiles;
-    serverDeviceTotalSize = res.deviceTotalSize;
+      const batchByKey = new Map(
+        batch.map((file) => [`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`, file])
+      );
 
-    const batchByKey = new Map(
-      batch.map((file) => [`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`, file])
-    );
+      for (const status of statuses) {
+        const key = `${status.relative_path}|${status.modified_time}|${status.size || 0}`;
 
-    for (const status of statuses) {
-      const key = `${status.relative_path}|${status.modified_time}|${status.size || 0}`;
-
-      if (status.status === 'present') {
-        present.add(key);
-        const file = batchByKey.get(key);
-        if (file) presentFiles.push(file);
+        if (status.status === 'present') {
+          present.add(key);
+          const file = batchByKey.get(key);
+          if (file) presentFiles.push(file);
+        }
       }
+
+      checked += batch.length;
+      if (onProgress) await onProgress(0, 0, { phase: 'checking', checked, total: files.length });
     }
 
-    checked += batch.length;
-    if (onProgress) await onProgress(0, 0, { phase: 'checking', checked, total: files.length });
+    if (presentFiles.length > 0) {
+      await markUploadedBatch(presentFiles);
+    }
   }
-
-  await markUploadedBatch(presentFiles);
 
   if (stoppedDuringCheck) {
     return {

@@ -304,14 +304,6 @@ function RootLayoutContent() {
           options={{ href: null, tabBarStyle: { display: 'none' }, freezeOnBlur: true }}
         />
         <Tabs.Screen
-          name="gaps"
-          options={{ href: null, tabBarStyle: { display: 'none' } }}
-        />
-        <Tabs.Screen
-          name="storage-insight"
-          options={{ href: null, tabBarStyle: { display: 'none' } }}
-        />
-        <Tabs.Screen
           name="goals"
           options={{ href: null, tabBarStyle: { display: 'none' } }}
         />

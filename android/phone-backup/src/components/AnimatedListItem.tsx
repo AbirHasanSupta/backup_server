@@ -22,11 +22,17 @@ export function AnimatedListItem({ children, index, style }: AnimatedListItemPro
   const hasAnimated = useRef(false);
 
   useEffect(() => {
-    if (hasAnimated.current) return;
+    if (hasAnimated.current) {
+      // Re-mounted after a tab switch or list recycle — skip stagger,
+      // snap immediately to visible so items never stay at opacity 0.
+      translateY.value = 0;
+      opacity.value = 1;
+      return;
+    }
     hasAnimated.current = true;
-    const delay = Math.min(index * STAGGER_PER_ITEM, MAX_STAGGER_DELAY);
-    translateY.value = withDelay(delay, withSpring(0, { damping: 18, stiffness: 200 }));
-    opacity.value = withDelay(delay, withSpring(1, { damping: 18, stiffness: 200 }));
+    const delay = index < 8 ? Math.min(index * STAGGER_PER_ITEM, MAX_STAGGER_DELAY) : 0;
+    translateY.value = delay > 0 ? withDelay(delay, withSpring(0, { damping: 18, stiffness: 200 })) : withSpring(0, { damping: 18, stiffness: 200 });
+    opacity.value = delay > 0 ? withDelay(delay, withSpring(1, { damping: 18, stiffness: 200 })) : withSpring(1, { damping: 18, stiffness: 200 });
   }, [index, translateY, opacity]);
 
   const animatedStyle = useAnimatedStyle(() => ({

@@ -432,18 +432,25 @@ export async function getSavedServers() {
 export async function saveServerProfile(server) {
   if (!server?.ip) return await getSavedServers();
   const servers = await getSavedServers();
-  const id = `${server.ip}:${server.port || 8000}`;
+  const port = Number(server.port) || 8000;
+  const id = `${server.ip}:${port}`;
   const now = Date.now();
 
-  const idx = servers.findIndex((s) => s.id === id || (s.ip === server.ip && (s.port || 8000) === (server.port || 8000)));
+  const idx = servers.findIndex((s) => s.id === id || (s.ip === server.ip && (Number(s.port) || 8000) === port));
+  const existing = idx >= 0 ? servers[idx] : null;
+
+  const resolvedName = (server.name && server.name !== server.ip)
+    ? server.name
+    : (existing?.name && existing.name !== server.ip ? existing.name : (server.name || server.ip));
+
   const profile = {
     id,
     ip: server.ip,
-    port: Number(server.port) || 8000,
-    name: server.name || server.ip,
-    apiKey: server.apiKey || 'YOUR_SECRET_KEY',
-    deviceToken: server.deviceToken || '',
-    certFingerprint: server.certFingerprint || '',
+    port,
+    name: resolvedName,
+    apiKey: server.apiKey || existing?.apiKey || 'YOUR_SECRET_KEY',
+    deviceToken: server.deviceToken || existing?.deviceToken || '',
+    certFingerprint: server.certFingerprint || existing?.certFingerprint || '',
     lastConnectedAt: now,
   };
 
@@ -451,8 +458,6 @@ export async function saveServerProfile(server) {
     servers[idx] = {
       ...servers[idx],
       ...profile,
-      apiKey: profile.apiKey || servers[idx].apiKey,
-      deviceToken: profile.deviceToken || servers[idx].deviceToken,
     };
   } else {
     servers.unshift(profile);

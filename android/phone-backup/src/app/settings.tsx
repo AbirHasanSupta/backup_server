@@ -23,6 +23,7 @@ import {
   setServerPort,
   getApiKey,
   setApiKey,
+  getServerName,
   setServerName,
   getSyncInterval,
   setSyncInterval,
@@ -39,7 +40,7 @@ import {
   switchToSavedServer,
 } from '../../settings';
 import { hapticMedium, hapticLight } from '@/utils/haptics';
-import { registerBackgroundTask, runSync } from '../../backgroundTask';
+import { registerBackgroundTask, runSync, getCurrentSyncState } from '../../backgroundTask';
 import { connectToServer } from '../../connectToServer';
 import { checkDeviceConnection } from '../../uploader';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
@@ -83,6 +84,7 @@ export default function SettingsScreen() {
 
   const [serverIp, setServerIpState] = useState('');
   const [serverPort, setServerPortState] = useState('8000');
+  const [serverName, setServerNameState] = useState('');
   const [apiKey, setApiKeyState] = useState('');
   const [syncInterval, setSyncIntervalState] = useState(60);
   const [syncPaused, setSyncPausedState] = useState(false);
@@ -101,9 +103,16 @@ export default function SettingsScreen() {
   const checkServer = useCallback(async () => {
     const ip = await getServerIp();
     if (!ip) { setServerStatus('unknown'); return; }
-    setServerStatus('checking');
+
+    const snapshot = await getCurrentSyncState().catch(() => null);
+    if (snapshot?.active) {
+      setServerStatus('connected');
+      return;
+    }
+
+    setServerStatus(prev => (prev === 'connected' ? prev : 'checking'));
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
+    const timeout = setTimeout(() => controller.abort(), 6000);
     try {
       const result = await checkDeviceConnection({ signal: controller.signal });
       clearTimeout(timeout);
@@ -117,13 +126,14 @@ export default function SettingsScreen() {
   const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
 
   const loadSettings = useCallback(async () => {
-    const [ip, port, key, interval, paused, saved] = await Promise.all([
+    const [ip, port, key, interval, paused, saved, name] = await Promise.all([
       getServerIp(),
       getServerPort(),
       getApiKey(),
       getSyncInterval(),
       getSyncPaused(),
       getSavedServers(),
+      getServerName(),
     ]);
     setServerIpState(ip);
     setServerPortState(String(port));
@@ -131,6 +141,30 @@ export default function SettingsScreen() {
     setSyncIntervalState(interval);
     setSyncPausedState(paused);
     setSavedServers(saved);
+    setServerNameState(name || '');
+
+    // If server name is not set or equals the IP, attempt to resolve friendly name from server
+    if (ip && (!name || name === ip)) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 2500);
+        const res = await fetch(`http://${ip}:${port || 8000}/ping`, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.name) {
+            await setServerName(data.name);
+            setServerNameState(data.name);
+            const updated = await saveServerProfile({
+              ip,
+              port: Number(port) || 8000,
+              name: data.name,
+            });
+            setSavedServers(updated);
+          }
+        }
+      } catch {}
+    }
   }, []);
 
   useFocusEffect(
@@ -196,6 +230,7 @@ export default function SettingsScreen() {
         }),
       ]);
 
+      setServerNameState(discoveredName || cleanIp);
       const updatedSaved = await getSavedServers();
       setSavedServers(updatedSaved);
 
@@ -232,6 +267,7 @@ export default function SettingsScreen() {
     const cleanIp = normalizeServerAddress(server.ip);
     setServerIpState(cleanIp);
     setServerPortState(String(server.port));
+    setServerNameState(server.name || cleanIp);
     const key = apiKey.trim() || 'YOUR_SECRET_KEY';
     await Promise.all([
       setServerIp(cleanIp),
@@ -279,15 +315,16 @@ export default function SettingsScreen() {
     if (switched) {
       setServerIpState(switched.ip);
       setServerPortState(String(switched.port));
+      setServerNameState(switched.name || switched.ip);
       setApiKeyState(switched.apiKey || '');
       setSavedServers(await getSavedServers());
       checkServer();
-      Alert.alert('Switched Server', `Now using "${switched.name}" (${switched.ip}:${switched.port})`);
+      Alert.alert('Switched Server', `Now using "${switched.name || switched.ip}" (${switched.ip}:${switched.port})`);
     }
   };
 
   const handleRemoveSaved = (item: any) => {
-    Alert.alert('Remove Server', `Remove "${item.name}" from saved servers?`, [
+    Alert.alert('Remove Server', `Remove "${item.name || item.ip}" from saved servers?`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Remove',
@@ -381,6 +418,7 @@ export default function SettingsScreen() {
                 <View style={styles.savedServersList}>
                   {savedServers.map((srv) => {
                     const isActive = srv.ip === serverIp && String(srv.port) === String(serverPort);
+                    const displayName = (isActive && serverName) ? serverName : (srv.name || srv.ip);
                     return (
                       <View
                         key={srv.id || `${srv.ip}:${srv.port}`}
@@ -402,7 +440,7 @@ export default function SettingsScreen() {
                         </View>
                         <View style={{ flex: 1 }}>
                           <Text style={styles.savedServerName} numberOfLines={1}>
-                            {srv.name || srv.ip}
+                            {displayName}
                           </Text>
                           <Text style={styles.savedServerMeta} numberOfLines={1}>
                             {srv.ip}:{srv.port}
@@ -418,7 +456,7 @@ export default function SettingsScreen() {
                             style={[styles.switchBtn, { backgroundColor: colors.primarySoft }]}
                             onPress={() => handleSwitchServer(srv)}
                             hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                            accessibilityLabel={`Switch to ${srv.name || srv.ip}`}
+                            accessibilityLabel={`Switch to ${displayName}`}
                           >
                             <Text style={[styles.switchBtnText, { color: colors.primary }]}>Switch</Text>
                           </TouchableOpacity>
@@ -427,7 +465,7 @@ export default function SettingsScreen() {
                           style={styles.removeSavedBtn}
                           onPress={() => handleRemoveSaved(srv)}
                           hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                          accessibilityLabel={`Remove ${srv.name || srv.ip}`}
+                          accessibilityLabel={`Remove ${displayName}`}
                         >
                           <AppIcon androidName="close" iosName="xmark" color={colors.textMuted} size={16} />
                         </TouchableOpacity>

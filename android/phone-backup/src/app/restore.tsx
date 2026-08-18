@@ -45,6 +45,7 @@ import {
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
+import { getCurrentSyncState } from '../../backgroundTask';
 import { prunePreviewCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticSelection, hapticLongPress, hapticSuccess, hapticError } from '@/utils/haptics';
@@ -2193,10 +2194,22 @@ export default function RestoreScreen() {
       setServerStatus('unknown');
       return;
     }
+
+    const snapshot = await getCurrentSyncState().catch(() => null);
+    if (!stillAlive()) return;
+    if (snapshot?.active) {
+      setServerStatus('connected');
+      loadServerConfig();
+      if (sourceModeRef.current === 'shared') {
+        void loadSharedSources();
+      }
+      return;
+    }
+
     // Keep showing connected while re-probing to avoid offline UI flash.
     setServerStatus(prev => (prev === 'connected' ? prev : 'checking'));
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);
+    const timeout = setTimeout(() => controller.abort(), 6000);
     try {
       const result = await checkDeviceConnection({ signal: controller.signal });
       if (!stillAlive()) return;

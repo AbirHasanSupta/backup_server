@@ -11,9 +11,9 @@ const ALL_KNOWN_EXTENSIONS = new Set(
 );
 
 const SCAN_BATCH_SIZE = 16;
-const METADATA_BATCH_SIZE = 24;
-const SCAN_PROGRESS_INTERVAL_MS = 500;
-const SCAN_PROGRESS_FILE_STEP = 50;
+const METADATA_BATCH_SIZE = 8;
+const SCAN_PROGRESS_INTERVAL_MS = 250;
+const SCAN_PROGRESS_FILE_STEP = 100;
 
 function safeDecodeUriPart(value) {
   try {
