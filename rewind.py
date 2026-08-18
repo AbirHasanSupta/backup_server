@@ -28,7 +28,8 @@ from memories import VIDEO_EXTS, _shared_sources_for_device
 from state import add_log
 
 DEFAULT_REWIND_CACHE_DIR = os.path.join(APP_DATA_DIR, "rewind_cache")
-DEFAULT_MUSIC_CACHE_DIR = os.path.join(DEFAULT_REWIND_CACHE_DIR, "music_cache")
+DEFAULT_MUSIC_CACHE_DIR = os.path.join(APP_DATA_DIR, "music_cache")
+
 
 REEL_WIDTH = 1080
 REEL_HEIGHT = 1920
@@ -43,27 +44,39 @@ FFMPEG_CONCAT_TIMEOUT_SEC = 90
 # Stills Android + typical ffmpeg builds can encode without extra codecs.
 REWIND_STILL_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 
-# Verified live royalty-free music sources (Creative Commons CC0 / CC-BY)
-ONLINE_MUSIC_TRACKS = [
+# Verified direct royalty-free music sources (Creative Commons CC0 / CC-BY) — PRIORITIZED
+PRIORITY_MUSIC_TRACKS = [
     {
         "name": "carefree.ogg",
-        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Kevin_MacLeod_-_Carefree.ogg",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/5/58/Kevin_MacLeod_-_Carefree.ogg",
     },
     {
         "name": "autumn_day.ogg",
-        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Kevin_MacLeod_-_Autumn_Day.ogg",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/5/59/Kevin_MacLeod_-_Autumn_Day.ogg",
     },
     {
         "name": "life_of_riley.mp3",
-        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Life_of_Riley_(ISRC_USUAN1400054).mp3",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/2/2e/Life_of_Riley_%28ISRC_USUAN1400054%29.mp3",
+    },
+    {
+        "name": "monkeys_spinning_monkeys.ogg",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/3/37/Kevin_MacLeod_-_Monkeys_Spinning_Monkeys.ogg",
+    },
+    {
+        "name": "fluffing_a_duck.ogg",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/c/c3/Kevin_MacLeod_-_Fluffing_a_Duck.ogg",
+    },
+    {
+        "name": "canon_in_d.mp3",
+        "url": "https://upload.wikimedia.org/wikipedia/commons/c/c6/Canon_in_D_Major_%28ISRC_USUAN1100301%29.mp3",
     },
 ]
 
-# Multiple procedurally synthesized ambient music styles (100% offline & instant)
+# Multiple procedurally synthesized ambient music styles (offline fallback, optimized for phone speakers)
 SYNTH_PRESETS = [
     {
         "filename": "ambient_warm_acoustic.m4a",
-        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=1400,volume=0.32[a]",
+        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=3500,volume=0.85[a]",
         "inputs": [
             "sine=frequency=261.63:sample_rate=44100:duration=50",  # C4
             "sine=frequency=329.63:sample_rate=44100:duration=50",  # E4
@@ -73,7 +86,7 @@ SYNTH_PRESETS = [
     },
     {
         "filename": "ambient_dreamy_nostalgia.m4a",
-        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=1100,volume=0.30[a]",
+        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=3200,volume=0.85[a]",
         "inputs": [
             "sine=frequency=220.00:sample_rate=44100:duration=50",  # A3
             "sine=frequency=261.63:sample_rate=44100:duration=50",  # C4
@@ -83,7 +96,7 @@ SYNTH_PRESETS = [
     },
     {
         "filename": "ambient_lofi_pad.m4a",
-        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=950,volume=0.35[a]",
+        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=2800,volume=0.90[a]",
         "inputs": [
             "sine=frequency=174.61:sample_rate=44100:duration=50",  # F3
             "sine=frequency=220.00:sample_rate=44100:duration=50",  # A3
@@ -93,7 +106,7 @@ SYNTH_PRESETS = [
     },
     {
         "filename": "ambient_uplifting_horizon.m4a",
-        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=1500,volume=0.30[a]",
+        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=3800,volume=0.85[a]",
         "inputs": [
             "sine=frequency=196.00:sample_rate=44100:duration=50",  # G3
             "sine=frequency=246.94:sample_rate=44100:duration=50",  # B3
@@ -103,7 +116,7 @@ SYNTH_PRESETS = [
     },
     {
         "filename": "ambient_calm_waters.m4a",
-        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=1200,volume=0.32[a]",
+        "filter": "[0:a][1:a][2:a][3:a]amix=inputs=4:dropout_transition=0,lowpass=f=3200,volume=0.85[a]",
         "inputs": [
             "sine=frequency=164.81:sample_rate=44100:duration=50",  # E3
             "sine=frequency=246.94:sample_rate=44100:duration=50",  # B3
@@ -112,6 +125,7 @@ SYNTH_PRESETS = [
         ],
     },
 ]
+
 
 _generation_lock = threading.Lock()
 _active_jobs: set[str] = set()
@@ -137,7 +151,19 @@ def _cache_dir() -> str:
 def _music_cache_dir() -> str:
     directory = DEFAULT_MUSIC_CACHE_DIR
     os.makedirs(directory, exist_ok=True)
+    # Migrate any legacy files from rewind_cache/music_cache if they exist
+    legacy_dir = os.path.join(DEFAULT_REWIND_CACHE_DIR, "music_cache")
+    if os.path.isdir(legacy_dir) and os.path.abspath(legacy_dir) != os.path.abspath(directory):
+        try:
+            for fname in os.listdir(legacy_dir):
+                src = os.path.join(legacy_dir, fname)
+                dst = os.path.join(directory, fname)
+                if os.path.isfile(src) and not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+        except Exception:
+            pass
     return directory
+
 
 
 def _ffmpeg_path() -> str | None:
@@ -390,81 +416,64 @@ def _build_segment(ffmpeg: str, src_path: str, seg_path: str, is_video: bool) ->
 
 
 def _get_or_fetch_background_music(ffmpeg: str, chosen_index: int | None = None) -> str | None:
-    """Select or synthesize a variety of royalty-free soundtracks."""
+    """Prioritize real royalty-free music tracks first; fall back to high-volume procedural soundscapes."""
     music_dir = _music_cache_dir()
 
-    # Total options: procedural synths + online tracks
-    total_options = len(SYNTH_PRESETS) + len(ONLINE_MUSIC_TRACKS)
+    # 1. ALWAYS PRIORITIZE REAL ROYALTY-FREE MUSIC TRACKS FIRST
+    total_priority = len(PRIORITY_MUSIC_TRACKS)
     if chosen_index is None:
-        chosen_index = random.randint(0, total_options - 1)
+        chosen_index = random.randint(0, total_priority - 1)
+
+    target_track = PRIORITY_MUSIC_TRACKS[chosen_index % total_priority]
+    downloaded_path = os.path.join(music_dir, target_track["name"])
+
+    # If already cached and valid, return immediately
+    if os.path.isfile(downloaded_path) and os.path.getsize(downloaded_path) > 1000:
+        return downloaded_path
 
     with _music_fetch_lock:
-        # 1. Procedural Synth Options
-        if chosen_index < len(SYNTH_PRESETS):
-            synth_info = SYNTH_PRESETS[chosen_index]
-            synth_path = os.path.join(music_dir, synth_info["filename"])
-            if os.path.isfile(synth_path) and os.path.getsize(synth_path) > 1000:
-                return synth_path
-
-            # Synthesize ambient track
-            try:
-                cmd_inputs = []
-                for inp in synth_info["inputs"]:
-                    cmd_inputs.extend(["-f", "lavfi", "-i", inp])
-                synth_cmd = [
-                    ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
-                    *cmd_inputs,
-                    "-filter_complex", synth_info["filter"],
-                    "-map", "[a]",
-                    "-c:a", "aac", "-b:a", "128k",
-                    synth_path,
-                ]
-                _run_ffmpeg(synth_cmd, timeout=15)
-                if os.path.isfile(synth_path) and os.path.getsize(synth_path) > 1000:
-                    add_log(f"[Rewind] generated procedural soundtrack ({synth_info['filename']})")
-                    return synth_path
-            except Exception as e:
-                add_log(f"[Rewind] procedural soundtrack synthesis error: {e}")
-
-        # 2. Online Track Option
-        online_idx = chosen_index % len(ONLINE_MUSIC_TRACKS)
-        track_info = ONLINE_MUSIC_TRACKS[online_idx]
-        downloaded_path = os.path.join(music_dir, track_info["name"])
-
         if os.path.isfile(downloaded_path) and os.path.getsize(downloaded_path) > 1000:
             return downloaded_path
 
-        tmp_download_path = f"{downloaded_path}.part-{os.getpid()}-{threading.get_ident()}"
-        try:
-            req = urllib.request.Request(
-                track_info["url"],
-                headers={"User-Agent": "PhoneBackupServer/3.1 (https://github.com)"},
-            )
-            with urllib.request.urlopen(req, timeout=12) as response:
-                if response.status == 200:
-                    with open(tmp_download_path, "wb") as f:
-                        f.write(response.read())
-                    if os.path.isfile(tmp_download_path) and os.path.getsize(tmp_download_path) > 1000:
-                        os.replace(tmp_download_path, downloaded_path)
-                        add_log(f"[Rewind] fetched royalty-free track: {track_info['name']}")
-                        return downloaded_path
-        except Exception:
-            pass
-        finally:
-            if os.path.isfile(tmp_download_path):
-                try:
-                    os.remove(tmp_download_path)
-                except OSError:
-                    pass
+        # Try downloading the chosen track first, then others if it fails
+        candidate_tracks = [target_track] + [t for t in PRIORITY_MUSIC_TRACKS if t != target_track]
+        for track in candidate_tracks:
+            track_path = os.path.join(music_dir, track["name"])
+            if os.path.isfile(track_path) and os.path.getsize(track_path) > 1000:
+                return track_path
 
-        # Fallback to any already cached or default synth
+            tmp_path = f"{track_path}.part-{os.getpid()}-{threading.get_ident()}"
+            try:
+                req = urllib.request.Request(
+                    track["url"],
+                    headers={"User-Agent": "PhoneBackupServer/3.1.0 (https://github.com/AbirHasanSupta/backup_server; supta@local.net)"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    if response.status == 200:
+                        with open(tmp_path, "wb") as f:
+                            f.write(response.read())
+                        if os.path.isfile(tmp_path) and os.path.getsize(tmp_path) > 1000:
+                            os.replace(tmp_path, track_path)
+                            add_log(f"[Rewind] fetched priority music: {track['name']}")
+                            return track_path
+            except Exception as e:
+                add_log(f"[Rewind] warning downloading {track['name']}: {e}")
+            finally:
+                if os.path.isfile(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+
+        # 2. Check if any procedural ambient soundscape is cached
         for preset in SYNTH_PRESETS:
             p = os.path.join(music_dir, preset["filename"])
             if os.path.isfile(p) and os.path.getsize(p) > 1000:
                 return p
 
-        # If nothing exists, synthesize preset 0
-        fallback_preset = SYNTH_PRESETS[0]
+        # 3. Synthesize procedural ambient preset as last resort
+        synth_idx = random.randint(0, len(SYNTH_PRESETS) - 1)
+        fallback_preset = SYNTH_PRESETS[synth_idx]
         fallback_path = os.path.join(music_dir, fallback_preset["filename"])
         try:
             cmd_inputs = []
@@ -480,9 +489,10 @@ def _get_or_fetch_background_music(ffmpeg: str, chosen_index: int | None = None)
             ]
             _run_ffmpeg(synth_cmd, timeout=15)
             if os.path.isfile(fallback_path) and os.path.getsize(fallback_path) > 1000:
+                add_log(f"[Rewind] synthesized ambient soundscape: {fallback_preset['filename']}")
                 return fallback_path
         except Exception as e:
-            add_log(f"[Rewind] fallback soundtrack synthesis failed: {e}")
+            add_log(f"[Rewind] ambient soundtrack synthesis failed: {e}")
 
         return None
 
@@ -582,7 +592,7 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                     if idx in segment_results:
                         total_duration += VIDEO_CLIP_SEC if is_vid else PHOTO_DURATION_SEC
 
-                # Select a varied background music track
+                # Select prioritized background music track
                 music_track = _get_or_fetch_background_music(ffmpeg)
                 if music_track and os.path.isfile(music_track):
                     fade_start = max(0.5, total_duration - 2.0)
@@ -591,7 +601,7 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                         "-i", concat_video,
                         "-i", music_track,
                         "-c:v", "copy",
-                        "-filter_complex", f"[1:a]volume=0.35,afade=t=out:st={fade_start:.2f}:d=2.0[a]",
+                        "-filter_complex", f"[1:a]volume=0.90,afade=t=in:st=0:d=0.8,afade=t=out:st={fade_start:.2f}:d=2.0[a]",
                         "-map", "0:v:0",
                         "-map", "[a]",
                         "-c:a", "aac", "-b:a", "128k",
@@ -638,6 +648,7 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                 _failed_jobs.add(job_key)
 
 
+
 def start_rewind_build(device_id: str, year: int, month: int | None) -> dict:
     job_key = _job_key(device_id, year, month)
 
@@ -665,12 +676,14 @@ def start_rewind_build(device_id: str, year: int, month: int | None) -> dict:
 # ─── Cache management helpers (used by desktop_app settings + shutdown) ────────
 
 def get_rewind_cache_stats() -> dict:
-    """Return {files, bytes} for the rewind cache directory."""
+    """Return {files, bytes} for generated reel videos in the rewind cache directory (excluding persistent music files)."""
     cache_dir = _cache_dir()
     total_files = 0
     total_bytes = 0
     try:
         for name in os.listdir(cache_dir):
+            if name == "music_cache":
+                continue
             p = os.path.join(cache_dir, name)
             if os.path.isfile(p):
                 total_files += 1
@@ -684,7 +697,8 @@ def get_rewind_cache_stats() -> dict:
 
 
 def clear_rewind_cache() -> dict:
-    """Delete all files in the rewind cache directory.
+    """Delete generated reel videos and temporary directories in the rewind cache directory.
+    The music library (music_cache) is strictly preserved and NEVER deleted on server shutdown or cache clearance.
     Returns {files, bytes} of what was removed.
     Also clears the in-memory job sets and reel pointers so stale state is not carried over.
     """
@@ -693,6 +707,8 @@ def clear_rewind_cache() -> dict:
     removed_bytes = 0
     try:
         for name in os.listdir(cache_dir):
+            if name == "music_cache":
+                continue
             p = os.path.join(cache_dir, name)
             try:
                 if os.path.isfile(p):

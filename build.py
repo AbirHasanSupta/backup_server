@@ -5,10 +5,12 @@ Run with:  python build.py
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
 
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -69,13 +71,25 @@ def main() -> None:
 
     # ── 3. Clean previous build artefacts ────────────────────────────────────
     step(3, 5, "Cleaning previous build...")
+    def _force_remove(action, path_str, exc):
+        import stat
+        try:
+            os.chmod(path_str, stat.S_IWRITE)
+            os.unlink(path_str)
+        except Exception:
+            pass
+
     for path in (DIST, BUILD):
         if path.exists():
-            shutil.rmtree(path)
-            print(f"      Removed: {path}")
+            shutil.rmtree(path, onerror=_force_remove)
+            print(f"      Cleaned: {path}")
     if OUT.exists():
-        OUT.unlink()
-        print(f"      Removed: {OUT}")
+        try:
+            OUT.unlink()
+            print(f"      Removed: {OUT}")
+        except Exception:
+            pass
+
 
     # ── 4. Run PyInstaller ───────────────────────────────────────────────────
     step(4, 5, "Building executable (this may take 2-3 minutes)...")
