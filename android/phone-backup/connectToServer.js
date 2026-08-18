@@ -1,4 +1,4 @@
-import { getDeviceId, setDeviceToken } from './settings';
+import { getDeviceId, setDeviceToken, saveServerProfile } from './settings';
 
 /**
  * connectToServer.js
@@ -75,8 +75,16 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
 
     const result = await readConnectionResponse(res);
     // Store per-device token if server provided one
-    if (result.status === 'accepted' && result.token) {
-      await setDeviceToken(result.token);
+    if (result.status === 'accepted') {
+      if (result.token) {
+        await setDeviceToken(result.token);
+      }
+      await saveServerProfile({
+        ip: serverIp,
+        port: serverPort,
+        apiKey,
+        deviceToken: result.token || '',
+      });
     }
     return result;
   } catch (err) {

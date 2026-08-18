@@ -5,11 +5,14 @@ from config import DB_PATH
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     # Background reindex / rewind threads share the DB with FastAPI workers.
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.execute("PRAGMA cache_size=-64000")
+    conn.execute("PRAGMA temp_store=MEMORY")
     return conn
 
 
@@ -373,6 +376,12 @@ def init_db():
         conn.execute("ALTER TABLE media_index ADD COLUMN gps_checked INTEGER NOT NULL DEFAULT 0")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_media_geo ON media_index(source_type, source_key, cap_lat, cap_lon)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_media_ym ON media_index(source_type, source_key, cap_year, cap_month)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_files_uploaded ON files(device_id, uploaded_time)"
     )
 
     # 7. One-time cleanup: remove stale duplicate file rows that may have

@@ -17,7 +17,6 @@ import {
   Linking,
   TextInput,
   RefreshControl,
-  ScrollView,
 } from 'react-native';
 import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
@@ -123,15 +122,6 @@ type SortDir   = 'asc' | 'desc';
 type SortPreference = { field: SortField; dir: SortDir };
 
 type FileCategory = 'image' | 'video' | 'audio' | 'other';
-type RestoreFilter = 'all' | FileCategory;
-
-const RESTORE_FILTERS: { id: RestoreFilter; label: string; icon: string; iosIcon: string }[] = [
-  { id: 'all', label: 'All', icon: 'select_all', iosIcon: 'square.grid.2x2' },
-  { id: 'image', label: 'Photos', icon: 'image', iosIcon: 'photo' },
-  { id: 'video', label: 'Videos', icon: 'videocam', iosIcon: 'video' },
-  { id: 'audio', label: 'Audio', icon: 'music_note', iosIcon: 'music.note' },
-  { id: 'other', label: 'Other', icon: 'insert_drive_file', iosIcon: 'doc' },
-];
 
 const RESTORE_SORT_PREFERENCE_KEY = 'restore_sort_preference_v1';
 
@@ -612,21 +602,17 @@ const srcStyles = StyleSheet.create({
 function LibraryFilterBar({
   query,
   onQueryChange,
-  category,
-  onCategoryChange,
   matchCount,
   totalCount,
   colors,
 }: {
   query: string;
   onQueryChange: (value: string) => void;
-  category: RestoreFilter;
-  onCategoryChange: (value: RestoreFilter) => void;
   matchCount: number;
   totalCount: number;
   colors: AppColors;
 }) {
-  const isFiltering = query.trim().length > 0 || category !== 'all';
+  const isFiltering = query.trim().length > 0;
   return (
     <View style={[filterStyles.wrap, { borderBottomColor: colors.surfaceBorder }]}>
       <View style={[filterStyles.searchBox, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}>
@@ -649,39 +635,6 @@ function LibraryFilterBar({
           </TouchableOpacity>
         )}
       </View>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={filterStyles.chipRow}
-      >
-        {RESTORE_FILTERS.map(chip => {
-          const active = category === chip.id;
-          return (
-            <TouchableOpacity
-              key={chip.id}
-              onPress={() => onCategoryChange(chip.id)}
-              style={[
-                filterStyles.chip,
-                {
-                  borderColor: active ? colors.primary : colors.surfaceBorder,
-                  backgroundColor: active ? colors.primarySoft : colors.surface,
-                },
-              ]}
-              activeOpacity={0.75}
-            >
-              <AppIcon
-                androidName={chip.icon}
-                iosName={chip.iosIcon}
-                color={active ? colors.primary : colors.textSecondary}
-                size={14}
-              />
-              <Text style={[filterStyles.chipText, { color: active ? colors.primary : colors.textSecondary }]}>
-                {chip.label}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </ScrollView>
       {isFiltering && (
         <Text style={[filterStyles.matchLabel, { color: colors.textMuted }]}>
           {matchCount.toLocaleString()} of {totalCount.toLocaleString()} files
@@ -2172,7 +2125,6 @@ export default function RestoreScreen() {
   // Selection mode state
   const [selectionMode, setSelectionMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState<RestoreFilter>('all');
   const [refreshing, setRefreshing] = useState(false);
 
   // Preview state
@@ -2180,7 +2132,7 @@ export default function RestoreScreen() {
   const [previewIndex, setPreviewIndex] = useState<number>(0);
   const [warmPreviewFile, setWarmPreviewFile] = useState<RemoteFile | null>(null);
 
-  const headerHeight = Spacing.five + 88;
+  const headerHeight = Spacing.five + 88 + 130;
   const {
     onScroll: onListScroll,
     headerAnimatedStyle,
@@ -2302,7 +2254,6 @@ export default function RestoreScreen() {
     setSelectedPaths(new Set());
     setSelectionMode(false);
     setSearchQuery('');
-    setCategoryFilter('all');
     if (mode !== 'shared') {
       sharedSourcesGen.current += 1;
       setIsLoadingSources(false);
@@ -2323,7 +2274,6 @@ export default function RestoreScreen() {
     setExpandedKeys(new Set());
     setSelectedPaths(new Set());
     setSearchQuery('');
-    setCategoryFilter('all');
   }, []);
 
   // Sorted tree — only recomputed when the file list or sort choice changes,
@@ -2340,19 +2290,18 @@ export default function RestoreScreen() {
     return out;
   }, [sortedTree, expandedKeys]);
 
-  const isFiltering = searchQuery.trim().length > 0 || categoryFilter !== 'all';
+  const isFiltering = searchQuery.trim().length > 0;
 
   const filteredFiles = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const matched = files.filter(f => {
-      if (categoryFilter !== 'all' && getFileCategory(f.path) !== categoryFilter) return false;
       if (!q) return true;
       const name = f.path.split(/[/\\]/).pop() ?? f.path;
       return name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q);
     });
-    if (searchQuery.trim().length === 0 && categoryFilter === 'all') return matched;
+    if (searchQuery.trim().length === 0) return matched;
     return matched.sort((a, b) => compareRemoteFiles(a, b, sortField, sortDir));
-  }, [files, searchQuery, categoryFilter, sortField, sortDir]);
+  }, [files, searchQuery, sortField, sortDir]);
 
   const listRows = useMemo<FlatRow[]>(() => {
     if (!isFiltering) return visibleRows;
@@ -2800,6 +2749,7 @@ export default function RestoreScreen() {
             headerAnimatedStyle,
           ]}
         >
+          <View style={styles.pageHeaderTopRow}>
           <View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
               <Text style={styles.pageTitle}>Library</Text>
@@ -2850,44 +2800,36 @@ export default function RestoreScreen() {
               </AnimatedPressable>
             )}
           </View>
+          </View>
+
+          <SourceSelector
+            mode={sourceMode}
+            sharedSources={sharedSources}
+            selectedSourceId={selectedSourceId}
+            isLoadingSources={isLoadingSources}
+            isOffline={isOffline}
+            sortEnabled={files.length > 0}
+            sortField={sortField}
+            sortDir={sortDir}
+            onModeChange={handleModeChange}
+            onSourceSelect={handleSourceSelect}
+            onSortChange={handleSortChange}
+            colors={colors}
+          />
+
+          {files.length > 0 && (
+            <LibraryFilterBar
+              query={searchQuery}
+              onQueryChange={setSearchQuery}
+              matchCount={filteredFiles.length}
+              totalCount={files.length}
+              colors={colors}
+            />
+          )}
         </ReAnimated.View>
       )}
 
       <ReAnimated.View style={isDownloading ? { flex: 1 } : contentInsetStyle}>
-      {/* Source Selector */}
-      {!isDownloading && (
-        <SourceSelector
-          mode={sourceMode}
-          sharedSources={sharedSources}
-          selectedSourceId={selectedSourceId}
-          isLoadingSources={isLoadingSources}
-          isOffline={isOffline}
-          sortEnabled={files.length > 0}
-          sortField={sortField}
-          sortDir={sortDir}
-          onModeChange={handleModeChange}
-          onSourceSelect={handleSourceSelect}
-          onSortChange={handleSortChange}
-          colors={colors}
-        />
-      )}
-
-      {files.length > 0 && !isDownloading && (
-        <LibraryFilterBar
-          query={searchQuery}
-          onQueryChange={setSearchQuery}
-          category={categoryFilter}
-          onCategoryChange={(next) => {
-            if (next === categoryFilter) return;
-            hapticSelection();
-            setCategoryFilter(next);
-          }}
-          matchCount={filteredFiles.length}
-          totalCount={files.length}
-          colors={colors}
-        />
-      )}
-
       {/* Hint Bar */}
       {files.length > 0 && selectedPaths.size === 0 && !selectionMode && !isDownloading && (
         <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
@@ -3023,8 +2965,11 @@ const createStyles = (colors: AppColors) =>
     root: { flex: 1 },
     listContent: { paddingHorizontal: Spacing.four, paddingTop: Spacing.two, flexGrow: 1 },
     pageHeader: {
+      paddingBottom: Spacing.three,
+    },
+    pageHeaderTopRow: {
       flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between',
-      paddingHorizontal: Spacing.five, paddingBottom: Spacing.three,
+      paddingHorizontal: Spacing.five,
     },
     pageTitle: { fontSize: TextScale.xl, fontWeight: '800', color: colors.text, letterSpacing: -0.5 },
     pageSubtitle: { fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '500', marginTop: 2 },

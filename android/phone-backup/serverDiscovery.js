@@ -68,7 +68,7 @@ function buildSubnetIps(deviceIp) {
  * @param {(progress: number, found: Array) => void} onProgress
  * @returns {Promise<Array<{ip, port, name, version}>>}
  */
-export async function discoverServers(onProgress) {
+export async function discoverServers(onProgress, options = {}) {
   if (!Network) {
     throw new Error(
       'Network scanning is not available in Expo Go. ' +
@@ -93,8 +93,10 @@ export async function discoverServers(onProgress) {
   const total = ips.length;
 
   for (let i = 0; i < ips.length; i += BATCH_SIZE) {
+    if (options.shouldStop?.() || options.signal?.aborted) break;
     const batch = ips.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(batch.map((ip) => probeServer(ip, port)));
+    if (options.shouldStop?.() || options.signal?.aborted) break;
     results.forEach((r) => { if (r) found.push(r); });
     scanned += batch.length;
     onProgress && onProgress(Math.round((scanned / total) * 100), [...found]);

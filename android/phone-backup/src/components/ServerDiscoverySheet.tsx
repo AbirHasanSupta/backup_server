@@ -173,6 +173,8 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
         if (generation !== scanGeneration.current || !mountedRef.current) return;
         setProgress(pct);
         setServers([...current]);
+      }, {
+        shouldStop: () => generation !== scanGeneration.current || !mountedRef.current,
       });
       if (generation !== scanGeneration.current || !mountedRef.current) return;
       setServers(found);
@@ -193,6 +195,10 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
   const handleSelect = useCallback(async (server: Server) => {
     if (selectingRef.current) return;
     selectingRef.current = true;
+    // Immediately cancel in-flight scan so connection proceeds without waiting
+    scanGeneration.current += 1;
+    setScanning(false);
+    setProgress(100);
     setSelecting(true);
     try {
       if (server.certFingerprint) {
@@ -314,7 +320,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
                   <AnimatedPressable
                     style={[styles.serverItem, selecting && { opacity: 0.6 }]}
                     onPress={() => handleSelect(item)}
-                    disabled={busy}
+                    disabled={selecting}
                     scaleDown={0.97}
                     accessibilityLabel={`Connect to ${item.name} at ${item.ip}`}
                   >

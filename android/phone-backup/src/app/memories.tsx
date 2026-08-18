@@ -1284,36 +1284,34 @@ export default function MemoriesScreen() {
               <View style={[styles.storyBottomBar, { paddingBottom: Math.max(insets.bottom, 20) }]}>
                 {flashbackIndex > 0 && (
                   <TouchableOpacity
-                    style={[styles.nextSurpriseBtn, { backgroundColor: 'rgba(255,255,255,0.2)' }]}
+                    style={styles.flashbackIconBtn}
                     onPress={handlePrevSurprise}
                     disabled={flashbackLoading}
                     activeOpacity={0.8}
+                    accessibilityLabel="Previous"
                   >
-                    <AppIcon androidName="arrow_back" iosName="arrow.left" color="#fff" size={16} />
-                    <Text style={styles.nextSurpriseBtnText}>Previous</Text>
+                    <AppIcon androidName="arrow_back" iosName="arrow.left" color="#fff" size={20} />
                   </TouchableOpacity>
                 )}
                 <TouchableOpacity
-                  style={styles.nextSurpriseBtn}
+                  style={styles.flashbackIconBtn}
                   onPress={handleNextSurprise}
                   disabled={flashbackLoading}
                   activeOpacity={0.8}
+                  accessibilityLabel="Next surprise"
                 >
-                  <AppIcon androidName="shuffle" iosName="shuffle" color="#fff" size={16} />
-                  <Text style={styles.nextSurpriseBtnText}>Next Surprise</Text>
+                  <AppIcon androidName="shuffle" iosName="shuffle" color="#fff" size={20} />
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.saveBtn}
+                  style={styles.flashbackIconBtn}
                   onPress={handleSaveFlashback}
                   disabled={flashbackSaving}
+                  accessibilityLabel="Save to device"
                 >
                   {flashbackSaving ? (
                     <ActivityIndicator size="small" color="#fff" />
                   ) : (
-                    <>
-                      <AppIcon androidName="download" iosName="arrow.down.circle" color="#fff" size={20} />
-                      <Text style={styles.saveBtnText}>Save to Device</Text>
-                    </>
+                    <AppIcon androidName="download" iosName="arrow.down.circle" color="#fff" size={20} />
                   )}
                 </TouchableOpacity>
               </View>
@@ -2087,6 +2085,16 @@ const createStyles = (colors: AppColors, insets: any) =>
       alignSelf: 'center',
     },
     nextSurpriseBtnText: { color: '#fff', fontSize: TextScale.xs, fontWeight: '700' },
+    flashbackIconBtn: {
+      width: 48,
+      height: 48,
+      borderRadius: 24,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: 'rgba(255,255,255,0.18)',
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.3)',
+    },
     closeBtn: {
       width: 36,
       height: 36,

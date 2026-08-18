@@ -8,6 +8,7 @@ import {
   StatusBar,
   Alert,
   Switch,
+  TouchableOpacity,
 } from 'react-native';
 import Constants from 'expo-constants';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -32,7 +33,12 @@ import {
   SYNC_INTERVAL_PRESETS,
   setDeviceToken,
   setServerCertFingerprint,
+  getSavedServers,
+  saveServerProfile,
+  removeSavedServer,
+  switchToSavedServer,
 } from '../../settings';
+import { hapticMedium, hapticLight } from '@/utils/haptics';
 import { registerBackgroundTask, runSync } from '../../backgroundTask';
 import { connectToServer } from '../../connectToServer';
 import { checkDeviceConnection } from '../../uploader';
@@ -82,6 +88,7 @@ export default function SettingsScreen() {
   const [syncPaused, setSyncPausedState] = useState(false);
   const [savingServer, setSavingServer] = useState(false);
   const [discoveryVisible, setDiscoveryVisible] = useState(false);
+  const [savedServers, setSavedServers] = useState<any[]>([]);
 
   type ServerStatus = 'connected' | 'disconnected' | 'unknown' | 'checking';
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
@@ -110,18 +117,20 @@ export default function SettingsScreen() {
   const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
 
   const loadSettings = useCallback(async () => {
-    const [ip, port, key, interval, paused] = await Promise.all([
+    const [ip, port, key, interval, paused, saved] = await Promise.all([
       getServerIp(),
       getServerPort(),
       getApiKey(),
       getSyncInterval(),
       getSyncPaused(),
+      getSavedServers(),
     ]);
     setServerIpState(ip);
     setServerPortState(String(port));
     setApiKeyState(key);
     setSyncIntervalState(interval);
     setSyncPausedState(paused);
+    setSavedServers(saved);
   }, []);
 
   useFocusEffect(
@@ -176,15 +185,24 @@ export default function SettingsScreen() {
         setServerIp(cleanIp),
         setServerPort(portNum),
         setApiKey(key),
-        setServerName(discoveredName),
+        setServerName(discoveredName || cleanIp),
         setDeviceToken(''),
         setServerCertFingerprint(''),
+        saveServerProfile({
+          ip: cleanIp,
+          port: portNum,
+          name: discoveredName || cleanIp,
+          apiKey: key,
+        }),
       ]);
+
+      const updatedSaved = await getSavedServers();
+      setSavedServers(updatedSaved);
 
       Alert.alert('Saved', 'Server settings saved. Connecting…');
 
       connectToServer(cleanIp, portNum, key)
-        .then((result) => {
+        .then(async (result) => {
           if (result.status === 'accepted') {
             setServerStatus('connected');
             Alert.alert('Connected', 'This device was accepted by the server and is ready to back up.');
@@ -193,6 +211,7 @@ export default function SettingsScreen() {
           } else if (result.status === 'error') {
             Alert.alert('Connection Error', result.reason || 'Could not connect to the server. Check that it is running.');
           }
+          setSavedServers(await getSavedServers());
           checkServer();
         })
         .catch((err: any) => {
@@ -220,7 +239,15 @@ export default function SettingsScreen() {
       setServerName(server.name),
       setApiKey(key),
       setDeviceToken(''),
+      saveServerProfile({
+        ip: cleanIp,
+        port: server.port,
+        name: server.name || cleanIp,
+        apiKey: key,
+      }),
     ]);
+
+    setSavedServers(await getSavedServers());
 
     Alert.alert(
       'Server found',
@@ -228,7 +255,7 @@ export default function SettingsScreen() {
     );
 
     connectToServer(cleanIp, server.port, key)
-      .then((result) => {
+      .then(async (result) => {
         if (result.status === 'accepted') {
           setServerStatus('connected');
           Alert.alert('Connected', `"${server.name}" accepted this device. You are ready to back up.`);
@@ -237,12 +264,41 @@ export default function SettingsScreen() {
         } else if (result.status === 'error') {
           Alert.alert('Connection Error', result.reason || 'Could not connect to the server.');
         }
+        setSavedServers(await getSavedServers());
         checkServer();
       })
       .catch((err: any) => {
         Alert.alert('Connection Failed', sanitizeErrorMessage(err, 'Could not reach the desktop server. Check Wi-Fi and server status.'));
         checkServer();
       });
+  };
+
+  const handleSwitchServer = async (item: any) => {
+    hapticMedium();
+    const switched = await switchToSavedServer(item.id);
+    if (switched) {
+      setServerIpState(switched.ip);
+      setServerPortState(String(switched.port));
+      setApiKeyState(switched.apiKey || '');
+      setSavedServers(await getSavedServers());
+      checkServer();
+      Alert.alert('Switched Server', `Now using "${switched.name}" (${switched.ip}:${switched.port})`);
+    }
+  };
+
+  const handleRemoveSaved = (item: any) => {
+    Alert.alert('Remove Server', `Remove "${item.name}" from saved servers?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          hapticLight();
+          const updated = await removeSavedServer(item.id);
+          setSavedServers(updated);
+        },
+      },
+    ]);
   };
 
   const handleIntervalChange = async (minutes: number) => {
@@ -319,6 +375,70 @@ export default function SettingsScreen() {
         <Animated.View entering={FadeInDown.duration(300).delay(100)}>
           <SectionHeader title="Server connection" styles={styles} />
           <SettingsCard styles={styles}>
+            {savedServers.length > 0 && (
+              <>
+                <FieldLabel text="Saved servers" styles={styles} />
+                <View style={styles.savedServersList}>
+                  {savedServers.map((srv) => {
+                    const isActive = srv.ip === serverIp && String(srv.port) === String(serverPort);
+                    return (
+                      <View
+                        key={srv.id || `${srv.ip}:${srv.port}`}
+                        style={[styles.savedServerRow, isActive && styles.savedServerRowActive]}
+                      >
+                        <View
+                          style={[
+                            styles.savedServerIcon,
+                            { backgroundColor: isActive ? colors.successSoft : colors.primarySoft },
+                          ]}
+                        >
+                          <AppIcon
+                            androidName="desktop_windows"
+                            iosName="desktopcomputer"
+                            color={isActive ? colors.success : colors.primary}
+                            size={18}
+                            fallback="PC"
+                          />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.savedServerName} numberOfLines={1}>
+                            {srv.name || srv.ip}
+                          </Text>
+                          <Text style={styles.savedServerMeta} numberOfLines={1}>
+                            {srv.ip}:{srv.port}
+                          </Text>
+                        </View>
+                        {isActive ? (
+                          <View style={[styles.activeBadge, { backgroundColor: colors.successSoft }]}>
+                            <AppIcon androidName="check" iosName="checkmark" color={colors.success} size={12} />
+                            <Text style={[styles.activeBadgeText, { color: colors.success }]}>Active</Text>
+                          </View>
+                        ) : (
+                          <TouchableOpacity
+                            style={[styles.switchBtn, { backgroundColor: colors.primarySoft }]}
+                            onPress={() => handleSwitchServer(srv)}
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            accessibilityLabel={`Switch to ${srv.name || srv.ip}`}
+                          >
+                            <Text style={[styles.switchBtnText, { color: colors.primary }]}>Switch</Text>
+                          </TouchableOpacity>
+                        )}
+                        <TouchableOpacity
+                          style={styles.removeSavedBtn}
+                          onPress={() => handleRemoveSaved(srv)}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          accessibilityLabel={`Remove ${srv.name || srv.ip}`}
+                        >
+                          <AppIcon androidName="close" iosName="xmark" color={colors.textMuted} size={16} />
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  })}
+                </View>
+                <View style={styles.divider} />
+              </>
+            )}
+
             <FieldLabel text="Server IP address" styles={styles} />
             <TextInput
               id="server-ip-input"
@@ -754,5 +874,66 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   },
   disabledBtn: {
     opacity: 0.4,
+  },
+  savedServersList: {
+    gap: Spacing.two,
+    marginTop: Spacing.two,
+    marginBottom: Spacing.two,
+  },
+  savedServerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surfaceSoft,
+    borderRadius: Radius.lg,
+    padding: Spacing.three,
+    gap: Spacing.three,
+    borderWidth: 1,
+    borderColor: colors.surfaceBorder,
+  },
+  savedServerRowActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.surfaceElevated,
+  },
+  savedServerIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: Radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  savedServerName: {
+    fontSize: TextScale.sm,
+    fontWeight: '800',
+    color: colors.text,
+  },
+  savedServerMeta: {
+    fontSize: TextScale.xs,
+    color: colors.textMuted,
+    fontWeight: '600',
+    marginTop: 1,
+  },
+  activeBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: Radius.full,
+  },
+  activeBadgeText: {
+    fontSize: TextScale.xs,
+    fontWeight: '800',
+  },
+  switchBtn: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: 6,
+    borderRadius: Radius.md,
+  },
+  switchBtnText: {
+    fontSize: TextScale.xs,
+    fontWeight: '800',
+  },
+  removeSavedBtn: {
+    padding: 6,
   },
 });

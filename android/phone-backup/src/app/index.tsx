@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,8 @@ import {
   Alert,
   DeviceEventEmitter,
   RefreshControl,
+  Modal,
+  TouchableOpacity,
 } from 'react-native';
 import Animated, {
   FadeIn,
@@ -41,18 +43,8 @@ import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
-import { PendingSyncCard, type PendingPreview } from '@/components/PendingSyncCard';
-import { StorageSavingsCard, type StorageSavingsPreview } from '@/components/StorageSavingsCard';
-import {
-  getCachedPendingPreview,
-  refreshPendingPreview,
-  invalidatePendingPreviewCache,
-} from '../../pendingPreview';
-import {
-  getCachedStorageSavingsPreview,
-  refreshStorageSavingsPreview,
-  invalidateStorageSavingsCache,
-} from '../../storageSavingsPreview';
+import { invalidatePendingPreviewCache } from '../../pendingPreview';
+import { invalidateStorageSavingsCache } from '../../storageSavingsPreview';
 import { getStreakData } from '../../streak';
 import { StreakBadge } from '@/components/StreakBadge';
 import { getGoals, invalidateGoalsFileCache } from '../../goals';
@@ -165,18 +157,18 @@ export default function HomeScreen() {
   const [forceStopPressedAt, setForceStopPressedAt] = useState<number | null>(null);
   const [, setRelativeTimeTick] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
-  const [pendingPreview, setPendingPreview] = useState<PendingPreview | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const previewAbortRef = useRef(false);
-  const previewGenRef = useRef(0);
-  const [storagePreview, setStoragePreview] = useState<StorageSavingsPreview | null>(null);
-  const [storageLoading, setStorageLoading] = useState(false);
-  const savingsAbortRef = useRef(false);
-  const savingsGenRef = useRef(0);
-  const [streakData, setStreakData] = useState<{ currentStreak: number; atRisk: boolean }>({
+  const [streakData, setStreakData] = useState<{
+    currentStreak: number;
+    atRisk: boolean;
+    longestStreak: number;
+    lastSyncDate: string | null;
+  }>({
     currentStreak: 0,
     atRisk: false,
+    longestStreak: 0,
+    lastSyncDate: null,
   });
+  const [streakModalVisible, setStreakModalVisible] = useState(false);
   const [activeGoalsCount, setActiveGoalsCount] = useState(0);
 
   const DOUBLE_TAP_WINDOW_MS = 1200;
@@ -241,58 +233,15 @@ export default function HomeScreen() {
     }
   }, []);
 
-  const loadPendingPreview = useCallback(async (opts: { skipScan?: boolean } = {}) => {
-    const gen = ++previewGenRef.current;
-    previewAbortRef.current = false;
-    const snapshot = await getCurrentSyncState().catch(() => null);
-    if (gen !== previewGenRef.current) return;
-    if (snapshot?.active) {
-      setPreviewLoading(false);
-      return;
-    }
-    setPreviewLoading(true);
-    try {
-      const result = await refreshPendingPreview({
-        skipScan: !!opts.skipScan,
-        shouldStop: () => previewAbortRef.current || previewGenRef.current !== gen,
-      });
-      if (gen !== previewGenRef.current || result.aborted) return;
-      setPendingPreview(result.noFolders ? null : result);
-    } catch {
-      // Local estimate is optional — dashboard still works without it.
-    } finally {
-      if (gen === previewGenRef.current) setPreviewLoading(false);
-    }
-  }, []);
-
-  const loadStorageSavings = useCallback(async (opts: { skipServerCheck?: boolean } = {}) => {
-    const gen = ++savingsGenRef.current;
-    savingsAbortRef.current = false;
-    const snapshot = await getCurrentSyncState().catch(() => null);
-    if (gen !== savingsGenRef.current) return;
-    if (snapshot?.active) {
-      setStorageLoading(false);
-      return;
-    }
-    setStorageLoading(true);
-    try {
-      const result = await refreshStorageSavingsPreview({
-        skipServerCheck: !!opts.skipServerCheck,
-        shouldStop: () => savingsAbortRef.current || savingsGenRef.current !== gen,
-      });
-      if (gen !== savingsGenRef.current || result.aborted) return;
-      setStoragePreview(result.noFolders ? null : result);
-    } catch {
-      // Storage insight is optional — dashboard still works without it.
-    } finally {
-      if (gen === savingsGenRef.current) setStorageLoading(false);
-    }
-  }, []);
-
   const loadStreak = useCallback(async () => {
     try {
       const data = await getStreakData();
-      setStreakData({ currentStreak: data.currentStreak, atRisk: data.atRisk });
+      setStreakData({
+        currentStreak: data.currentStreak,
+        atRisk: data.atRisk,
+        longestStreak: data.longestStreak,
+        lastSyncDate: data.lastSyncDate,
+      });
     } catch {
       // Streak is optional — dashboard still works without it.
     }
@@ -338,34 +287,11 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      let alive = true;
-      previewAbortRef.current = false;
-      savingsAbortRef.current = false;
       loadAll();
       loadStreak();
       loadGoalsSummary();
       getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
-      (async () => {
-        try {
-          const [cachedPending, cachedSavings] = await Promise.all([
-            getCachedPendingPreview(),
-            getCachedStorageSavingsPreview(),
-          ]);
-          if (alive && cachedPending) setPendingPreview(cachedPending);
-          if (alive && cachedSavings) setStoragePreview(cachedSavings);
-        } catch {}
-        if (alive) await loadPendingPreview();
-        if (alive) await loadStorageSavings({ skipServerCheck: true });
-        if (alive) await loadStorageSavings({ skipServerCheck: false });
-      })();
-      return () => {
-        alive = false;
-        previewAbortRef.current = true;
-        previewGenRef.current += 1;
-        savingsAbortRef.current = true;
-        savingsGenRef.current += 1;
-      };
-    }, [applySyncSnapshot, loadAll, loadStreak, loadGoalsSummary, loadPendingPreview, loadStorageSavings])
+    }, [applySyncSnapshot, loadAll, loadStreak, loadGoalsSummary])
   );
 
   useEffect(() => {
@@ -389,10 +315,6 @@ export default function HomeScreen() {
 
   useEffect(() => {
     const onStarted = () => {
-      previewAbortRef.current = true;
-      previewGenRef.current += 1;
-      savingsAbortRef.current = true;
-      savingsGenRef.current += 1;
       setSyncing(true);
       setStopRequested(false);
       setForceStopPressedAt(null);
@@ -463,10 +385,6 @@ export default function HomeScreen() {
       }
       invalidatePendingPreviewCache();
       invalidateStorageSavingsCache();
-      loadPendingPreview();
-      loadStorageSavings({ skipServerCheck: true }).then(() =>
-        loadStorageSavings({ skipServerCheck: false })
-      );
       loadStreak();
       invalidateGoalsFileCache();
       loadGoalsSummary();
@@ -480,8 +398,6 @@ export default function HomeScreen() {
       setStatusMessage(message || 'Backup failed. Check your connection.');
       invalidatePendingPreviewCache();
       invalidateStorageSavingsCache();
-      loadPendingPreview();
-      loadStorageSavings({ skipServerCheck: true });
     };
 
     const subs = [
@@ -495,13 +411,11 @@ export default function HomeScreen() {
         invalidatePendingPreviewCache();
         invalidateStorageSavingsCache();
         invalidateGoalsFileCache();
-        loadPendingPreview();
-        loadStorageSavings({ skipServerCheck: true });
       }),
     ];
 
     return () => subs.forEach((sub) => sub.remove());
-  }, [applySyncSnapshot, loadAll, loadPendingPreview, loadStorageSavings, loadGoalsSummary, loadStreak]);
+  }, [applySyncSnapshot, loadAll, loadGoalsSummary, loadStreak]);
 
   const handleSync = async () => {
     const snapshot = await getCurrentSyncState().catch(() => null);
@@ -523,10 +437,6 @@ export default function HomeScreen() {
           invalidatePendingPreviewCache();
           invalidateStorageSavingsCache();
           await forceStopCurrentSync();
-          previewAbortRef.current = false;
-          savingsAbortRef.current = false;
-          loadPendingPreview();
-          loadStorageSavings({ skipServerCheck: true });
         } else {
           setForceStopPressedAt(now);
           hapticWarning();
@@ -604,17 +514,10 @@ export default function HomeScreen() {
     }
 
     try {
-      previewAbortRef.current = true;
-      previewGenRef.current += 1;
-      savingsAbortRef.current = true;
-      savingsGenRef.current += 1;
       hapticMedium();
       await runSync();
     } catch {
-      previewAbortRef.current = false;
-      savingsAbortRef.current = false;
-      loadPendingPreview();
-      loadStorageSavings({ skipServerCheck: true });
+      // Sync failure is surfaced via the sync-failed event listener.
     }
   };
 
@@ -623,16 +526,11 @@ export default function HomeScreen() {
     invalidatePendingPreviewCache();
     invalidateStorageSavingsCache();
     try {
-      await Promise.all([
-        loadAll(),
-        loadPendingPreview(),
-        loadStorageSavings({ skipServerCheck: true }),
-      ]);
-      await loadStorageSavings({ skipServerCheck: false });
+      await loadAll();
     } finally {
       setRefreshing(false);
     }
-  }, [loadAll, loadPendingPreview, loadStorageSavings]);
+  }, [loadAll]);
 
   const statusColors: Record<ServerStatus, string> = {
     connected: colors.success,
@@ -670,7 +568,15 @@ export default function HomeScreen() {
             <Text style={styles.appTitle}>Everything safe, quietly.</Text>
             <Text style={styles.appSubtitle}>Your folders sync to your own computer.</Text>
           </View>
-          <StreakBadge colors={colors} streak={streakData.currentStreak} atRisk={streakData.atRisk} />
+          {streakData.currentStreak > 0 && (
+            <AnimatedPressable
+              onPress={() => { hapticMedium(); setStreakModalVisible(true); }}
+              scaleDown={0.92}
+              accessibilityLabel="View streak details"
+            >
+              <StreakBadge colors={colors} streak={streakData.currentStreak} atRisk={streakData.atRisk} />
+            </AnimatedPressable>
+          )}
         </View>
         <AnimatedPressable style={[styles.serverPill, { borderColor: serverColor }]} onPress={loadAll}>
           <View style={[styles.statusDot, { backgroundColor: serverColor }]} />
@@ -809,35 +715,41 @@ export default function HomeScreen() {
           </AnimatedPressable>
         </Animated.View>
 
-        {(pendingPreview || previewLoading) && !syncing ? (
+        {!syncing && (
           <Animated.View entering={FadeInDown.duration(400).delay(250)} style={styles.pendingSection}>
-            <Text style={styles.sectionKicker}>On this device</Text>
-            <PendingSyncCard
-              colors={colors}
-              preview={pendingPreview}
-              loading={previewLoading}
-              syncing={syncing}
-              onPress={pendingPreview && (pendingPreview.newCount + pendingPreview.changedCount) > 0
-                ? () => {
-                    hapticMedium();
-                    router.push('/gaps');
-                  }
-                : undefined}
-            />
+            <Text style={styles.sectionKicker}>Insights</Text>
+            <AnimatedPressable
+              style={styles.goalsCard}
+              onPress={() => { hapticMedium(); router.push('/gaps'); }}
+              scaleDown={0.98}
+              accessibilityLabel="Open on this device"
+            >
+              <View style={[styles.goalsIconWrap, { backgroundColor: colors.primarySoft }]}>
+                <AppIcon androidName="smartphone" iosName="iphone" color={colors.primary} size={18} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.goalsTitle}>On this device</Text>
+                <Text style={styles.goalsSubtitle}>See files not yet backed up</Text>
+              </View>
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
+            </AnimatedPressable>
+            <AnimatedPressable
+              style={[styles.goalsCard, { marginTop: Spacing.two }]}
+              onPress={() => { hapticMedium(); router.push('/storage-insight'); }}
+              scaleDown={0.98}
+              accessibilityLabel="Open storage insight"
+            >
+              <View style={[styles.goalsIconWrap, { backgroundColor: colors.primarySoft }]}>
+                <AppIcon androidName="cloud_done" iosName="checkmark.icloud.fill" color={colors.primary} size={18} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.goalsTitle}>Storage insight</Text>
+                <Text style={styles.goalsSubtitle}>Check server totals & reclaimable space</Text>
+              </View>
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
+            </AnimatedPressable>
           </Animated.View>
-        ) : null}
-
-        {(storagePreview || storageLoading) && !syncing ? (
-          <Animated.View entering={FadeInDown.duration(400).delay(275)} style={styles.pendingSection}>
-            <Text style={styles.sectionKicker}>Storage insight</Text>
-            <StorageSavingsCard
-              colors={colors}
-              preview={storagePreview}
-              loading={storageLoading}
-              syncing={syncing}
-            />
-          </Animated.View>
-        ) : null}
+        )}
 
         {!syncing && (
           <Animated.View entering={FadeInDown.duration(400).delay(285)} style={styles.pendingSection}>
@@ -907,6 +819,53 @@ export default function HomeScreen() {
         )}
       </ScrollView>
       </Animated.View>
+
+      <Modal
+        visible={streakModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setStreakModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, { backgroundColor: colors.surface }]}>
+            <View style={[styles.streakModalIconWrap, { backgroundColor: streakData.atRisk ? colors.errorSoft : colors.warningSoft }]}>
+              <AppIcon
+                androidName="local_fire_department"
+                iosName="flame.fill"
+                color={streakData.atRisk ? colors.error : colors.warning}
+                size={28}
+                fallback="*"
+              />
+            </View>
+            <Text style={styles.modalTitle}>
+              {streakData.currentStreak} day{streakData.currentStreak === 1 ? '' : 's'} streak
+            </Text>
+            <Text style={styles.modalDesc}>
+              Your streak counts consecutive days you&apos;ve backed up at least one file. Sync at least once a day to keep it going — miss a full day and it resets to zero.
+            </Text>
+            <View style={styles.streakStatsRow}>
+              <View style={styles.streakStatItem}>
+                <Text style={styles.streakStatValue}>{streakData.currentStreak}</Text>
+                <Text style={styles.streakStatLabel}>Current</Text>
+              </View>
+              <View style={styles.streakStatDivider} />
+              <View style={styles.streakStatItem}>
+                <Text style={styles.streakStatValue}>{streakData.longestStreak}</Text>
+                <Text style={styles.streakStatLabel}>Longest</Text>
+              </View>
+            </View>
+            {streakData.atRisk && (
+              <Text style={styles.modalWarning}>Sync today to keep your streak alive.</Text>
+            )}
+            <TouchableOpacity
+              style={[styles.modalConfirmBtn, { backgroundColor: colors.primary, marginTop: Spacing.four }]}
+              onPress={() => setStreakModalVisible(false)}
+            >
+              <Text style={styles.modalConfirmText}>Got it</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1126,5 +1085,76 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     color: colors.textSecondary,
     lineHeight: 20,
     fontWeight: '600',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: Spacing.five,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 340,
+    borderRadius: Radius.xl,
+    padding: Spacing.five,
+    alignItems: 'center',
+    ...Shadows.card,
+  },
+  streakModalIconWrap: {
+    width: 56,
+    height: 56,
+    borderRadius: Radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: Spacing.three,
+  },
+  modalTitle: {
+    fontSize: TextScale.md,
+    fontWeight: '800',
+    color: colors.text,
+    textAlign: 'center',
+    marginBottom: Spacing.two,
+  },
+  modalDesc: {
+    fontSize: TextScale.xs,
+    color: colors.textSecondary,
+    fontWeight: '500',
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  streakStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.five,
+    marginTop: Spacing.four,
+  },
+  streakStatItem: { alignItems: 'center', minWidth: 70 },
+  streakStatValue: { fontSize: TextScale.xl, fontWeight: '900', color: colors.text },
+  streakStatLabel: { fontSize: TextScale.xs, color: colors.textMuted, fontWeight: '600', marginTop: 2 },
+  streakStatDivider: {
+    width: StyleSheet.hairlineWidth,
+    alignSelf: 'stretch',
+    backgroundColor: colors.surfaceBorder,
+  },
+  modalWarning: {
+    fontSize: TextScale.xs,
+    color: colors.warning,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: Spacing.three,
+  },
+  modalConfirmBtn: {
+    width: '100%',
+    paddingVertical: Spacing.three,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: Radius.md,
+  },
+  modalConfirmText: {
+    fontSize: TextScale.sm,
+    fontWeight: '800',
+    color: '#fff',
   },
 });

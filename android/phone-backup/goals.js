@@ -202,10 +202,17 @@ export async function computeAllGoalsProgress(shouldStop) {
     goal.lastProgress = progress;
     goalsChanged = true;
 
-    if (progress.percent >= 100 && progress.total > 0 && !goal.completedAt) {
-      goal.completedAt = Date.now();
-      goal.notifiedComplete = true;
-      await showGoalCompleteNotification(goal).catch(() => {});
+    if (progress.percent >= 100 && progress.total > 0) {
+      if (!goal.completedAt) {
+        goal.completedAt = Date.now();
+        goal.notifiedComplete = true;
+        await showGoalCompleteNotification(goal).catch(() => {});
+      }
+    } else if (goal.completedAt) {
+      // If new photos were taken on the phone for this year, progress is no longer 100%.
+      // Re-activate the goal so the user sees live progress and gets notified again once backed up.
+      goal.completedAt = null;
+      goal.notifiedComplete = false;
     }
     results.push({ goal, progress });
   }

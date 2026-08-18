@@ -25,6 +25,7 @@ const KEYS = {
   LAST_MEMORY_NOTIFIED_DATE: 'last_memory_notified_date',
   LAST_FLASHBACK_NOTIFIED_AT: 'last_flashback_notified_at',
   LAST_RECAP_NOTIFIED_MONTH: 'last_recap_notified_month',
+  SAVED_SERVERS: 'saved_servers_v1',
 };
 
 export async function getLastMemoryNotifiedDate() { return (await AsyncStorage.getItem(KEYS.LAST_MEMORY_NOTIFIED_DATE)) || ''; }
@@ -419,3 +420,70 @@ export async function setDeviceToken(token) { await AsyncStorage.setItem(KEYS.DE
 // ─── TLS cert fingerprint ─────────────────────────────────────────────────────
 export async function getServerCertFingerprint() { return (await AsyncStorage.getItem(KEYS.CERT_FINGERPRINT)) || ''; }
 export async function setServerCertFingerprint(fp) { await AsyncStorage.setItem(KEYS.CERT_FINGERPRINT, fp); }
+
+// ─── Saved Servers Profiles & Switching ───────────────────────────────────────
+
+export async function getSavedServers() {
+  const raw = await AsyncStorage.getItem(KEYS.SAVED_SERVERS).catch(() => null);
+  const parsed = safeJsonParse(raw, []);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+export async function saveServerProfile(server) {
+  if (!server?.ip) return await getSavedServers();
+  const servers = await getSavedServers();
+  const id = `${server.ip}:${server.port || 8000}`;
+  const now = Date.now();
+
+  const idx = servers.findIndex((s) => s.id === id || (s.ip === server.ip && (s.port || 8000) === (server.port || 8000)));
+  const profile = {
+    id,
+    ip: server.ip,
+    port: Number(server.port) || 8000,
+    name: server.name || server.ip,
+    apiKey: server.apiKey || 'YOUR_SECRET_KEY',
+    deviceToken: server.deviceToken || '',
+    certFingerprint: server.certFingerprint || '',
+    lastConnectedAt: now,
+  };
+
+  if (idx >= 0) {
+    servers[idx] = {
+      ...servers[idx],
+      ...profile,
+      apiKey: profile.apiKey || servers[idx].apiKey,
+      deviceToken: profile.deviceToken || servers[idx].deviceToken,
+    };
+  } else {
+    servers.unshift(profile);
+  }
+
+  await AsyncStorage.setItem(KEYS.SAVED_SERVERS, JSON.stringify(servers)).catch(() => {});
+  return servers;
+}
+
+export async function removeSavedServer(id) {
+  const servers = (await getSavedServers()).filter((s) => s.id !== id && s.ip !== id);
+  await AsyncStorage.setItem(KEYS.SAVED_SERVERS, JSON.stringify(servers)).catch(() => {});
+  return servers;
+}
+
+export async function switchToSavedServer(id) {
+  const servers = await getSavedServers();
+  const server = servers.find((s) => s.id === id || s.ip === id);
+  if (!server) return null;
+
+  await AsyncStorage.multiSet([
+    [KEYS.SERVER_IP, server.ip],
+    [KEYS.SERVER_PORT, String(server.port || 8000)],
+    [KEYS.SERVER_NAME, server.name || server.ip],
+    [KEYS.API_KEY, server.apiKey || 'YOUR_SECRET_KEY'],
+    [KEYS.DEVICE_TOKEN, server.deviceToken || ''],
+    [KEYS.CERT_FINGERPRINT, server.certFingerprint || ''],
+  ]);
+
+  server.lastConnectedAt = Date.now();
+  await AsyncStorage.setItem(KEYS.SAVED_SERVERS, JSON.stringify(servers)).catch(() => {});
+  DeviceEventEmitter.emit('settings-updated');
+  return server;
+}
