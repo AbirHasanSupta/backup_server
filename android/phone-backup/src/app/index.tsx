@@ -47,6 +47,7 @@ import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 import { getStreakData } from '../../streak';
 import { StreakBadge } from '@/components/StreakBadge';
 import { getGoals, invalidateGoalsFileCache } from '../../goals';
+import { getPendingBackupSummary, invalidatePendingBackupCache } from '../../pendingBackup';
 import { hapticMedium, hapticWarning, hapticError } from '@/utils/haptics';
 
 function formatRelativeTime(ts: number | null): string {
@@ -171,6 +172,7 @@ export default function HomeScreen() {
   });
   const [streakModalVisible, setStreakModalVisible] = useState(false);
   const [activeGoalsCount, setActiveGoalsCount] = useState(0);
+  const [pendingFilesCount, setPendingFilesCount] = useState<number | null>(null);
 
   const DOUBLE_TAP_WINDOW_MS = 1200;
 
@@ -262,6 +264,15 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const loadPendingSummary = useCallback(async () => {
+    try {
+      const summary = await getPendingBackupSummary();
+      setPendingFilesCount(typeof summary.count === 'number' ? summary.count : null);
+    } catch {
+      // Pending summary is optional — dashboard still works without it.
+    }
+  }, []);
+
   const applySyncSnapshot = useCallback((snapshot: any) => {
     if (!snapshot?.active) {
       setSyncing(false);
@@ -300,8 +311,9 @@ export default function HomeScreen() {
       }
       loadStreak();
       loadGoalsSummary();
+      loadPendingSummary();
       getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
-    }, [applySyncSnapshot, loadAll, loadStreak, loadGoalsSummary])
+    }, [applySyncSnapshot, loadAll, loadStreak, loadGoalsSummary, loadPendingSummary])
   );
 
   useEffect(() => {
@@ -405,6 +417,7 @@ export default function HomeScreen() {
       loadStreak();
       invalidateGoalsFileCache();
       loadGoalsSummary();
+      loadPendingSummary();
       // loadAll() was suppressed during sync — call it now to refresh last-sync
       // time, total synced count, and re-probe the server connection.
       loadAll();
@@ -420,20 +433,27 @@ export default function HomeScreen() {
       loadAll();
     };
 
+    const onPendingUpdated = () => {
+      loadPendingSummary();
+    };
+
     const subs = [
       DeviceEventEmitter.addListener('sync-started', onStarted),
       DeviceEventEmitter.addListener('sync-progress', onProgress),
       DeviceEventEmitter.addListener('sync-state', applySyncSnapshot),
       DeviceEventEmitter.addListener('sync-completed', onCompleted),
       DeviceEventEmitter.addListener('sync-failed', onFailed),
+      DeviceEventEmitter.addListener('pending-backup-updated', onPendingUpdated),
       DeviceEventEmitter.addListener('settings-updated', () => {
         loadAll();
         invalidateGoalsFileCache();
+        invalidatePendingBackupCache();
+        loadPendingSummary();
       }),
     ];
 
     return () => subs.forEach((sub) => sub.remove());
-  }, [applySyncSnapshot, loadAll, loadGoalsSummary, loadStreak]);
+  }, [applySyncSnapshot, loadAll, loadGoalsSummary, loadPendingSummary, loadStreak]);
 
   const handleSync = async () => {
     const snapshot = await getCurrentSyncState().catch(() => null);
@@ -728,6 +748,39 @@ export default function HomeScreen() {
             )}
           </AnimatedPressable>
         </Animated.View>
+
+        {!syncing && (
+          <Animated.View entering={FadeInDown.duration(400).delay(250)} style={styles.pendingSection}>
+            <Text style={styles.sectionKicker}>New files</Text>
+            <AnimatedPressable
+              style={styles.goalsCard}
+              onPress={() => { hapticMedium(); router.push('/pending'); }}
+              scaleDown={0.98}
+              accessibilityLabel="Open new files"
+            >
+              <View style={[styles.goalsIconWrap, { backgroundColor: colors.warningSoft }]}>
+                <AppIcon androidName="note_add" iosName="doc.badge.plus" color={colors.warning} size={18} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.goalsTitle}>
+                  {pendingFilesCount === null
+                    ? 'Check for new files'
+                    : pendingFilesCount === 0
+                      ? '0 new files'
+                      : `${pendingFilesCount} new file${pendingFilesCount === 1 ? '' : 's'}`}
+                </Text>
+                <Text style={styles.goalsSubtitle}>
+                  {pendingFilesCount === null
+                    ? 'Refresh on the page to scan'
+                    : pendingFilesCount === 0
+                      ? 'Everything in your folders is backed up'
+                      : 'Tap to review and back up'}
+                </Text>
+              </View>
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
+            </AnimatedPressable>
+          </Animated.View>
+        )}
 
         {!syncing && (
           <Animated.View entering={FadeInDown.duration(400).delay(285)} style={styles.pendingSection}>

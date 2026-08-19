@@ -308,6 +308,10 @@ function RootLayoutContent() {
           options={{ href: null, tabBarStyle: { display: 'none' } }}
         />
         <Tabs.Screen
+          name="pending"
+          options={{ href: null, tabBarStyle: { display: 'none' } }}
+        />
+        <Tabs.Screen
           name="places"
           options={{ href: null, tabBarStyle: { display: 'none' } }}
         />

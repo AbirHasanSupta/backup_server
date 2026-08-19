@@ -279,3 +279,50 @@ export async function scan(onActivity, targetFolderUri, snapshotCache = null, op
   result.stopped = !!scanOptions.stopped;
   return result;
 }
+
+/** Key used by upload cache + pending detection. */
+export function pendingFileKey(file) {
+  return `${file.relativePath}|${file.modifiedTime}|${file.size || 0}`;
+}
+
+/**
+ * Incremental scan path shared with Sync Now — skips snapshot-known paths and
+ * only walks folders far enough to discover new/changed files.
+ */
+export async function scanIncrementalBackup(onActivity, snapshotCache, options = {}) {
+  const scanned = await scan(onActivity, options.targetFolderUri || null, snapshotCache, {
+    incremental: options.incremental !== false,
+    noMetadata: options.noMetadata === true,
+    shouldStop: options.shouldStop,
+  });
+
+  const files = scanned.filter((file) => hasProperExtension(file.name));
+  return {
+    files,
+    snapshotSkipped: scanned.skippedFromSnapshot || 0,
+    stopped: !!scanned.stopped,
+  };
+}
+
+/** Enrich metadata for newly discovered files only (snapshot hits are skipped). */
+export async function enrichFilesBatch(files, options = {}) {
+  const { shouldStop, concurrency = METADATA_BATCH_SIZE } = options;
+  const targets = files.filter((file) => !file.metadataLoaded);
+  if (!targets.length) return files;
+
+  let nextIndex = 0;
+  const workers = Math.min(concurrency, targets.length);
+
+  async function worker() {
+    while (nextIndex < targets.length) {
+      if (shouldStop?.()) break;
+      const index = nextIndex++;
+      const file = targets[index];
+      if (!file) break;
+      Object.assign(file, await enrichFileMetadata(file));
+    }
+  }
+
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  return files;
+}

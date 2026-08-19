@@ -1,5 +1,5 @@
 import { DeviceEventEmitter, Platform, NativeModules } from 'react-native';
-import { enrichFileMetadata, scan, hasProperExtension } from './scanner';
+import { enrichFileMetadata, scanIncrementalBackup, pendingFileKey } from './scanner';
 import { checkDeviceConnection, checkServerFiles, postSyncSession, uploadFile } from './uploader';
 import { acquireSyncWakeLock, releaseSyncWakeLock } from './wakeLock';
 import {
@@ -43,6 +43,7 @@ import {
   setLastStreakRiskNotifiedDate,
 } from './streak';
 import { computeAllGoalsProgress, invalidateGoalsFileCache } from './goals';
+import { setPendingBackupFromSync } from './pendingBackup';
 import { triggerWidgetRefresh } from './widget';
 
 /**
@@ -677,17 +678,23 @@ export async function performActualSync(onProgress, runOptions = {}) {
   if (onProgress) await onProgress(0, 0, { phase: 'scanning' });
   await reportServerActivity('Scanning folders');
   const snapshotCache = await loadScanSnapshot();
-  const scanned = await scan(async (detail) => {
-    if (await shouldAbortSync()) return;
-    if (onProgress) await onProgress(0, 0, detail);
-  }, targetFolderUri, snapshotCache, {
-    incremental: incrementalScan,
-    shouldStop: () => isStopRequested() || isForceStop() || isAborted(),
-  });
-  const files = scanned.filter((file) => hasProperExtension(file.name));
-  const snapshotSkipped = scanned.skippedFromSnapshot || 0;
+  const { files, snapshotSkipped, stopped: scanStopped } = await scanIncrementalBackup(
+    async (detail) => {
+      if (await shouldAbortSync()) return;
+      if (onProgress) await onProgress(0, 0, detail);
+    },
+    snapshotCache,
+    {
+      incremental: incrementalScan,
+      // Keep original Sync Now behaviour: metadata enriches during the walk
+      // via the scan scheduler (parallel with directory traversal).
+      noMetadata: false,
+      targetFolderUri,
+      shouldStop: () => isStopRequested() || isForceStop() || isAborted(),
+    }
+  );
 
-  if (scanned.stopped || await shouldAbortSync()) {
+  if (scanStopped || await shouldAbortSync()) {
     return { ...emptySyncResult('stopped'), stopped: true };
   }
 
@@ -706,7 +713,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
     // Pure client-side check against cached upload keys (no HTTP request)
     const trusted = await isUploadedBatch(files);
     for (const file of files) {
-      const key = `${file.relativePath}|${file.modifiedTime}|${file.size || 0}`;
+      const key = pendingFileKey(file);
       if (trusted.has(key)) {
         present.add(key);
         trustedFiles.push(file);
@@ -724,7 +731,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
       serverDeviceTotalSize = res.deviceTotalSize;
 
       const batchByKey = new Map(
-        batch.map((file) => [`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`, file])
+        batch.map((file) => [pendingFileKey(file), file])
       );
 
       for (const status of statuses) {
@@ -747,6 +754,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   }
 
   if (stoppedDuringCheck) {
+    const stoppedPending = files.filter((file) => !present.has(pendingFileKey(file)));
     return {
       uploaded: 0,
       skipped: present.size + snapshotSkipped,
@@ -755,12 +763,11 @@ export async function performActualSync(onProgress, runOptions = {}) {
       deviceTotalFiles: serverDeviceTotalFiles,
       deviceTotalSize: serverDeviceTotalSize,
       stopped: true,
+      pendingFiles: stoppedPending,
     };
   }
 
-  const pending = files.filter((file) => (
-    !present.has(`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`)
-  ));
+  const pending = files.filter((file) => !present.has(pendingFileKey(file)));
 
   const totalUploads = pending.length;
   let uploaded = 0;
@@ -838,6 +845,9 @@ export async function performActualSync(onProgress, runOptions = {}) {
   await Promise.all(Array.from({ length: uploadConcurrency }, () => worker()));
   await markUploadedBatch(uploadedFiles);
 
+  const uploadedKeys = new Set(uploadedFiles.map(pendingFileKey));
+  const remainingPending = pending.filter((file) => !uploadedKeys.has(pendingFileKey(file)));
+
   if (!(await shouldAbortSync())) {
     const scannedSuccessfully = [...trustedFiles, ...presentFiles, ...uploadedFiles];
     await saveScanSnapshot(scannedSuccessfully, { merge: !forceRefreshAll }).catch(() => {});
@@ -857,6 +867,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
     deviceTotalFiles: serverDeviceTotalFiles,
     deviceTotalSize: serverDeviceTotalSize,
     stopped: await shouldAbortSync(),
+    pendingFiles: remainingPending,
   };
 }
 
@@ -1052,6 +1063,10 @@ export async function runSync(onProgress, runOptions = {}) {
 
     if (outcome === 'completed' && result.errors === 0) {
       await recordSyncCompleted().catch(() => {});
+    }
+
+    if (!wasForceStopped && Array.isArray(result.pendingFiles)) {
+      setPendingBackupFromSync(result.pendingFiles).catch(() => {});
     }
 
     if (outcome === 'completed' && !result.stopped && !wasForceStopped) {
