@@ -676,7 +676,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   }
 
   if (onProgress) await onProgress(0, 0, { phase: 'scanning' });
-  await reportServerActivity('Scanning folders');
+  reportServerActivity('Scanning folders');
   const snapshotCache = await loadScanSnapshot();
   const { files, snapshotSkipped, stopped: scanStopped } = await scanIncrementalBackup(
     async (detail) => {
@@ -686,9 +686,10 @@ export async function performActualSync(onProgress, runOptions = {}) {
     snapshotCache,
     {
       incremental: incrementalScan,
-      // Keep original Sync Now behaviour: metadata enriches during the walk
-      // via the scan scheduler (parallel with directory traversal).
-      noMetadata: false,
+      // Two-way refresh needs real size/modifiedTime before hitting /files/check.
+      // Normal Sync Now / Auto Sync defers metadata to the upload worker so the
+      // scan doesn't block on per-file SAF stat calls (drain()) before checking.
+      noMetadata: !isTwoWay,
       targetFolderUri,
       shouldStop: () => isStopRequested() || isForceStop() || isAborted(),
     }
@@ -699,7 +700,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   }
 
   if (onProgress) await onProgress(0, 0, { phase: 'checking', checked: 0, total: files.length });
-  await reportServerActivity(isTwoWay ? 'Checking server files' : 'Checking local files');
+  reportServerActivity(isTwoWay ? 'Checking server files' : 'Checking local files');
 
   const present = new Set();
   const presentFiles = [];
@@ -779,7 +780,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   const uploadedFiles = [];
 
   if (onProgress) await onProgress(0, totalUploads, { phase: 'uploading', currentFile: '' });
-  await reportServerActivity('Uploading files');
+  reportServerActivity('Uploading files');
 
   async function worker() {
     while (nextIndex < pending.length) {

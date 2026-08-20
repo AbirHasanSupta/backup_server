@@ -216,7 +216,7 @@ export async function isUploadedBatch(files) {
   const valueByKey = new Map(pairs);
   for (const file of files) {
     const val = valueByKey.get(`uploaded_${file.relativePath}`);
-    if (val != null && (val === String(file.modifiedTime) || !file.modifiedTime)) {
+    if (val != null && file.metadataLoaded && val === String(file.modifiedTime)) {
       trusted.add(`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`);
     }
   }
