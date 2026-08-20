@@ -871,6 +871,18 @@ def get_files_browse(device_id: str, prefix: str) -> tuple[list[dict], list[dict
     return list(folders.values()), files
 
 
+def search_files_for_device(device_id: str, query: str, limit: int = 500) -> list[dict]:
+    conn = get_conn()
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    rows = conn.execute(
+        "SELECT path, size, modified_time, sha256, uploaded_time FROM files "
+        "WHERE device_id = ? AND path LIKE ? ESCAPE '\\' ORDER BY path LIMIT ?",
+        (device_id, f"%{escaped}%", max(1, min(limit, 500))),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_device_folder_name(device_id: str) -> str | None:
     """Return the stable on-disk folder_name for a device_id, or None if not found."""
     conn = get_conn()

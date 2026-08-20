@@ -1,5 +1,7 @@
+import asyncio
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 import anyio
@@ -17,7 +19,12 @@ import memories
 async def lifespan(app: FastAPI):
     token_limit = max(200, (os.cpu_count() or 4) * 30)
     anyio.to_thread.current_default_thread_limiter().total_tokens = token_limit
-    yield
+    executor = ThreadPoolExecutor(max_workers=token_limit)
+    asyncio.get_running_loop().set_default_executor(executor)
+    try:
+        yield
+    finally:
+        executor.shutdown(wait=False)
 
 
 app = FastAPI(title="Phone Backup Server", version="3.4.1", lifespan=lifespan)

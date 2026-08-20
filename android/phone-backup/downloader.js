@@ -101,6 +101,26 @@ export async function listServerFiles(prefix = '') {
   return data.files;
 }
 
+export async function searchFiles(query) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const data = await fetchJsonWithTimeout(
+    `http://${ip}:${port}/files/search?device_id=${encodeURIComponent(deviceId)}&q=${encodeURIComponent(query)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+    15000,
+  );
+  return data.files ?? [];
+}
+
+export async function searchSharedFiles(sourceId, query) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const data = await fetchJsonWithTimeout(
+    `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/search?q=${encodeURIComponent(query)}&device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+    15000,
+  );
+  return data.files ?? [];
+}
+
 export async function browseFiles(prefix = '') {
   const { ip, port, key, deviceId } = await getConfig();
   return fetchJsonWithTimeout(

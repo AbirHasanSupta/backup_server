@@ -23,6 +23,7 @@ from database import (
     get_device_stats,
     get_devices,
     get_files_for_device,
+    search_files_for_device,
     insert_file,
     insert_sync_session,
     get_sync_sessions,
@@ -515,6 +516,60 @@ async def browse_files(device_id: str, prefix: str = "", authorization: str = He
     norm_prefix = f"{norm_prefix}/" if norm_prefix else ""
     folders, files = await asyncio.to_thread(get_files_browse, device_id, norm_prefix)
     return {"folders": folders, "files": files}
+
+
+@router.get("/files/search")
+async def search_files(device_id: str, q: str, authorization: str = Header(None), token: str = None):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    q = q.strip()
+    if not q:
+        return {"files": []}
+    files = await asyncio.to_thread(search_files_for_device, device_id, q)
+    return {"files": files}
+
+
+def _search_shared_dir(root: str, query: str, limit: int = 500) -> list[dict]:
+    query = query.lower()
+    results = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            if query not in name.lower():
+                continue
+            full = os.path.join(dirpath, name)
+            try:
+                stat = os.stat(full)
+            except OSError:
+                continue
+            rel = os.path.relpath(full, root).replace("\\", "/")
+            results.append({"path": rel, "size": stat.st_size, "modified_time": int(stat.st_mtime)})
+            if len(results) >= limit:
+                return results
+    return results
+
+
+@router.get("/shared/{source_id}/search")
+async def search_shared_files(
+        source_id: str,
+        q: str,
+        device_id: str | None = None,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    entry = _find_shared_dir(source_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Shared source not found")
+    if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
+        raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
+    q = q.strip()
+    if not q:
+        return {"files": []}
+    root = os.path.abspath(entry["path"])
+    if not os.path.isdir(root):
+        return {"files": []}
+    files = await asyncio.to_thread(_search_shared_dir, root, q)
+    return {"files": files}
 
 
 @router.get("/shared/{source_id}/browse")

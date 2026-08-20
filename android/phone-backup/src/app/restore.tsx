@@ -32,10 +32,8 @@ import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 import {
-  listServerFiles,
   downloadFile,
   listSharedSources,
-  listSharedFiles,
   downloadSharedFile,
   getConfig,
   buildPreviewUrl,
@@ -44,6 +42,8 @@ import {
   getTodaysMemories,
   browseFiles,
   browseSharedFiles,
+  searchFiles,
+  searchSharedFiles,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
@@ -2179,6 +2179,10 @@ export default function RestoreScreen() {
   // Selection mode state
   const [selectionMode, setSelectionMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<RemoteFile[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchGenRef = useRef(0);
   const [refreshing, setRefreshing] = useState(false);
 
   // Preview state
@@ -2321,7 +2325,11 @@ export default function RestoreScreen() {
     setExpandedKeys(new Set());
     setSelectedPaths(new Set());
     setSelectionMode(false);
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchGenRef.current += 1;
     setSearchQuery('');
+    setSearchResults([]);
+    setIsSearching(false);
     if (mode !== 'shared') {
       sharedSourcesGen.current += 1;
       setIsLoadingSources(false);
@@ -2341,7 +2349,11 @@ export default function RestoreScreen() {
     setTree(null);
     setExpandedKeys(new Set());
     setSelectedPaths(new Set());
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchGenRef.current += 1;
     setSearchQuery('');
+    setSearchResults([]);
+    setIsSearching(false);
   }, []);
 
   // Sorted tree — only recomputed when the file list or sort choice changes,
@@ -2361,15 +2373,43 @@ export default function RestoreScreen() {
   const isFiltering = searchQuery.trim().length > 0;
 
   const filteredFiles = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    const matched = files.filter(f => {
-      if (!q) return true;
-      const name = f.path.split(/[/\\]/).pop() ?? f.path;
-      return name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q);
-    });
-    if (searchQuery.trim().length === 0) return matched;
-    return matched.sort((a, b) => compareRemoteFiles(a, b, sortField, sortDir));
-  }, [files, searchQuery, sortField, sortDir]);
+    if (!isFiltering) return files;
+    return [...searchResults].sort((a, b) => compareRemoteFiles(a, b, sortField, sortDir));
+  }, [isFiltering, searchResults, sortField, sortDir]);
+
+  const runSearch = useCallback((query: string) => {
+    const trimmed = query.trim();
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    if (!trimmed) {
+      searchGenRef.current += 1;
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+    searchDebounceRef.current = setTimeout(async () => {
+      const generation = ++searchGenRef.current;
+      setIsSearching(true);
+      try {
+        const results: RemoteFile[] = sourceMode === 'shared' && selectedSourceId
+          ? await searchSharedFiles(selectedSourceId, trimmed)
+          : await searchFiles(trimmed);
+        if (generation !== searchGenRef.current || !restoreMountedRef.current) return;
+        setSearchResults(results);
+      } catch (err: any) {
+        if (generation !== searchGenRef.current || !restoreMountedRef.current) return;
+        setSearchResults([]);
+        Alert.alert('Search Failed', sanitizeErrorMessage(err, 'Could not search files on server.'));
+      } finally {
+        if (generation === searchGenRef.current && restoreMountedRef.current) setIsSearching(false);
+      }
+    }, 350);
+  }, [sourceMode, selectedSourceId]);
+
+  useEffect(() => {
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+  }, []);
 
   const listRows = useMemo<FlatRow[]>(() => {
     if (!isFiltering) return visibleRows;
@@ -2451,28 +2491,6 @@ export default function RestoreScreen() {
       if (restoreMountedRef.current) setIsFetching(false);
     }
   }, [isOffline, isDownloading, sourceMode, selectedSourceId, loadServerConfig]);
-
-  const handleLoadFullIndex = useCallback(async () => {
-    if (fetchingRef.current || isDownloading) return;
-    if (sourceMode === 'shared' && !selectedSourceId) return;
-    fetchingRef.current = true;
-    setIsFetching(true);
-    try {
-      const serverFiles: RemoteFile[] = sourceMode === 'shared'
-        ? await listSharedFiles(selectedSourceId!)
-        : await listServerFiles();
-      if (!restoreMountedRef.current) return;
-      setFiles(serverFiles);
-      setTree(buildTree(serverFiles));
-    } catch (error: any) {
-      if (restoreMountedRef.current) {
-        Alert.alert('Load Failed', sanitizeErrorMessage(error, 'Could not load the full file index.'));
-      }
-    } finally {
-      fetchingRef.current = false;
-      if (restoreMountedRef.current) setIsFetching(false);
-    }
-  }, [isDownloading, sourceMode, selectedSourceId]);
 
   const onRefreshLibrary = useCallback(async () => {
     if (isDownloading) return;
@@ -2942,7 +2960,7 @@ export default function RestoreScreen() {
           {files.length > 0 && (
             <LibraryFilterBar
               query={searchQuery}
-              onQueryChange={(q) => { setSearchQuery(q); if (q.trim()) handleLoadFullIndex(); }}
+              onQueryChange={(q) => { setSearchQuery(q); runSearch(q); }}
               matchCount={filteredFiles.length}
               totalCount={files.length}
               colors={colors}
@@ -3022,7 +3040,7 @@ export default function RestoreScreen() {
         updateCellsBatchingPeriod={50}
         windowSize={9}
         ListEmptyComponent={
-          !isFetching ? (
+          !isFetching && !(isFiltering && isSearching) ? (
             <View style={styles.emptyContainer}>
               <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft }]}>
                 <AppIcon

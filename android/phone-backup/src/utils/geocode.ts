@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const CACHE_PREFIX = 'geocode_cache_v1:';
+const CACHE_PREFIX = 'geocode_cache_v2:';
 const REQUEST_MIN_INTERVAL_MS = 1100;
 
 let lastRequestAt = 0;
@@ -12,9 +12,14 @@ function roundKey(lat: number, lon: number): string {
 
 function pickLabel(address: Record<string, string> | undefined, displayName: string | undefined): string | null {
   if (address) {
-    const area = address.neighbourhood || address.suburb || address.quarter || address.residential || address.hamlet || address.village;
-    const district = address.city_district || address.town || address.city || address.county || address.state_district;
-    if (area && district && area !== district) return `${area}, ${district}`;
+    const tiers = [
+      address.neighbourhood, address.suburb, address.quarter, address.residential,
+      address.hamlet, address.village, address.city_district, address.town,
+      address.municipality, address.city, address.county, address.state_district,
+    ].filter((t): t is string => !!t);
+    const area = tiers[0];
+    const district = tiers.find(t => t !== area);
+    if (area && district) return `${area}, ${district}`;
     if (area) return area;
     if (district) return district;
     const region = address.state || address.country;
