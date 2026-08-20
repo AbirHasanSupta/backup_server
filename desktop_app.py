@@ -1407,6 +1407,31 @@ class BackupServerApp(ctk.CTk):
         self._thumb_cache_clear_button.pack(side="right", padx=(12, 0))
         self.after(140, self._refresh_thumbnail_cache_status)
 
+        # ── MEMORY INDEX ──────────────────────────────────────────────────
+        memory_index_card = settings_card("Memory Index")
+        memory_index_row = ctk.CTkFrame(memory_index_card, fg_color="transparent")
+        memory_index_row.pack(fill="x", padx=18, pady=(14, 18))
+        memory_index_copy = ctk.CTkFrame(memory_index_row, fg_color="transparent")
+        memory_index_copy.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            memory_index_copy, text="Capture-date index used for Memories / On This Day",
+            font=FONT_BODY, text_color=C_TEXT,
+        ).pack(anchor="w")
+        self._memory_index_status_var = tk.StringVar(value="Checking index…")
+        ctk.CTkLabel(
+            memory_index_copy, textvariable=self._memory_index_status_var,
+            font=FONT_SMALL, text_color=C_MUTED, wraplength=330, justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+        self._memory_index_clear_button = ctk.CTkButton(
+            memory_index_row, text="Clean & Reindex", width=140, height=38,
+            fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
+            text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
+            corner_radius=12, font=FONT_BODY,
+            command=self._clean_and_reindex_memories,
+        )
+        self._memory_index_clear_button.pack(side="right", padx=(12, 0))
+        self.after(160, self._refresh_memory_index_status)
+
         # ── SECURITY ──────────────────────────────────────────────────────
         sec_card = settings_card("Security")
         self._e_key = labeled_entry(sec_card, "API Key  (must match Android app)",
@@ -1731,6 +1756,54 @@ class BackupServerApp(ctk.CTk):
             self.after(0, _finish)
 
         threading.Thread(target=_clean, name="clear-thumbnail-cache", daemon=True).start()
+
+    def _refresh_memory_index_status(self):
+        status_var = getattr(self, "_memory_index_status_var", None)
+        if status_var is None:
+            return
+        try:
+            import memories
+            stats = memories.get_memory_index_stats()
+            last = stats.get("last_indexed_at")
+            last_txt = datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "never"
+            status_var.set(f"{stats['files']} indexed file(s) · last run {last_txt}")
+        except Exception:
+            status_var.set("Memory index unavailable until the server starts.")
+
+    def _clean_and_reindex_memories(self):
+        if not confirm_dialog(
+            self,
+            "Clean & Reindex Memory Index",
+            "Clear the memory index and rebuild it from scratch?\n\n"
+            "Your original backups are not affected. This may take a while for large libraries.",
+        ):
+            return
+
+        button = getattr(self, "_memory_index_clear_button", None)
+        if button:
+            button.configure(state="disabled", text="Reindexing…")
+
+        def _run():
+            try:
+                import memories
+                result = memories.reset_and_reindex_all()
+                if result.get("ok"):
+                    n = result["cleared"]
+                    message = f"Cleared {n} entr{'y' if n == 1 else 'ies'} and rebuilt the memory index."
+                else:
+                    message = result.get("error", "Could not reset the memory index.")
+            except Exception as exc:
+                message = f"Could not reset the memory index: {exc}"
+
+            def _finish():
+                if button and button.winfo_exists():
+                    button.configure(state="normal", text="Clean & Reindex")
+                self._refresh_memory_index_status()
+                messagebox.showinfo("Memory Index", message)
+
+            self.after(0, _finish)
+
+        threading.Thread(target=_run, name="clean-reindex-memories", daemon=True).start()
 
     # ── Shared Folders helpers ─────────────────────────────────────────
 

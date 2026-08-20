@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 
 
 APP_NAME = "PhoneBackupServer"
@@ -123,8 +124,13 @@ def _load_json(path: str) -> dict | None:
         return None
 
 
+_migrated = False
+
+
 def _migrate_frozen_files() -> None:
-    if not _IS_FROZEN:
+    global _migrated
+    if _migrated or not _IS_FROZEN:
+        _migrated = True
         return
 
     _copy_if_missing(_PORTABLE_CONFIG_FILE, CONFIG_FILE)
@@ -134,24 +140,42 @@ def _migrate_frozen_files() -> None:
     old_db_path = (cfg or {}).get("DB_PATH")
     if old_db_path and os.path.abspath(old_db_path) != os.path.abspath(DB_PATH):
         _copy_if_missing(old_db_path, DB_PATH)
+    _migrated = True
+
+
+_config_lock = threading.Lock()
+_config_cache: dict | None = None
+_config_cache_mtime: float | None = None
 
 
 def load_config() -> dict:
+    global _config_cache, _config_cache_mtime
     _migrate_frozen_files()
 
-    data = _load_json(CONFIG_FILE)
-    if data is None and _IS_FROZEN:
-        data = _load_json(_PORTABLE_CONFIG_FILE)
+    try:
+        current_mtime = os.path.getmtime(CONFIG_FILE)
+    except OSError:
+        current_mtime = None
 
-    cfg = {**_DEFAULTS, **(data or {})}
+    with _config_lock:
+        if _config_cache is not None and current_mtime == _config_cache_mtime:
+            return _config_cache
 
-    if _IS_FROZEN:
-        cfg["DB_PATH"] = DB_PATH
+        data = _load_json(CONFIG_FILE)
+        if data is None and _IS_FROZEN:
+            data = _load_json(_PORTABLE_CONFIG_FILE)
 
-    return cfg
+        cfg = {**_DEFAULTS, **(data or {})}
+        if _IS_FROZEN:
+            cfg["DB_PATH"] = DB_PATH
+
+        _config_cache = cfg
+        _config_cache_mtime = current_mtime
+        return cfg
 
 
 def save_config(cfg: dict) -> None:
+    global _config_cache, _config_cache_mtime
     merged = {**_DEFAULTS, **cfg}
     if _IS_FROZEN:
         merged["DB_PATH"] = DB_PATH
@@ -159,6 +183,10 @@ def save_config(cfg: dict) -> None:
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(merged, f, indent=2)
+
+    with _config_lock:
+        _config_cache = None
+        _config_cache_mtime = None
 
 
 _cfg = load_config()

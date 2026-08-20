@@ -11,6 +11,7 @@ import json
 import os
 import random
 import subprocess
+import threading
 import time as time_module
 from PIL import Image
 
@@ -27,6 +28,7 @@ except Exception:
 from config import load_config
 from database import (
     batch_upsert_media_index_rows,
+    clear_media_index,
     get_devices,
     get_distinct_cap_years,
     get_files_for_device,
@@ -35,14 +37,17 @@ from database import (
     get_media_for_days_multi,
     get_media_for_ymd_list,
     get_media_index_cache,
+    get_media_index_stats,
     get_quiz_photo_pool,
     get_random_media_row,
+    get_scan_dirs,
     get_year_wrapped_stats,
     prune_media_index,
     upsert_media_index_row,
+    upsert_scan_dirs,
 )
 from state import add_log
-from storage import full_path_for
+from storage import full_path_in_root, resolve_backup_root
 from video_preview import _ffprobe_path
 
 IMAGE_EXTS = {
@@ -95,33 +100,6 @@ def _parse_date_str(val: str) -> int | None:
     return None
 
 
-def _extract_image_exif_time(full_path: str) -> int | None:
-    try:
-        with Image.open(full_path) as img:
-            exif = img.getexif()
-            if not exif:
-                return None
-            tags = dict(exif)
-            # DateTimeOriginal (36867) and DateTimeDigitized (36868) live in the
-            # Exif sub-IFD (tag 0x8769), not the top-level IFD0 that getexif()
-            # returns directly — without this, EXIF capture time is almost
-            # always missed and files fall back to filesystem time.
-            try:
-                tags.update(exif.get_ifd(0x8769))
-            except Exception:
-                pass
-            # 36867 = DateTimeOriginal, 36868 = DateTimeDigitized, 306 = DateTime
-            for tag in (36867, 36868, 306):
-                raw_val = tags.get(tag)
-                if raw_val:
-                    ts = _parse_date_str(str(raw_val))
-                    if ts is not None:
-                        return ts
-    except Exception:
-        pass
-    return None
-
-
 def _gps_dms_to_decimal(dms, ref: str) -> float | None:
     try:
         degrees, minutes, seconds = float(dms[0]), float(dms[1]), float(dms[2])
@@ -133,33 +111,45 @@ def _gps_dms_to_decimal(dms, ref: str) -> float | None:
         return None
 
 
-def _extract_image_gps(full_path: str) -> tuple[float, float] | None:
+def _extract_image_exif_and_gps(full_path: str) -> tuple[int | None, tuple[float, float] | None]:
+    cap_time = None
+    gps_point = None
     try:
         with Image.open(full_path) as img:
             exif = img.getexif()
             if not exif:
-                return None
-            # GPSInfo (tag 0x8825) is itself an IFD pointer, same pattern as
-            # the Exif sub-IFD used for capture time above.
-            gps = exif.get_ifd(0x8825)
-            if not gps:
-                return None
-            lat_dms = gps.get(2)
-            lat_ref = gps.get(1)
-            lon_dms = gps.get(4)
-            lon_ref = gps.get(3)
-            if not (lat_dms and lat_ref and lon_dms and lon_ref):
-                return None
-            lat = _gps_dms_to_decimal(lat_dms, lat_ref)
-            lon = _gps_dms_to_decimal(lon_dms, lon_ref)
-            if lat is None or lon is None:
-                return None
-            if lat == 0 and lon == 0:
-                return None
-            return round(lat, 6), round(lon, 6)
+                return None, None
+
+            tags = dict(exif)
+            try:
+                tags.update(exif.get_ifd(0x8769))
+            except Exception:
+                pass
+            for tag in (36867, 36868, 306):
+                raw_val = tags.get(tag)
+                if raw_val:
+                    ts = _parse_date_str(str(raw_val))
+                    if ts is not None:
+                        cap_time = ts
+                        break
+
+            try:
+                gps = exif.get_ifd(0x8825)
+            except Exception:
+                gps = None
+            if gps:
+                lat_dms = gps.get(2)
+                lat_ref = gps.get(1)
+                lon_dms = gps.get(4)
+                lon_ref = gps.get(3)
+                if lat_dms and lat_ref and lon_dms and lon_ref:
+                    lat = _gps_dms_to_decimal(lat_dms, lat_ref)
+                    lon = _gps_dms_to_decimal(lon_dms, lon_ref)
+                    if lat is not None and lon is not None and not (lat == 0 and lon == 0):
+                        gps_point = (round(lat, 6), round(lon, 6))
     except Exception:
         pass
-    return None
+    return cap_time, gps_point
 
 
 def _extract_video_creation_time(full_path: str) -> int | None:
@@ -198,27 +188,7 @@ def _extract_video_creation_time(full_path: str) -> int | None:
     return None
 
 
-def extract_capture_time(full_path: str, ext: str, fallback_mtime: int | None = None) -> tuple[int | None, str]:
-    """Extract capture epoch timestamp and source label from file metadata.
-
-    fallback_mtime, when given, is the file's modified time as reported by
-    the originating device/uploader. Most transfer paths preserve mtime from
-    the original file, while the local filesystem's creation time only
-    reflects when this copy landed on the backup server — so mtime is a far
-    better last-resort proxy for the real capture date than local ctime.
-    """
-    ext_lower = ext.lower()
-    if ext_lower in IMAGE_EXTS:
-        ts = _extract_image_exif_time(full_path)
-        if ts is not None:
-            return ts, "exif"
-    elif ext_lower in VIDEO_EXTS:
-        ts = _extract_video_creation_time(full_path)
-        if ts is not None:
-            return ts, "video"
-
-    # Fallback: prefer the originating device's modified time when available,
-    # otherwise fall back to this local copy's filesystem creation time.
+def _fallback_capture_time(full_path: str, fallback_mtime: int | None) -> tuple[int | None, str]:
     candidates = []
     if fallback_mtime:
         candidates.append(int(fallback_mtime))
@@ -235,6 +205,19 @@ def extract_capture_time(full_path: str, ext: str, fallback_mtime: int | None = 
     return min(candidates), "fs_ctime"
 
 
+def extract_capture_time(full_path: str, ext: str, fallback_mtime: int | None = None) -> tuple[int | None, str]:
+    ext_lower = ext.lower()
+    if ext_lower in IMAGE_EXTS:
+        ts, _gps = _extract_image_exif_and_gps(full_path)
+        if ts is not None:
+            return ts, "exif"
+    elif ext_lower in VIDEO_EXTS:
+        ts = _extract_video_creation_time(full_path)
+        if ts is not None:
+            return ts, "video"
+    return _fallback_capture_time(full_path, fallback_mtime)
+
+
 def _extract_media_row_metadata(item: dict) -> dict:
     """Extract EXIF/GPS/video timestamp metadata for a single media file."""
     full_path = item["full_path"]
@@ -243,7 +226,24 @@ def _extract_media_row_metadata(item: dict) -> dict:
     size = item["size"]
     now_ts = item["now_ts"]
 
-    cap_time, cap_source = extract_capture_time(full_path, ext, fallback_mtime=mtime)
+    cap_lat, cap_lon = None, None
+    gps_checked = ext in IMAGE_EXTS
+
+    if gps_checked:
+        cap_time, gps = _extract_image_exif_and_gps(full_path)
+        cap_source = "exif" if cap_time is not None else None
+        if gps:
+            cap_lat, cap_lon = gps
+        if cap_time is None:
+            cap_time, cap_source = _fallback_capture_time(full_path, mtime)
+    elif ext in VIDEO_EXTS:
+        cap_time = _extract_video_creation_time(full_path)
+        cap_source = "video" if cap_time is not None else None
+        if cap_time is None:
+            cap_time, cap_source = _fallback_capture_time(full_path, mtime)
+    else:
+        cap_time, cap_source = _fallback_capture_time(full_path, mtime)
+
     cap_month, cap_day, cap_year = None, None, None
     if cap_time is not None:
         try:
@@ -251,13 +251,6 @@ def _extract_media_row_metadata(item: dict) -> dict:
             cap_month, cap_day, cap_year = dt.month, dt.day, dt.year
         except Exception:
             pass
-
-    cap_lat, cap_lon = (None, None)
-    gps_checked = ext in IMAGE_EXTS
-    if gps_checked:
-        gps = _extract_image_gps(full_path)
-        if gps:
-            cap_lat, cap_lon = gps
 
     return {
         "source_type": item["source_type"],
@@ -277,9 +270,51 @@ def _extract_media_row_metadata(item: dict) -> dict:
     }
 
 
+def _resolve_worker_counts() -> tuple[int, int]:
+    cfg = load_config()
+    cpu = os.cpu_count() or 4
+    default_image = min(32, cpu * 4)
+    default_video = max(2, cpu)
+    try:
+        image_workers = int(cfg.get("MEMORIES_IMAGE_WORKERS") or default_image)
+    except (TypeError, ValueError):
+        image_workers = default_image
+    try:
+        video_workers = int(cfg.get("MEMORIES_VIDEO_WORKERS") or default_video)
+    except (TypeError, ValueError):
+        video_workers = default_video
+    return max(2, image_workers), max(1, video_workers)
+
+
+def _run_extraction(items: list[dict]) -> list[dict]:
+    image_items = [it for it in items if it["ext"] in IMAGE_EXTS]
+    video_items = [it for it in items if it["ext"] not in IMAGE_EXTS]
+    image_workers, video_workers = _resolve_worker_counts()
+
+    rows: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=image_workers) as img_ex, \
+         concurrent.futures.ThreadPoolExecutor(max_workers=video_workers) as vid_ex:
+        futures = [img_ex.submit(_extract_media_row_metadata, it) for it in image_items]
+        futures += [vid_ex.submit(_extract_media_row_metadata, it) for it in video_items]
+        for fut in concurrent.futures.as_completed(futures):
+            rows.append(fut.result())
+    return rows
+
+
+def _flush_rows(rows: list[dict]) -> None:
+    batch_size = 500
+    for i in range(0, len(rows), batch_size):
+        batch_upsert_media_index_rows(rows[i:i + batch_size])
+
+
 def reindex_device(device_id: str) -> None:
     files = get_files_for_device(device_id)
     cache = get_media_index_cache("phone", device_id)
+    try:
+        device_root = resolve_backup_root(device_id)
+    except Exception:
+        return
+
     seen_paths: set[str] = set()
     now_ts = int(time_module.time())
     to_process: list[dict] = []
@@ -290,24 +325,24 @@ def reindex_device(device_id: str) -> None:
         if ext not in IMAGE_EXTS and ext not in VIDEO_EXTS:
             continue
 
-        try:
-            full_path = full_path_for(rel_path, device_id)
-        except Exception:
-            continue
-
-        if not os.path.isfile(full_path):
-            continue
-
         size = f.get("size", 0)
         mtime = f.get("modified_time", 0)
-        seen_paths.add(rel_path)
 
         cached_entry = cache.get(rel_path)
         unchanged = cached_entry and cached_entry[0] == size and cached_entry[1] == mtime
-        stale_fallback = cached_entry and cached_entry[2] == "fs_ctime" and (ext in IMAGE_EXTS or ext in VIDEO_EXTS)
+        stale_fallback = cached_entry and cached_entry[2] == "fs_ctime"
         missing_gps = cached_entry and ext in IMAGE_EXTS and not cached_entry[4]
         if unchanged and not stale_fallback and not missing_gps:
+            seen_paths.add(rel_path)
             continue
+
+        try:
+            full_path = full_path_in_root(device_root, rel_path)
+        except Exception:
+            continue
+        if not os.path.isfile(full_path):
+            continue
+        seen_paths.add(rel_path)
 
         to_process.append({
             "source_type": "phone",
@@ -321,94 +356,181 @@ def reindex_device(device_id: str) -> None:
         })
 
     if to_process:
-        max_workers = min(8, max(2, os.cpu_count() or 4))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            rows = list(executor.map(_extract_media_row_metadata, to_process))
-        batch_size = 500
-        for i in range(0, len(rows), batch_size):
-            batch_upsert_media_index_rows(rows[i:i + batch_size])
+        _flush_rows(_run_extraction(to_process))
 
-    prune_media_index("phone", device_id, seen_paths)
+    prune_media_index("phone", device_id, seen_paths, existing_paths=set(cache.keys()))
+
+
+def _rel_dirname(rel_path: str) -> str:
+    idx = rel_path.rfind("/")
+    return rel_path[:idx] if idx != -1 else ""
+
+
+def _rel_to_abs(root_path: str, rel_path: str) -> str:
+    return os.path.join(root_path, *rel_path.split("/"))
 
 
 def reindex_shared(source_id: str, root_path: str) -> None:
     if not os.path.isdir(root_path):
         return
+
     cache = get_media_index_cache("shared", source_id)
+    cached_dirs = get_scan_dirs("shared", source_id)
+    dir_children: dict[str, list[str]] = {}
+    for rel_path in cache:
+        dir_children.setdefault(_rel_dirname(rel_path), []).append(rel_path)
+
     seen_paths: set[str] = set()
+    dir_updates: dict[str, int] = {}
     now_ts = int(time_module.time())
     to_process: list[dict] = []
 
-    for root, _, filenames in os.walk(root_path):
-        for name in filenames:
-            ext = os.path.splitext(name)[1].lower()
-            if ext not in IMAGE_EXTS and ext not in VIDEO_EXTS:
-                continue
+    stack: list[tuple[str, str]] = [("", root_path)]
+    while stack:
+        rel_dir, abs_dir = stack.pop()
+        try:
+            dstat = os.stat(abs_dir)
+            entries = list(os.scandir(abs_dir))
+        except Exception:
+            continue
 
-            full_path = os.path.join(root, name)
-            try:
-                stat = os.stat(full_path)
-            except Exception:
-                continue
+        dir_updates[rel_dir] = dstat.st_mtime_ns
+        skip_files = cached_dirs.get(rel_dir) == dstat.st_mtime_ns
 
-            size = stat.st_size
-            mtime = int(stat.st_mtime)
-            rel_path = os.path.relpath(full_path, root_path).replace("\\", "/")
-            seen_paths.add(rel_path)
+        if skip_files:
+            for rel_path in dir_children.get(rel_dir, []):
+                ext = os.path.splitext(rel_path)[1].lower()
+                cached_entry = cache.get(rel_path)
+                seen_paths.add(rel_path)
+                stale_fallback = cached_entry[2] == "fs_ctime"
+                missing_gps = ext in IMAGE_EXTS and not cached_entry[4]
+                if not (stale_fallback or missing_gps):
+                    continue
+                full_path = _rel_to_abs(root_path, rel_path)
+                if not os.path.isfile(full_path):
+                    continue
+                to_process.append({
+                    "source_type": "shared",
+                    "source_key": source_id,
+                    "relative_path": rel_path,
+                    "full_path": full_path,
+                    "size": cached_entry[0],
+                    "modified_time": cached_entry[1],
+                    "ext": ext,
+                    "now_ts": now_ts,
+                })
+        else:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    continue
+                ext = os.path.splitext(entry.name)[1].lower()
+                if ext not in IMAGE_EXTS and ext not in VIDEO_EXTS:
+                    continue
+                try:
+                    fstat = entry.stat(follow_symlinks=False)
+                except Exception:
+                    continue
 
-            cached_entry = cache.get(rel_path)
-            unchanged = cached_entry and cached_entry[0] == size and cached_entry[1] == mtime
-            stale_fallback = cached_entry and cached_entry[2] == "fs_ctime" and (ext in IMAGE_EXTS or ext in VIDEO_EXTS)
-            missing_gps = cached_entry and ext in IMAGE_EXTS and not cached_entry[4]
-            if unchanged and not stale_fallback and not missing_gps:
-                continue
+                size = fstat.st_size
+                mtime = int(fstat.st_mtime)
+                rel_path = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+                seen_paths.add(rel_path)
 
-            to_process.append({
-                "source_type": "shared",
-                "source_key": source_id,
-                "relative_path": rel_path,
-                "full_path": full_path,
-                "size": size,
-                "modified_time": mtime,
-                "ext": ext,
-                "now_ts": now_ts,
-            })
+                cached_entry = cache.get(rel_path)
+                unchanged = cached_entry and cached_entry[0] == size and cached_entry[1] == mtime
+                stale_fallback = cached_entry and cached_entry[2] == "fs_ctime"
+                missing_gps = cached_entry and ext in IMAGE_EXTS and not cached_entry[4]
+                if unchanged and not stale_fallback and not missing_gps:
+                    continue
+
+                to_process.append({
+                    "source_type": "shared",
+                    "source_key": source_id,
+                    "relative_path": rel_path,
+                    "full_path": entry.path,
+                    "size": size,
+                    "modified_time": mtime,
+                    "ext": ext,
+                    "now_ts": now_ts,
+                })
+
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                child_rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+                stack.append((child_rel, entry.path))
 
     if to_process:
-        max_workers = min(8, max(2, os.cpu_count() or 4))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            rows = list(executor.map(_extract_media_row_metadata, to_process))
-        batch_size = 500
-        for i in range(0, len(rows), batch_size):
-            batch_upsert_media_index_rows(rows[i:i + batch_size])
+        _flush_rows(_run_extraction(to_process))
 
-    prune_media_index("shared", source_id, seen_paths)
+    prune_media_index("shared", source_id, seen_paths, existing_paths=set(cache.keys()))
+    upsert_scan_dirs("shared", source_id, dir_updates)
 
 
-def reindex_all() -> None:
+_reindex_lock = threading.Lock()
+
+
+def _do_reindex_all() -> None:
     add_log("[Memories] Starting indexing scan...")
     try:
-        devices = get_devices()
-        for d in devices:
+        tasks: list[tuple[str, str, str | None]] = []
+        for d in get_devices():
             dev_id = d.get("device_id")
             if dev_id:
-                try:
-                    reindex_device(dev_id)
-                except Exception as e:
-                    add_log(f"[Memories] Error reindexing device {dev_id}: {e}")
+                tasks.append(("device", dev_id, None))
 
         shared_dirs = load_config().get("SHARED_DIRS", [])
         for s in shared_dirs:
             sid = s.get("id")
             spath = s.get("path")
             if sid and spath:
-                try:
-                    reindex_shared(sid, spath)
-                except Exception as e:
-                    add_log(f"[Memories] Error reindexing shared dir {sid}: {e}")
+                tasks.append(("shared", sid, spath))
+
+        def _run_task(task: tuple[str, str, str | None]) -> None:
+            kind, key, path = task
+            try:
+                if kind == "device":
+                    reindex_device(key)
+                else:
+                    reindex_shared(key, path)
+            except Exception as e:
+                add_log(f"[Memories] Error reindexing {kind} {key}: {e}")
+
+        max_workers = min(4, max(1, len(tasks)))
+        if tasks:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                list(executor.map(_run_task, tasks))
+
         add_log("[Memories] Indexing scan completed.")
     except Exception as e:
         add_log(f"[Memories] Indexing scan failed: {e}")
+
+
+def reindex_all() -> None:
+    if not _reindex_lock.acquire(blocking=False):
+        add_log("[Memories] Skipped scan: another indexing run is already in progress.")
+        return
+    try:
+        _do_reindex_all()
+    finally:
+        _reindex_lock.release()
+
+
+def reset_and_reindex_all() -> dict:
+    """Clear the media_index/scan_dirs cache entirely and rebuild it from scratch."""
+    if not _reindex_lock.acquire(blocking=True, timeout=10):
+        add_log("[Memories] Reset skipped: indexing already in progress.")
+        return {"ok": False, "error": "Indexing already in progress, try again shortly."}
+    try:
+        cleared = clear_media_index()
+        add_log(f"[Memories] Memory index cleared ({cleared} rows). Starting full rescan...")
+        _do_reindex_all()
+        return {"ok": True, "cleared": cleared}
+    finally:
+        _reindex_lock.release()
+
+
+def get_memory_index_stats() -> dict:
+    return get_media_index_stats()
 
 
 def startup_scan_loop() -> None:

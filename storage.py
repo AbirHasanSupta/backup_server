@@ -49,22 +49,24 @@ def sanitize_relative_path(relative_path: str) -> str:
     return os.path.join(*parts) if parts else "unnamed"
 
 
-def full_path_for(relative_path: str, device_id: str | None = None) -> str:
+def resolve_backup_root(device_id: str | None = None) -> str:
     root = os.path.abspath(_backup_root())
-
-    # If device_id is provided, nest files under the device's human-readable
-    # folder name (derived from device_name, stored in DB).  This makes the
-    # backup directory legible and stable across app reinstalls.
     if device_id:
         folder = _resolve_device_folder(device_id)
         root = os.path.join(root, folder)
+    return root
 
+
+def full_path_in_root(root: str, relative_path: str) -> str:
     full_path = os.path.abspath(os.path.join(root, sanitize_relative_path(relative_path)))
-
-    # Ensure the final path is still within the expected device-specific root (or global root)
     if os.path.commonpath([root, full_path]) != root:
         raise ValueError("Invalid backup path")
     return full_path
+
+
+def full_path_for(relative_path: str, device_id: str | None = None) -> str:
+    root = resolve_backup_root(device_id)
+    return full_path_in_root(root, relative_path)
 
 
 def calculate_sha256(relative_path: str, device_id: str | None = None) -> str:
@@ -188,4 +190,4 @@ async def save_upload_stream(
         except OSError:
             pass
         raise
-    return full_path, sha256_hash.hexdigest() if sha256_hash else ""
+    return full_path, sha256_hash.hexdigest() if sha256_hash else ""

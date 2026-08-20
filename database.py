@@ -59,8 +59,8 @@ def _create_raw_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA cache_size=-64000")
-    conn.execute("PRAGMA mmap_size=268435456")
+    conn.execute("PRAGMA cache_size=-262144")
+    conn.execute("PRAGMA mmap_size=2147483648")
     conn.execute("PRAGMA temp_store=MEMORY")
     return conn
 
@@ -452,6 +452,19 @@ def init_db():
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_files_uploaded ON files(device_id, uploaded_time)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scan_dirs (
+            source_type TEXT NOT NULL,
+            source_key TEXT NOT NULL,
+            dir_relpath TEXT NOT NULL,
+            dir_mtime_ns INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (source_type, source_key, dir_relpath)
+        )
+        """
     )
 
     # 7. One-time cleanup: remove stale duplicate file rows that may have
@@ -1122,6 +1135,26 @@ def batch_upsert_media_index_rows(rows: list[dict]) -> None:
     conn.close()
 
 
+def get_media_index_stats() -> dict:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT COUNT(*) AS c, MAX(indexed_at) AS last FROM media_index"
+    ).fetchone()
+    conn.close()
+    return {"files": row["c"] or 0, "last_indexed_at": row["last"]}
+
+
+def clear_media_index() -> int:
+    conn = get_conn()
+    row = conn.execute("SELECT COUNT(*) AS c FROM media_index").fetchone()
+    count = row["c"] or 0
+    conn.execute("DELETE FROM media_index")
+    conn.execute("DELETE FROM scan_dirs")
+    conn.commit()
+    conn.close()
+    return count
+
+
 def get_media_index_cache(source_type: str, source_key: str) -> dict[str, tuple[int, int, str | None, float | None, bool]]:
 
     """Return {relative_path: (size, modified_time, capture_source, cap_lat, gps_checked)} for a given source."""
@@ -1458,14 +1491,20 @@ def get_geotagged_media(
     return [dict(r) for r in rows]
 
 
-def prune_media_index(source_type: str, source_key: str, keep_paths: set[str]) -> None:
+def prune_media_index(
+    source_type: str,
+    source_key: str,
+    keep_paths: set[str],
+    existing_paths: set[str] | None = None,
+) -> None:
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT relative_path FROM media_index WHERE source_type = ? AND source_key = ?",
-        (source_type, source_key),
-    ).fetchall()
-    existing = {r["relative_path"] for r in rows}
-    to_delete = existing - keep_paths
+    if existing_paths is None:
+        rows = conn.execute(
+            "SELECT relative_path FROM media_index WHERE source_type = ? AND source_key = ?",
+            (source_type, source_key),
+        ).fetchall()
+        existing_paths = {r["relative_path"] for r in rows}
+    to_delete = existing_paths - keep_paths
     if to_delete:
         to_delete_list = list(to_delete)
         chunk_size = 500
@@ -1477,4 +1516,52 @@ def prune_media_index(source_type: str, source_key: str, keep_paths: set[str]) -
                 [source_type, source_key] + chunk,
             )
         conn.commit()
+    conn.close()
+
+
+def get_scan_dirs(source_type: str, source_key: str) -> dict[str, int]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT dir_relpath, dir_mtime_ns FROM scan_dirs WHERE source_type = ? AND source_key = ?",
+        (source_type, source_key),
+    ).fetchall()
+    conn.close()
+    return {r["dir_relpath"]: r["dir_mtime_ns"] for r in rows}
+
+
+def upsert_scan_dirs(source_type: str, source_key: str, dir_mtimes: dict[str, int]) -> None:
+    if not dir_mtimes:
+        return
+    conn = get_conn()
+    now_ts = int(_time.time())
+    params = [
+        (source_type, source_key, rel, mtime, now_ts)
+        for rel, mtime in dir_mtimes.items()
+    ]
+    conn.executemany(
+        """
+        INSERT INTO scan_dirs (source_type, source_key, dir_relpath, dir_mtime_ns, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(source_type, source_key, dir_relpath) DO UPDATE SET
+            dir_mtime_ns = excluded.dir_mtime_ns,
+            updated_at = excluded.updated_at
+        """,
+        params,
+    )
+
+    rows = conn.execute(
+        "SELECT dir_relpath FROM scan_dirs WHERE source_type = ? AND source_key = ?",
+        (source_type, source_key),
+    ).fetchall()
+    stale = [r["dir_relpath"] for r in rows if r["dir_relpath"] not in dir_mtimes]
+    if stale:
+        chunk_size = 500
+        for i in range(0, len(stale), chunk_size):
+            chunk = stale[i:i + chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+            conn.execute(
+                f"DELETE FROM scan_dirs WHERE source_type = ? AND source_key = ? AND dir_relpath IN ({placeholders})",
+                [source_type, source_key] + chunk,
+            )
+    conn.commit()
     conn.close()
