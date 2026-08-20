@@ -1375,6 +1375,11 @@ function NativeVideoPreviewPlayer({
   const upgradedRef = useRef(false);
   const upgradeScheduledRef = useRef(false);
   const upgradeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const videoViewRef = useRef<InstanceType<ExpoVideoModule['VideoView']> | null>(null);
+
+  const enterFullscreen = useCallback(() => {
+    safeMediaCall(() => { videoViewRef.current?.enterFullscreen(); });
+  }, []);
 
   const source = useMemo<VideoSource>(() => ({
     uri: previewUri,
@@ -1580,11 +1585,13 @@ function NativeVideoPreviewPlayer({
   return (
     <View style={pvStyles.videoContainer}>
       <videoModule.VideoView
+        ref={videoViewRef}
         player={player}
         style={pvStyles.videoFull}
         contentFit="contain"
         nativeControls={false}
         surfaceType="textureView"
+        fullscreenOptions={{ enable: true }}
       />
       {isBuffering && (
         <View style={pvStyles.imgLoadingOverlay} pointerEvents="none">
@@ -1689,10 +1696,20 @@ function NativeVideoPreviewPlayer({
             />
           </TouchableOpacity>
 
-          {/* Duration / total time (right side spacer-match for mute button) */}
-          <View style={[pvStyles.videoCtrlBtn, { alignItems: 'flex-end' }]}>
+          {/* Duration / total time */}
+          <View style={pvStyles.videoCtrlBtn}>
             <Text style={pvStyles.videoDurationText}>{formatMediaTime(durationSec)}</Text>
           </View>
+
+          {/* Fullscreen */}
+          <TouchableOpacity
+            onPress={enterFullscreen}
+            style={pvStyles.videoCtrlBtn}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Play fullscreen"
+          >
+            <AppIcon androidName="fullscreen" iosName="arrow.up.left.and.arrow.down.right" color="#fff" size={20} />
+          </TouchableOpacity>
         </View>
       </View>
     </View>
@@ -2121,6 +2138,8 @@ export default function RestoreScreen() {
   const headerHeight = Spacing.five + 88 + 130;
   const {
     onScroll: onListScroll,
+    onScrollEndDrag: onListScrollEndDrag,
+    onMomentumScrollEnd: onListMomentumScrollEnd,
     headerAnimatedStyle,
     contentInsetStyle,
     onHeaderLayout,
@@ -2876,6 +2895,8 @@ export default function RestoreScreen() {
         contentContainerStyle={[styles.listContent, { paddingBottom: BottomTabInset + Spacing.eight }]}
         showsVerticalScrollIndicator={false}
         onScroll={isDownloading ? undefined : onListScroll}
+        onScrollEndDrag={isDownloading ? undefined : onListScrollEndDrag}
+        onMomentumScrollEnd={isDownloading ? undefined : onListMomentumScrollEnd}
         scrollEventThrottle={16}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"

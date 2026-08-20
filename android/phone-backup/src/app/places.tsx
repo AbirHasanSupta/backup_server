@@ -13,6 +13,7 @@ import { AnimatedListItem } from '@/components/AnimatedListItem';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticMedium, hapticLight } from '@/utils/haptics';
+import { getPlaceName } from '@/utils/geocode';
 import {
   getPlaceClusters,
   getPlaceItems,
@@ -83,6 +84,8 @@ export default function PlacesScreen() {
   const viewerListRef = useRef<FlatList<PlaceItem>>(null);
   const [saving, setSaving] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [placeNames, setPlaceNames] = useState<Record<string, string | null>>({});
+  const resolvedPlaceKeysRef = useRef<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -99,6 +102,21 @@ export default function PlacesScreen() {
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      for (const place of places) {
+        if (cancelled) return;
+        if (resolvedPlaceKeysRef.current.has(place.cluster_key)) continue;
+        const name = await getPlaceName(place.lat, place.lon);
+        if (cancelled) return;
+        resolvedPlaceKeysRef.current.add(place.cluster_key);
+        setPlaceNames(prev => ({ ...prev, [place.cluster_key]: name }));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [places]);
 
   const openCluster = useCallback(async (cluster: PlaceCluster) => {
     hapticMedium();
@@ -247,21 +265,32 @@ export default function PlacesScreen() {
                 : buildPreviewUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id))
               : undefined;
 
+            const resolvedName = placeNames[item.cluster_key];
+            const nameLabel = resolvedName === undefined ? 'Locating…' : (resolvedName || 'Unknown location');
+
             return (
               <AnimatedListItem index={index}>
                 <TouchableOpacity
-                  style={[styles.placeCell, { width: cellSize, height: cellSize }]}
+                  style={[styles.placeTile, { width: cellSize }]}
                   onPress={() => openCluster(item)}
                   activeOpacity={0.85}
                 >
-                  <Image
-                    source={{ uri: thumbUrl }}
-                    style={styles.placeCellImage}
-                    contentFit="cover"
-                    transition={150}
-                  />
-                  <View style={styles.placeCellOverlay}>
-                    <Text style={styles.placeCellCount}>{item.count}</Text>
+                  <View style={[styles.placeCell, { width: cellSize, height: cellSize }]}>
+                    <Image
+                      source={{ uri: thumbUrl }}
+                      style={styles.placeCellImage}
+                      contentFit="cover"
+                      transition={150}
+                    />
+                    <View style={styles.placeCellOverlay}>
+                      <Text style={styles.placeCellCount}>{item.count}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.placeTileLabel}>
+                    <Text style={styles.placeTileName} numberOfLines={1}>{nameLabel}</Text>
+                    <Text style={styles.placeTileCoords} numberOfLines={1}>
+                      {formatCoordinates(item.lat, item.lon)}
+                    </Text>
                   </View>
                 </TouchableOpacity>
               </AnimatedListItem>
@@ -280,10 +309,13 @@ export default function PlacesScreen() {
               <AppIcon androidName="close" iosName="xmark" color={colors.text} size={22} />
             </TouchableOpacity>
             <View style={styles.headerCenter}>
-              <Text style={styles.headerTitle}>
-                {activeCluster ? formatCoordinates(activeCluster.lat, activeCluster.lon) || 'This Place' : 'This Place'}
+              <Text style={styles.headerTitle} numberOfLines={1}>
+                {activeCluster
+                  ? (placeNames[activeCluster.cluster_key] || formatCoordinates(activeCluster.lat, activeCluster.lon) || 'This Place')
+                  : 'This Place'}
               </Text>
-              <Text style={styles.headerSubtitle}>
+              <Text style={styles.headerSubtitle} numberOfLines={1}>
+                {activeCluster ? `${formatCoordinates(activeCluster.lat, activeCluster.lon)} · ` : ''}
                 {clusterLoading ? 'Loading…' : `${clusterItems.length} ${clusterItems.length === 1 ? 'memory' : 'memories'}`}
               </Text>
             </View>
@@ -480,10 +512,14 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   emptyIconWrap: { width: 72, height: 72, borderRadius: Radius.full, alignItems: 'center', justifyContent: 'center', marginBottom: Spacing.four },
   emptyTitle: { fontSize: TextScale.lg, fontWeight: '800', color: colors.text, marginBottom: Spacing.two },
   emptySubtitle: { fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '500', textAlign: 'center', lineHeight: 22, maxWidth: 280 },
+  placeTile: {},
   placeCell: { borderRadius: Radius.md, overflow: 'hidden', backgroundColor: colors.surfaceSoft },
   placeCellImage: { width: '100%', height: '100%' },
   placeCellOverlay: { position: 'absolute', bottom: 4, right: 4, backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: Radius.full },
   placeCellCount: { color: '#fff', fontSize: TextScale.xs, fontWeight: '800' },
+  placeTileLabel: { paddingTop: 4, paddingHorizontal: 2 },
+  placeTileName: { fontSize: TextScale.xs, fontWeight: '700', color: colors.text },
+  placeTileCoords: { fontSize: TextScale.xs, color: colors.textSecondary, marginTop: 1 },
   videoBadge: { position: 'absolute', top: 4, right: 4, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: Radius.full, width: 22, height: 22, alignItems: 'center', justifyContent: 'center' },
   viewerOverlay: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
   viewerTopBar: {

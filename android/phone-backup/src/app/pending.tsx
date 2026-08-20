@@ -7,6 +7,7 @@ import {
   ActivityIndicator,
   StatusBar,
   FlatList,
+  ScrollView,
   Modal,
   Alert,
   RefreshControl,
@@ -380,7 +381,12 @@ export default function PendingBackupScreen() {
       )}
 
       {!hasSnapshot && !scanning ? (
-        <View style={styles.emptyContainer}>
+        <ScrollView
+          contentContainerStyle={styles.emptyScrollContent}
+          refreshControl={
+            <RefreshControl refreshing={scanning} onRefresh={refresh} tintColor={colors.primary} colors={[colors.primary]} />
+          }
+        >
           <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft }]}>
             <AppIcon androidName="cloud_upload" iosName="icloud.and.arrow.up" color={colors.primary} size={36} />
           </View>
@@ -392,14 +398,24 @@ export default function PendingBackupScreen() {
             <AppIcon androidName="refresh" iosName="arrow.clockwise" color={colors.white} size={18} />
             <Text style={styles.emptyCtaText}>Scan Now</Text>
           </AnimatedPressable>
-        </View>
+        </ScrollView>
       ) : scanning && files.length === 0 ? (
-        <View style={styles.centered}>
+        <ScrollView
+          contentContainerStyle={styles.emptyScrollContent}
+          refreshControl={
+            <RefreshControl refreshing={scanning} onRefresh={refresh} tintColor={colors.primary} colors={[colors.primary]} />
+          }
+        >
           <ActivityIndicator size="large" color={colors.primary} />
           <Text style={styles.loadingText}>{scanStatus || 'Scanning folders…'}</Text>
-        </View>
+        </ScrollView>
       ) : files.length === 0 ? (
-        <View style={styles.emptyContainer}>
+        <ScrollView
+          contentContainerStyle={styles.emptyScrollContent}
+          refreshControl={
+            <RefreshControl refreshing={scanning} onRefresh={refresh} tintColor={colors.primary} colors={[colors.primary]} />
+          }
+        >
           <View style={[styles.emptyIconWrap, { backgroundColor: colors.successSoft }]}>
             <AppIcon androidName="check_circle" iosName="checkmark.circle.fill" color={colors.success} size={36} />
           </View>
@@ -410,7 +426,7 @@ export default function PendingBackupScreen() {
           {lastScannedAt ? (
             <Text style={styles.emptyHint}>Last scanned {formatDate(lastScannedAt)}</Text>
           ) : null}
-        </View>
+        </ScrollView>
       ) : (
         <FlatList
           data={files}
@@ -613,10 +629,9 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   },
   toolbarAction: { fontSize: TextScale.sm, fontWeight: '800', color: colors.primary },
   toolbarMeta: { fontSize: TextScale.sm, color: colors.textMuted, fontWeight: '600' },
-  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: Spacing.three },
   loadingText: { fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '600' },
-  emptyContainer: {
-    flex: 1,
+  emptyScrollContent: {
+    flexGrow: 1,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: Spacing.six,

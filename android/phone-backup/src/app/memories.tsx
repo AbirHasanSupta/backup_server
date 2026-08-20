@@ -645,7 +645,11 @@ export default function MemoriesScreen() {
           setActiveDayIdx(null);
           return true;
         }
-        routerRef.current.navigate('/');
+        if (routerRef.current.canGoBack()) {
+          routerRef.current.back();
+        } else {
+          routerRef.current.replace('/');
+        }
         return true;
       };
 
