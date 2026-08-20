@@ -42,6 +42,8 @@ import {
   buildVideoPreviewUrl,
   warmVideoPreviews,
   getTodaysMemories,
+  browseFiles,
+  browseSharedFiles,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
@@ -114,6 +116,8 @@ type TreeNode = {
   totalSize: number;
   fileCount: number;
   filePaths: string[];
+  loaded?: boolean;
+  loading?: boolean;
 };
 
 type FlatRow = { node: TreeNode; depth: number };
@@ -239,6 +243,53 @@ function rollupStats(node: TreeNode): void {
   node.totalSize = node.children.reduce((s, c) => s + c.totalSize, 0);
   node.fileCount = node.children.reduce((s, c) => s + c.fileCount, 0);
   node.filePaths = node.children.flatMap(c => c.filePaths);
+}
+
+function nodeFromBrowseFolder(entry: { name: string; path: string; file_count?: number; total_size?: number }): TreeNode {
+  return {
+    name: entry.name,
+    key: entry.path,
+    isFolder: true,
+    children: [],
+    totalSize: entry.total_size ?? 0,
+    fileCount: entry.file_count ?? 0,
+    filePaths: [],
+    loaded: false,
+  };
+}
+
+function nodeFromBrowseFile(file: RemoteFile): TreeNode {
+  const name = sanitizeRelativePath(file.path).split('/').pop() ?? file.path;
+  return {
+    name,
+    key: file.path,
+    isFolder: false,
+    file,
+    children: [],
+    totalSize: file.size,
+    fileCount: 1,
+    filePaths: [file.path],
+  };
+}
+
+function buildRootFromBrowse(data: { folders: any[]; files: RemoteFile[] }): TreeNode {
+  const children: TreeNode[] = [
+    ...data.folders.map(nodeFromBrowseFolder),
+    ...data.files.map(nodeFromBrowseFile),
+  ];
+  return { name: '__root__', key: '__root__', isFolder: true, children, totalSize: 0, fileCount: 0, filePaths: [], loaded: true };
+}
+
+function replaceNodeChildren(node: TreeNode, targetKey: string, children: TreeNode[]): TreeNode {
+  if (node.key === targetKey) return { ...node, children, loaded: true, loading: false };
+  if (!node.children.length) return node;
+  return { ...node, children: node.children.map(c => replaceNodeChildren(c, targetKey, children)) };
+}
+
+function markNodeLoading(node: TreeNode, targetKey: string, loading: boolean): TreeNode {
+  if (node.key === targetKey) return { ...node, loading };
+  if (!node.children.length) return node;
+  return { ...node, children: node.children.map(c => markNodeLoading(c, targetKey, loading)) };
 }
 
 function buildTree(files: RemoteFile[]): TreeNode {
@@ -2360,41 +2411,27 @@ export default function RestoreScreen() {
     if (fetchingRef.current || isDownloading) return;
     if (!opts?.ignoreOffline && isOffline) return;
     if (sourceMode === 'shared' && !selectedSourceId) {
-      if (!opts?.quiet) {
-        Alert.alert('No Source', 'Please select a shared folder first.');
-      }
+      if (!opts?.quiet) Alert.alert('No Source', 'Please select a shared folder first.');
       return;
     }
     fetchingRef.current = true;
     setIsFetching(true);
     try {
       await loadServerConfig();
-      let serverFiles: RemoteFile[];
-      if (sourceMode === 'shared') {
-        serverFiles = await listSharedFiles(selectedSourceId!);
-      } else {
-        serverFiles = await listServerFiles();
-      }
+      const data = sourceMode === 'shared'
+        ? await browseSharedFiles(selectedSourceId!)
+        : await browseFiles('');
       if (!restoreMountedRef.current) return;
-      setFiles(serverFiles);
 
-      // After a successful fetch, warm a few of the largest video previews in the background.
-      // This reduces the first-open wait time dramatically for big files.
-      const warmCandidates = serverFiles
-        .filter(f => getFileCategory(f.path) === 'video')
-        .sort((a, b) => (b.size ?? 0) - (a.size ?? 0))
-        .slice(0, 6)
-        .map(f => f.path);
-      void warmVideoPreviews(
-        warmCandidates,
-        sourceMode,
-        sourceMode === 'shared' ? selectedSourceId : null,
-      ).catch(() => undefined);
+      const rootFiles: RemoteFile[] = (data.files || []).map((f: any) => ({
+        path: f.path, size: f.size, modified_time: f.modified_time,
+        sha256: f.sha256, uploaded_time: f.uploaded_time,
+      }));
+      setFiles(rootFiles);
+      setTree(buildRootFromBrowse(data));
 
-      const newTree = buildTree(serverFiles);
-      setTree(newTree);
       if (opts?.preserveSelection) {
-        const valid = new Set(serverFiles.map(f => f.path));
+        const valid = new Set(rootFiles.map(f => f.path));
         setSelectedPaths(prev => {
           const next = new Set([...prev].filter(p => valid.has(p)));
           if (next.size === 0) setSelectionMode(false);
@@ -2414,6 +2451,28 @@ export default function RestoreScreen() {
       if (restoreMountedRef.current) setIsFetching(false);
     }
   }, [isOffline, isDownloading, sourceMode, selectedSourceId, loadServerConfig]);
+
+  const handleLoadFullIndex = useCallback(async () => {
+    if (fetchingRef.current || isDownloading) return;
+    if (sourceMode === 'shared' && !selectedSourceId) return;
+    fetchingRef.current = true;
+    setIsFetching(true);
+    try {
+      const serverFiles: RemoteFile[] = sourceMode === 'shared'
+        ? await listSharedFiles(selectedSourceId!)
+        : await listServerFiles();
+      if (!restoreMountedRef.current) return;
+      setFiles(serverFiles);
+      setTree(buildTree(serverFiles));
+    } catch (error: any) {
+      if (restoreMountedRef.current) {
+        Alert.alert('Load Failed', sanitizeErrorMessage(error, 'Could not load the full file index.'));
+      }
+    } finally {
+      fetchingRef.current = false;
+      if (restoreMountedRef.current) setIsFetching(false);
+    }
+  }, [isDownloading, sourceMode, selectedSourceId]);
 
   const onRefreshLibrary = useCallback(async () => {
     if (isDownloading) return;
@@ -2464,14 +2523,60 @@ export default function RestoreScreen() {
     setPreviewFile(null);
   }, []);
 
-  const handleToggleExpand = useCallback((nodeKey: string) => {
+  const handleToggleExpand = useCallback(async (nodeKey: string) => {
+    const isExpanding = !expandedKeys.has(nodeKey);
+    if (!isExpanding) {
+      setExpandedKeys(prev => {
+        const next = new Set(prev);
+        next.delete(nodeKey);
+        return next;
+      });
+      return;
+    }
+
+    let targetNode: TreeNode | null = null;
+    function findNode(nodes: TreeNode[]): TreeNode | null {
+      for (const n of nodes) {
+        if (n.key === nodeKey) return n;
+        const found = findNode(n.children);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (tree) targetNode = findNode(tree.children);
+
+    if (targetNode && !targetNode.loaded && !targetNode.loading) {
+      setTree(prev => prev ? markNodeLoading(prev, nodeKey, true) : prev);
+      try {
+        const data = sourceMode === 'shared'
+          ? await browseSharedFiles(selectedSourceId!, nodeKey)
+          : await browseFiles(nodeKey);
+        const childNodes: TreeNode[] = [
+          ...(data.folders || []).map(nodeFromBrowseFolder),
+          ...(data.files || []).map((f: any) => nodeFromBrowseFile({
+            path: f.path, size: f.size, modified_time: f.modified_time,
+            sha256: f.sha256, uploaded_time: f.uploaded_time,
+          })),
+        ];
+        setTree(prev => prev ? replaceNodeChildren(prev, nodeKey, childNodes) : prev);
+        setFiles(prev => {
+          const existing = new Set(prev.map(f => f.path));
+          const additions = childNodes.filter(n => !n.isFolder && n.file && !existing.has(n.file.path)).map(n => n.file!);
+          return additions.length ? [...prev, ...additions] : prev;
+        });
+      } catch (err: any) {
+        setTree(prev => prev ? markNodeLoading(prev, nodeKey, false) : prev);
+        Alert.alert('Load Failed', sanitizeErrorMessage(err, 'Could not load this folder.'));
+        return;
+      }
+    }
+
     setExpandedKeys(prev => {
       const next = new Set(prev);
-      if (next.has(nodeKey)) next.delete(nodeKey);
-      else next.add(nodeKey);
+      next.add(nodeKey);
       return next;
     });
-  }, []);
+  }, [expandedKeys, tree, sourceMode, selectedSourceId]);
 
   // Selection mode handlers
   const handleEnterSelectionMode = useCallback((node: TreeNode) => {
@@ -2837,7 +2942,7 @@ export default function RestoreScreen() {
           {files.length > 0 && (
             <LibraryFilterBar
               query={searchQuery}
-              onQueryChange={setSearchQuery}
+              onQueryChange={(q) => { setSearchQuery(q); if (q.trim()) handleLoadFullIndex(); }}
               matchCount={filteredFiles.length}
               totalCount={files.length}
               colors={colors}

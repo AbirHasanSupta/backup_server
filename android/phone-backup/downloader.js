@@ -55,19 +55,68 @@ export async function warmVideoPreviews(relativePaths, sourceMode, sourceId) {
   }
 }
 
-/**
- * Fetch the list of backed-up files for this device from the server.
- * @returns {Promise<Array<{path: string, size: number, modified_time: number, sha256: string, uploaded_time: number}>>}
- */
-export async function listServerFiles() {
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) throw new Error(`Request failed (${res.status})`);
+    return await res.json();
+  } catch (err) {
+    clearTimeout(timer);
+    if (err?.name === 'AbortError') throw new Error('Request timed out — server is busy, try again.');
+    throw err;
+  }
+}
+
+export async function listSharedSources() {
   const { ip, port, key, deviceId } = await getConfig();
-  const res = await fetch(
-    `http://${ip}:${port}/files/list?device_id=${encodeURIComponent(deviceId)}`,
+  const data = await fetchJsonWithTimeout(
+    `http://${ip}:${port}/shared/list?device_id=${encodeURIComponent(deviceId)}`,
     { headers: { Authorization: `Bearer ${key}` } },
   );
-  if (!res.ok) throw new Error(`List failed (${res.status})`);
-  return (await res.json()).files;
+  return data.sources ?? [];
 }
+
+export async function listSharedFiles(sourceId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const data = await fetchJsonWithTimeout(
+    `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/files?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+    30000,
+  );
+  if (data.warning) console.warn('[SharedDir]', data.warning);
+  return data.files ?? [];
+}
+
+export async function listServerFiles(prefix = '') {
+  const { ip, port, key, deviceId } = await getConfig();
+  const data = await fetchJsonWithTimeout(
+    `http://${ip}:${port}/files/list?device_id=${encodeURIComponent(deviceId)}${prefix ? `&prefix=${encodeURIComponent(prefix)}` : ''}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+    30000,
+  );
+  return data.files;
+}
+
+export async function browseFiles(prefix = '') {
+  const { ip, port, key, deviceId } = await getConfig();
+  return fetchJsonWithTimeout(
+    `http://${ip}:${port}/files/browse?device_id=${encodeURIComponent(deviceId)}&prefix=${encodeURIComponent(prefix)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+}
+
+export async function browseSharedFiles(sourceId, prefix = '') {
+  const { ip, port, key, deviceId } = await getConfig();
+  return fetchJsonWithTimeout(
+    `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/browse?device_id=${encodeURIComponent(deviceId)}&prefix=${encodeURIComponent(prefix)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+}
+
 
 /**
  * Download a single file from the server.
@@ -119,36 +168,6 @@ export async function getFilePreviewUrl(relativePath) {
 // Shared Directories  (read-only folders configured in the Desktop app)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Return the list of shared sources configured on the server.
- * @returns {Promise<Array<{id: string, label: string}>>}
- */
-export async function listSharedSources() {
-  const { ip, port, key, deviceId } = await getConfig();
-  const res = await fetch(
-    `http://${ip}:${port}/shared/list?device_id=${encodeURIComponent(deviceId)}`,
-    { headers: { Authorization: `Bearer ${key}` } },
-  );
-  if (!res.ok) throw new Error(`Shared list failed (${res.status})`);
-  return (await res.json()).sources ?? [];
-}
-
-/**
- * List all files inside a shared directory source.
- * @param {string} sourceId — the source id from listSharedSources()
- * @returns {Promise<Array<{path: string, size: number, modified_time: number}>>}
- */
-export async function listSharedFiles(sourceId) {
-  const { ip, port, key, deviceId } = await getConfig();
-  const res = await fetch(
-    `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/files?device_id=${encodeURIComponent(deviceId)}`,
-    { headers: { Authorization: `Bearer ${key}` } },
-  );
-  if (!res.ok) throw new Error(`Shared files failed (${res.status})`);
-  const data = await res.json();
-  if (data.warning) console.warn('[SharedDir]', data.warning);
-  return data.files ?? [];
-}
 
 /**
  * Download a file from a shared directory.

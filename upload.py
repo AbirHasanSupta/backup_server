@@ -35,7 +35,7 @@ from database import (
     touch_device,
     upsert_device,
     ensure_device_token,
-    verify_device_token,
+    verify_device_token, get_files_browse,
 )
 from state import add_log, get_current_activity, pending_connections, set_current_activity
 from storage import file_exists, save_fileobj, save_upload_stream, full_path_for
@@ -500,12 +500,64 @@ async def upload_file(
 # ──────────────────────────────────────────────────────────────────────────────
 
 @router.get("/files/list")
-async def list_files(device_id: str, authorization: str = Header(None), token: str = None):
-    # Accept auth either via Authorization header or ?token= query param
+async def list_files(device_id: str, prefix: str = "", authorization: str = Header(None), token: str = None):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    files = await asyncio.to_thread(get_files_for_device, device_id)
+    files = await asyncio.to_thread(get_files_for_device, device_id, prefix)
     return {"files": files}
+
+
+@router.get("/files/browse")
+async def browse_files(device_id: str, prefix: str = "", authorization: str = Header(None), token: str = None):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    norm_prefix = prefix.strip("/")
+    norm_prefix = f"{norm_prefix}/" if norm_prefix else ""
+    folders, files = await asyncio.to_thread(get_files_browse, device_id, norm_prefix)
+    return {"folders": folders, "files": files}
+
+
+@router.get("/shared/{source_id}/browse")
+async def browse_shared_files(
+        source_id: str,
+        prefix: str = "",
+        device_id: str | None = None,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    entry = _find_shared_dir(source_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Shared source not found")
+    if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
+        raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
+
+    root = os.path.abspath(entry["path"])
+    norm_prefix = prefix.strip("/").replace("\\", "/")
+    target_dir = os.path.join(root, norm_prefix) if norm_prefix else root
+    target_dir = os.path.abspath(target_dir)
+    if os.path.commonpath([root, target_dir]) != root:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not os.path.isdir(target_dir):
+        return {"folders": [], "files": []}
+
+    def _scan():
+        folders = []
+        files = []
+        for e in os.scandir(target_dir):
+            try:
+                rel = f"{norm_prefix}/{e.name}" if norm_prefix else e.name
+                if e.is_dir(follow_symlinks=False):
+                    folders.append({"name": e.name, "path": rel})
+                else:
+                    stat = e.stat()
+                    files.append({"path": rel, "size": stat.st_size, "modified_time": int(stat.st_mtime)})
+            except OSError:
+                continue
+        return folders, files
+
+    folders, files = await asyncio.to_thread(_scan)
+    return {"folders": folders, "files": files}
 
 
 _MIME_MAP = {

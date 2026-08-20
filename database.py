@@ -821,15 +821,54 @@ def verify_device_token(device_id: str, token: str) -> bool:
     return row is not None
 
 
-def get_files_for_device(device_id: str) -> list[dict]:
+def get_files_for_device(device_id: str, prefix: str = "") -> list[dict]:
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT path, size, modified_time, sha256, uploaded_time "
-        "FROM files WHERE device_id = ? ORDER BY path",
-        (device_id,),
-    ).fetchall()
+    if prefix:
+        rows = conn.execute(
+            "SELECT path, size, modified_time, sha256, uploaded_time FROM files WHERE device_id = ? AND path LIKE ? ORDER BY path",
+            (device_id, f"{prefix}%"),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT path, size, modified_time, sha256, uploaded_time FROM files WHERE device_id = ? ORDER BY path",
+            (device_id,),
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_files_browse(device_id: str, prefix: str) -> tuple[list[dict], list[dict]]:
+    conn = get_conn()
+    like_pattern = f"{prefix}%" if prefix else "%"
+    rows = conn.execute(
+        "SELECT path, size, modified_time, sha256, uploaded_time FROM files WHERE device_id = ? AND path LIKE ? ORDER BY path",
+        (device_id, like_pattern),
+    ).fetchall()
+    conn.close()
+
+    prefix_len = len(prefix)
+    folders: dict[str, dict] = {}
+    files: list[dict] = []
+    for r in rows:
+        path = r["path"]
+        if prefix and not path.startswith(prefix):
+            continue
+        rest = path[prefix_len:]
+        if not rest:
+            continue
+        slash_idx = rest.find("/")
+        if slash_idx == -1:
+            files.append(dict(r))
+        else:
+            folder_name = rest[:slash_idx]
+            entry = folders.setdefault(
+                folder_name,
+                {"name": folder_name, "path": prefix + folder_name, "file_count": 0, "total_size": 0},
+            )
+            entry["file_count"] += 1
+            entry["total_size"] += r["size"] or 0
+
+    return list(folders.values()), files
 
 
 def get_device_folder_name(device_id: str) -> str | None:

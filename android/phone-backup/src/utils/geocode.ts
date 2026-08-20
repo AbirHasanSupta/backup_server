@@ -12,15 +12,17 @@ function roundKey(lat: number, lon: number): string {
 
 function pickLabel(address: Record<string, string> | undefined, displayName: string | undefined): string | null {
   if (address) {
-    const locality = address.city || address.town || address.village || address.municipality || address.suburb || address.county;
+    const area = address.neighbourhood || address.suburb || address.quarter || address.residential || address.hamlet || address.village;
+    const district = address.city_district || address.town || address.city || address.county || address.state_district;
+    if (area && district && area !== district) return `${area}, ${district}`;
+    if (area) return area;
+    if (district) return district;
     const region = address.state || address.country;
-    if (locality && region && locality !== region) return `${locality}, ${region}`;
-    if (locality) return locality;
     if (region) return region;
   }
   if (displayName) {
     const parts = displayName.split(',').map(p => p.trim()).filter(Boolean);
-    if (parts.length >= 2) return `${parts[0]}, ${parts[parts.length - 1]}`;
+    if (parts.length >= 2) return `${parts[0]}, ${parts[1]}`;
     if (parts.length === 1) return parts[0];
   }
   return null;
@@ -34,7 +36,7 @@ async function throttle(): Promise<void> {
 
 async function fetchPlaceName(lat: number, lon: number): Promise<string | null> {
   await throttle();
-  const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=10&addressdetails=1`;
+  const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=16&addressdetails=1`;
   const res = await fetch(url, { headers: { 'User-Agent': 'PhoneBackupApp/1.0', 'Accept-Language': 'en' } });
   if (!res.ok) return null;
   const data = await res.json();
