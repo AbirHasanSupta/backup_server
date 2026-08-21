@@ -26,7 +26,7 @@ A self-hosted, high-performance photo, video, and file backup & restore ecosyste
 - **On This Day — Memories**: Story-style full-screen viewer for photos and videos from past years on today's date and recent days, with tap-to-advance, hold-to-pause, and save-to-device support.
 - **Surprise Flashbacks & Monthly Rewind Reels**: Automated video recap montages with background music and surprise flashback photo cards.
 - **Interactive Media Experiences**:
-  - 🏆 **Backup Goals & Streaks**: Daily backup streak tracking with evening reminders if a sync is at risk.
+  - 🏆 **Backup Streaks**: Daily backup streak tracking with evening reminders if a sync is at risk.
   - 🗺️ **Places**: Geotagged photo map and location clusters.
   - 🎲 **Photo Roulette**: Random memory wheel spinner.
   - 🧠 **Memory Trivia Quiz**: Interactive guessing game testing memory dates and locations.
@@ -62,10 +62,10 @@ A self-hosted, high-performance photo, video, and file backup & restore ecosyste
     │   ├── history.tsx       Sync history session logger
     │   ├── settings.tsx      Server connection, sync schedule & preference settings
     │   ├── memories.tsx      Full-screen story viewer & "On This Day" recap
-    │   ├── goals.tsx         Backup streak tracker & milestone goals
     │   ├── places.tsx        Geotagged photo location clustering
     │   ├── quiz.tsx          Photo trivia guessing game
     │   ├── roulette.tsx      Photo roulette random memory spinner
+    │   ├── pending.tsx       New / pending files viewer and selective uploader
     │   └── wrapped.tsx       Backup Wrapped summary recap
     ├── src/components/       Reusable UI components (FolderCard, ServerDiscoverySheet, SyncProgressRing, ...)
     ├── uploader.js            Differential sync orchestrator & chunked upload handler
@@ -75,7 +75,6 @@ A self-hosted, high-performance photo, video, and file backup & restore ecosyste
     ├── backgroundTask.js      Foreground service auto-sync engine & WakeLock execution
     ├── notificationService.js Android persistent & interactive notification manager
     ├── streak.js              Daily backup streak calculation and risk monitoring
-    ├── goals.js               Backup goals storage & milestone evaluation
     ├── widget.js              Home screen widget synchronization helper
     ├── serverDiscovery.js     Subnet LAN scanner for automatic server discovery
     ├── connectToServer.js     Device pairing & token negotiation logic

@@ -21,8 +21,6 @@ const FLASHBACK_CHANNEL_ID = 'flashback';
 const FLASHBACK_NOTIFICATION_ID = 'memories-flashback';
 const STREAK_CHANNEL_ID = 'streak';
 const STREAK_NOTIFICATION_ID = 'streak-risk';
-const GOAL_CHANNEL_ID = 'backup-goals';
-const GOAL_NOTIFICATION_ID = 'backup-goal-complete';
 const RECAP_CHANNEL_ID = 'recap';
 const RECAP_NOTIFICATION_ID = 'monthly-recap-ready';
 const APP_PRIMARY_COLOR = '#2563EB';
@@ -104,12 +102,6 @@ export async function setupNotifications() {
       });
       await N.setNotificationChannelAsync(STREAK_CHANNEL_ID, {
         name: 'Streak',
-        importance: N.AndroidImportance.DEFAULT,
-        lightColor: APP_PRIMARY_COLOR,
-        showBadge: false,
-      });
-      await N.setNotificationChannelAsync(GOAL_CHANNEL_ID, {
-        name: 'Backup Goals',
         importance: N.AndroidImportance.DEFAULT,
         lightColor: APP_PRIMARY_COLOR,
         showBadge: false,
@@ -256,10 +248,6 @@ function streakNotificationTrigger() {
   return Platform.OS === 'android' ? { channelId: STREAK_CHANNEL_ID } : null;
 }
 
-function goalNotificationTrigger() {
-  return Platform.OS === 'android' ? { channelId: GOAL_CHANNEL_ID } : null;
-}
-
 function recapNotificationTrigger() {
   return Platform.OS === 'android' ? { channelId: RECAP_CHANNEL_ID } : null;
 }
@@ -328,23 +316,6 @@ export async function showStreakRiskNotification(streak) {
     });
   } catch (e) {
     console.warn('[Notifications] showStreakRiskNotification failed:', e?.message);
-  }
-}
-
-export async function showGoalCompleteNotification(goal) {
-  if (!N) return;
-  try {
-    await N.scheduleNotificationAsync({
-      identifier: `${GOAL_NOTIFICATION_ID}-${goal.id}`,
-      content: {
-        title: '🎯 Backup goal complete',
-        body: `All your ${goal.year} photos and videos are backed up.`,
-        data: { type: 'goal_complete', goalId: goal.id },
-      },
-      trigger: goalNotificationTrigger(),
-    });
-  } catch (e) {
-    console.warn('[Notifications] showGoalCompleteNotification failed:', e?.message);
   }
 }
 

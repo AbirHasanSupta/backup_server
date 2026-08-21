@@ -58,17 +58,6 @@ function getFileCategory(name: string): 'image' | 'video' | 'other' {
   return 'other';
 }
 
-function formatSize(bytes: number): string {
-  if (!bytes) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
-}
 
 function formatDate(ts: number): string {
   if (!ts) return 'Unknown date';
@@ -375,7 +364,7 @@ export default function PendingBackupScreen() {
             <Text style={styles.toolbarAction}>{allSelected ? 'Clear' : 'Select all'}</Text>
           </TouchableOpacity>
           <Text style={styles.toolbarMeta}>
-            {selected.size > 0 ? `${selected.size} selected` : formatSize(files.reduce((sum, f) => sum + (f.size || 0), 0))}
+            {selected.size > 0 ? `${selected.size} selected` : `${files.length} pending`}
           </Text>
         </View>
       )}
@@ -431,7 +420,7 @@ export default function PendingBackupScreen() {
         <FlatList
           data={files}
           keyExtractor={(item) => fileKey(item)}
-          contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + (selected.size > 0 ? 96 : Spacing.six) }]}
+          contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + 96 }]}
           refreshControl={
             <RefreshControl
               refreshing={scanning}
@@ -455,7 +444,7 @@ export default function PendingBackupScreen() {
                   <TouchableOpacity style={styles.rowBody} onPress={() => toggleSelect(item)}>
                     <Text style={styles.fileName} numberOfLines={1}>{getDisplayName(item)}</Text>
                     <Text style={styles.fileMeta} numberOfLines={1}>
-                      {getFolderLabel(item.relativePath)} · {formatSize(item.size)} · {formatDate(item.modifiedTime)}
+                      {getFolderLabel(item.relativePath)}
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -534,7 +523,7 @@ export default function PendingBackupScreen() {
                 </TouchableOpacity>
                 <View style={styles.previewMeta}>
                   <Text style={styles.previewName} numberOfLines={1}>{getDisplayName(previewFile)}</Text>
-                  <Text style={styles.previewDetails}>{formatSize(previewFile.size)} · {formatDate(previewFile.modifiedTime)}</Text>
+                  <Text style={styles.previewDetails}>{getFolderLabel(previewFile.relativePath)}</Text>
                 </View>
                 <TouchableOpacity onPress={() => navigatePreview(1)} disabled={!previewableFiles.length}>
                   <AppIcon androidName="chevron_right" iosName="chevron.right" color="#fff" size={28} />

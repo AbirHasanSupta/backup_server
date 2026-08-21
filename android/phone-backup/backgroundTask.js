@@ -42,7 +42,6 @@ import {
   getLastStreakRiskNotifiedDate,
   setLastStreakRiskNotifiedDate,
 } from './streak';
-import { computeAllGoalsProgress, invalidateGoalsFileCache } from './goals';
 import { setPendingBackupFromSync } from './pendingBackup';
 import { triggerWidgetRefresh } from './widget';
 
@@ -1071,8 +1070,6 @@ export async function runSync(onProgress, runOptions = {}) {
     }
 
     if (outcome === 'completed' && !result.stopped && !wasForceStopped) {
-      invalidateGoalsFileCache();
-      computeAllGoalsProgress(() => false).catch(() => {});
       triggerWidgetRefresh().catch(() => {});
     }
 
