@@ -44,6 +44,8 @@ import {
   browseSharedFiles,
   searchFiles,
   searchSharedFiles,
+  listServerFiles,
+  listSharedFiles,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
@@ -219,32 +221,6 @@ function sanitizeRelativePath(raw: string): string {
 // Tree construction & helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-function insertFileIntoTree(node: TreeNode, segments: string[], file: RemoteFile, depth: number): void {
-  if (depth === segments.length - 1) {
-    node.children.push({
-      name: segments[depth], key: file.path, isFolder: false,
-      file, children: [], totalSize: file.size, fileCount: 1, filePaths: [file.path],
-    });
-    return;
-  }
-  const segName = segments[depth];
-  const folderKey = segments.slice(0, depth + 1).join('/');
-  let child = node.children.find(c => c.isFolder && c.name === segName);
-  if (!child) {
-    child = { name: segName, key: folderKey, isFolder: true, children: [], totalSize: 0, fileCount: 0, filePaths: [] };
-    node.children.push(child);
-  }
-  insertFileIntoTree(child, segments, file, depth + 1);
-}
-
-function rollupStats(node: TreeNode): void {
-  if (!node.isFolder) return;
-  for (const child of node.children) rollupStats(child);
-  node.totalSize = node.children.reduce((s, c) => s + c.totalSize, 0);
-  node.fileCount = node.children.reduce((s, c) => s + c.fileCount, 0);
-  node.filePaths = node.children.flatMap(c => c.filePaths);
-}
-
 function nodeFromBrowseFolder(entry: { name: string; path: string; file_count?: number; total_size?: number }): TreeNode {
   return {
     name: entry.name,
@@ -292,36 +268,53 @@ function markNodeLoading(node: TreeNode, targetKey: string, loading: boolean): T
   return { ...node, children: node.children.map(c => markNodeLoading(c, targetKey, loading)) };
 }
 
-function buildTree(files: RemoteFile[]): TreeNode {
-  const root: TreeNode = { name: '__root__', key: '__root__', isFolder: true, children: [], totalSize: 0, fileCount: 0, filePaths: [] };
-  for (const file of files) {
-    const displayPath = sanitizeRelativePath(file.path);
-    const segments = displayPath.split('/').filter(Boolean);
-    if (segments.length === 0) continue;
-    if (segments.length === 1) {
-      root.children.push({ name: segments[0], key: file.path, isFolder: false, file, children: [], totalSize: file.size, fileCount: 1, filePaths: [file.path] });
-    } else {
-      insertFileIntoTree(root, segments, file, 0);
-    }
+function collectSubtreePaths(node: TreeNode): string[] {
+  if (!node.isFolder) {
+    return node.file ? [node.file.path] : [node.key];
   }
-  rollupStats(root);
-  return root;
+  const result: string[] = [];
+  for (const child of node.children) {
+    result.push(...collectSubtreePaths(child));
+  }
+  return result;
 }
 
-function collectFilePaths(node: TreeNode): string[] {
-  return node.filePaths;
+function collectSubtreeFiles(node: TreeNode): RemoteFile[] {
+  if (!node.isFolder) {
+    return node.file ? [node.file] : [];
+  }
+  const result: RemoteFile[] = [];
+  for (const child of node.children) {
+    result.push(...collectSubtreeFiles(child));
+  }
+  return result;
+}
+
+function isSubtreeFullyLoaded(node: TreeNode): boolean {
+  if (!node.isFolder) return true;
+  if (!node.loaded) return false;
+  return node.children.every(isSubtreeFullyLoaded);
 }
 
 function folderSelectionState(node: TreeNode, selectedPaths: Set<string>): 'none' | 'partial' | 'all' {
-  const paths = node.filePaths;
-  if (paths.length === 0) return 'none';
   if (selectedPaths.size === 0) return 'none';
-  let selected = 0;
-  for (const p of paths) {
-    if (selectedPaths.has(p)) selected++;
+  const loadedPaths = collectSubtreePaths(node);
+  if (loadedPaths.length > 0) {
+    let selected = 0;
+    for (const p of loadedPaths) {
+      if (selectedPaths.has(p)) selected++;
+    }
+    if (selected === 0) return 'none';
+    if (selected === loadedPaths.length && (node.fileCount <= 0 || selected >= node.fileCount)) return 'all';
+    return 'partial';
   }
-  if (selected === 0) return 'none';
-  if (selected === paths.length) return 'all';
+  const prefix = node.key.endsWith('/') ? node.key : `${node.key}/`;
+  let matching = 0;
+  for (const p of selectedPaths) {
+    if (p.startsWith(prefix) || p === node.key) matching++;
+  }
+  if (matching === 0) return 'none';
+  if ((node.fileCount > 0 && matching >= node.fileCount) || (node.fileCount <= 0 && matching > 0)) return 'all';
   return 'partial';
 }
 
@@ -1950,6 +1943,7 @@ type TreeNodeViewProps = {
   isExpanded: boolean;
   selectedPaths: Set<string>;
   selectionMode: boolean;
+  isLoadingSelection?: boolean;
   onToggleNode: (node: TreeNode) => void;
   onToggleExpand: (nodeKey: string) => void;
   onPreview: (file: RemoteFile) => void;
@@ -1960,7 +1954,7 @@ type TreeNodeViewProps = {
 };
 
 const TreeNodeView = React.memo(function TreeNodeView({
-  node, depth, isExpanded, selectedPaths, selectionMode, onToggleNode, onToggleExpand, onPreview, onWarmPreview, onEnterSelectionMode, styles, colors,
+  node, depth, isExpanded, selectedPaths, selectionMode, isLoadingSelection, onToggleNode, onToggleExpand, onPreview, onWarmPreview, onEnterSelectionMode, styles, colors,
 }: TreeNodeViewProps) {
   const indent = depth * 16;
 
@@ -2069,17 +2063,41 @@ const TreeNodeView = React.memo(function TreeNodeView({
         }}
         hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
       >
-        {isAllSelected && <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />}
-        {isPartial && <View style={styles.partialDot} />}
+        {isLoadingSelection ? (
+          <ActivityIndicator size="small" color={isAllSelected ? colors.white : colors.primary} />
+        ) : (
+          <>
+            {isAllSelected && <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={13} />}
+            {isPartial && <View style={styles.partialDot} />}
+          </>
+        )}
       </TouchableOpacity>
-      <TouchableOpacity style={styles.folderLabelBtn} onPress={() => onToggleExpand(node.key)} activeOpacity={0.7}>
+      <TouchableOpacity
+        style={styles.folderLabelBtn}
+        onPress={() => onToggleExpand(node.key)}
+        onLongPress={() => {
+          if (selectionMode) {
+            onToggleNode(node);
+          } else {
+            onEnterSelectionMode(node);
+          }
+        }}
+        delayLongPress={400}
+        activeOpacity={0.7}
+      >
         <AppIcon androidName="folder" iosName="folder.fill" color={colors.primary} size={18} />
         <Text style={styles.folderName} numberOfLines={1}>{node.name}</Text>
       </TouchableOpacity>
-      <View style={styles.folderBadge}>
-        <Text style={styles.folderBadgeText}>{node.fileCount} {node.fileCount === 1 ? 'file' : 'files'}</Text>
-        <Text style={styles.folderBadgeSize}>{formatSize(node.totalSize)}</Text>
-      </View>
+      {node.fileCount > 0 ? (
+        <View style={styles.folderBadge}>
+          <Text style={styles.folderBadgeText}>{node.fileCount} {node.fileCount === 1 ? 'file' : 'files'}</Text>
+          <Text style={styles.folderBadgeSize}>{formatSize(node.totalSize)}</Text>
+        </View>
+      ) : node.loaded && node.children.length === 0 ? (
+        <View style={styles.folderBadge}>
+          <Text style={styles.folderBadgeText}>Empty</Text>
+        </View>
+      ) : null}
     </View>
   );
 });
@@ -2192,11 +2210,11 @@ export default function RestoreScreen() {
 
   const headerHeight = Spacing.five + 88 + 130;
   const {
+    containerPaddingTop,
     onScroll: onListScroll,
     onScrollEndDrag: onListScrollEndDrag,
     onMomentumScrollEnd: onListMomentumScrollEnd,
     headerAnimatedStyle,
-    contentInsetStyle,
     onHeaderLayout,
     expandHeader,
   } = useCollapsibleHeader({
@@ -2375,7 +2393,7 @@ export default function RestoreScreen() {
   const filteredFiles = useMemo(() => {
     if (!isFiltering) return files;
     return [...searchResults].sort((a, b) => compareRemoteFiles(a, b, sortField, sortDir));
-  }, [isFiltering, searchResults, sortField, sortDir]);
+  }, [isFiltering, searchResults, sortField, sortDir, files]);
 
   const runSearch = useCallback((query: string) => {
     const trimmed = query.trim();
@@ -2596,37 +2614,109 @@ export default function RestoreScreen() {
     });
   }, [expandedKeys, tree, sourceMode, selectedSourceId]);
 
+  // Loading state for folder selection fetching
+  const [loadingNodeKeys, setLoadingNodeKeys] = useState<Set<string>>(new Set());
+
+  const getOrFetchNodeFiles = useCallback(async (node: TreeNode): Promise<{ files: RemoteFile[]; paths: string[] }> => {
+    if (!node.isFolder) {
+      const f = node.file ?? { path: node.key, size: node.totalSize, modified_time: 0 };
+      return { files: [f], paths: [node.key] };
+    }
+
+    if (isSubtreeFullyLoaded(node)) {
+      const subtreeFiles = collectSubtreeFiles(node);
+      const subtreePaths = collectSubtreePaths(node);
+      if (subtreePaths.length > 0) {
+        return { files: subtreeFiles, paths: subtreePaths };
+      }
+    }
+
+    // Fetch all descendant files under this folder prefix from server
+    try {
+      let fetched: RemoteFile[] = [];
+      if (sourceModeRef.current === 'shared' && selectedSourceId) {
+        fetched = await listSharedFiles(selectedSourceId, node.key);
+      } else {
+        fetched = await listServerFiles(node.key);
+      }
+      if (fetched.length > 0) {
+        setFiles(prev => {
+          const existing = new Set(prev.map(f => f.path));
+          const toAdd = fetched.filter(f => !existing.has(f.path));
+          return toAdd.length ? [...prev, ...toAdd] : prev;
+        });
+        return { files: fetched, paths: fetched.map(f => f.path) };
+      }
+    } catch (e) {
+      console.warn('Failed to fetch folder files for selection:', e);
+    }
+
+    const subtreeFiles = collectSubtreeFiles(node);
+    const subtreePaths = collectSubtreePaths(node);
+    return { files: subtreeFiles, paths: subtreePaths };
+  }, [selectedSourceId]);
+
   // Selection mode handlers
-  const handleEnterSelectionMode = useCallback((node: TreeNode) => {
+  const handleEnterSelectionMode = useCallback(async (node: TreeNode) => {
     hapticLongPress();
     setSelectionMode(true);
-    const paths = collectFilePaths(node);
-    setSelectedPaths(prev => {
-      const next = new Set(prev);
-      const allSelected = paths.every(p => next.has(p));
-      if (allSelected) paths.forEach(p => next.delete(p));
-      else paths.forEach(p => next.add(p));
-      return next;
-    });
-  }, []);
 
-  const handleToggleNode = useCallback((node: TreeNode) => {
+    if (node.isFolder && !isSubtreeFullyLoaded(node)) {
+      setLoadingNodeKeys(prev => new Set(prev).add(node.key));
+    }
+
+    try {
+      const { paths } = await getOrFetchNodeFiles(node);
+      if (paths.length === 0) return;
+
+      setSelectedPaths(prev => {
+        const next = new Set(prev);
+        const allSelected = paths.every(p => next.has(p));
+        if (allSelected) paths.forEach(p => next.delete(p));
+        else paths.forEach(p => next.add(p));
+        return next;
+      });
+    } finally {
+      setLoadingNodeKeys(prev => {
+        const next = new Set(prev);
+        next.delete(node.key);
+        return next;
+      });
+    }
+  }, [getOrFetchNodeFiles]);
+
+  const handleToggleNode = useCallback(async (node: TreeNode) => {
     hapticSelection();
-    const paths = collectFilePaths(node);
-    setSelectedPaths(prev => {
-      const next = new Set(prev);
-      const allSelected = paths.every(p => next.has(p));
-      if (allSelected) paths.forEach(p => next.delete(p));
-      else paths.forEach(p => next.add(p));
-      if (next.size === 0) setSelectionMode(false);
-      return next;
-    });
-  }, []);
 
-  const selectAll = () => {
-    const target = isFiltering ? filteredFiles : files;
-    if (target.length === 0) return;
+    if (node.isFolder && !isSubtreeFullyLoaded(node)) {
+      setLoadingNodeKeys(prev => new Set(prev).add(node.key));
+    }
+
+    try {
+      const { paths } = await getOrFetchNodeFiles(node);
+      if (paths.length === 0) return;
+
+      setSelectedPaths(prev => {
+        const next = new Set(prev);
+        const allSelected = paths.every(p => next.has(p));
+        if (allSelected) paths.forEach(p => next.delete(p));
+        else paths.forEach(p => next.add(p));
+        if (next.size === 0) setSelectionMode(false);
+        return next;
+      });
+    } finally {
+      setLoadingNodeKeys(prev => {
+        const next = new Set(prev);
+        next.delete(node.key);
+        return next;
+      });
+    }
+  }, [getOrFetchNodeFiles]);
+
+  const selectAll = useCallback(async () => {
     if (isFiltering) {
+      const target = filteredFiles;
+      if (target.length === 0) return;
       const allVisibleSelected = target.every(f => selectedPaths.has(f.path));
       setSelectedPaths(prev => {
         const next = new Set(prev);
@@ -2641,15 +2731,40 @@ export default function RestoreScreen() {
       });
       return;
     }
-    const allVisibleSelected = target.every(f => selectedPaths.has(f.path));
-    if (allVisibleSelected) {
-      setSelectedPaths(new Set());
-      setSelectionMode(false);
-    } else {
-      setSelectionMode(true);
-      setSelectedPaths(new Set(target.map(f => f.path)));
+
+    try {
+      let allFiles = files;
+      if (sourceModeRef.current === 'shared' && selectedSourceId) {
+        allFiles = await listSharedFiles(selectedSourceId);
+      } else {
+        allFiles = await listServerFiles('');
+      }
+      if (allFiles.length > 0) {
+        setFiles(allFiles);
+      }
+      const target = allFiles.length > 0 ? allFiles : files;
+      if (target.length === 0) return;
+
+      const allSelected = target.every(f => selectedPaths.has(f.path));
+      if (allSelected) {
+        setSelectedPaths(new Set());
+        setSelectionMode(false);
+      } else {
+        setSelectedPaths(new Set(target.map(f => f.path)));
+        setSelectionMode(true);
+      }
+    } catch {
+      if (files.length === 0) return;
+      const allSelected = files.every(f => selectedPaths.has(f.path));
+      if (allSelected) {
+        setSelectedPaths(new Set());
+        setSelectionMode(false);
+      } else {
+        setSelectedPaths(new Set(files.map(f => f.path)));
+        setSelectionMode(true);
+      }
     }
-  };
+  }, [isFiltering, filteredFiles, selectedPaths, files, selectedSourceId]);
 
   // Download files
   const handleDownloadFiles = useCallback(async (pathSet: Set<string>) => {
@@ -2696,15 +2811,8 @@ export default function RestoreScreen() {
         if (!downloadActiveRef.current) return;
 
         const fileInfo = files.find(f => f.path === path);
-        if (!fileInfo) {
-          completed++;
-          failed++;
-          publishProgress(completed, path.split(/[/\\]/).pop() ?? path, 0, 0);
-          continue;
-        }
-
         const displayName = path.split(/[/\\]/).pop() ?? path;
-        const knownSize = fileInfo.size || 0;
+        const knownSize = fileInfo?.size || 0;
         publishProgress(completed, displayName, 0, knownSize);
 
         try {
@@ -2766,7 +2874,7 @@ export default function RestoreScreen() {
           if (!folderInfo.exists) await FileSystem.makeDirectoryAsync(folderUri, { intermediates: true });
 
           const existingInfo = await FileSystem.getInfoAsync(destUri);
-          if (existingInfo.exists && (existingInfo as any).size === fileInfo.size) {
+          if (existingInfo.exists && fileInfo?.size && (existingInfo as any).size === fileInfo.size) {
             skipped++;
             completed++;
             publishProgress(completed, displayName, 0, 0);
@@ -2935,7 +3043,7 @@ export default function RestoreScreen() {
                 <Text style={[styles.actionBtnText, { color: isOffline ? colors.textMuted : colors.primary }]}>
                   {isFiltering
                     ? (filteredFiles.length > 0 && filteredFiles.every(f => selectedPaths.has(f.path)) ? 'Deselect' : 'Select visible')
-                    : (selectedPaths.size === files.length ? 'Deselect All' : 'Select All')}
+                    : (files.length > 0 && files.every(f => selectedPaths.has(f.path)) ? 'Deselect All' : 'Select All')}
                 </Text>
               </AnimatedPressable>
             )}
@@ -2966,36 +3074,35 @@ export default function RestoreScreen() {
               colors={colors}
             />
           )}
+          {/* Hint Bar */}
+          {files.length > 0 && selectedPaths.size === 0 && !selectionMode && !isDownloading && (
+            <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
+              <AppIcon androidName="touch_app" iosName="hand.tap" color={colors.textMuted} size={13} />
+              <Text style={[styles.hintText, { color: colors.textMuted }]}>
+                Tap to preview · long press to select
+              </Text>
+            </View>
+          )}
+
+          {/* Selection Info Bar */}
+          {selectedPaths.size > 0 && !isDownloading && (
+            <View style={[styles.selectionBar, { borderColor: colors.surfaceBorder }]}>
+              <AppIcon androidName="check_circle" iosName="checkmark.circle" color={colors.primary} size={16} />
+              <Text style={[styles.selectionBarText, { color: colors.primary }]}>
+                {selectedPaths.size} {selectedPaths.size === 1 ? 'file' : 'files'} selected
+              </Text>
+              <TouchableOpacity
+                onPress={() => { setSelectedPaths(new Set()); setSelectionMode(false); }}
+                style={styles.clearSelBtn}
+              >
+                <Text style={[styles.clearSelText, { color: colors.textSecondary }]}>Clear</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </ReAnimated.View>
       )}
 
-      <ReAnimated.View style={isDownloading ? { flex: 1 } : contentInsetStyle}>
-      {/* Hint Bar */}
-      {files.length > 0 && selectedPaths.size === 0 && !selectionMode && !isDownloading && (
-        <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
-          <AppIcon androidName="touch_app" iosName="hand.tap" color={colors.textMuted} size={13} />
-          <Text style={[styles.hintText, { color: colors.textMuted }]}>
-            Tap to preview · long press to select
-          </Text>
-        </View>
-      )}
-
-      {/* Selection Info Bar */}
-      {selectedPaths.size > 0 && !isDownloading && (
-        <View style={[styles.selectionBar, { borderColor: colors.surfaceBorder }]}>
-          <AppIcon androidName="check_circle" iosName="checkmark.circle" color={colors.primary} size={16} />
-          <Text style={[styles.selectionBarText, { color: colors.primary }]}>
-            {selectedPaths.size} {selectedPaths.size === 1 ? 'file' : 'files'} selected
-          </Text>
-          <TouchableOpacity
-            onPress={() => { setSelectedPaths(new Set()); setSelectionMode(false); }}
-            style={styles.clearSelBtn}
-          >
-            <Text style={[styles.clearSelText, { color: colors.textSecondary }]}>Clear</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
+      <View style={{ flex: 1 }}>
       {/* File Tree List */}
       <FlatList
         style={{ flex: 1 }}
@@ -3007,6 +3114,7 @@ export default function RestoreScreen() {
             isExpanded={expandedKeys.has(item.node.key)}
             selectedPaths={selectedPaths}
             selectionMode={selectionMode}
+            isLoadingSelection={loadingNodeKeys.has(item.node.key)}
             onToggleNode={handleToggleNode}
             onEnterSelectionMode={handleEnterSelectionMode}
             onToggleExpand={handleToggleExpand}
@@ -3015,7 +3123,13 @@ export default function RestoreScreen() {
             styles={styles} colors={colors}
           />
         )}
-        contentContainerStyle={[styles.listContent, { paddingBottom: BottomTabInset + Spacing.eight }]}
+        contentContainerStyle={[
+          styles.listContent,
+          {
+            paddingTop: isDownloading ? Spacing.two : containerPaddingTop + Spacing.two,
+            paddingBottom: BottomTabInset + Spacing.eight,
+          },
+        ]}
         showsVerticalScrollIndicator={false}
         onScroll={isDownloading ? undefined : onListScroll}
         onScrollEndDrag={isDownloading ? undefined : onListScrollEndDrag}
@@ -3063,7 +3177,7 @@ export default function RestoreScreen() {
           ) : null
         }
       />
-      </ReAnimated.View>
+      </View>
 
       {/* Download FAB */}
       {selectedPaths.size > 0 && !isDownloading && (

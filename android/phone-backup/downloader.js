@@ -80,10 +80,11 @@ export async function listSharedSources() {
   return data.sources ?? [];
 }
 
-export async function listSharedFiles(sourceId) {
+export async function listSharedFiles(sourceId, prefix = '') {
   const { ip, port, key, deviceId } = await getConfig();
+  const query = prefix ? `&prefix=${encodeURIComponent(prefix)}` : '';
   const data = await fetchJsonWithTimeout(
-    `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/files?device_id=${encodeURIComponent(deviceId)}`,
+    `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/files?device_id=${encodeURIComponent(deviceId)}${query}`,
     { headers: { Authorization: `Bearer ${key}` } },
     30000,
   );
@@ -98,7 +99,7 @@ export async function listServerFiles(prefix = '') {
     { headers: { Authorization: `Bearer ${key}` } },
     30000,
   );
-  return data.files;
+  return data.files ?? [];
 }
 
 export async function searchFiles(query) {

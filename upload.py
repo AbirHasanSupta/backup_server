@@ -603,7 +603,20 @@ async def browse_shared_files(
             try:
                 rel = f"{norm_prefix}/{e.name}" if norm_prefix else e.name
                 if e.is_dir(follow_symlinks=False):
-                    folders.append({"name": e.name, "path": rel})
+                    count = 0
+                    total_size = 0
+                    try:
+                        for dirpath, _dirs, filenames in os.walk(e.path):
+                            for fname in filenames:
+                                try:
+                                    st = os.stat(os.path.join(dirpath, fname))
+                                    count += 1
+                                    total_size += st.st_size
+                                except OSError:
+                                    pass
+                    except OSError:
+                        pass
+                    folders.append({"name": e.name, "path": rel, "file_count": count, "total_size": total_size})
                 else:
                     stat = e.stat()
                     files.append({"path": rel, "size": stat.st_size, "modified_time": int(stat.st_mtime)})
@@ -1039,12 +1052,14 @@ async def list_shared_sources(
 @router.get("/shared/{source_id}/files")
 async def list_shared_files(
         source_id: str,
+        prefix: str = "",
         device_id: str | None = None,
         authorization: str = Header(None),
         token: str = None,
 ):
     """
-    Recursively list all files inside the shared directory identified by *source_id*.
+    Recursively list files inside the shared directory identified by *source_id*,
+    optionally filtered by *prefix*.
     Only accessible if the folder is tagged for this device.
     """
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
@@ -1059,26 +1074,33 @@ async def list_shared_files(
     if not os.path.isdir(root):
         return {"files": [], "warning": "Directory does not exist on server"}
 
-    files = await asyncio.to_thread(_walk_shared_dir, root)
+    norm_prefix = prefix.strip("/").replace("\\", "/")
+    target_dir = os.path.join(root, norm_prefix) if norm_prefix else root
+    target_dir = os.path.abspath(target_dir)
+    if os.path.commonpath([root, target_dir]) != root:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not os.path.isdir(target_dir):
+        return {"files": [], "source_id": source_id, "label": entry["label"]}
+
+    def _walk():
+        files = []
+        for dirpath, _dirnames, filenames in os.walk(target_dir):
+            for fname in filenames:
+                full = os.path.join(dirpath, fname)
+                try:
+                    stat = os.stat(full)
+                    rel = os.path.relpath(full, root).replace("\\", "/")
+                    files.append({
+                        "path": rel,
+                        "size": stat.st_size,
+                        "modified_time": int(stat.st_mtime),
+                    })
+                except OSError:
+                    continue
+        return files
+
+    files = await asyncio.to_thread(_walk)
     return {"files": files, "source_id": source_id, "label": entry["label"]}
-
-
-def _walk_shared_dir(root: str) -> list[dict]:
-    files = []
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for fname in filenames:
-            full = os.path.join(dirpath, fname)
-            try:
-                stat = os.stat(full)
-                rel = os.path.relpath(full, root).replace("\\", "/")
-                files.append({
-                    "path": rel,
-                    "size": stat.st_size,
-                    "modified_time": int(stat.st_mtime),
-                })
-            except OSError:
-                continue
-    return files
 
 
 @router.get("/shared/{source_id}/download")

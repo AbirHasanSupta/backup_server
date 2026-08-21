@@ -177,7 +177,15 @@ export default function HomeScreen() {
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
   const [serverLabel, setServerLabel] = useState('No server');
 
-  const { onScroll, headerAnimatedStyle, contentInsetStyle, onHeaderLayout } = useCollapsibleHeader({
+  const {
+    onScroll,
+    onScrollEndDrag,
+    onMomentumScrollEnd,
+    headerAnimatedStyle,
+    contentInsetStyle,
+    onHeaderLayout,
+    containerPaddingTop,
+  } = useCollapsibleHeader({
     headerHeight: HEADER_HEIGHT,
     topInset: insets.top,
   });
@@ -609,10 +617,15 @@ export default function HomeScreen() {
       <ScrollView
         contentContainerStyle={[
           styles.scrollContent,
-          { paddingBottom: BottomTabInset + insets.bottom + 34 },
+          {
+            paddingTop: containerPaddingTop + Spacing.two,
+            paddingBottom: BottomTabInset + insets.bottom + 34,
+          },
         ]}
         showsVerticalScrollIndicator={false}
         onScroll={onScroll}
+        onScrollEndDrag={onScrollEndDrag}
+        onMomentumScrollEnd={onMomentumScrollEnd}
         scrollEventThrottle={16}
         refreshControl={
           <RefreshControl

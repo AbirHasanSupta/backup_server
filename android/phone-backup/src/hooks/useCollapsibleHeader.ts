@@ -1,4 +1,4 @@
-import { useRef, useCallback, useEffect } from 'react';
+import { useRef, useCallback, useEffect, useState } from 'react';
 import {
   useSharedValue,
   useAnimatedStyle,
@@ -10,6 +10,8 @@ import {
   LayoutChangeEvent,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  StyleProp,
+  ViewStyle,
 } from 'react-native';
 
 /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
@@ -22,18 +24,20 @@ interface CollapsibleHeaderConfig {
 
 /**
  * Collapses the page header on scroll down and restores it on scroll up.
- * Uses translateY for the header and a matching content inset so the blank
- * header slot is reclaimed (transform alone leaves empty layout space).
+ * Uses GPU-accelerated translateY for the header while keeping the scroll container
+ * layout frame completely static to prevent layout reflow oscillation / jitter.
  */
 export function useCollapsibleHeader({
   headerHeight: estimatedHeight,
   topInset = 0,
 }: CollapsibleHeaderConfig) {
   const safeTopInset = Math.max(topInset, 0);
-  const heightSV = useSharedValue(Math.max(estimatedHeight, 1));
+  const initialH = Math.max(estimatedHeight, 1);
+  const [measuredHeight, setMeasuredHeight] = useState(initialH);
+  const heightSV = useSharedValue(initialH);
   const headerTranslateY = useSharedValue(0);
   const lastScrollY = useRef(0);
-  const measuredRef = useRef(Math.max(estimatedHeight, 1));
+  const measuredRef = useRef(initialH);
 
   useEffect(() => {
     const next = Math.max(estimatedHeight, 1);
@@ -43,6 +47,7 @@ export function useCollapsibleHeader({
       const wasCollapsed = headerTranslateY.value < -measuredRef.current * 0.5;
       measuredRef.current = next;
       heightSV.value = next;
+      setMeasuredHeight(next);
       if (wasCollapsed) {
         headerTranslateY.value = -next;
       }
@@ -56,6 +61,7 @@ export function useCollapsibleHeader({
       const wasCollapsed = headerTranslateY.value < -measuredRef.current * 0.5;
       measuredRef.current = h;
       heightSV.value = h;
+      setMeasuredHeight(h);
       if (wasCollapsed) {
         headerTranslateY.value = -h;
       }
@@ -67,8 +73,7 @@ export function useCollapsibleHeader({
     headerTranslateY.value = withTiming(0, { duration: 200 });
   }, [headerTranslateY]);
 
-  // Tracks the finger 1:1 during the drag (no withTiming mid-gesture, so
-  // there is never more than one animation competing for the shared value).
+  // Tracks the finger 1:1 during the drag.
   // snapHeader settles to fully open/closed once the drag ends.
   const onScroll = useCallback(
     (event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -78,7 +83,7 @@ export function useCollapsibleHeader({
       lastScrollY.current = currentY;
 
       if (currentY <= 0) {
-        headerTranslateY.value = withTiming(0, { duration: 200 });
+        headerTranslateY.value = withTiming(0, { duration: 150 });
         return;
       }
       if (Math.abs(diff) < 0.5) return;
@@ -92,7 +97,7 @@ export function useCollapsibleHeader({
   const snapHeader = useCallback(() => {
     const headerHeight = measuredRef.current;
     const shouldCollapse = headerTranslateY.value < -headerHeight * 0.5;
-    headerTranslateY.value = withTiming(shouldCollapse ? -headerHeight : 0, { duration: 200 });
+    headerTranslateY.value = withTiming(shouldCollapse ? -headerHeight : 0, { duration: 180 });
   }, [headerTranslateY]);
 
   const headerAnimatedStyle = useAnimatedStyle(() => {
@@ -100,8 +105,7 @@ export function useCollapsibleHeader({
     const collapsed = headerTranslateY.value < -headerHeight * 0.5;
     return {
       position: 'absolute' as const,
-      // These pages run edge-to-edge on Android. Keep the header below the
-      // system status bar while it is visible and while it is animated.
+      // Keep the header below the system status bar while it is visible and animated.
       top: safeTopInset,
       left: 0,
       right: 0,
@@ -117,21 +121,14 @@ export function useCollapsibleHeader({
     };
   });
 
-  /** Apply to a flex wrapper around the scrollable content. */
-  const contentInsetStyle = useAnimatedStyle(() => {
-    const headerHeight = Math.max(heightSV.value, 1);
-    return {
-      flex: 1,
-      paddingTop: interpolate(
-        headerTranslateY.value,
-        [-headerHeight, 0],
-        [safeTopInset, safeTopInset + headerHeight],
-        Extrapolation.CLAMP
-      ),
-    };
-  });
+  /** Static flex wrapper style (zero layout reflow on scroll) */
+  const contentInsetStyle: StyleProp<ViewStyle> = {
+    flex: 1,
+  };
 
   return {
+    headerHeight: measuredHeight,
+    containerPaddingTop: safeTopInset + measuredHeight,
     headerTranslateY,
     headerAnimatedStyle,
     contentInsetStyle,

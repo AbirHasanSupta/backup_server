@@ -127,7 +127,15 @@ export default function HistoryScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   const headerHeight = Spacing.five + 88;
-  const { onScroll, headerAnimatedStyle, contentInsetStyle, onHeaderLayout } = useCollapsibleHeader({
+  const {
+    onScroll,
+    onScrollEndDrag,
+    onMomentumScrollEnd,
+    headerAnimatedStyle,
+    contentInsetStyle,
+    onHeaderLayout,
+    containerPaddingTop,
+  } = useCollapsibleHeader({
     headerHeight,
     topInset: insets.top,
   });
@@ -226,7 +234,10 @@ export default function HistoryScreen() {
           ListEmptyComponent={<EmptyState styles={styles} colors={colors} />}
           contentContainerStyle={[
             styles.listContent,
-            { paddingBottom: BottomTabInset + Spacing.five },
+            {
+              paddingTop: containerPaddingTop + Spacing.two,
+              paddingBottom: BottomTabInset + Spacing.five,
+            },
           ]}
           refreshControl={
             <RefreshControl
@@ -237,6 +248,8 @@ export default function HistoryScreen() {
             />
           }
           onScroll={onScroll}
+          onScrollEndDrag={onScrollEndDrag}
+          onMomentumScrollEnd={onMomentumScrollEnd}
           scrollEventThrottle={16}
           showsVerticalScrollIndicator={false}
         />

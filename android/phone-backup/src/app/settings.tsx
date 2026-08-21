@@ -95,7 +95,15 @@ export default function SettingsScreen() {
   type ServerStatus = 'connected' | 'disconnected' | 'unknown' | 'checking';
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
 
-  const { onScroll, headerAnimatedStyle, contentInsetStyle, onHeaderLayout } = useCollapsibleHeader({
+  const {
+    onScroll,
+    onScrollEndDrag,
+    onMomentumScrollEnd,
+    headerAnimatedStyle,
+    contentInsetStyle,
+    onHeaderLayout,
+    containerPaddingTop,
+  } = useCollapsibleHeader({
     headerHeight: HEADER_HEIGHT,
     topInset: insets.top,
   });
@@ -402,11 +410,16 @@ export default function SettingsScreen() {
       <ScrollView
         contentContainerStyle={[
           styles.scrollContent,
-          { paddingBottom: BottomTabInset + insets.bottom + 34 },
+          {
+            paddingTop: containerPaddingTop + Spacing.two,
+            paddingBottom: BottomTabInset + insets.bottom + 34,
+          },
         ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
         onScroll={onScroll}
+        onScrollEndDrag={onScrollEndDrag}
+        onMomentumScrollEnd={onMomentumScrollEnd}
         scrollEventThrottle={16}
       >
         <Animated.View entering={FadeInDown.duration(300).delay(100)}>

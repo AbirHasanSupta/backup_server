@@ -824,9 +824,11 @@ def verify_device_token(device_id: str, token: str) -> bool:
 def get_files_for_device(device_id: str, prefix: str = "") -> list[dict]:
     conn = get_conn()
     if prefix:
+        norm = prefix.strip("/")
+        norm_dir = f"{norm}/%"
         rows = conn.execute(
-            "SELECT path, size, modified_time, sha256, uploaded_time FROM files WHERE device_id = ? AND path LIKE ? ORDER BY path",
-            (device_id, f"{prefix}%"),
+            "SELECT path, size, modified_time, sha256, uploaded_time FROM files WHERE device_id = ? AND (path = ? OR path LIKE ?) ORDER BY path",
+            (device_id, norm, norm_dir),
         ).fetchall()
     else:
         rows = conn.execute(

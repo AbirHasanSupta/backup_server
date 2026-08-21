@@ -39,7 +39,15 @@ export default function FoldersScreen() {
 
   const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
 
-  const { onScroll, headerAnimatedStyle, contentInsetStyle, onHeaderLayout } = useCollapsibleHeader({
+  const {
+    onScroll,
+    onScrollEndDrag,
+    onMomentumScrollEnd,
+    headerAnimatedStyle,
+    contentInsetStyle,
+    onHeaderLayout,
+    containerPaddingTop,
+  } = useCollapsibleHeader({
     headerHeight: HEADER_HEIGHT,
     topInset: insets.top,
   });
@@ -187,7 +195,10 @@ export default function FoldersScreen() {
           contentContainerStyle={[
             styles.listContent,
             folders.length === 0 && styles.listContentEmpty,
-            { paddingBottom: BottomTabInset + insets.bottom + 24 },
+            {
+              paddingTop: containerPaddingTop + Spacing.two,
+              paddingBottom: BottomTabInset + insets.bottom + 24,
+            },
           ]}
           ListHeaderComponent={
             <Animated.View entering={FadeInDown.duration(300).delay(100)} style={styles.filterSection}>
@@ -201,6 +212,8 @@ export default function FoldersScreen() {
             </View>
           )}
           onScroll={onScroll}
+          onScrollEndDrag={onScrollEndDrag}
+          onMomentumScrollEnd={onMomentumScrollEnd}
           scrollEventThrottle={16}
           showsVerticalScrollIndicator={false}
         />
