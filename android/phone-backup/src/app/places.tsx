@@ -72,19 +72,43 @@ let _cachedPlaces: PlaceCluster[] | null = null;
 let _cachedServerConfig: any | null = null;
 const _cachedPlaceNames: Record<string, string | null> = {};
 const _cachedClusterItems: Map<string, PlaceItem[]> = new Map();
-const _prefetchedUrls = new Set<string>();
+const _coverPrefetchedUrls = new Set<string>();
+const _contentPrefetchedUrls = new Set<string>();
 let _preloadPromise: Promise<void> | null = null;
+let _placesTabFocused = false;
+const _focusWaiters = new Set<() => void>();
+
+export function setPlacesTabFocused(focused: boolean): void {
+  _placesTabFocused = focused;
+  if (focused) {
+    _focusWaiters.forEach(resolve => resolve());
+    _focusWaiters.clear();
+  } else {
+    _cachedClusterItems.clear();
+    _contentPrefetchedUrls.clear();
+  }
+}
+
+function waitForPlacesTabFocus(): { promise: Promise<void>; cancel: () => void } {
+  if (_placesTabFocused) return { promise: Promise.resolve(), cancel: () => {} };
+  let waiter: () => void = () => {};
+  const promise = new Promise<void>(resolve => {
+    waiter = resolve;
+    _focusWaiters.add(waiter);
+  });
+  return { promise, cancel: () => { _focusWaiters.delete(waiter); waiter(); } };
+}
 
 export function preloadPlaceThumbnails(config: any, clusters: PlaceCluster[]): void {
-  if (!config || !clusters || clusters.length === 0) return;
+  if (!_placesTabFocused || !config || !clusters || clusters.length === 0) return;
   const urls: string[] = [];
   for (const item of clusters) {
     if (!item?.cover?.relative_path) continue;
     const url = item.cover.is_video
       ? buildThumbnailUrl(config, item.cover.relative_path, item.cover.source_type, item.cover.source_id)
       : buildPreviewUrl(config, item.cover.relative_path, item.cover.source_type, item.cover.source_id);
-    if (url && !_prefetchedUrls.has(url)) {
-      _prefetchedUrls.add(url);
+    if (url && !_coverPrefetchedUrls.has(url)) {
+      _coverPrefetchedUrls.add(url);
       urls.push(url);
     }
   }
@@ -94,15 +118,15 @@ export function preloadPlaceThumbnails(config: any, clusters: PlaceCluster[]): v
 }
 
 export function preloadClusterThumbnails(config: any, items: PlaceItem[]): void {
-  if (!config || !items || items.length === 0) return;
+  if (!_placesTabFocused || !config || !items || items.length === 0) return;
   const urls: string[] = [];
   for (const item of items) {
     if (!item?.relative_path) continue;
     const url = item.is_video
       ? buildThumbnailUrl(config, item.relative_path, item.source_type, item.source_id)
       : buildPreviewUrl(config, item.relative_path, item.source_type, item.source_id);
-    if (url && !_prefetchedUrls.has(url)) {
-      _prefetchedUrls.add(url);
+    if (url && !_contentPrefetchedUrls.has(url)) {
+      _contentPrefetchedUrls.add(url);
       urls.push(url);
     }
   }
@@ -116,6 +140,7 @@ export function preloadClusterThumbnails(config: any, items: PlaceItem[]): void 
  * Can be called proactively from parent screens (e.g. Memories).
  */
 export async function preloadPlacesCache(): Promise<void> {
+  if (!_placesTabFocused) return;
   if (_preloadPromise) return _preloadPromise;
   _preloadPromise = (async () => {
     try {
@@ -137,7 +162,8 @@ export function clearPlacesMemoryCache(): void {
   _cachedPlaces = null;
   _cachedServerConfig = null;
   _cachedClusterItems.clear();
-  _prefetchedUrls.clear();
+  _coverPrefetchedUrls.clear();
+  _contentPrefetchedUrls.clear();
 }
 
 function safeCall(fn: () => void): void {
@@ -172,14 +198,20 @@ export default function PlacesScreen() {
   const [sharing, setSharing] = useState(false);
   const [placeNames, setPlaceNames] = useState<Record<string, string | null>>({ ..._cachedPlaceNames });
   const resolvedPlaceKeysRef = useRef<Set<string>>(new Set(Object.keys(_cachedPlaceNames)));
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const clusterAbortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async (isSilent = false) => {
+    loadAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
     if (!isSilent && _cachedPlaces === null) {
       setLoading(true);
     }
     setError(null);
     try {
-      const [cfg, res] = await Promise.all([getConfig(), getPlaceClusters()]);
+      const [cfg, res] = await Promise.all([getConfig(), getPlaceClusters({ signal: controller.signal })]);
+      if (controller.signal.aborted) return;
       _cachedServerConfig = cfg;
       setServerConfig(cfg);
       const placesList = Array.isArray(res?.places) ? res.places : [];
@@ -187,13 +219,25 @@ export default function PlacesScreen() {
       setPlaces(placesList);
       preloadPlaceThumbnails(cfg, placesList);
     } catch (err: any) {
+      if (err?.name === 'AbortError') return;
       if (_cachedPlaces === null) {
         setError(sanitizeErrorMessage(err, 'Could not load places.'));
       }
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      setPlacesTabFocused(true);
+      return () => {
+        setPlacesTabFocused(false);
+        loadAbortRef.current?.abort();
+        clusterAbortRef.current?.abort();
+      };
+    }, [])
+  );
 
   useFocusEffect(
     useCallback(() => {
@@ -204,6 +248,7 @@ export default function PlacesScreen() {
 
   useEffect(() => {
     let cancelled = false;
+    let activeWaiterCancel: (() => void) | null = null;
     (async () => {
       for (const place of places) {
         if (cancelled) return;
@@ -215,6 +260,11 @@ export default function PlacesScreen() {
           continue;
         }
         if (resolvedPlaceKeysRef.current.has(place.cluster_key)) continue;
+        const waiter = waitForPlacesTabFocus();
+        activeWaiterCancel = waiter.cancel;
+        await waiter.promise;
+        activeWaiterCancel = null;
+        if (cancelled) return;
         const name = await getPlaceName(place.lat, place.lon);
         if (cancelled) return;
         _cachedPlaceNames[place.cluster_key] = name;
@@ -222,12 +272,18 @@ export default function PlacesScreen() {
         setPlaceNames(prev => ({ ...prev, [place.cluster_key]: name }));
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      activeWaiterCancel?.();
+    };
   }, [places]);
 
   const openCluster = useCallback(async (cluster: PlaceCluster) => {
     hapticMedium();
     setActiveCluster(cluster);
+    clusterAbortRef.current?.abort();
+    const controller = new AbortController();
+    clusterAbortRef.current = controller;
     const cached = _cachedClusterItems.get(cluster.cluster_key);
     if (cached && cached.length > 0) {
       setClusterItems(cached);
@@ -241,18 +297,22 @@ export default function PlacesScreen() {
     }
 
     try {
-      const res = await getPlaceItems(cluster.cluster_key);
+      const res = await getPlaceItems(cluster.cluster_key, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       const items = Array.isArray(res?.items) ? res.items : [];
-      _cachedClusterItems.set(cluster.cluster_key, items);
+      if (_placesTabFocused) {
+        _cachedClusterItems.set(cluster.cluster_key, items);
+      }
       setClusterItems(items);
       const cfg = _cachedServerConfig || (await getConfig());
       preloadClusterThumbnails(cfg, items);
     } catch (err: any) {
+      if (err?.name === 'AbortError') return;
       if (!cached) {
         Alert.alert('Failed to Load', sanitizeErrorMessage(err, 'Could not load this place.'));
       }
     } finally {
-      setClusterLoading(false);
+      if (!controller.signal.aborted) setClusterLoading(false);
     }
   }, []);
 
@@ -268,6 +328,7 @@ export default function PlacesScreen() {
   }, [load]);
 
   const closeCluster = useCallback(() => {
+    clusterAbortRef.current?.abort();
     setActiveCluster(null);
     setClusterItems([]);
     setViewerIndex(null);
