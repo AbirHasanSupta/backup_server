@@ -43,6 +43,7 @@ import {
   downloadRewindReel,
 } from '../../downloader';
 import { consumePendingFlashbackItem } from '../../notificationService';
+import { preloadPlacesCache } from './places';
 
 const DAY_CARD_W = 132;
 const DAY_CARD_H = 208;
@@ -265,6 +266,7 @@ export default function MemoriesScreen() {
           setServerConfig(cfg);
           setData(res);
           setLoading(false);
+          preloadPlacesCache().catch(() => {});
         }
       })
       .catch((err: any) => {
