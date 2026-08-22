@@ -633,6 +633,7 @@ export default function HomeScreen() {
             onRefresh={onRefresh}
             tintColor={colors.primary}
             colors={[colors.primary]}
+            progressViewOffset={containerPaddingTop}
           />
         }
       >

@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useMemo } from 'react';
-import { View, Text, FlatList, StyleSheet, StatusBar, Alert } from 'react-native';
+import { View, Text, FlatList, StyleSheet, StatusBar, Alert, RefreshControl } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
@@ -36,6 +36,7 @@ export default function FoldersScreen() {
   const [folders, setFolders] = useState<Folder[]>([]);
   const [selectedTypes, setSelectedTypes] = useState<string[]>(['all']);
   const [refreshing, setRefreshing] = useState<string | null>(null);
+  const [pullRefreshing, setPullRefreshing] = useState(false);
 
   const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
 
@@ -82,6 +83,15 @@ export default function FoldersScreen() {
     setFolders(f);
     setSelectedTypes(t);
   }, []);
+
+  const handlePullRefresh = useCallback(async () => {
+    setPullRefreshing(true);
+    try {
+      await Promise.all([loadData(), checkServer()]);
+    } finally {
+      setPullRefreshing(false);
+    }
+  }, [loadData, checkServer]);
 
   useFocusEffect(
     useCallback(() => {
@@ -216,6 +226,15 @@ export default function FoldersScreen() {
           onMomentumScrollEnd={onMomentumScrollEnd}
           scrollEventThrottle={16}
           showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={pullRefreshing}
+              onRefresh={handlePullRefresh}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+              progressViewOffset={containerPaddingTop}
+            />
+          }
         />
       </Animated.View>
     </View>

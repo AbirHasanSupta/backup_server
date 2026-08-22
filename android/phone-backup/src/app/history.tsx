@@ -245,6 +245,7 @@ export default function HistoryScreen() {
               onRefresh={onRefresh}
               tintColor={colors.primary}
               colors={[colors.primary]}
+              progressViewOffset={containerPaddingTop}
             />
           }
           onScroll={onScroll}

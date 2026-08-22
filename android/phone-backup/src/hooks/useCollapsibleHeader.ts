@@ -129,6 +129,7 @@ export function useCollapsibleHeader({
   return {
     headerHeight: measuredHeight,
     containerPaddingTop: safeTopInset + measuredHeight,
+    progressViewOffset: safeTopInset + measuredHeight,
     headerTranslateY,
     headerAnimatedStyle,
     contentInsetStyle,

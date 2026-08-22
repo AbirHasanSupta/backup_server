@@ -3145,6 +3145,7 @@ export default function RestoreScreen() {
               onRefresh={onRefreshLibrary}
               tintColor={colors.primary}
               colors={[colors.primary]}
+              progressViewOffset={containerPaddingTop}
             />
           )
         }

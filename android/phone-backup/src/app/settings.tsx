@@ -9,6 +9,7 @@ import {
   Alert,
   Switch,
   TouchableOpacity,
+  RefreshControl,
 } from 'react-native';
 import Constants from 'expo-constants';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -91,6 +92,7 @@ export default function SettingsScreen() {
   const [savingServer, setSavingServer] = useState(false);
   const [discoveryVisible, setDiscoveryVisible] = useState(false);
   const [savedServers, setSavedServers] = useState<any[]>([]);
+  const [pullRefreshing, setPullRefreshing] = useState(false);
 
   type ServerStatus = 'connected' | 'disconnected' | 'unknown' | 'checking';
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
@@ -174,6 +176,15 @@ export default function SettingsScreen() {
       } catch {}
     }
   }, []);
+
+  const handlePullRefresh = useCallback(async () => {
+    setPullRefreshing(true);
+    try {
+      await Promise.all([loadSettings(), checkServer()]);
+    } finally {
+      setPullRefreshing(false);
+    }
+  }, [loadSettings, checkServer]);
 
   useFocusEffect(
     useCallback(() => {
@@ -421,6 +432,15 @@ export default function SettingsScreen() {
         onScrollEndDrag={onScrollEndDrag}
         onMomentumScrollEnd={onMomentumScrollEnd}
         scrollEventThrottle={16}
+        refreshControl={
+          <RefreshControl
+            refreshing={pullRefreshing}
+            onRefresh={handlePullRefresh}
+            tintColor={colors.primary}
+            colors={[colors.primary]}
+            progressViewOffset={containerPaddingTop}
+          />
+        }
       >
         <Animated.View entering={FadeInDown.duration(300).delay(100)}>
           <SectionHeader title="Server connection" styles={styles} />
