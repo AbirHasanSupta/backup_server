@@ -286,7 +286,6 @@ function RootLayoutContent() {
             ),
           }}
         />
-        <Tabs.Screen name="explore" options={{ href: null }} />
         <Tabs.Screen
           name="memories"
           options={{ href: null, tabBarStyle: { display: 'none' } }}
