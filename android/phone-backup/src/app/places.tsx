@@ -1,5 +1,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, FlatList, Modal, Alert, useWindowDimensions } from 'react-native';
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  ActivityIndicator,
+  StatusBar,
+  FlatList,
+  Modal,
+  Alert,
+  useWindowDimensions,
+  BackHandler,
+  RefreshControl,
+} from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -54,6 +67,75 @@ type PlaceItem = {
   year: number | null;
 };
 
+// Module-level in-memory cache to retain places data and thumbnails across visits
+let _cachedPlaces: PlaceCluster[] | null = null;
+let _cachedServerConfig: any | null = null;
+const _cachedPlaceNames: Record<string, string | null> = {};
+const _cachedClusterItems: Map<string, PlaceItem[]> = new Map();
+const _prefetchedUrls = new Set<string>();
+let _preloadPromise: Promise<void> | null = null;
+
+export function preloadPlaceThumbnails(config: any, clusters: PlaceCluster[]): void {
+  if (!config || !clusters || clusters.length === 0) return;
+  const urls: string[] = [];
+  for (const item of clusters) {
+    if (!item?.cover?.relative_path) continue;
+    const url = buildThumbnailUrl(config, item.cover.relative_path, item.cover.source_type, item.cover.source_id);
+    if (url && !_prefetchedUrls.has(url)) {
+      _prefetchedUrls.add(url);
+      urls.push(url);
+    }
+  }
+  if (urls.length > 0) {
+    Image.prefetch(urls, 'memory-disk').catch(() => {});
+  }
+}
+
+export function preloadClusterThumbnails(config: any, items: PlaceItem[]): void {
+  if (!config || !items || items.length === 0) return;
+  const urls: string[] = [];
+  for (const item of items) {
+    if (!item?.relative_path) continue;
+    const url = buildThumbnailUrl(config, item.relative_path, item.source_type, item.source_id);
+    if (url && !_prefetchedUrls.has(url)) {
+      _prefetchedUrls.add(url);
+      urls.push(url);
+    }
+  }
+  if (urls.length > 0) {
+    Image.prefetch(urls, 'memory-disk').catch(() => {});
+  }
+}
+
+/**
+ * Pre-warm places data and cover thumbnails into memory.
+ * Can be called proactively from parent screens (e.g. Memories).
+ */
+export async function preloadPlacesCache(): Promise<void> {
+  if (_preloadPromise) return _preloadPromise;
+  _preloadPromise = (async () => {
+    try {
+      const [cfg, res] = await Promise.all([getConfig(), getPlaceClusters()]);
+      _cachedServerConfig = cfg;
+      const placesList = Array.isArray(res?.places) ? res.places : [];
+      _cachedPlaces = placesList;
+      preloadPlaceThumbnails(cfg, placesList);
+    } catch {
+      // Ignore preload failures in background
+    } finally {
+      _preloadPromise = null;
+    }
+  })();
+  return _preloadPromise;
+}
+
+export function clearPlacesMemoryCache(): void {
+  _cachedPlaces = null;
+  _cachedServerConfig = null;
+  _cachedClusterItems.clear();
+  _prefetchedUrls.clear();
+}
+
 function safeCall(fn: () => void): void {
   try { fn(); } catch (e) { console.warn('[Places] player error:', e); }
 }
@@ -72,9 +154,9 @@ export default function PlacesScreen() {
   const { width, height } = useWindowDimensions();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  const [serverConfig, setServerConfig] = useState<any>(null);
-  const [places, setPlaces] = useState<PlaceCluster[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [serverConfig, setServerConfig] = useState<any>(_cachedServerConfig);
+  const [places, setPlaces] = useState<PlaceCluster[]>(_cachedPlaces ?? []);
+  const [loading, setLoading] = useState(_cachedPlaces === null);
   const [error, setError] = useState<string | null>(null);
 
   const [activeCluster, setActiveCluster] = useState<PlaceCluster | null>(null);
@@ -84,33 +166,54 @@ export default function PlacesScreen() {
   const viewerListRef = useRef<FlatList<PlaceItem>>(null);
   const [saving, setSaving] = useState(false);
   const [sharing, setSharing] = useState(false);
-  const [placeNames, setPlaceNames] = useState<Record<string, string | null>>({});
-  const resolvedPlaceKeysRef = useRef<Set<string>>(new Set());
+  const [placeNames, setPlaceNames] = useState<Record<string, string | null>>({ ..._cachedPlaceNames });
+  const resolvedPlaceKeysRef = useRef<Set<string>>(new Set(Object.keys(_cachedPlaceNames)));
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (isSilent = false) => {
+    if (!isSilent && _cachedPlaces === null) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const [cfg, res] = await Promise.all([getConfig(), getPlaceClusters()]);
+      _cachedServerConfig = cfg;
       setServerConfig(cfg);
-      setPlaces(Array.isArray(res?.places) ? res.places : []);
+      const placesList = Array.isArray(res?.places) ? res.places : [];
+      _cachedPlaces = placesList;
+      setPlaces(placesList);
+      preloadPlaceThumbnails(cfg, placesList);
     } catch (err: any) {
-      setError(sanitizeErrorMessage(err, 'Could not load places.'));
+      if (_cachedPlaces === null) {
+        setError(sanitizeErrorMessage(err, 'Could not load places.'));
+      }
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(
+    useCallback(() => {
+      const hasCache = _cachedPlaces !== null;
+      load(hasCache);
+    }, [load])
+  );
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       for (const place of places) {
         if (cancelled) return;
+        if (_cachedPlaceNames[place.cluster_key] !== undefined) {
+          if (!resolvedPlaceKeysRef.current.has(place.cluster_key)) {
+            resolvedPlaceKeysRef.current.add(place.cluster_key);
+            setPlaceNames(prev => ({ ...prev, [place.cluster_key]: _cachedPlaceNames[place.cluster_key] }));
+          }
+          continue;
+        }
         if (resolvedPlaceKeysRef.current.has(place.cluster_key)) continue;
         const name = await getPlaceName(place.lat, place.lon);
         if (cancelled) return;
+        _cachedPlaceNames[place.cluster_key] = name;
         resolvedPlaceKeysRef.current.add(place.cluster_key);
         setPlaceNames(prev => ({ ...prev, [place.cluster_key]: name }));
       }
@@ -121,24 +224,89 @@ export default function PlacesScreen() {
   const openCluster = useCallback(async (cluster: PlaceCluster) => {
     hapticMedium();
     setActiveCluster(cluster);
-    setClusterItems([]);
-    setClusterLoading(true);
+    const cached = _cachedClusterItems.get(cluster.cluster_key);
+    if (cached && cached.length > 0) {
+      setClusterItems(cached);
+      setClusterLoading(false);
+      if (_cachedServerConfig) {
+        preloadClusterThumbnails(_cachedServerConfig, cached);
+      }
+    } else {
+      setClusterItems([]);
+      setClusterLoading(true);
+    }
+
     try {
       const res = await getPlaceItems(cluster.cluster_key);
-      setClusterItems(Array.isArray(res?.items) ? res.items : []);
+      const items = Array.isArray(res?.items) ? res.items : [];
+      _cachedClusterItems.set(cluster.cluster_key, items);
+      setClusterItems(items);
+      const cfg = _cachedServerConfig || (await getConfig());
+      preloadClusterThumbnails(cfg, items);
     } catch (err: any) {
-      Alert.alert('Failed to Load', sanitizeErrorMessage(err, 'Could not load this place.'));
+      if (!cached) {
+        Alert.alert('Failed to Load', sanitizeErrorMessage(err, 'Could not load this place.'));
+      }
     } finally {
       setClusterLoading(false);
     }
   }, []);
 
+  const [refreshing, setRefreshing] = useState(false);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await load(true);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [load]);
+
   const closeCluster = useCallback(() => {
     setActiveCluster(null);
     setClusterItems([]);
+    setViewerIndex(null);
   }, []);
 
   const closeViewer = useCallback(() => setViewerIndex(null), []);
+
+  // Back navigation handling: Keep latest modal state in refs
+  const viewerIndexRef = useRef(viewerIndex);
+  const activeClusterRef = useRef(activeCluster);
+  const closeViewerRef = useRef(closeViewer);
+  const closeClusterRef = useRef(closeCluster);
+
+  useEffect(() => {
+    viewerIndexRef.current = viewerIndex;
+    activeClusterRef.current = activeCluster;
+    closeViewerRef.current = closeViewer;
+    closeClusterRef.current = closeCluster;
+  }, [viewerIndex, activeCluster, closeViewer, closeCluster]);
+
+  // Hardware/default back gesture:
+  // - If full-screen viewer is open -> close viewer
+  // - If cluster modal is open -> close cluster
+  // - Otherwise -> always navigate back to memories tab
+  useFocusEffect(
+    useCallback(() => {
+      const onBackPress = () => {
+        if (viewerIndexRef.current !== null) {
+          closeViewerRef.current();
+          return true;
+        }
+        if (activeClusterRef.current !== null) {
+          closeClusterRef.current();
+          return true;
+        }
+        router.replace('/memories');
+        return true;
+      };
+
+      const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+      return () => sub.remove();
+    }, [router])
+  );
 
   const activeViewerItem = viewerIndex != null && clusterItems[viewerIndex] ? clusterItems[viewerIndex] : null;
 
@@ -220,7 +388,7 @@ export default function PlacesScreen() {
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
       <View style={[styles.header, { paddingTop: insets.top + Spacing.three }]}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()} accessibilityLabel="Go back">
+        <TouchableOpacity style={styles.backBtn} onPress={() => router.replace('/memories')} accessibilityLabel="Go back">
           <AppIcon androidName="arrow_back" iosName="chevron.left" color={colors.text} size={22} />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
@@ -258,11 +426,17 @@ export default function PlacesScreen() {
           numColumns={3}
           contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: gridGap }}
           columnWrapperStyle={{ gap: gridGap }}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={colors.primary}
+              colors={[colors.primary]}
+            />
+          }
           renderItem={({ item, index }) => {
             const thumbUrl = serverConfig
-              ? (item.cover.is_video
-                ? buildThumbnailUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id)
-                : buildPreviewUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id))
+              ? buildThumbnailUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id)
               : undefined;
 
             const resolvedName = placeNames[item.cluster_key];
@@ -278,9 +452,11 @@ export default function PlacesScreen() {
                   <View style={[styles.placeCell, { width: cellSize, height: cellSize }]}>
                     <Image
                       source={{ uri: thumbUrl }}
+                      cachePolicy="memory-disk"
+                      priority="high"
                       style={styles.placeCellImage}
                       contentFit="cover"
-                      transition={150}
+                      transition={100}
                     />
                     <View style={styles.placeCellOverlay}>
                       <Text style={styles.placeCellCount}>{item.count}</Text>
@@ -335,9 +511,7 @@ export default function PlacesScreen() {
               columnWrapperStyle={{ gap: gridGap }}
               renderItem={({ item, index }) => {
                 const itemThumbUrl = serverConfig
-                  ? (item.is_video
-                    ? buildThumbnailUrl(serverConfig, item.relative_path, item.source_type, item.source_id)
-                    : buildPreviewUrl(serverConfig, item.relative_path, item.source_type, item.source_id))
+                  ? buildThumbnailUrl(serverConfig, item.relative_path, item.source_type, item.source_id)
                   : undefined;
 
                 return (
@@ -349,9 +523,11 @@ export default function PlacesScreen() {
                     >
                       <Image
                         source={{ uri: itemThumbUrl }}
+                        cachePolicy="memory-disk"
+                        priority="high"
                         style={styles.placeCellImage}
                         contentFit="cover"
-                        transition={150}
+                        transition={100}
                       />
                       {item.is_video && (
                         <View style={styles.videoBadge}>
@@ -431,9 +607,10 @@ export default function PlacesScreen() {
                     ) : (
                       <Image
                         source={{ uri: mediaUrl }}
+                        cachePolicy="memory-disk"
                         style={styles.viewerImage}
                         contentFit="contain"
-                        transition={150}
+                        transition={100}
                       />
                     )}
                   </View>
