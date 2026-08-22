@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
         executor.shutdown(wait=False)
 
 
-app = FastAPI(title="Phone Backup Server", version="3.4.1", lifespan=lifespan)
+app = FastAPI(title="Phone Backup Server", version="3.4.2", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

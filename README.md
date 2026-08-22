@@ -1,4 +1,4 @@
-# Phone Backup Server (v3.4.1)
+# Phone Backup Server (v3.4.2)
 
 A self-hosted, high-performance photo, video, and file backup & restore ecosystem over LAN. The project consists of a feature-rich **Windows Desktop Control Center** (FastAPI backend + CustomTkinter GUI) and a **React Native / Expo Android App** that provides automatic background synchronization, differential file transfers, cross-device file restoration, an "On This Day" media memories feed, video rewind reels, photo quizzes, location clusters, and shared desktop folder access.
 

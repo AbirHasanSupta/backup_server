@@ -1,4 +1,4 @@
-# Phone Backup - Android Client (v3.4.1)
+# Phone Backup - Android Client (v3.4.2)
 
 React Native & Expo client app for the **Phone Backup Server**. Built with Expo SDK 57, React Native 0.86, TypeScript, and Expo Router.
 
