@@ -302,13 +302,12 @@ export async function getRouletteItem() {
 
 /**
  * Fetch clustered "Memories from this place" groups (GPS EXIF-derived).
- * @param {{ signal?: AbortSignal }} [options]
  */
-export async function getPlaceClusters(options = {}) {
+export async function getPlaceClusters() {
   const { ip, port, key, deviceId } = await getConfig();
   const res = await fetch(
     `http://${ip}:${port}/memories/places?device_id=${encodeURIComponent(deviceId)}`,
-    { headers: { Authorization: `Bearer ${key}` }, signal: options.signal },
+    { headers: { Authorization: `Bearer ${key}` } },
   );
   if (!res.ok) throw new Error(`Failed to fetch places (${res.status})`);
   return await readJsonOrNull(res);
@@ -317,13 +316,12 @@ export async function getPlaceClusters(options = {}) {
 /**
  * Fetch all items within a single place cluster.
  * @param {string} clusterKey
- * @param {{ signal?: AbortSignal }} [options]
  */
-export async function getPlaceItems(clusterKey, options = {}) {
+export async function getPlaceItems(clusterKey) {
   const { ip, port, key, deviceId } = await getConfig();
   const res = await fetch(
     `http://${ip}:${port}/memories/places/${encodeURIComponent(clusterKey)}?device_id=${encodeURIComponent(deviceId)}`,
-    { headers: { Authorization: `Bearer ${key}` }, signal: options.signal },
+    { headers: { Authorization: `Bearer ${key}` } },
   );
   if (!res.ok) throw new Error(`Failed to fetch place items (${res.status})`);
   return await readJsonOrNull(res);
