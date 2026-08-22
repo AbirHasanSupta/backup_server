@@ -80,7 +80,9 @@ export function preloadPlaceThumbnails(config: any, clusters: PlaceCluster[]): v
   const urls: string[] = [];
   for (const item of clusters) {
     if (!item?.cover?.relative_path) continue;
-    const url = buildThumbnailUrl(config, item.cover.relative_path, item.cover.source_type, item.cover.source_id);
+    const url = item.cover.is_video
+      ? buildThumbnailUrl(config, item.cover.relative_path, item.cover.source_type, item.cover.source_id)
+      : buildPreviewUrl(config, item.cover.relative_path, item.cover.source_type, item.cover.source_id);
     if (url && !_prefetchedUrls.has(url)) {
       _prefetchedUrls.add(url);
       urls.push(url);
@@ -96,7 +98,9 @@ export function preloadClusterThumbnails(config: any, items: PlaceItem[]): void 
   const urls: string[] = [];
   for (const item of items) {
     if (!item?.relative_path) continue;
-    const url = buildThumbnailUrl(config, item.relative_path, item.source_type, item.source_id);
+    const url = item.is_video
+      ? buildThumbnailUrl(config, item.relative_path, item.source_type, item.source_id)
+      : buildPreviewUrl(config, item.relative_path, item.source_type, item.source_id);
     if (url && !_prefetchedUrls.has(url)) {
       _prefetchedUrls.add(url);
       urls.push(url);
@@ -436,7 +440,9 @@ export default function PlacesScreen() {
           }
           renderItem={({ item, index }) => {
             const thumbUrl = serverConfig
-              ? buildThumbnailUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id)
+              ? (item.cover.is_video
+                ? buildThumbnailUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id)
+                : buildPreviewUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id))
               : undefined;
 
             const resolvedName = placeNames[item.cluster_key];
@@ -511,7 +517,9 @@ export default function PlacesScreen() {
               columnWrapperStyle={{ gap: gridGap }}
               renderItem={({ item, index }) => {
                 const itemThumbUrl = serverConfig
-                  ? buildThumbnailUrl(serverConfig, item.relative_path, item.source_type, item.source_id)
+                  ? (item.is_video
+                    ? buildThumbnailUrl(serverConfig, item.relative_path, item.source_type, item.source_id)
+                    : buildPreviewUrl(serverConfig, item.relative_path, item.source_type, item.source_id))
                   : undefined;
 
                 return (

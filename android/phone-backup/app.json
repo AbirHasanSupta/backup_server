@@ -34,8 +34,7 @@
       "expo-asset",
       "expo-video",
       "expo-sensors",
-      "expo-sharing",
-      "expo-audio"
+      "expo-sharing"
     ],
     "android": {
       "icon": "./assets/images/icon.png",
