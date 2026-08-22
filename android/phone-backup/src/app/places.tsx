@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, FlatList, Modal, Alert, useWindowDimensions } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, FlatList, Modal, Alert, useWindowDimensions, BackHandler } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -140,6 +140,38 @@ export default function PlacesScreen() {
 
   const closeViewer = useCallback(() => setViewerIndex(null), []);
 
+  const viewerIndexRef = useRef(viewerIndex);
+  const activeClusterRef = useRef(activeCluster);
+  const closeViewerRef = useRef(closeViewer);
+  const closeClusterRef = useRef(closeCluster);
+
+  useEffect(() => {
+    viewerIndexRef.current = viewerIndex;
+    activeClusterRef.current = activeCluster;
+    closeViewerRef.current = closeViewer;
+    closeClusterRef.current = closeCluster;
+  }, [viewerIndex, activeCluster, closeViewer, closeCluster]);
+
+  useFocusEffect(
+    useCallback(() => {
+      const onBackPress = () => {
+        if (viewerIndexRef.current !== null) {
+          closeViewerRef.current();
+          return true;
+        }
+        if (activeClusterRef.current !== null) {
+          closeClusterRef.current();
+          return true;
+        }
+        router.replace('/memories');
+        return true;
+      };
+
+      const sub = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+      return () => sub.remove();
+    }, [router])
+  );
+
   const activeViewerItem = viewerIndex != null && clusterItems[viewerIndex] ? clusterItems[viewerIndex] : null;
 
   const handleSaveViewerItem = async () => {
@@ -220,7 +252,7 @@ export default function PlacesScreen() {
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
       <View style={[styles.header, { paddingTop: insets.top + Spacing.three }]}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()} accessibilityLabel="Go back">
+        <TouchableOpacity style={styles.backBtn} onPress={() => router.replace('/memories')} accessibilityLabel="Go back">
           <AppIcon androidName="arrow_back" iosName="chevron.left" color={colors.text} size={22} />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
