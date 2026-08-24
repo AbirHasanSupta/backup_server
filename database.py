@@ -2217,7 +2217,7 @@ def get_or_create_media_id(
         (source_type, source_key, relative_path, size, modified_time, now_ts),
     )
     conn.commit()
-    if cur.lastrowid:
+    if cur.rowcount == 1 and cur.lastrowid:
         mid = cur.lastrowid
         conn.close()
         return mid

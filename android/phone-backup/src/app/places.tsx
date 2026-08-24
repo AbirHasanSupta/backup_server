@@ -12,7 +12,7 @@ import {
   useWindowDimensions,
   BackHandler,
   Linking,
-  ScrollView,
+  RefreshControl,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -33,6 +33,7 @@ import {
   getPlaceItems,
   getTrips,
   getTripMedia,
+  reclusterTrips,
   getConfig,
   buildPreviewUrl,
   buildVideoPreviewUrl,
@@ -173,6 +174,19 @@ export default function PlacesScreen() {
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  const refreshTrips = useCallback(async () => {
+    setTripsLoading(true);
+    try {
+      await reclusterTrips().catch(() => null);
+      const tripsRes = await getTrips();
+      setTrips(Array.isArray(tripsRes?.trips) ? tripsRes.trips : []);
+    } catch (err: any) {
+      Alert.alert('Refresh Failed', sanitizeErrorMessage(err, 'Could not refresh trips.'));
+    } finally {
+      setTripsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -498,19 +512,33 @@ export default function PlacesScreen() {
       ) : (
         // ─── TRIPS TAB ────────────────────────────────────────────────────────
         trips.length === 0 ? (
-          <View style={styles.centered}>
-            <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft }]}>
-              <AppIcon androidName="flight_takeoff" iosName="airplane" color={colors.primary} size={36} />
-            </View>
-            <Text style={styles.emptyTitle}>No trip albums yet</Text>
-            <Text style={styles.emptySubtitle}>
-              Trips are automatically curated when 5+ photos are taken in the same region over a day, weekend, or vacation.
-            </Text>
-          </View>
+          <FlatList
+            data={trips}
+            keyExtractor={(item) => `trip_${item.id}`}
+            renderItem={null}
+            refreshControl={
+              <RefreshControl refreshing={tripsLoading} onRefresh={refreshTrips} tintColor={colors.primary} colors={[colors.primary]} />
+            }
+            contentContainerStyle={styles.centered}
+            ListEmptyComponent={
+              <>
+                <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft }]}>
+                  <AppIcon androidName="flight_takeoff" iosName="airplane" color={colors.primary} size={36} />
+                </View>
+                <Text style={styles.emptyTitle}>No trip albums yet</Text>
+                <Text style={styles.emptySubtitle}>
+                  Trips are automatically curated when 5+ photos are taken in the same region over a day, weekend, or vacation.
+                </Text>
+              </>
+            }
+          />
         ) : (
           <FlatList
             data={trips}
             keyExtractor={(item) => `trip_${item.id}`}
+            refreshControl={
+              <RefreshControl refreshing={tripsLoading} onRefresh={refreshTrips} tintColor={colors.primary} colors={[colors.primary]} />
+            }
             contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: Spacing.three }}
             renderItem={({ item, index }) => {
               const coverUrl = serverConfig && item.cover
