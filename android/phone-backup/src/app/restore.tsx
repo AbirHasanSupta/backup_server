@@ -37,6 +37,7 @@ import {
   downloadSharedFile,
   getConfig,
   buildPreviewUrl,
+  buildThumbnailUrl,
   buildVideoPreviewUrl,
   warmVideoPreviews,
   getTodaysMemories,
@@ -47,7 +48,6 @@ import {
   listServerFiles,
   listSharedFiles,
   reactToMedia,
-  getMediaReactions,
   getSharedFeed,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
@@ -913,6 +913,23 @@ const srcStyles = StyleSheet.create({
     paddingVertical: Spacing.three,
   },
   sourceMenuItemText: { flex: 1, fontSize: TextScale.sm, fontWeight: '500' },
+  viewSwitcherWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    borderRadius: Radius.full,
+    padding: 2,
+  },
+  viewSwitchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: Spacing.two + 2,
+    paddingVertical: 6,
+    borderRadius: Radius.full,
+  },
+  viewSwitchBtnActive: {},
+  viewSwitchBtnText: { fontSize: TextScale.xs, fontWeight: '700' },
 });
 
 function LibraryFilterBar({
@@ -2888,7 +2905,9 @@ export default function RestoreScreen() {
   useEffect(() => {
     if (sourceMode !== 'shared' || !selectedSourceId) return;
     if (isOffline || isDownloading) return;
-    void handleFetch({ quiet: true, preserveSelection: true });
+    queueMicrotask(() => {
+      void handleFetch({ quiet: true, preserveSelection: true });
+    });
   }, [sourceMode, selectedSourceId, sharedViewMode, isOffline, isDownloading, handleFetch]);
 
   useFocusEffect(useCallback(() => {
