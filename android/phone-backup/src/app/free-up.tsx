@@ -139,7 +139,7 @@ export default function FreeUpScreen() {
 
     try {
       // Try in-memory cache first for instant load
-      const cached = getCleanupCandidateFiles();
+      const cached = getCleanupCandidateFiles() as CandidateFile[];
       if (cached.length > 0 && !isRefresh) {
         setFiles(cached);
         setSelected(new Set(cached.map(fileKey)));
@@ -162,8 +162,9 @@ export default function FreeUpScreen() {
         return;
       }
 
-      setFiles(result.files);
-      setSelected(new Set(result.files.map(fileKey)));
+      const resultFiles = result.files as CandidateFile[];
+      setFiles(resultFiles);
+      setSelected(new Set(resultFiles.map(fileKey)));
       setStatusMsg('');
     } catch (err: any) {
       setStatusMsg(err?.message || 'Scan failed');
