@@ -446,3 +446,97 @@ export async function downloadRewindReel(year, month, destUri, onProgress) {
   );
   return downloadResumable.downloadAsync();
 }
+
+/**
+ * Fetch auto-generated trip albums for the current or specified source.
+ * @param {string} [sourceId]
+ * @returns {Promise<{trips: Array<{id: number, source_id: string, title: string, start_time: number, end_time: number, center_lat: number, center_lon: number, media_count: number, cover_media_id: number|null, cover: any}>}>}
+ */
+export async function getTrips(sourceId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const target = sourceId || deviceId;
+  const res = await fetch(
+    `http://${ip}:${port}/api/trips?source_id=${encodeURIComponent(target)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch trips (${res.status})`);
+  return await readJsonOrNull(res);
+}
+
+/**
+ * Fetch all media items in a specific trip.
+ * @param {number} tripId
+ * @returns {Promise<{trip: any, media: Array<any>}>}
+ */
+export async function getTripMedia(tripId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/trips/${encodeURIComponent(tripId)}/media?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch trip media (${res.status})`);
+  return await readJsonOrNull(res);
+}
+
+/**
+ * Re-trigger trip clustering on the server for a device.
+ * @param {string} [sourceId]
+ */
+export async function reclusterTrips(sourceId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const target = sourceId || deviceId;
+  const res = await fetch(
+    `http://${ip}:${port}/api/trips/recluster?source_id=${encodeURIComponent(target)}`,
+    { method: 'POST', headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to recluster trips (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Toggle emoji reaction on a media item.
+ * @param {number} mediaId
+ * @param {string} emoji
+ * @returns {Promise<{status: 'added'|'removed', media_id: number, emoji: string, counts: Record<string, number>, user_reactions: string[]}>}
+ */
+export async function reactToMedia(mediaId, emoji) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/media/${encodeURIComponent(mediaId)}/react`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ source_id: deviceId, emoji }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to react (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Fetch reactions for a media item.
+ * @param {number} mediaId
+ */
+export async function getMediaReactions(mediaId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/media/${encodeURIComponent(mediaId)}/reactions?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch reactions (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Fetch chronological media feed with reactions for a shared folder.
+ * @param {string} sourceId
+ */
+export async function getSharedFeed(sourceId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/feed?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch shared feed (${res.status})`);
+  return await res.json();
+}

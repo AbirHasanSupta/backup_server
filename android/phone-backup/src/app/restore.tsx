@@ -46,6 +46,9 @@ import {
   searchSharedFiles,
   listServerFiles,
   listSharedFiles,
+  reactToMedia,
+  getMediaReactions,
+  getSharedFeed,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
@@ -104,6 +107,10 @@ type RemoteFile = {
   modified_time: number;
   sha256?: string;
   uploaded_time?: number;
+  media_id?: number;
+  reaction_counts?: Record<string, number>;
+  user_reactions?: string[];
+  is_video?: boolean;
 };
 
 type ServerConfig = { ip: string; port: string; key: string; deviceId: string } | null;
@@ -374,6 +381,127 @@ function compareRemoteFiles(a: RemoteFile, b: RemoteFile, field: SortField, dir:
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Reaction Bar & Feed Card Components
+// ─────────────────────────────────────────────────────────────────────────────
+
+const REACTION_EMOJIS = ['❤️', '😂', '😮', '👍'];
+
+function ReactionEmojiBar({
+  reactionCounts,
+  userReactions,
+  onReact,
+  colors,
+}: {
+  reactionCounts?: Record<string, number>;
+  userReactions?: string[];
+  onReact: (emoji: string) => void;
+  colors: AppColors;
+}) {
+  return (
+    <View style={reactionStyles.bar}>
+      {REACTION_EMOJIS.map((emoji) => {
+        const count = reactionCounts?.[emoji] || 0;
+        const active = userReactions?.includes(emoji) || false;
+        return (
+          <TouchableOpacity
+            key={emoji}
+            onPress={() => onReact(emoji)}
+            style={[
+              reactionStyles.emojiBtn,
+              {
+                backgroundColor: active ? colors.primarySoft : colors.surfaceSoft,
+                borderColor: active ? colors.primary : colors.surfaceBorder,
+              },
+            ]}
+            activeOpacity={0.7}
+          >
+            <Text style={reactionStyles.emojiText}>{emoji}</Text>
+            {count > 0 && (
+              <Text
+                style={[
+                  reactionStyles.countText,
+                  { color: active ? colors.primary : colors.textSecondary },
+                ]}
+              >
+                {count}
+              </Text>
+            )}
+          </TouchableOpacity>
+        );
+      })}
+    </View>
+  );
+}
+
+function SharedFeedCard({
+  item,
+  serverConfig,
+  sourceId,
+  onPreview,
+  onReact,
+  colors,
+}: {
+  item: RemoteFile;
+  serverConfig: ServerConfig;
+  sourceId: string;
+  onPreview: (file: RemoteFile) => void;
+  onReact: (file: RemoteFile, emoji: string) => void;
+  colors: AppColors;
+}) {
+  const category = getFileCategory(item.path);
+  const isVideo = category === 'video';
+  const fileName = item.path.split(/[/\\]/).pop() ?? item.path;
+  const thumbUrl = serverConfig
+    ? isVideo
+      ? buildThumbnailUrl(serverConfig, item.path, 'shared', sourceId)
+      : buildPreviewUrl(serverConfig, item.path, 'shared', sourceId)
+    : '';
+
+  return (
+    <View style={[feedCardStyles.card, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
+      <TouchableOpacity
+        style={feedCardStyles.mediaWrap}
+        onPress={() => onPreview(item)}
+        activeOpacity={0.9}
+      >
+        <Image
+          source={{ uri: thumbUrl }}
+          style={feedCardStyles.mediaImage}
+          contentFit="cover"
+          transition={150}
+        />
+        {isVideo && (
+          <View style={feedCardStyles.videoBadge}>
+            <AppIcon androidName="play_arrow" iosName="play.fill" color="#fff" size={24} />
+          </View>
+        )}
+      </TouchableOpacity>
+
+      <View style={feedCardStyles.body}>
+        <View style={feedCardStyles.headerRow}>
+          <Text style={[feedCardStyles.fileName, { color: colors.text }]} numberOfLines={1}>
+            {fileName}
+          </Text>
+          <Text style={[feedCardStyles.fileDate, { color: colors.textMuted }]}>
+            {formatDate(item.modified_time)}
+          </Text>
+        </View>
+        <Text style={[feedCardStyles.fileSize, { color: colors.textSecondary }]}>
+          {formatSize(item.size)}
+        </Text>
+
+        <ReactionEmojiBar
+          reactionCounts={item.reaction_counts}
+          userReactions={item.user_reactions}
+          onReact={(emoji) => onReact(item, emoji)}
+          colors={colors}
+        />
+      </View>
+    </View>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Source Selector
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -381,6 +509,8 @@ type SourceSelectorProps = {
   mode: SourceMode;
   sharedSources: SharedSource[];
   selectedSourceId: string | null;
+  sharedViewMode?: 'feed' | 'folder';
+  onSharedViewModeChange?: (vmode: 'feed' | 'folder') => void;
   isLoadingSources: boolean;
   isOffline: boolean;
   sortEnabled: boolean;
@@ -393,8 +523,9 @@ type SourceSelectorProps = {
 };
 
 function SourceSelector({
-  mode, sharedSources, selectedSourceId, isLoadingSources, isOffline,
-  sortEnabled, sortField, sortDir, onModeChange, onSourceSelect, onSortChange, colors,
+  mode, sharedSources, selectedSourceId, sharedViewMode = 'feed', onSharedViewModeChange,
+  isLoadingSources, isOffline, sortEnabled, sortField, sortDir,
+  onModeChange, onSourceSelect, onSortChange, colors,
 }: SourceSelectorProps) {
   const [showSourceMenu, setShowSourceMenu] = useState(false);
   const [showSortMenu, setShowSortMenu] = useState(false);
@@ -460,7 +591,7 @@ function SourceSelector({
             ]}
             activeOpacity={0.75}
             accessibilityLabel="Sort files"
-            accessibilityHint={`Currently sorted by ${sortField}, ${sortDir === 'asc' ? 'ascending' : 'descending'}`}
+            accessibilityHint={`Currently sorted by ${sortField}, ${sortDir === 'asc' ? 'asc' : 'desc'}`}
           >
             <AppIcon
               androidName="sort"
@@ -480,12 +611,19 @@ function SourceSelector({
             return (
               <TouchableOpacity
                 key={option.field}
+                style={[
+                  srcStyles.sortMenuItem,
+                  isActive && { backgroundColor: colors.primarySoft },
+                ]}
                 onPress={() => handleSortSelect(option.field)}
-                style={[srcStyles.sortMenuItem, isActive && { backgroundColor: colors.primarySoft }]}
                 activeOpacity={0.75}
-                accessibilityLabel={`Sort by ${option.label}`}
               >
-                <Text style={[srcStyles.sortMenuItemText, { color: isActive ? colors.primary : colors.text }]}>
+                <Text
+                  style={[
+                    srcStyles.sortMenuItemText,
+                    { color: isActive ? colors.primary : colors.text },
+                  ]}
+                >
                   {option.label}
                 </Text>
                 {isActive && (
@@ -493,7 +631,12 @@ function SourceSelector({
                     <Text style={[srcStyles.sortDirectionText, { color: colors.primary }]}>
                       {sortDir === 'asc' ? '↑' : '↓'}
                     </Text>
-                    <AppIcon androidName="check" iosName="checkmark" color={colors.primary} size={14} />
+                    <AppIcon
+                      androidName="check"
+                      iosName="checkmark"
+                      color={colors.primary}
+                      size={14}
+                    />
                   </View>
                 )}
               </TouchableOpacity>
@@ -521,17 +664,60 @@ function SourceSelector({
             </Text>
           ) : (
             <>
-              <TouchableOpacity
-                style={[srcStyles.sourcePicker, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}
-                onPress={() => setShowSourceMenu(v => !v)}
-                activeOpacity={0.8}
-              >
-                <AppIcon androidName="folder" iosName="folder.fill" color={colors.primary} size={16} />
-                <Text style={[srcStyles.sourcePickerText, { color: colors.text }]} numberOfLines={1}>
-                  {selectedSource ? selectedSource.label : 'Select a folder…'}
-                </Text>
-                <AppIcon androidName={showSourceMenu ? 'expand_less' : 'expand_more'} iosName={showSourceMenu ? 'chevron.up' : 'chevron.down'} color={colors.textSecondary} size={18} />
-              </TouchableOpacity>
+              <View style={srcStyles.sharedControlsRow}>
+                <TouchableOpacity
+                  style={[srcStyles.sourcePicker, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}
+                  onPress={() => setShowSourceMenu(v => !v)}
+                  activeOpacity={0.8}
+                >
+                  <AppIcon androidName="folder" iosName="folder.fill" color={colors.primary} size={16} />
+                  <Text style={[srcStyles.sourcePickerText, { color: colors.text }]} numberOfLines={1}>
+                    {selectedSource ? selectedSource.label : 'Select a folder…'}
+                  </Text>
+                  <AppIcon androidName={showSourceMenu ? 'expand_less' : 'expand_more'} iosName={showSourceMenu ? 'chevron.up' : 'chevron.down'} color={colors.textSecondary} size={18} />
+                </TouchableOpacity>
+
+                {selectedSourceId && (
+                  <View style={[srcStyles.viewSwitcherWrap, { backgroundColor: colors.surfaceSoft }]}>
+                    <TouchableOpacity
+                      style={[
+                        srcStyles.viewSwitchBtn,
+                        sharedViewMode === 'feed' && [srcStyles.viewSwitchBtnActive, { backgroundColor: colors.primary }],
+                      ]}
+                      onPress={() => onSharedViewModeChange?.('feed')}
+                      activeOpacity={0.8}
+                    >
+                      <AppIcon
+                        androidName="dynamic_feed"
+                        iosName="rectangle.grid.1x2"
+                        color={sharedViewMode === 'feed' ? '#fff' : colors.textSecondary}
+                        size={14}
+                      />
+                      <Text style={[srcStyles.viewSwitchBtnText, { color: sharedViewMode === 'feed' ? '#fff' : colors.textSecondary }]}>
+                        Feed
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        srcStyles.viewSwitchBtn,
+                        sharedViewMode === 'folder' && [srcStyles.viewSwitchBtnActive, { backgroundColor: colors.primary }],
+                      ]}
+                      onPress={() => onSharedViewModeChange?.('folder')}
+                      activeOpacity={0.8}
+                    >
+                      <AppIcon
+                        androidName="folder"
+                        iosName="folder"
+                        color={sharedViewMode === 'folder' ? '#fff' : colors.textSecondary}
+                        size={14}
+                      />
+                      <Text style={[srcStyles.viewSwitchBtnText, { color: sharedViewMode === 'folder' ? '#fff' : colors.textSecondary }]}>
+                        Tree
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
 
               {showSourceMenu && (
                 <View style={[srcStyles.sourceMenu, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
@@ -566,6 +752,85 @@ function SourceSelector({
     </View>
   );
 }
+
+const reactionStyles = StyleSheet.create({
+  bar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    marginTop: Spacing.two,
+  },
+  emojiBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: Spacing.two + 2,
+    paddingVertical: 5,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+  },
+  emojiText: {
+    fontSize: TextScale.sm,
+  },
+  countText: {
+    fontSize: TextScale.xs,
+    fontWeight: '700',
+  },
+});
+
+const feedCardStyles = StyleSheet.create({
+  card: {
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    overflow: 'hidden',
+    marginBottom: Spacing.four,
+  },
+  mediaWrap: {
+    width: '100%',
+    height: 220,
+    backgroundColor: '#000',
+    position: 'relative',
+  },
+  mediaImage: {
+    width: '100%',
+    height: '100%',
+  },
+  videoBadge: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    marginTop: -20,
+    marginLeft: -20,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  body: {
+    padding: Spacing.three,
+    gap: 2,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+  },
+  fileName: {
+    fontSize: TextScale.base,
+    fontWeight: '700',
+    flex: 1,
+  },
+  fileDate: {
+    fontSize: TextScale.xs,
+  },
+  fileSize: {
+    fontSize: TextScale.xs,
+    marginTop: 1,
+  },
+});
 
 const srcStyles = StyleSheet.create({
   container: {
@@ -618,7 +883,13 @@ const srcStyles = StyleSheet.create({
   sourceLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   sourceLoadingText: { fontSize: TextScale.xs },
   noSourceText: { fontSize: TextScale.xs, lineHeight: 18 },
+  sharedControlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
   sourcePicker: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
@@ -2139,6 +2410,7 @@ export default function RestoreScreen() {
   const [sourceMode, setSourceMode] = useState<SourceMode>('phone');
   const [sharedSources, setSharedSources] = useState<SharedSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
+  const [sharedViewMode, setSharedViewMode] = useState<'feed' | 'folder'>('feed');
   const [isLoadingSources, setIsLoadingSources] = useState(false);
 
   // Server Config cache
@@ -2449,8 +2721,82 @@ export default function RestoreScreen() {
     });
   }, [isFiltering, visibleRows, filteredFiles]);
 
+  const isFeedMode = sourceMode === 'shared' && sharedViewMode === 'feed' && !!selectedSourceId;
+
+  // Reaction handler
+  const handleToggleReaction = useCallback(async (file: RemoteFile, emoji: string) => {
+    if (!file.media_id) return;
+    hapticSelection();
+
+    const currentReactions = file.user_reactions || [];
+    const currentCounts = { ...(file.reaction_counts || {}) };
+    const hasReacted = currentReactions.includes(emoji);
+
+    const updatedReactions = hasReacted
+      ? currentReactions.filter(e => e !== emoji)
+      : [...currentReactions, emoji];
+
+    const updatedCounts = {
+      ...currentCounts,
+      [emoji]: Math.max(0, (currentCounts[emoji] || 0) + (hasReacted ? -1 : 1)),
+    };
+
+    const updateList = (list: RemoteFile[]) =>
+      list.map(f =>
+        f.path === file.path
+          ? { ...f, user_reactions: updatedReactions, reaction_counts: updatedCounts }
+          : f
+      );
+
+    setFiles(updateList);
+
+    try {
+      const res = await reactToMedia(file.media_id, emoji);
+      if (res?.counts && res?.user_reactions) {
+        const syncServer = (list: RemoteFile[]) =>
+          list.map(f =>
+            f.path === file.path
+              ? { ...f, user_reactions: res.user_reactions, reaction_counts: res.counts }
+              : f
+          );
+        setFiles(syncServer);
+      }
+    } catch (err) {
+      console.warn('[Restore] reaction error:', err);
+    }
+  }, []);
+
+  const handleSharedViewModeChange = useCallback((vmode: 'feed' | 'folder') => {
+    setSharedViewMode(vmode);
+  }, []);
+
+  // Periodic refresh of reactions/feed when in shared feed view
+  useEffect(() => {
+    if (!isFeedMode || isOffline) return;
+    const interval = setInterval(() => {
+      if (fetchingRef.current || isDownloading || !selectedSourceId) return;
+      getSharedFeed(selectedSourceId)
+        .then(res => {
+          if (!restoreMountedRef.current || !res?.items) return;
+          const feedFiles: RemoteFile[] = res.items.map((f: any) => ({
+            path: f.path,
+            size: f.size,
+            modified_time: f.modified_time,
+            media_id: f.media_id,
+            reaction_counts: f.reaction_counts,
+            user_reactions: f.user_reactions,
+            is_video: f.is_video,
+          }));
+          setFiles(feedFiles);
+        })
+        .catch(() => {});
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [isFeedMode, selectedSourceId, isOffline, isDownloading]);
+
   // Flat ordered list of previewable files
   const previewableFiles = useMemo<RemoteFile[]>(() => {
+    if (isFeedMode) return isFiltering ? filteredFiles : files;
     if (isFiltering) return filteredFiles;
     const result: RemoteFile[] = [];
     function collect(node: TreeNode) {
@@ -2462,7 +2808,7 @@ export default function RestoreScreen() {
     }
     if (sortedTree) sortedTree.children.forEach(collect);
     return result;
-  }, [isFiltering, filteredFiles, sortedTree]);
+  }, [isFeedMode, isFiltering, filteredFiles, files, sortedTree]);
 
   // Fetch files from server
   const handleFetch = useCallback(async (opts?: { quiet?: boolean; ignoreOffline?: boolean; preserveSelection?: boolean }) => {
@@ -2476,22 +2822,44 @@ export default function RestoreScreen() {
     setIsFetching(true);
     try {
       await loadServerConfig();
-      const data = sourceMode === 'shared'
-        ? await browseSharedFiles(selectedSourceId!)
-        : await browseFiles('');
-      if (!restoreMountedRef.current) return;
+      if (sourceMode === 'shared' && sharedViewMode === 'feed') {
+        const feedData = await getSharedFeed(selectedSourceId!);
+        if (!restoreMountedRef.current) return;
+        const feedFiles: RemoteFile[] = (feedData.items || []).map((f: any) => ({
+          path: f.path,
+          size: f.size,
+          modified_time: f.modified_time,
+          media_id: f.media_id,
+          reaction_counts: f.reaction_counts,
+          user_reactions: f.user_reactions,
+          is_video: f.is_video,
+        }));
+        setFiles(feedFiles);
+        setTree(null);
+      } else {
+        const data = sourceMode === 'shared'
+          ? await browseSharedFiles(selectedSourceId!)
+          : await browseFiles('');
+        if (!restoreMountedRef.current) return;
 
-      const rootFiles: RemoteFile[] = (data.files || []).map((f: any) => ({
-        path: f.path, size: f.size, modified_time: f.modified_time,
-        sha256: f.sha256, uploaded_time: f.uploaded_time,
-      }));
-      setFiles(rootFiles);
-      setTree(buildRootFromBrowse(data));
+        const rootFiles: RemoteFile[] = (data.files || []).map((f: any) => ({
+          path: f.path,
+          size: f.size,
+          modified_time: f.modified_time,
+          sha256: f.sha256,
+          uploaded_time: f.uploaded_time,
+          media_id: f.media_id,
+          reaction_counts: f.reaction_counts,
+          user_reactions: f.user_reactions,
+          is_video: f.is_video,
+        }));
+        setFiles(rootFiles);
+        setTree(buildRootFromBrowse(data));
+      }
 
       if (opts?.preserveSelection) {
-        const valid = new Set(rootFiles.map(f => f.path));
         setSelectedPaths(prev => {
-          const next = new Set([...prev].filter(p => valid.has(p)));
+          const next = new Set([...prev]);
           if (next.size === 0) setSelectionMode(false);
           return next;
         });
@@ -2508,7 +2876,7 @@ export default function RestoreScreen() {
       fetchingRef.current = false;
       if (restoreMountedRef.current) setIsFetching(false);
     }
-  }, [isOffline, isDownloading, sourceMode, selectedSourceId, loadServerConfig]);
+  }, [isOffline, isDownloading, sourceMode, selectedSourceId, sharedViewMode, loadServerConfig]);
 
   const onRefreshLibrary = useCallback(async () => {
     if (isDownloading) return;
@@ -3054,9 +3422,11 @@ export default function RestoreScreen() {
             mode={sourceMode}
             sharedSources={sharedSources}
             selectedSourceId={selectedSourceId}
+            sharedViewMode={sharedViewMode}
+            onSharedViewModeChange={handleSharedViewModeChange}
             isLoadingSources={isLoadingSources}
             isOffline={isOffline}
-            sortEnabled={files.length > 0}
+            sortEnabled={files.length > 0 && !isFeedMode}
             sortField={sortField}
             sortDir={sortDir}
             onModeChange={handleModeChange}
@@ -3079,7 +3449,7 @@ export default function RestoreScreen() {
             <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
               <AppIcon androidName="touch_app" iosName="hand.tap" color={colors.textMuted} size={13} />
               <Text style={[styles.hintText, { color: colors.textMuted }]}>
-                Tap to preview · long press to select
+                {isFeedMode ? 'Tap to preview · tap emoji to react' : 'Tap to preview · long press to select'}
               </Text>
             </View>
           )}
@@ -3103,26 +3473,39 @@ export default function RestoreScreen() {
       )}
 
       <View style={{ flex: 1 }}>
-      {/* File Tree List */}
+      {/* File Tree or Shared Feed List */}
       <FlatList
         style={{ flex: 1 }}
-        data={listRows}
-        keyExtractor={row => row.node.key}
-        renderItem={({ item }) => (
-          <TreeNodeView
-            node={item.node} depth={item.depth}
-            isExpanded={expandedKeys.has(item.node.key)}
-            selectedPaths={selectedPaths}
-            selectionMode={selectionMode}
-            isLoadingSelection={loadingNodeKeys.has(item.node.key)}
-            onToggleNode={handleToggleNode}
-            onEnterSelectionMode={handleEnterSelectionMode}
-            onToggleExpand={handleToggleExpand}
-            onPreview={handlePreview}
-            onWarmPreview={handleWarmPreview}
-            styles={styles} colors={colors}
-          />
-        )}
+        data={isFeedMode ? (isFiltering ? filteredFiles : files) : (listRows as any)}
+        keyExtractor={(item: any) => (isFeedMode ? item.path : item.node.key)}
+        renderItem={({ item }: any) =>
+          isFeedMode ? (
+            <SharedFeedCard
+              item={item}
+              serverConfig={serverConfig}
+              sourceId={selectedSourceId!}
+              onPreview={handlePreview}
+              onReact={handleToggleReaction}
+              colors={colors}
+            />
+          ) : (
+            <TreeNodeView
+              node={item.node}
+              depth={item.depth}
+              isExpanded={expandedKeys.has(item.node.key)}
+              selectedPaths={selectedPaths}
+              selectionMode={selectionMode}
+              isLoadingSelection={loadingNodeKeys.has(item.node.key)}
+              onToggleNode={handleToggleNode}
+              onEnterSelectionMode={handleEnterSelectionMode}
+              onToggleExpand={handleToggleExpand}
+              onPreview={handlePreview}
+              onWarmPreview={handleWarmPreview}
+              styles={styles}
+              colors={colors}
+            />
+          )
+        }
         contentContainerStyle={[
           styles.listContent,
           {

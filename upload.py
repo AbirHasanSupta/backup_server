@@ -39,7 +39,14 @@ from database import (
     verify_device_token, get_files_browse,
     get_cleanup_candidates,
     log_cleanup_deletions,
+    get_trips,
+    get_trip_media,
+    toggle_reaction,
+    get_media_reactions,
+    get_reactions_for_media_ids,
+    get_or_create_media_id,
 )
+from trips import cluster_source_media, trigger_background_clustering
 from state import add_log, get_current_activity, pending_connections, set_current_activity
 from storage import file_exists, save_fileobj, save_upload_stream, full_path_for
 from thumbnail import get_video_thumbnail_path
@@ -60,7 +67,7 @@ APP_VERSION = "3.4.2"
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _extract_bearer(authorization: str | None) -> str | None:
-    if not authorization or not authorization.startswith("Bearer "):
+    if not authorization or not isinstance(authorization, str) or not authorization.startswith("Bearer "):
         return None
     return authorization[7:]
 
@@ -377,6 +384,8 @@ def finish_upload_record(
     touch_device(device_ip, device_id=device_id)
     device_stats = get_device_stats(device_ip, device_id=device_id)
     add_log(f"Uploaded: {relative_path} ({device_id or device_ip})")
+    if device_id:
+        trigger_background_clustering(device_id)
 
     return {
         "status": "uploaded",
@@ -531,6 +540,26 @@ async def search_files(device_id: str, q: str, authorization: str = Header(None)
     return {"files": files}
 
 
+def _enrich_shared_files_with_reactions(source_id: str, files: list[dict], device_id: str | None = None) -> list[dict]:
+    if not files:
+        return []
+    media_ids = []
+    for f in files:
+        mid = get_or_create_media_id("shared", source_id, f["path"], f.get("size", 0), f.get("modified_time", 0))
+        f["media_id"] = mid
+        media_ids.append(mid)
+
+    counts_map, user_map = get_reactions_for_media_ids(media_ids, current_source_id=device_id)
+    video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
+    for f in files:
+        mid = f["media_id"]
+        f["reaction_counts"] = counts_map.get(mid, {})
+        f["user_reactions"] = user_map.get(mid, [])
+        ext = ("." + f["path"].rsplit(".", 1)[-1].lower()) if "." in f["path"] else ""
+        f["is_video"] = ext in video_exts
+    return files
+
+
 def _search_shared_dir(root: str, query: str, limit: int = 500) -> list[dict]:
     query = query.lower()
     results = []
@@ -551,6 +580,7 @@ def _search_shared_dir(root: str, query: str, limit: int = 500) -> list[dict]:
 
 
 @router.get("/shared/{source_id}/search")
+@router.get("/api/shared/{source_id}/search")
 async def search_shared_files(
         source_id: str,
         q: str,
@@ -571,10 +601,12 @@ async def search_shared_files(
     if not os.path.isdir(root):
         return {"files": []}
     files = await asyncio.to_thread(_search_shared_dir, root, q)
-    return {"files": files}
+    enriched = await asyncio.to_thread(_enrich_shared_files_with_reactions, source_id, files, device_id)
+    return {"files": enriched}
 
 
 @router.get("/shared/{source_id}/browse")
+@router.get("/api/shared/{source_id}/browse")
 async def browse_shared_files(
         source_id: str,
         prefix: str = "",
@@ -627,7 +659,63 @@ async def browse_shared_files(
         return folders, files
 
     folders, files = await asyncio.to_thread(_scan)
-    return {"folders": folders, "files": files}
+    enriched_files = await asyncio.to_thread(_enrich_shared_files_with_reactions, source_id, files, device_id)
+    return {"folders": folders, "files": enriched_files}
+
+
+@router.get("/shared/{source_id}/feed")
+@router.get("/api/shared/{source_id}/feed")
+async def get_shared_feed(
+        source_id: str,
+        device_id: str | None = None,
+        authorization: str = Header(None),
+        token: str = None,
+):
+    """
+    Return a flat, chronological feed of media items in the shared folder
+    with attached reaction counts and the user's reaction status.
+    """
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    entry = _find_shared_dir(source_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Shared source not found")
+    if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
+        raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
+
+    root = os.path.abspath(entry["path"])
+    if not os.path.isdir(root):
+        return {"items": [], "source_id": source_id, "label": entry["label"]}
+
+    def _collect_feed():
+        media_exts = {
+            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif",
+            ".bmp", ".tiff", ".tif", ".avif",
+            ".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv",
+        }
+        all_files = []
+        for dirpath, _dirs, filenames in os.walk(root):
+            for fname in filenames:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in media_exts:
+                    continue
+                full = os.path.join(dirpath, fname)
+                try:
+                    st = os.stat(full)
+                    rel = os.path.relpath(full, root).replace("\\", "/")
+                    all_files.append({
+                        "path": rel,
+                        "size": st.st_size,
+                        "modified_time": int(st.st_mtime),
+                    })
+                except OSError:
+                    continue
+
+        # Sort chronologically (newest first)
+        all_files.sort(key=lambda x: x["modified_time"], reverse=True)
+        return _enrich_shared_files_with_reactions(source_id, all_files, device_id)
+
+    items = await asyncio.to_thread(_collect_feed)
+    return {"items": items, "source_id": source_id, "label": entry["label"]}
 
 
 _MIME_MAP = {
@@ -965,6 +1053,9 @@ async def record_sync_session(
         f"{label} Sync session from {device_name or body.device_id or 'unknown'}: "
         f"{body.uploaded} uploaded, {body.skipped} skipped, {body.errors} errors — {body.outcome}"
     )
+
+    if body.device_id and body.uploaded > 0:
+        trigger_background_clustering(body.device_id)
 
     return {"ok": True, "id": session_id}
 
@@ -1456,4 +1547,93 @@ async def cleanup_delete(
         f"{result['total_bytes_freed'] / (1024 ** 3):.2f} GB "
         f"({len(body.files)} files)"
     )
-    return result
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Auto-generated Trips Endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.get("/api/trips")
+@router.get("/trips")
+async def list_trips(
+    source_id: str | None = None,
+    device_id: str | None = None,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    target_id = source_id or device_id
+    if not target_id:
+        raise HTTPException(status_code=400, detail="Missing source_id")
+    verify_auth(authorization or (f"Bearer {token}" if token else None), target_id)
+    trips = await asyncio.to_thread(get_trips, target_id)
+    return {"trips": trips}
+
+
+@router.get("/api/trips/{trip_id}/media")
+@router.get("/trips/{trip_id}/media")
+async def get_trip_media_items(
+    trip_id: int,
+    device_id: str | None = None,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    trip, media = await asyncio.to_thread(get_trip_media, trip_id)
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    return {"trip": trip, "media": media}
+
+
+@router.post("/api/trips/recluster")
+@router.post("/trips/recluster")
+async def recluster_trips(
+    source_id: str | None = None,
+    device_id: str | None = None,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    target_id = source_id or device_id
+    if not target_id:
+        raise HTTPException(status_code=400, detail="Missing source_id")
+    verify_auth(authorization or (f"Bearer {token}" if token else None), target_id)
+    clusters = await asyncio.to_thread(cluster_source_media, target_id)
+    trips = await asyncio.to_thread(get_trips, target_id)
+    return {"ok": True, "clusters_found": len(clusters), "trips": trips}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Media Reactions Endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ReactRequest(BaseModel):
+    source_id: str
+    emoji: str
+
+
+@router.post("/api/media/{media_id}/react")
+@router.post("/media/{media_id}/react")
+async def react_to_media(
+    media_id: int,
+    body: ReactRequest,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), body.source_id)
+    emoji = body.emoji.strip()
+    if not emoji:
+        raise HTTPException(status_code=400, detail="Emoji cannot be empty")
+    res = await asyncio.to_thread(toggle_reaction, media_id, body.source_id, emoji)
+    return res
+
+
+@router.get("/api/media/{media_id}/reactions")
+@router.get("/media/{media_id}/reactions")
+async def get_reactions(
+    media_id: int,
+    device_id: str | None = None,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    return await asyncio.to_thread(get_media_reactions, media_id)

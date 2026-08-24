@@ -49,6 +49,7 @@ from database import (
 from state import add_log
 from storage import full_path_in_root, resolve_backup_root
 from video_preview import _ffprobe_path
+from trips import trigger_background_clustering
 
 IMAGE_EXTS = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif",
@@ -359,6 +360,7 @@ def reindex_device(device_id: str) -> None:
         _flush_rows(_run_extraction(to_process))
 
     prune_media_index("phone", device_id, seen_paths, existing_paths=set(cache.keys()))
+    trigger_background_clustering(device_id)
 
 
 def _rel_dirname(rel_path: str) -> str:
@@ -501,6 +503,7 @@ def _do_reindex_all() -> None:
                 list(executor.map(_run_task, tasks))
 
         add_log("[Memories] Indexing scan completed.")
+        trigger_background_clustering()
     except Exception as e:
         add_log(f"[Memories] Indexing scan failed: {e}")
 

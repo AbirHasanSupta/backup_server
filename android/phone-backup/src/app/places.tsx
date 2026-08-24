@@ -1,5 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, FlatList, Modal, Alert, useWindowDimensions, BackHandler } from 'react-native';
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  ActivityIndicator,
+  StatusBar,
+  FlatList,
+  Modal,
+  Alert,
+  useWindowDimensions,
+  BackHandler,
+  Linking,
+  ScrollView,
+} from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -17,6 +31,8 @@ import { getPlaceName } from '@/utils/geocode';
 import {
   getPlaceClusters,
   getPlaceItems,
+  getTrips,
+  getTripMedia,
   getConfig,
   buildPreviewUrl,
   buildVideoPreviewUrl,
@@ -43,6 +59,19 @@ type PlaceCluster = {
   cover: { source_type: string; source_id: string; relative_path: string; is_video: boolean };
 };
 
+type Trip = {
+  id: number;
+  source_id: string;
+  title: string;
+  start_time: number;
+  end_time: number;
+  center_lat: number;
+  center_lon: number;
+  media_count: number;
+  cover_media_id: number | null;
+  cover?: { source_type: string; source_id: string; relative_path: string; is_video: boolean } | null;
+};
+
 type PlaceItem = {
   source_type: string;
   source_id: string;
@@ -51,7 +80,9 @@ type PlaceItem = {
   size: number;
   capture_time: number | null;
   is_video: boolean;
-  year: number | null;
+  year?: number | null;
+  cap_lat?: number | null;
+  cap_lon?: number | null;
 };
 
 function safeCall(fn: () => void): void {
@@ -65,6 +96,28 @@ function formatCoordinates(lat?: number, lon?: number): string {
   return `${Math.abs(lat).toFixed(2)}° ${latDir}, ${Math.abs(lon).toFixed(2)}° ${lonDir}`;
 }
 
+function formatTripDateRange(startTime: number, endTime: number): string {
+  const d1 = new Date(startTime * 1000);
+  const d2 = new Date(endTime * 1000);
+  const m1 = d1.toLocaleDateString('en-US', { month: 'short' });
+  const m2 = d2.toLocaleDateString('en-US', { month: 'short' });
+  const day1 = d1.getDate();
+  const day2 = d2.getDate();
+  const yr1 = d1.getFullYear();
+  const yr2 = d2.getFullYear();
+
+  if (yr1 === yr2) {
+    if (m1 === m2) {
+      if (day1 === day2) {
+        return `${m1} ${day1}, ${yr1}`;
+      }
+      return `${m1} ${day1} – ${day2}, ${yr1}`;
+    }
+    return `${m1} ${day1} – ${m2} ${day2}, ${yr1}`;
+  }
+  return `${m1} ${day1}, ${yr1} – ${m2} ${day2}, ${yr2}`;
+}
+
 export default function PlacesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -72,30 +125,47 @@ export default function PlacesScreen() {
   const { width, height } = useWindowDimensions();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
+  const [activeTab, setActiveTab] = useState<'places' | 'trips'>('places');
   const [serverConfig, setServerConfig] = useState<any>(null);
+
+  // Places state
   const [places, setPlaces] = useState<PlaceCluster[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
   const [activeCluster, setActiveCluster] = useState<PlaceCluster | null>(null);
   const [clusterItems, setClusterItems] = useState<PlaceItem[]>([]);
   const [clusterLoading, setClusterLoading] = useState(false);
+  const [placeNames, setPlaceNames] = useState<Record<string, string | null>>({});
+  const resolvedPlaceKeysRef = useRef<Set<string>>(new Set());
+
+  // Trips state
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [tripsLoading, setTripsLoading] = useState(false);
+  const [activeTrip, setActiveTrip] = useState<Trip | null>(null);
+  const [tripItems, setTripItems] = useState<PlaceItem[]>([]);
+  const [tripLoading, setTripLoading] = useState(false);
+
+  // Full-Screen Viewer state (shared)
+  const [viewerItems, setViewerItems] = useState<PlaceItem[]>([]);
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
   const viewerListRef = useRef<FlatList<PlaceItem>>(null);
   const [saving, setSaving] = useState(false);
   const [sharing, setSharing] = useState(false);
-  const [placeNames, setPlaceNames] = useState<Record<string, string | null>>({});
-  const resolvedPlaceKeysRef = useRef<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [cfg, res] = await Promise.all([getConfig(), getPlaceClusters()]);
+      const [cfg, placesRes, tripsRes] = await Promise.all([
+        getConfig(),
+        getPlaceClusters().catch(() => ({ places: [] })),
+        getTrips().catch(() => ({ trips: [] })),
+      ]);
       setServerConfig(cfg);
-      setPlaces(Array.isArray(res?.places) ? res.places : []);
+      setPlaces(Array.isArray(placesRes?.places) ? placesRes.places : []);
+      setTrips(Array.isArray(tripsRes?.trips) ? tripsRes.trips : []);
     } catch (err: any) {
-      setError(sanitizeErrorMessage(err, 'Could not load places.'));
+      setError(sanitizeErrorMessage(err, 'Could not load places and trips.'));
     } finally {
       setLoading(false);
     }
@@ -138,25 +208,67 @@ export default function PlacesScreen() {
     setClusterItems([]);
   }, []);
 
-  const closeViewer = useCallback(() => setViewerIndex(null), []);
+  const openTrip = useCallback(async (trip: Trip) => {
+    hapticMedium();
+    setActiveTrip(trip);
+    setTripItems([]);
+    setTripLoading(true);
+    try {
+      const res = await getTripMedia(trip.id);
+      setTripItems(Array.isArray(res?.media) ? res.media : []);
+    } catch (err: any) {
+      Alert.alert('Failed to Load', sanitizeErrorMessage(err, 'Could not load trip media.'));
+    } finally {
+      setTripLoading(false);
+    }
+  }, []);
+
+  const closeTrip = useCallback(() => {
+    setActiveTrip(null);
+    setTripItems([]);
+  }, []);
+
+  const openViewerForCluster = useCallback((index: number) => {
+    hapticLight();
+    setViewerItems(clusterItems);
+    setViewerIndex(index);
+  }, [clusterItems]);
+
+  const openViewerForTrip = useCallback((index: number) => {
+    hapticLight();
+    setViewerItems(tripItems);
+    setViewerIndex(index);
+  }, [tripItems]);
+
+  const closeViewer = useCallback(() => {
+    setViewerIndex(null);
+  }, []);
 
   const viewerIndexRef = useRef(viewerIndex);
   const activeClusterRef = useRef(activeCluster);
+  const activeTripRef = useRef(activeTrip);
   const closeViewerRef = useRef(closeViewer);
   const closeClusterRef = useRef(closeCluster);
+  const closeTripRef = useRef(closeTrip);
 
   useEffect(() => {
     viewerIndexRef.current = viewerIndex;
     activeClusterRef.current = activeCluster;
+    activeTripRef.current = activeTrip;
     closeViewerRef.current = closeViewer;
     closeClusterRef.current = closeCluster;
-  }, [viewerIndex, activeCluster, closeViewer, closeCluster]);
+    closeTripRef.current = closeTrip;
+  }, [viewerIndex, activeCluster, activeTrip, closeViewer, closeCluster, closeTrip]);
 
   useFocusEffect(
     useCallback(() => {
       const onBackPress = () => {
         if (viewerIndexRef.current !== null) {
           closeViewerRef.current();
+          return true;
+        }
+        if (activeTripRef.current !== null) {
+          closeTripRef.current();
           return true;
         }
         if (activeClusterRef.current !== null) {
@@ -172,7 +284,7 @@ export default function PlacesScreen() {
     }, [router])
   );
 
-  const activeViewerItem = viewerIndex != null && clusterItems[viewerIndex] ? clusterItems[viewerIndex] : null;
+  const activeViewerItem = viewerIndex != null && viewerItems[viewerIndex] ? viewerItems[viewerIndex] : null;
 
   const handleSaveViewerItem = async () => {
     if (!activeViewerItem || saving) return;
@@ -183,9 +295,9 @@ export default function PlacesScreen() {
         Alert.alert('Permission Needed', 'Media library permission is required to save photos and videos.');
         return;
       }
-      const displayName = activeViewerItem.relative_path.split(/[/\\]/).pop() ?? `place_${Date.now()}`;
+      const displayName = activeViewerItem.relative_path.split(/[/\\]/).pop() ?? `media_${Date.now()}`;
       const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
-      const tmpUri = `${cacheDir}place_save_${Date.now()}_${displayName}`;
+      const tmpUri = `${cacheDir}media_save_${Date.now()}_${displayName}`;
       if (activeViewerItem.source_type === 'shared') {
         await downloadSharedFile(activeViewerItem.source_id, activeViewerItem.relative_path, tmpUri);
       } else {
@@ -205,9 +317,9 @@ export default function PlacesScreen() {
     if (!activeViewerItem || sharing) return;
     setSharing(true);
     try {
-      const displayName = activeViewerItem.relative_path.split(/[/\\]/).pop() ?? `place_${Date.now()}`;
+      const displayName = activeViewerItem.relative_path.split(/[/\\]/).pop() ?? `media_${Date.now()}`;
       const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
-      const tmpUri = `${cacheDir}place_share_${Date.now()}_${displayName}`;
+      const tmpUri = `${cacheDir}media_share_${Date.now()}_${displayName}`;
       if (activeViewerItem.source_type === 'shared') {
         await downloadSharedFile(activeViewerItem.source_id, activeViewerItem.relative_path, tmpUri);
       } else {
@@ -236,11 +348,18 @@ export default function PlacesScreen() {
   };
 
   const goToNext = () => {
-    if (viewerIndex != null && viewerIndex < clusterItems.length - 1) {
+    if (viewerIndex != null && viewerIndex < viewerItems.length - 1) {
       const nextIdx = viewerIndex + 1;
       setViewerIndex(nextIdx);
       viewerListRef.current?.scrollToIndex({ index: nextIdx, animated: true });
     }
+  };
+
+  const openInExternalMaps = (lat: number, lon: number) => {
+    const url = `https://www.google.com/maps/search/?api=1&query=${lat},${lon}`;
+    Linking.openURL(url).catch(() => {
+      Alert.alert('Could Not Open Map', `Coordinates: ${formatCoordinates(lat, lon)}`);
+    });
   };
 
   const gridGap = Spacing.two;
@@ -251,17 +370,59 @@ export default function PlacesScreen() {
     <View style={[styles.root, { backgroundColor: colors.bg }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
 
+      {/* Header */}
       <View style={[styles.header, { paddingTop: insets.top + Spacing.three }]}>
         <TouchableOpacity style={styles.backBtn} onPress={() => router.replace('/memories')} accessibilityLabel="Go back">
           <AppIcon androidName="arrow_back" iosName="chevron.left" color={colors.text} size={22} />
         </TouchableOpacity>
         <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle}>Places</Text>
+          <Text style={styles.headerTitle}>{activeTab === 'places' ? 'Places' : 'Trips'}</Text>
           <Text style={styles.headerSubtitle}>
-            {loading ? 'Finding memories by location…' : places.length > 0 ? `${places.length} places` : 'No geotagged memories yet'}
+            {loading
+              ? 'Loading…'
+              : activeTab === 'places'
+              ? (places.length > 0 ? `${places.length} places discovered` : 'No geotagged memories yet')
+              : (trips.length > 0 ? `${trips.length} auto-generated trip${trips.length !== 1 ? 's' : ''}` : 'No trips generated yet')}
           </Text>
         </View>
         <View style={{ width: 36 }} />
+      </View>
+
+      {/* Tab Switcher */}
+      <View style={[styles.tabBarWrap, { backgroundColor: colors.bg }]}>
+        <View style={[styles.tabBar, { backgroundColor: colors.surfaceSoft }]}>
+          <TouchableOpacity
+            style={[styles.tabBtn, activeTab === 'places' && [styles.tabBtnActive, { backgroundColor: colors.primary }]]}
+            onPress={() => { hapticLight(); setActiveTab('places'); }}
+            activeOpacity={0.8}
+          >
+            <AppIcon
+              androidName="place"
+              iosName="mappin.and.ellipse"
+              color={activeTab === 'places' ? '#fff' : colors.textSecondary}
+              size={16}
+            />
+            <Text style={[styles.tabBtnText, { color: activeTab === 'places' ? '#fff' : colors.textSecondary }]}>
+              Places ({places.length})
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.tabBtn, activeTab === 'trips' && [styles.tabBtnActive, { backgroundColor: colors.primary }]]}
+            onPress={() => { hapticLight(); setActiveTab('trips'); }}
+            activeOpacity={0.8}
+          >
+            <AppIcon
+              androidName="flight_takeoff"
+              iosName="airplane"
+              color={activeTab === 'trips' ? '#fff' : colors.textSecondary}
+              size={16}
+            />
+            <Text style={[styles.tabBtnText, { color: activeTab === 'trips' ? '#fff' : colors.textSecondary }]}>
+              Trips ({trips.length})
+            </Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {loading ? (
@@ -273,66 +434,138 @@ export default function PlacesScreen() {
           <AppIcon androidName="cloud_off" iosName="wifi.slash" color={colors.textMuted} size={40} />
           <Text style={styles.emptySubtitle}>{error}</Text>
         </View>
-      ) : places.length === 0 ? (
-        <View style={styles.centered}>
-          <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft }]}>
-            <AppIcon androidName="place" iosName="mappin.and.ellipse" color={colors.primary} size={36} />
+      ) : activeTab === 'places' ? (
+        // ─── PLACES TAB ───────────────────────────────────────────────────────
+        places.length === 0 ? (
+          <View style={styles.centered}>
+            <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft }]}>
+              <AppIcon androidName="place" iosName="mappin.and.ellipse" color={colors.primary} size={36} />
+            </View>
+            <Text style={styles.emptyTitle}>No places yet</Text>
+            <Text style={styles.emptySubtitle}>
+              Photos with GPS location data will appear here once they&apos;re backed up and indexed.
+            </Text>
           </View>
-          <Text style={styles.emptyTitle}>No places yet</Text>
-          <Text style={styles.emptySubtitle}>
-            Photos with location data will show up here once they&apos;re backed up and indexed.
-          </Text>
-        </View>
-      ) : (
-        <FlatList
-          data={places}
-          keyExtractor={(item) => item.cluster_key}
-          numColumns={3}
-          contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: gridGap }}
-          columnWrapperStyle={{ gap: gridGap }}
-          renderItem={({ item, index }) => {
-            const thumbUrl = serverConfig
-              ? (item.cover.is_video
-                ? buildThumbnailUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id)
-                : buildPreviewUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id))
-              : undefined;
+        ) : (
+          <FlatList
+            data={places}
+            keyExtractor={(item) => item.cluster_key}
+            numColumns={3}
+            contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: gridGap }}
+            columnWrapperStyle={{ gap: gridGap }}
+            renderItem={({ item, index }) => {
+              const thumbUrl = serverConfig
+                ? (item.cover.is_video
+                  ? buildThumbnailUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id)
+                  : buildPreviewUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id))
+                : undefined;
 
-            const resolvedName = placeNames[item.cluster_key];
-            const nameLabel = resolvedName === undefined ? 'Locating…' : (resolvedName || 'Unknown location');
+              const resolvedName = placeNames[item.cluster_key];
+              const nameLabel = resolvedName === undefined ? 'Locating…' : (resolvedName || 'Unknown location');
 
-            return (
-              <AnimatedListItem index={index}>
-                <TouchableOpacity
-                  style={[styles.placeTile, { width: cellSize }]}
-                  onPress={() => openCluster(item)}
-                  activeOpacity={0.85}
-                >
-                  <View style={[styles.placeCell, { width: cellSize, height: cellSize }]}>
-                    <Image
-                      source={{ uri: thumbUrl }}
-                      style={styles.placeCellImage}
-                      contentFit="cover"
-                      transition={150}
-                    />
-                    <View style={styles.placeCellOverlay}>
-                      <Text style={styles.placeCellCount}>{item.count}</Text>
+              return (
+                <AnimatedListItem index={index}>
+                  <TouchableOpacity
+                    style={[styles.placeTile, { width: cellSize }]}
+                    onPress={() => openCluster(item)}
+                    activeOpacity={0.85}
+                  >
+                    <View style={[styles.placeCell, { width: cellSize, height: cellSize }]}>
+                      <Image
+                        source={{ uri: thumbUrl }}
+                        style={styles.placeCellImage}
+                        contentFit="cover"
+                        transition={150}
+                      />
+                      <View style={styles.placeCellOverlay}>
+                        <Text style={styles.placeCellCount}>{item.count}</Text>
+                      </View>
                     </View>
-                  </View>
-                  <View style={styles.placeTileLabel}>
-                    <Text style={styles.placeTileName} numberOfLines={1}>{nameLabel}</Text>
-                    <Text style={styles.placeTileCoords} numberOfLines={1}>
-                      {formatCoordinates(item.lat, item.lon)}
-                    </Text>
-                  </View>
-                </TouchableOpacity>
-              </AnimatedListItem>
-            );
-          }}
-          showsVerticalScrollIndicator={false}
-        />
+                    <View style={styles.placeTileLabel}>
+                      <Text style={styles.placeTileName} numberOfLines={1}>{nameLabel}</Text>
+                      <Text style={styles.placeTileCoords} numberOfLines={1}>
+                        {formatCoordinates(item.lat, item.lon)}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                </AnimatedListItem>
+              );
+            }}
+            showsVerticalScrollIndicator={false}
+          />
+        )
+      ) : (
+        // ─── TRIPS TAB ────────────────────────────────────────────────────────
+        trips.length === 0 ? (
+          <View style={styles.centered}>
+            <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft }]}>
+              <AppIcon androidName="flight_takeoff" iosName="airplane" color={colors.primary} size={36} />
+            </View>
+            <Text style={styles.emptyTitle}>No trip albums yet</Text>
+            <Text style={styles.emptySubtitle}>
+              Trips are automatically curated when 5+ photos are taken in the same region over a day, weekend, or vacation.
+            </Text>
+          </View>
+        ) : (
+          <FlatList
+            data={trips}
+            keyExtractor={(item) => `trip_${item.id}`}
+            contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: Spacing.three }}
+            renderItem={({ item, index }) => {
+              const coverUrl = serverConfig && item.cover
+                ? (item.cover.is_video
+                  ? buildThumbnailUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id)
+                  : buildPreviewUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id))
+                : undefined;
+
+              return (
+                <AnimatedListItem index={index}>
+                  <TouchableOpacity
+                    style={[styles.tripCard, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}
+                    onPress={() => openTrip(item)}
+                    activeOpacity={0.85}
+                  >
+                    <View style={styles.tripCardCover}>
+                      {coverUrl ? (
+                        <Image source={{ uri: coverUrl }} style={styles.tripCoverImage} contentFit="cover" transition={150} />
+                      ) : (
+                        <View style={[styles.tripCoverFallback, { backgroundColor: colors.surfaceSoft }]}>
+                          <AppIcon androidName="photo" iosName="photo" color={colors.textMuted} size={32} />
+                        </View>
+                      )}
+                      <View style={styles.tripCountBadge}>
+                        <AppIcon androidName="photo_library" iosName="photo.on.rectangle" color="#fff" size={12} />
+                        <Text style={styles.tripCountText}>{item.media_count}</Text>
+                      </View>
+                    </View>
+                    <View style={styles.tripCardBody}>
+                      <Text style={[styles.tripCardTitle, { color: colors.text }]} numberOfLines={1}>{item.title}</Text>
+                      <View style={styles.tripCardMetaRow}>
+                        <AppIcon androidName="calendar_today" iosName="calendar" color={colors.primary} size={13} />
+                        <Text style={[styles.tripCardDate, { color: colors.textSecondary }]}>
+                          {formatTripDateRange(item.start_time, item.end_time)}
+                        </Text>
+                      </View>
+                      <View style={styles.tripCardMetaRow}>
+                        <AppIcon androidName="place" iosName="mappin" color={colors.textMuted} size={13} />
+                        <Text style={[styles.tripCardCoords, { color: colors.textMuted }]}>
+                          {formatCoordinates(item.center_lat, item.center_lon)}
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={styles.tripChevron}>
+                      <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={20} />
+                    </View>
+                  </TouchableOpacity>
+                </AnimatedListItem>
+              );
+            }}
+            showsVerticalScrollIndicator={false}
+          />
+        )
       )}
 
-      {/* Cluster Items Grid Modal */}
+      {/* Place Cluster Detail Modal */}
       <Modal visible={!!activeCluster} animationType="slide" onRequestClose={closeCluster}>
         <View style={[styles.root, { backgroundColor: colors.bg }]}>
           <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
@@ -361,7 +594,7 @@ export default function PlacesScreen() {
           ) : (
             <FlatList
               data={clusterItems}
-              keyExtractor={(item, idx) => `${item.source_type}:${item.source_id}:${item.relative_path}:${idx}`}
+              keyExtractor={(item, idx) => `cluster_${item.source_type}:${item.source_id}:${item.relative_path}:${idx}`}
               numColumns={3}
               contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: gridGap }}
               columnWrapperStyle={{ gap: gridGap }}
@@ -376,7 +609,112 @@ export default function PlacesScreen() {
                   <AnimatedListItem index={index}>
                     <TouchableOpacity
                       style={[styles.placeCell, { width: cellSize, height: cellSize }]}
-                      onPress={() => { hapticLight(); setViewerIndex(index); }}
+                      onPress={() => openViewerForCluster(index)}
+                      activeOpacity={0.85}
+                    >
+                      <Image
+                        source={{ uri: itemThumbUrl }}
+                        style={styles.placeCellImage}
+                        contentFit="cover"
+                        transition={150}
+                      />
+                      {item.is_video && (
+                        <View style={styles.videoBadge}>
+                          <AppIcon androidName="play_arrow" iosName="play.fill" color="#fff" size={14} />
+                        </View>
+                      )}
+                    </TouchableOpacity>
+                  </AnimatedListItem>
+                );
+              }}
+              showsVerticalScrollIndicator={false}
+            />
+          )}
+        </View>
+      </Modal>
+
+      {/* Trip Detail Modal with Map Card & Media Grid */}
+      <Modal visible={!!activeTrip} animationType="slide" onRequestClose={closeTrip}>
+        <View style={[styles.root, { backgroundColor: colors.bg }]}>
+          <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
+          <View style={[styles.header, { paddingTop: insets.top + Spacing.three }]}>
+            <TouchableOpacity style={styles.backBtn} onPress={closeTrip} accessibilityLabel="Close">
+              <AppIcon androidName="close" iosName="xmark" color={colors.text} size={22} />
+            </TouchableOpacity>
+            <View style={styles.headerCenter}>
+              <Text style={styles.headerTitle} numberOfLines={1}>
+                {activeTrip?.title || 'Trip Details'}
+              </Text>
+              <Text style={styles.headerSubtitle} numberOfLines={1}>
+                {activeTrip ? `${formatTripDateRange(activeTrip.start_time, activeTrip.end_time)} · ` : ''}
+                {tripLoading ? 'Loading…' : `${tripItems.length} ${tripItems.length === 1 ? 'item' : 'items'}`}
+              </Text>
+            </View>
+            <View style={{ width: 36 }} />
+          </View>
+
+          {tripLoading ? (
+            <View style={styles.centered}>
+              <ActivityIndicator size="large" color={colors.primary} />
+            </View>
+          ) : (
+            <FlatList
+              data={tripItems}
+              keyExtractor={(item, idx) => `trip_media_${item.id || idx}_${item.relative_path}`}
+              numColumns={3}
+              contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: gridGap }}
+              columnWrapperStyle={{ gap: gridGap }}
+              ListHeaderComponent={
+                activeTrip ? (
+                  <View style={[styles.tripMapCard, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
+                    <View style={styles.tripMapHeader}>
+                      <View style={styles.tripMapHeaderInfo}>
+                        <Text style={[styles.tripMapTitle, { color: colors.text }]}>{activeTrip.title}</Text>
+                        <Text style={[styles.tripMapCoords, { color: colors.textSecondary }]}>
+                          {formatCoordinates(activeTrip.center_lat, activeTrip.center_lon)}
+                        </Text>
+                      </View>
+                      <TouchableOpacity
+                        style={[styles.openMapBtn, { backgroundColor: colors.primarySoft }]}
+                        onPress={() => openInExternalMaps(activeTrip.center_lat, activeTrip.center_lon)}
+                        activeOpacity={0.8}
+                      >
+                        <AppIcon androidName="map" iosName="map" color={colors.primary} size={15} />
+                        <Text style={[styles.openMapBtnText, { color: colors.primary }]}>Open Map</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.tripMapVisualWrap}
+                      onPress={() => openInExternalMaps(activeTrip.center_lat, activeTrip.center_lon)}
+                      activeOpacity={0.9}
+                    >
+                      <Image
+                        source={{
+                          uri: `https://staticmap.openstreetmap.de/staticmap.php?center=${activeTrip.center_lat},${activeTrip.center_lon}&zoom=11&size=600x260&markers=${activeTrip.center_lat},${activeTrip.center_lon},ol-marker`,
+                        }}
+                        style={styles.tripMapImage}
+                        contentFit="cover"
+                        transition={200}
+                      />
+                      <View style={styles.mapPinOverlay}>
+                        <AppIcon androidName="place" iosName="mappin.circle.fill" color="#EF4444" size={28} />
+                      </View>
+                    </TouchableOpacity>
+                  </View>
+                ) : null
+              }
+              renderItem={({ item, index }) => {
+                const itemThumbUrl = serverConfig
+                  ? (item.is_video
+                    ? buildThumbnailUrl(serverConfig, item.relative_path, item.source_type, item.source_id)
+                    : buildPreviewUrl(serverConfig, item.relative_path, item.source_type, item.source_id))
+                  : undefined;
+
+                return (
+                  <AnimatedListItem index={index}>
+                    <TouchableOpacity
+                      style={[styles.placeCell, { width: cellSize, height: cellSize }]}
+                      onPress={() => openViewerForTrip(index)}
                       activeOpacity={0.85}
                     >
                       <Image
@@ -407,7 +745,7 @@ export default function PlacesScreen() {
           <View style={[styles.viewerTopBar, { top: insets.top + Spacing.two }]}>
             <View style={styles.viewerHeaderInfo}>
               <Text style={styles.viewerIndexText}>
-                {viewerIndex !== null ? `${viewerIndex + 1} / ${clusterItems.length}` : ''}
+                {viewerIndex !== null ? `${viewerIndex + 1} / ${viewerItems.length}` : ''}
               </Text>
               {activeViewerItem?.source_label ? (
                 <Text style={styles.viewerSubText} numberOfLines={1}>
@@ -424,7 +762,7 @@ export default function PlacesScreen() {
           {viewerIndex !== null && (
             <FlatList
               ref={viewerListRef}
-              data={clusterItems}
+              data={viewerItems}
               keyExtractor={(item, idx) => `viewer_${item.source_type}_${item.source_id}_${item.relative_path}_${idx}`}
               horizontal
               pagingEnabled
@@ -438,7 +776,7 @@ export default function PlacesScreen() {
               }}
               onMomentumScrollEnd={(e) => {
                 const idx = Math.round(e.nativeEvent.contentOffset.x / width);
-                if (idx >= 0 && idx < clusterItems.length) {
+                if (idx >= 0 && idx < viewerItems.length) {
                   setViewerIndex(idx);
                 }
               }}
@@ -480,7 +818,7 @@ export default function PlacesScreen() {
               <AppIcon androidName="chevron_left" iosName="chevron.left" color="#fff" size={28} />
             </TouchableOpacity>
           )}
-          {viewerIndex !== null && viewerIndex < clusterItems.length - 1 && (
+          {viewerIndex !== null && viewerIndex < viewerItems.length - 1 && (
             <TouchableOpacity style={[styles.navChevronBtn, styles.navChevronRight]} onPress={goToNext}>
               <AppIcon androidName="chevron_right" iosName="chevron.right" color="#fff" size={28} />
             </TouchableOpacity>
@@ -531,15 +869,45 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   root: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: Spacing.four, paddingBottom: Spacing.three,
+    paddingHorizontal: Spacing.four, paddingBottom: Spacing.two,
     backgroundColor: colors.bg,
-    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.surfaceBorder,
     gap: Spacing.two,
   },
   backBtn: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
   headerCenter: { flex: 1, alignItems: 'center' },
   headerTitle: { fontSize: TextScale.lg, fontWeight: '800', color: colors.text },
   headerSubtitle: { fontSize: TextScale.xs, color: colors.textSecondary, fontWeight: '600', marginTop: 2, textAlign: 'center' },
+  tabBarWrap: {
+    paddingHorizontal: Spacing.four,
+    paddingBottom: Spacing.three,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.surfaceBorder,
+  },
+  tabBar: {
+    flexDirection: 'row',
+    borderRadius: Radius.full,
+    padding: 3,
+  },
+  tabBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 7,
+    borderRadius: Radius.full,
+    gap: 6,
+  },
+  tabBtnActive: {
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 1 },
+  },
+  tabBtnText: {
+    fontSize: TextScale.xs,
+    fontWeight: '700',
+  },
   centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.six },
   emptyIconWrap: { width: 72, height: 72, borderRadius: Radius.full, alignItems: 'center', justifyContent: 'center', marginBottom: Spacing.four },
   emptyTitle: { fontSize: TextScale.lg, fontWeight: '800', color: colors.text, marginBottom: Spacing.two },
@@ -553,6 +921,131 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   placeTileName: { fontSize: TextScale.xs, fontWeight: '700', color: colors.text },
   placeTileCoords: { fontSize: TextScale.xs, color: colors.textSecondary, marginTop: 1 },
   videoBadge: { position: 'absolute', top: 4, right: 4, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: Radius.full, width: 22, height: 22, alignItems: 'center', justifyContent: 'center' },
+  
+  // Trips Card Styles
+  tripCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    overflow: 'hidden',
+    padding: Spacing.two + 2,
+    gap: Spacing.three,
+  },
+  tripCardCover: {
+    width: 80,
+    height: 80,
+    borderRadius: Radius.md,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  tripCoverImage: {
+    width: '100%',
+    height: '100%',
+  },
+  tripCoverFallback: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tripCountBadge: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    borderRadius: Radius.full,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  tripCountText: {
+    color: '#fff',
+    fontSize: TextScale.xs - 2,
+    fontWeight: '800',
+  },
+  tripCardBody: {
+    flex: 1,
+    gap: 3,
+  },
+  tripCardTitle: {
+    fontSize: TextScale.base,
+    fontWeight: '800',
+  },
+  tripCardMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  tripCardDate: {
+    fontSize: TextScale.xs,
+    fontWeight: '600',
+  },
+  tripCardCoords: {
+    fontSize: TextScale.xs - 1,
+  },
+  tripChevron: {
+    paddingRight: Spacing.one,
+  },
+
+  // Trip Map Card in Detail Modal
+  tripMapCard: {
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+    overflow: 'hidden',
+    marginBottom: Spacing.three,
+  },
+  tripMapHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: Spacing.three,
+  },
+  tripMapHeaderInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  tripMapTitle: {
+    fontSize: TextScale.sm,
+    fontWeight: '800',
+  },
+  tripMapCoords: {
+    fontSize: TextScale.xs,
+    fontWeight: '500',
+  },
+  openMapBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: 6,
+    borderRadius: Radius.full,
+  },
+  openMapBtnText: {
+    fontSize: TextScale.xs,
+    fontWeight: '700',
+  },
+  tripMapVisualWrap: {
+    width: '100%',
+    height: 140,
+    backgroundColor: '#E2E8F0',
+    position: 'relative',
+  },
+  tripMapImage: {
+    width: '100%',
+    height: '100%',
+  },
+  mapPinOverlay: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    marginTop: -14,
+    marginLeft: -14,
+  },
+
+  // Viewer Styles
   viewerOverlay: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
   viewerTopBar: {
     position: 'absolute', left: Spacing.four, right: Spacing.four, zIndex: 20,

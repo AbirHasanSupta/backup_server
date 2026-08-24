@@ -505,6 +505,81 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_cleanup_deleted_at ON cleanup_log(source_id, deleted_at DESC)"
     )
 
+    # 9. trips table for auto-generated trip albums
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trips
+        (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id       TEXT    NOT NULL,
+            title           TEXT    NOT NULL,
+            start_time      INTEGER NOT NULL,
+            end_time        INTEGER NOT NULL,
+            center_lat      REAL    NOT NULL,
+            center_lon      REAL    NOT NULL,
+            media_count     INTEGER NOT NULL DEFAULT 0,
+            cover_media_id  INTEGER,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trips_source_start ON trips(source_id, start_time DESC)"
+    )
+
+    # 10. trip_media junction table
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trip_media
+        (
+            trip_id   INTEGER NOT NULL,
+            media_id  INTEGER NOT NULL,
+            PRIMARY KEY (trip_id, media_id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trip_media_trip ON trip_media(trip_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trip_media_media ON trip_media(media_id)"
+    )
+
+    # 11. reactions table for shared media reactions
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reactions
+        (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            media_id    INTEGER NOT NULL,
+            source_id   TEXT    NOT NULL,
+            emoji       TEXT    NOT NULL,
+            created_at  INTEGER NOT NULL,
+            UNIQUE (media_id, source_id, emoji)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reactions_media ON reactions(media_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reactions_source ON reactions(source_id)"
+    )
+
+    # 12. geocode_cache table for cached reverse geocoding place names
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS geocode_cache
+        (
+            lat_round   REAL NOT NULL,
+            lon_round   REAL NOT NULL,
+            place_name  TEXT NOT NULL,
+            PRIMARY KEY (lat_round, lon_round)
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -1744,3 +1819,387 @@ def log_cleanup_deletions(source_id: str, items: list[dict]) -> dict:
     conn.commit()
     conn.close()
     return {"results": results, "total_bytes_freed": total_freed}
+
+
+# ─── Trips helpers ─────────────────────────────────────────────────────────────
+
+def get_trips(source_id: str) -> list[dict]:
+    """Return all trip records for source_id sorted by start_time DESC, with cover details."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT t.id, t.source_id, t.title, t.start_time, t.end_time,
+               t.center_lat, t.center_lon, t.media_count, t.cover_media_id,
+               t.created_at, t.updated_at,
+               mi.relative_path AS cover_path, mi.source_type AS cover_source_type,
+               mi.source_key AS cover_source_key
+        FROM trips t
+        LEFT JOIN media_index mi ON t.cover_media_id = mi.id
+        WHERE t.source_id = ?
+        ORDER BY t.start_time DESC
+        """,
+        (source_id,),
+    ).fetchall()
+    conn.close()
+
+    trips = []
+    video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
+    for r in rows:
+        cover_path = r["cover_path"]
+        ext = ("." + cover_path.rsplit(".", 1)[-1].lower()) if cover_path and "." in cover_path else ""
+        cover_obj = None
+        if cover_path:
+            cover_obj = {
+                "id": r["cover_media_id"],
+                "relative_path": cover_path,
+                "source_type": r["cover_source_type"] or "phone",
+                "source_id": r["cover_source_key"] or source_id,
+                "is_video": ext in video_exts,
+            }
+        trips.append({
+            "id": r["id"],
+            "source_id": r["source_id"],
+            "title": r["title"],
+            "start_time": r["start_time"],
+            "end_time": r["end_time"],
+            "center_lat": r["center_lat"],
+            "center_lon": r["center_lon"],
+            "media_count": r["media_count"],
+            "cover_media_id": r["cover_media_id"],
+            "cover": cover_obj,
+            "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        })
+    return trips
+
+
+def get_trip_media(trip_id: int) -> tuple[dict | None, list[dict]]:
+    """Return the trip metadata and list of media items in the trip."""
+    conn = get_conn()
+    trip_row = conn.execute(
+        """
+        SELECT id, source_id, title, start_time, end_time,
+               center_lat, center_lon, media_count, cover_media_id,
+               created_at, updated_at
+        FROM trips WHERE id = ?
+        """,
+        (trip_id,),
+    ).fetchone()
+
+    if not trip_row:
+        conn.close()
+        return None, []
+
+    trip = dict(trip_row)
+    media_rows = conn.execute(
+        """
+        SELECT mi.id, mi.source_type, mi.source_key, mi.relative_path, mi.size,
+               mi.modified_time, mi.capture_time, mi.cap_lat, mi.cap_lon, mi.cap_year
+        FROM trip_media tm
+        JOIN media_index mi ON tm.media_id = mi.id
+        WHERE tm.trip_id = ?
+        ORDER BY mi.capture_time ASC, mi.relative_path ASC
+        """,
+        (trip_id,),
+    ).fetchall()
+    conn.close()
+
+    video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
+    media_items = []
+    for r in media_rows:
+        path = r["relative_path"]
+        ext = ("." + path.rsplit(".", 1)[-1].lower()) if path and "." in path else ""
+        media_items.append({
+            "id": r["id"],
+            "source_type": r["source_type"],
+            "source_id": r["source_key"],
+            "relative_path": r["relative_path"],
+            "size": r["size"],
+            "modified_time": r["modified_time"],
+            "capture_time": r["capture_time"],
+            "cap_lat": r["cap_lat"],
+            "cap_lon": r["cap_lon"],
+            "cap_year": r["cap_year"],
+            "is_video": ext in video_exts,
+        })
+
+    return trip, media_items
+
+
+def _haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    import math
+    r = 6371.0  # Earth radius in kilometers
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return r * c
+
+
+def save_trip_clusters(source_id: str, clusters: list[dict]) -> None:
+    """
+    Idempotently persist trip clusters for a source_id.
+    Merges/updates existing trips if they match by time window and proximity,
+    inserts new trips, and removes trips that no longer qualify.
+    """
+    conn = get_conn()
+    now_ts = int(_time.time())
+
+    # Get existing trips for this source_id
+    existing_rows = conn.execute(
+        "SELECT id, title, start_time, end_time, center_lat, center_lon FROM trips WHERE source_id = ?",
+        (source_id,),
+    ).fetchall()
+    existing_trips = [dict(r) for r in existing_rows]
+
+    matched_existing_ids = set()
+
+    for c in clusters:
+        title = c["title"]
+        start_time = c["start_time"]
+        end_time = c["end_time"]
+        center_lat = c["center_lat"]
+        center_lon = c["center_lon"]
+        media_count = c["media_count"]
+        cover_media_id = c.get("cover_media_id")
+        media_ids = c.get("media_ids", [])
+
+        # Look for matching existing trip: overlapping time within 48h and center within 35km
+        matched_id = None
+        for et in existing_trips:
+            if et["id"] in matched_existing_ids:
+                continue
+            time_overlap = (start_time <= et["end_time"] + 172800) and (end_time >= et["start_time"] - 172800)
+            if time_overlap:
+                dist = _haversine_distance_km(center_lat, center_lon, et["center_lat"], et["center_lon"])
+                if dist <= 35.0:
+                    matched_id = et["id"]
+                    matched_existing_ids.add(matched_id)
+                    break
+
+        if matched_id:
+            # Update existing trip
+            conn.execute(
+                """
+                UPDATE trips SET
+                    title = ?,
+                    start_time = ?,
+                    end_time = ?,
+                    center_lat = ?,
+                    center_lon = ?,
+                    media_count = ?,
+                    cover_media_id = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (title, start_time, end_time, center_lat, center_lon, media_count, cover_media_id, now_ts, matched_id),
+            )
+            trip_id = matched_id
+        else:
+            # Insert new trip
+            cur = conn.execute(
+                """
+                INSERT INTO trips (source_id, title, start_time, end_time, center_lat, center_lon,
+                                   media_count, cover_media_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (source_id, title, start_time, end_time, center_lat, center_lon, media_count, cover_media_id, now_ts, now_ts),
+            )
+            trip_id = cur.lastrowid
+
+        # Replace junction rows for trip_id
+        conn.execute("DELETE FROM trip_media WHERE trip_id = ?", (trip_id,))
+        if media_ids:
+            trip_media_params = [(trip_id, mid) for mid in media_ids]
+            conn.executemany(
+                "INSERT OR IGNORE INTO trip_media (trip_id, media_id) VALUES (?, ?)",
+                trip_media_params,
+            )
+
+    # Delete trips that no longer exist/qualify
+    stale_ids = [et["id"] for et in existing_trips if et["id"] not in matched_existing_ids]
+    if stale_ids:
+        placeholders = ",".join(["?"] * len(stale_ids))
+        conn.execute(f"DELETE FROM trip_media WHERE trip_id IN ({placeholders})", stale_ids)
+        conn.execute(f"DELETE FROM trips WHERE id IN ({placeholders})", stale_ids)
+
+    conn.commit()
+    conn.close()
+
+
+# ─── Reactions helpers ─────────────────────────────────────────────────────────
+
+def toggle_reaction(media_id: int, source_id: str, emoji: str) -> dict:
+    """Toggle a reaction on/off. Return status ('added'|'removed'), counts and user reactions."""
+    conn = get_conn()
+    now_ts = int(_time.time())
+
+    # Check if already exists
+    existing = conn.execute(
+        "SELECT id FROM reactions WHERE media_id = ? AND source_id = ? AND emoji = ?",
+        (media_id, source_id, emoji),
+    ).fetchone()
+
+    if existing:
+        conn.execute(
+            "DELETE FROM reactions WHERE media_id = ? AND source_id = ? AND emoji = ?",
+            (media_id, source_id, emoji),
+        )
+        status = "removed"
+    else:
+        conn.execute(
+            "INSERT OR IGNORE INTO reactions (media_id, source_id, emoji, created_at) VALUES (?, ?, ?, ?)",
+            (media_id, source_id, emoji, now_ts),
+        )
+        status = "added"
+
+    conn.commit()
+
+    # Get updated counts for media_id
+    counts_rows = conn.execute(
+        "SELECT emoji, COUNT(*) AS c FROM reactions WHERE media_id = ? GROUP BY emoji",
+        (media_id,),
+    ).fetchall()
+    counts = {r["emoji"]: r["c"] for r in counts_rows}
+
+    # Get user reactions
+    user_rows = conn.execute(
+        "SELECT emoji FROM reactions WHERE media_id = ? AND source_id = ?",
+        (media_id, source_id),
+    ).fetchall()
+    user_reactions = [r["emoji"] for r in user_rows]
+
+    conn.close()
+    return {
+        "status": status,
+        "media_id": media_id,
+        "emoji": emoji,
+        "counts": counts,
+        "user_reactions": user_reactions,
+    }
+
+
+def get_media_reactions(media_id: int) -> dict:
+    """Return full reaction list and counts for a media item."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, media_id, source_id, emoji, created_at FROM reactions WHERE media_id = ? ORDER BY created_at ASC",
+        (media_id,),
+    ).fetchall()
+    conn.close()
+
+    reactions = [dict(r) for r in rows]
+    counts: dict[str, int] = {}
+    for r in reactions:
+        counts[r["emoji"]] = counts.get(r["emoji"], 0) + 1
+
+    return {
+        "media_id": media_id,
+        "reactions": reactions,
+        "counts": counts,
+    }
+
+
+def get_reactions_for_media_ids(
+    media_ids: list[int], current_source_id: str | None = None
+) -> tuple[dict[int, dict[str, int]], dict[int, list[str]]]:
+    """Bulk fetch reaction counts and current user reactions for a list of media IDs."""
+    if not media_ids:
+        return {}, {}
+
+    conn = get_conn()
+    counts_map: dict[int, dict[str, int]] = {}
+    user_map: dict[int, list[str]] = {}
+
+    chunk_size = 500
+    for i in range(0, len(media_ids), chunk_size):
+        chunk = media_ids[i:i + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+
+        # Fetch counts
+        rows = conn.execute(
+            f"SELECT media_id, emoji, COUNT(*) AS c FROM reactions WHERE media_id IN ({placeholders}) GROUP BY media_id, emoji",
+            chunk,
+        ).fetchall()
+        for r in rows:
+            mid = r["media_id"]
+            counts_map.setdefault(mid, {})[r["emoji"]] = r["c"]
+
+        # Fetch current user reactions if source_id provided
+        if current_source_id:
+            u_rows = conn.execute(
+                f"SELECT media_id, emoji FROM reactions WHERE media_id IN ({placeholders}) AND source_id = ?",
+                chunk + [current_source_id],
+            ).fetchall()
+            for r in u_rows:
+                mid = r["media_id"]
+                user_map.setdefault(mid, []).append(r["emoji"])
+
+    conn.close()
+    return counts_map, user_map
+
+
+def get_or_create_media_id(
+    source_type: str,
+    source_key: str,
+    relative_path: str,
+    size: int = 0,
+    modified_time: int = 0,
+) -> int:
+    """Return media_index.id for the given file, inserting a row if it doesn't exist."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id FROM media_index WHERE source_type = ? AND source_key = ? AND relative_path = ?",
+        (source_type, source_key, relative_path),
+    ).fetchone()
+    if row:
+        mid = row["id"]
+        conn.close()
+        return mid
+
+    now_ts = int(_time.time())
+    cur = conn.execute(
+        """
+        INSERT INTO media_index (source_type, source_key, relative_path, size, modified_time, indexed_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_type, source_key, relative_path) DO NOTHING
+        """,
+        (source_type, source_key, relative_path, size, modified_time, now_ts),
+    )
+    conn.commit()
+    if cur.lastrowid:
+        mid = cur.lastrowid
+        conn.close()
+        return mid
+
+    row2 = conn.execute(
+        "SELECT id FROM media_index WHERE source_type = ? AND source_key = ? AND relative_path = ?",
+        (source_type, source_key, relative_path),
+    ).fetchone()
+    conn.close()
+    return row2["id"] if row2 else 0
+
+
+# ─── Geocode Cache helpers ─────────────────────────────────────────────────────
+
+def get_cached_geocode(lat_round: float, lon_round: float) -> str | None:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT place_name FROM geocode_cache WHERE lat_round = ? AND lon_round = ?",
+        (lat_round, lon_round),
+    ).fetchone()
+    conn.close()
+    return row["place_name"] if row else None
+
+
+def save_cached_geocode(lat_round: float, lon_round: float, place_name: str) -> None:
+    conn = get_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO geocode_cache (lat_round, lon_round, place_name) VALUES (?, ?, ?)",
+        (lat_round, lon_round, place_name),
+    )
+    conn.commit()
+    conn.close()
