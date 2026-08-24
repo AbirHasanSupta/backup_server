@@ -484,6 +484,27 @@ def init_db():
         """
     )
 
+    # 8. cleanup_log — tracks phone-side deletions after verified backup
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cleanup_log
+        (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id     INTEGER,
+            source_id   TEXT    NOT NULL,
+            path        TEXT    NOT NULL,
+            size_bytes  INTEGER NOT NULL,
+            deleted_at  INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cleanup_source_path ON cleanup_log(source_id, path)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cleanup_deleted_at ON cleanup_log(source_id, deleted_at DESC)"
+    )
+
     conn.commit()
     conn.close()
 
@@ -1618,3 +1639,108 @@ def upsert_scan_dirs(source_type: str, source_key: str, dir_mtimes: dict[str, in
             )
     conn.commit()
     conn.close()
+
+
+# ─── Cleanup helpers ───────────────────────────────────────────────────────────
+
+def get_cleaned_paths(source_id: str) -> set[str]:
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT path FROM cleanup_log WHERE source_id = ?",
+        (source_id,),
+    ).fetchall()
+    conn.close()
+    return {r["path"] for r in rows}
+
+
+def get_cleanup_candidates(source_id: str) -> list[dict]:
+    """Return backed-up files verified on disk that have not been cleaned yet."""
+    from storage import file_exists
+
+    cleaned = get_cleaned_paths(source_id)
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, path, size, modified_time FROM files WHERE device_id = ?",
+        (source_id,),
+    ).fetchall()
+    capture_rows = conn.execute(
+        """
+        SELECT relative_path, capture_time
+        FROM media_index
+        WHERE source_type = 'phone' AND source_key = ?
+        """,
+        (source_id,),
+    ).fetchall()
+    conn.close()
+
+    capture_map = {r["relative_path"]: r["capture_time"] for r in capture_rows}
+    candidates = []
+    for row in rows:
+        path = row["path"]
+        if path in cleaned:
+            continue
+        size = row["size"]
+        modified_time = row["modified_time"]
+        if not is_uploaded_compatible(path, size, modified_time, device_id=source_id):
+            continue
+        if not file_exists(path, size, device_id=source_id):
+            continue
+        capture_time = capture_map.get(path)
+        if capture_time is None:
+            capture_time = modified_time
+        candidates.append({
+            "file_id": row["id"],
+            "path": path,
+            "size": size,
+            "capture_time": capture_time,
+        })
+    return candidates
+
+
+def log_cleanup_deletions(source_id: str, items: list[dict]) -> dict:
+    """Record client-reported deletions. Returns per-file results + total bytes."""
+    conn = get_conn()
+    now_ts = int(_time.time())
+    results = []
+    total_freed = 0
+
+    for item in items:
+        path = (item.get("path") or item.get("relative_path") or "").strip()
+        if not path:
+            results.append({"path": "", "success": False, "error": "Missing path"})
+            continue
+
+        size = int(item.get("size") or item.get("size_bytes") or 0)
+        file_id = item.get("file_id")
+
+        if not file_id:
+            row = conn.execute(
+                "SELECT id FROM files WHERE device_id = ? AND path = ?",
+                (source_id, path),
+            ).fetchone()
+            file_id = row["id"] if row else None
+
+        existing = conn.execute(
+            "SELECT 1 FROM cleanup_log WHERE source_id = ? AND path = ?",
+            (source_id, path),
+        ).fetchone()
+        if existing:
+            results.append({"path": path, "success": True, "already_logged": True})
+            continue
+
+        try:
+            conn.execute(
+                """
+                INSERT INTO cleanup_log (file_id, source_id, path, size_bytes, deleted_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (file_id, source_id, path, size, now_ts),
+            )
+            total_freed += size
+            results.append({"path": path, "success": True})
+        except Exception as exc:
+            results.append({"path": path, "success": False, "error": str(exc)})
+
+    conn.commit()
+    conn.close()
+    return {"results": results, "total_bytes_freed": total_freed}

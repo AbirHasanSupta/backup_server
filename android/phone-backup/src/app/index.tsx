@@ -47,6 +47,7 @@ import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 import { getStreakData } from '../../streak';
 import { StreakBadge } from '@/components/StreakBadge';
 import { getPendingBackupSummary, invalidatePendingBackupCache } from '../../pendingBackup';
+import { getCleanupSummary, invalidateCleanupCache, formatFreeUpBytes } from '../../freeUpStorage';
 import { hapticMedium, hapticWarning, hapticError } from '@/utils/haptics';
 
 function formatRelativeTime(ts: number | null): string {
@@ -171,6 +172,7 @@ export default function HomeScreen() {
   });
   const [streakModalVisible, setStreakModalVisible] = useState(false);
   const [pendingFilesCount, setPendingFilesCount] = useState<number | null>(null);
+  const [cleanupSummary, setCleanupSummary] = useState<{ count: number; totalBytes: number } | null>(null);
 
   const DOUBLE_TAP_WINDOW_MS = 1200;
 
@@ -270,6 +272,15 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const loadCleanupSummary = useCallback(async () => {
+    try {
+      const summary = await getCleanupSummary();
+      setCleanupSummary(summary.totalBytes > 0 ? { count: summary.count, totalBytes: summary.totalBytes } : null);
+    } catch {
+      // Cleanup summary is optional — dashboard still works without it.
+    }
+  }, []);
+
   const applySyncSnapshot = useCallback((snapshot: any) => {
     if (!snapshot?.active) {
       setSyncing(false);
@@ -308,8 +319,9 @@ export default function HomeScreen() {
       }
       loadStreak();
       loadPendingSummary();
+      loadCleanupSummary();
       getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
-    }, [applySyncSnapshot, loadAll, loadStreak, loadPendingSummary])
+    }, [applySyncSnapshot, loadAll, loadStreak, loadPendingSummary, loadCleanupSummary])
   );
 
   useEffect(() => {
@@ -412,6 +424,7 @@ export default function HomeScreen() {
       }
       loadStreak();
       loadPendingSummary();
+      loadCleanupSummary();
       // loadAll() was suppressed during sync — call it now to refresh last-sync
       // time, total synced count, and re-probe the server connection.
       loadAll();
@@ -438,15 +451,24 @@ export default function HomeScreen() {
       DeviceEventEmitter.addListener('sync-completed', onCompleted),
       DeviceEventEmitter.addListener('sync-failed', onFailed),
       DeviceEventEmitter.addListener('pending-backup-updated', onPendingUpdated),
+      DeviceEventEmitter.addListener('cleanup-candidates-updated', (summary: any) => {
+        setCleanupSummary(
+          summary?.totalBytes > 0
+            ? { count: summary.count ?? 0, totalBytes: summary.totalBytes }
+            : null
+        );
+      }),
       DeviceEventEmitter.addListener('settings-updated', () => {
         loadAll();
         invalidatePendingBackupCache();
+        invalidateCleanupCache();
         loadPendingSummary();
+        loadCleanupSummary();
       }),
     ];
 
     return () => subs.forEach((sub) => sub.remove());
-  }, [applySyncSnapshot, loadAll, loadPendingSummary, loadStreak]);
+  }, [applySyncSnapshot, loadAll, loadPendingSummary, loadCleanupSummary, loadStreak]);
 
   const handleSync = async () => {
     const snapshot = await getCurrentSyncState().catch(() => null);
@@ -781,6 +803,30 @@ export default function HomeScreen() {
           </Animated.View>
         )}
 
+        {!syncing && cleanupSummary && cleanupSummary.totalBytes > 0 && (
+          <Animated.View entering={FadeInDown.duration(400).delay(270)} style={styles.pendingSection}>
+            <Text style={styles.sectionKicker}>Storage</Text>
+            <AnimatedPressable
+              style={styles.pendingCard}
+              onPress={() => { hapticMedium(); router.push('/free-up'); }}
+              scaleDown={0.98}
+              accessibilityLabel="Free up storage"
+            >
+              <View style={[styles.pendingIconWrap, { backgroundColor: colors.successSoft }]}>
+                <AppIcon androidName="delete_sweep" iosName="trash.circle.fill" color={colors.success} size={18} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.pendingTitle}>
+                  Free up {formatFreeUpBytes(cleanupSummary.totalBytes)}
+                </Text>
+                <Text style={styles.pendingSubtitle}>
+                  {cleanupSummary.count} backed-up file{cleanupSummary.count === 1 ? '' : 's'} can be safely removed from your phone
+                </Text>
+              </View>
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
+            </AnimatedPressable>
+          </Animated.View>
+        )}
 
         {serverStatus === 'unknown' && (
           <Animated.View entering={FadeIn.duration(300)} style={styles.noticeCard}>

@@ -37,6 +37,8 @@ from database import (
     upsert_device,
     ensure_device_token,
     verify_device_token, get_files_browse,
+    get_cleanup_candidates,
+    log_cleanup_deletions,
 )
 from state import add_log, get_current_activity, pending_connections, set_current_activity
 from storage import file_exists, save_fileobj, save_upload_stream, full_path_for
@@ -1392,3 +1394,66 @@ async def stream_rewind_reel(
     if not path:
         raise HTTPException(status_code=404, detail="Reel not ready")
     return _file_range_response(path, request)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Cleanup / Free-up-storage endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+class CleanupDeleteItem(BaseModel):
+    path: str
+    size: int = 0
+    file_id: int | None = None
+
+
+class CleanupDeleteRequest(BaseModel):
+    source_id: str
+    files: list[CleanupDeleteItem]
+
+
+@router.get("/cleanup/candidates")
+async def cleanup_candidates(
+    source_id: str,
+    authorization: str = Header(None),
+):
+    """
+    Return files for this device that are confirmed backed up on disk and have
+    not yet been cleaned from the phone.  Used to pre-populate the "Free up
+    storage" review screen and to retrieve already-cleaned paths so the phone
+    can exclude them from its local scan.
+    """
+    verify_auth(authorization, source_id)
+    verify_known_device_by_id(source_id)
+    candidates = await asyncio.to_thread(get_cleanup_candidates, source_id)
+    total_size = sum(c["size"] for c in candidates)
+    return {
+        "candidates": candidates,
+        "total_size": total_size,
+        "count": len(candidates),
+    }
+
+
+@router.post("/cleanup/delete")
+async def cleanup_delete(
+    body: CleanupDeleteRequest,
+    authorization: str = Header(None),
+):
+    """
+    Record that the client deleted a batch of phone-side files.
+    The server does NOT touch its own backup copies — it only logs the
+    deletion in cleanup_log so the files are excluded from future candidate
+    lists and can be audited later.
+    """
+    verify_auth(authorization, body.source_id)
+    verify_known_device_by_id(body.source_id)
+    items = [
+        {"path": f.path, "size": f.size, "file_id": f.file_id}
+        for f in body.files
+    ]
+    result = await asyncio.to_thread(log_cleanup_deletions, body.source_id, items)
+    add_log(
+        f"🗑️  Cleanup: {body.source_id} freed "
+        f"{result['total_bytes_freed'] / (1024 ** 3):.2f} GB "
+        f"({len(body.files)} files)"
+    )
+    return result
