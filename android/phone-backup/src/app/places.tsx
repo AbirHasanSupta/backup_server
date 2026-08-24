@@ -73,6 +73,7 @@ type Trip = {
 };
 
 type PlaceItem = {
+  id?: number;
   source_type: string;
   source_id: string;
   source_label: string;

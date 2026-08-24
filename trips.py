@@ -104,6 +104,13 @@ def reverse_geocode(lat: float, lon: float) -> str | None:
     return None
 
 
+def coord_place_label(lat: float, lon: float) -> str:
+    """Human-readable coordinate fallback when reverse geocoding has no name."""
+    lat_dir = "N" if lat >= 0 else "S"
+    lon_dir = "E" if lon >= 0 else "W"
+    return f"{abs(lat):.2f}° {lat_dir}, {abs(lon):.2f}° {lon_dir}"
+
+
 def generate_trip_title(start_time: int, end_time: int, place_name: str | None) -> str:
     """Generate a descriptive title like 'Weekend in Kyoto' or 'Trip to Paris'."""
     dt_start = datetime.fromtimestamp(start_time)
@@ -160,13 +167,7 @@ def cluster_source_media(source_id: str) -> list[dict]:
 
         prev = current_cluster[-1]
         time_gap = (it["capture_time"] or 0) - (prev["capture_time"] or 0)
-
-        # Spatial distance to cluster centroid
-        c_lats = [x["cap_lat"] for x in current_cluster]
-        c_lons = [x["cap_lon"] for x in current_cluster]
-        c_lat = sum(c_lats) / len(c_lats)
-        c_lon = sum(c_lons) / len(c_lons)
-        dist_km = _haversine_km(it["cap_lat"], it["cap_lon"], c_lat, c_lon)
+        dist_km = _haversine_km(it["cap_lat"], it["cap_lon"], prev["cap_lat"], prev["cap_lon"])
 
         if time_gap <= MAX_TIME_GAP_SECONDS and dist_km <= MAX_DISTANCE_KM:
             current_cluster.append(it)
@@ -205,7 +206,7 @@ def cluster_source_media(source_id: str) -> list[dict]:
         if not cover_id and c:
             cover_id = c[0]["id"]
 
-        place_name = reverse_geocode(center_lat, center_lon)
+        place_name = reverse_geocode(center_lat, center_lon) or coord_place_label(center_lat, center_lon)
         title = generate_trip_title(start_time, end_time, place_name)
 
         qualifying_clusters.append({

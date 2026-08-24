@@ -1623,7 +1623,10 @@ async def react_to_media(
     emoji = body.emoji.strip()
     if not emoji:
         raise HTTPException(status_code=400, detail="Emoji cannot be empty")
-    res = await asyncio.to_thread(toggle_reaction, media_id, body.source_id, emoji)
+    try:
+        res = await asyncio.to_thread(toggle_reaction, media_id, body.source_id, emoji)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return res
 
 

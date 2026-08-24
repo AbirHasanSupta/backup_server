@@ -59,6 +59,7 @@ def _create_raw_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA cache_size=-262144")
     conn.execute("PRAGMA mmap_size=2147483648")
     conn.execute("PRAGMA temp_store=MEMORY")
@@ -535,7 +536,9 @@ def init_db():
         (
             trip_id   INTEGER NOT NULL,
             media_id  INTEGER NOT NULL,
-            PRIMARY KEY (trip_id, media_id)
+            PRIMARY KEY (trip_id, media_id),
+            FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE,
+            FOREIGN KEY (media_id) REFERENCES media_index(id) ON DELETE CASCADE
         )
         """
     )
@@ -545,6 +548,37 @@ def init_db():
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_trip_media_media ON trip_media(media_id)"
     )
+    trip_media_sql_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='trip_media'"
+    ).fetchone()
+    trip_media_sql = (trip_media_sql_row[0] if trip_media_sql_row else "") or ""
+    if trip_media_sql and "FOREIGN KEY" not in trip_media_sql.upper():
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("ALTER TABLE trip_media RENAME TO trip_media_old")
+        conn.execute(
+            """
+            CREATE TABLE trip_media
+            (
+                trip_id   INTEGER NOT NULL,
+                media_id  INTEGER NOT NULL,
+                PRIMARY KEY (trip_id, media_id),
+                FOREIGN KEY (trip_id) REFERENCES trips(id) ON DELETE CASCADE,
+                FOREIGN KEY (media_id) REFERENCES media_index(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO trip_media (trip_id, media_id)
+            SELECT trip_id, media_id FROM trip_media_old
+            WHERE trip_id IN (SELECT id FROM trips)
+              AND media_id IN (SELECT id FROM media_index)
+            """
+        )
+        conn.execute("DROP TABLE trip_media_old")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trip_media_trip ON trip_media(trip_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trip_media_media ON trip_media(media_id)")
+        conn.execute("PRAGMA foreign_keys=ON")
 
     # 11. reactions table for shared media reactions
     conn.execute(
@@ -2032,8 +2066,21 @@ def save_trip_clusters(source_id: str, clusters: list[dict]) -> None:
 
 # ─── Reactions helpers ─────────────────────────────────────────────────────────
 
+ALLOWED_REACTION_EMOJIS = frozenset({"❤️", "😂", "😮", "👍"})
+
+
+def _normalize_reaction_emoji(emoji: str) -> str:
+    cleaned = (emoji or "").strip()
+    if cleaned == "❤":
+        return "❤️"
+    return cleaned
+
+
 def toggle_reaction(media_id: int, source_id: str, emoji: str) -> dict:
     """Toggle a reaction on/off. Return status ('added'|'removed'), counts and user reactions."""
+    emoji = _normalize_reaction_emoji(emoji)
+    if emoji not in ALLOWED_REACTION_EMOJIS:
+        raise ValueError("Unsupported reaction emoji")
     conn = get_conn()
     now_ts = int(_time.time())
 
@@ -2185,7 +2232,9 @@ def get_or_create_media_id(
 
 # ─── Geocode Cache helpers ─────────────────────────────────────────────────────
 
-def get_cached_geocode(lat_round: float, lon_round: float) -> str | None:
+def get_cached_geocode(lat: float, lon: float) -> str | None:
+    lat_round = round(float(lat), 2)
+    lon_round = round(float(lon), 2)
     conn = get_conn()
     row = conn.execute(
         "SELECT place_name FROM geocode_cache WHERE lat_round = ? AND lon_round = ?",
@@ -2195,7 +2244,9 @@ def get_cached_geocode(lat_round: float, lon_round: float) -> str | None:
     return row["place_name"] if row else None
 
 
-def save_cached_geocode(lat_round: float, lon_round: float, place_name: str) -> None:
+def save_cached_geocode(lat: float, lon: float, place_name: str) -> None:
+    lat_round = round(float(lat), 2)
+    lon_round = round(float(lon), 2)
     conn = get_conn()
     conn.execute(
         "INSERT OR REPLACE INTO geocode_cache (lat_round, lon_round, place_name) VALUES (?, ?, ?)",

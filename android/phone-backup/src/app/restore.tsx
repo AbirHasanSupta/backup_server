@@ -2763,6 +2763,13 @@ export default function RestoreScreen() {
       }
     } catch (err) {
       console.warn('[Restore] reaction error:', err);
+      const revertList = (list: RemoteFile[]) =>
+        list.map(f =>
+          f.path === file.path
+            ? { ...f, user_reactions: currentReactions, reaction_counts: currentCounts }
+            : f
+        );
+      setFiles(revertList);
     }
   }, []);
 
@@ -2877,6 +2884,17 @@ export default function RestoreScreen() {
       if (restoreMountedRef.current) setIsFetching(false);
     }
   }, [isOffline, isDownloading, sourceMode, selectedSourceId, sharedViewMode, loadServerConfig]);
+
+  useEffect(() => {
+    if (sourceMode !== 'shared' || !selectedSourceId) return;
+    if (isOffline || isDownloading) return;
+    void handleFetch({ quiet: true, preserveSelection: true });
+  }, [sourceMode, selectedSourceId, sharedViewMode, isOffline, isDownloading, handleFetch]);
+
+  useFocusEffect(useCallback(() => {
+    if (sourceMode !== 'shared' || !selectedSourceId || isOffline || isDownloading) return;
+    void handleFetch({ quiet: true, preserveSelection: true });
+  }, [sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]));
 
   const onRefreshLibrary = useCallback(async () => {
     if (isDownloading) return;
