@@ -32,6 +32,22 @@ export function buildThumbnailUrl(config, relativePath, sourceMode, sourceId) {
   return `http://${config.ip}:${config.port}/files/thumbnail?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
 }
 
+// Device-to-device share serving — addressed by share_id (no relative_path exposed).
+export function buildShareDownloadUrl(config, shareId) {
+  if (!config || !config.ip || !config.port) return '';
+  return `http://${config.ip}:${config.port}/share/${encodeURIComponent(shareId)}/download?device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+}
+
+export function buildSharePreviewUrl(config, shareId) {
+  if (!config || !config.ip || !config.port) return '';
+  return `http://${config.ip}:${config.port}/share/${encodeURIComponent(shareId)}/preview?device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+}
+
+export function buildShareThumbnailUrl(config, shareId) {
+  if (!config || !config.ip || !config.port) return '';
+  return `http://${config.ip}:${config.port}/share/${encodeURIComponent(shareId)}/thumbnail?device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+}
+
 export async function warmVideoPreviews(relativePaths, sourceMode, sourceId) {
   if (!relativePaths || relativePaths.length === 0) return { ok: true, scheduled: 0 };
   const { ip, port, key, deviceId } = await getConfig();
@@ -538,5 +554,108 @@ export async function getSharedFeed(sourceId) {
     { headers: { Authorization: `Bearer ${key}` } },
   );
   if (!res.ok) throw new Error(`Failed to fetch shared feed (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * List accepted devices this device can share to (safe fields only — never a token).
+ * @returns {Promise<{devices: {device_id: string, device_name: string, device_model: string}[]}>}
+ */
+export async function listShareTargetDevices() {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/share/devices?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to list devices (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Share files with one or more devices on the network.
+ * @param {string[]} targetDeviceIds
+ * @param {string} caption
+ * @param {{source_type: string, source_key: string, relative_path: string, size?: number, modified_time?: number}[]} items
+ */
+export async function createDeviceShare(targetDeviceIds, caption, items) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/share/create`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        shared_by_device_id: deviceId,
+        target_device_ids: targetDeviceIds,
+        caption: caption || null,
+        items,
+      }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to share (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Fetch the unified feed: device-to-device shares + permitted PC shared-folder media.
+ */
+export async function getFeed() {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/feed?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch feed (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Fetch comments for a media item.
+ * @param {number} mediaId
+ */
+export async function getComments(mediaId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/media/${encodeURIComponent(mediaId)}/comments?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch comments (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Add a comment to a media item.
+ * @param {number} mediaId
+ * @param {string} text
+ */
+export async function addComment(mediaId, text) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/media/${encodeURIComponent(mediaId)}/comments`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ source_id: deviceId, text }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to add comment (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Delete one of your own comments (author-only on the server).
+ * @param {number} commentId
+ */
+export async function deleteComment(commentId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/comments/${encodeURIComponent(commentId)}/delete`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ source_id: deviceId }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to delete comment (${res.status})`);
   return await res.json();
 }

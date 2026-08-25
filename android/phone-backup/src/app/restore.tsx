@@ -17,6 +17,8 @@ import {
   Linking,
   TextInput,
   RefreshControl,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
@@ -48,7 +50,15 @@ import {
   listServerFiles,
   listSharedFiles,
   reactToMedia,
-  getSharedFeed,
+  getFeed,
+  listShareTargetDevices,
+  createDeviceShare,
+  getComments,
+  addComment,
+  deleteComment,
+  buildShareThumbnailUrl,
+  buildSharePreviewUrl,
+  buildShareDownloadUrl,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
@@ -111,6 +121,16 @@ type RemoteFile = {
   reaction_counts?: Record<string, number>;
   user_reactions?: string[];
   is_video?: boolean;
+  // Feed-only fields (device-to-device shares + PC shared-folder media)
+  kind?: 'share' | 'shared';
+  is_device_share?: boolean;
+  share_id?: number;
+  source_id?: string;
+  caption?: string | null;
+  shared_by?: string;
+  shared_by_device_id?: string;
+  comment_count?: number;
+  created_at?: number;
 };
 
 type ServerConfig = { ip: string; port: string; key: string; deviceId: string } | null;
@@ -138,6 +158,7 @@ type SortPreference = { field: SortField; dir: SortDir };
 type FileCategory = 'image' | 'video' | 'audio' | 'other';
 
 const RESTORE_SORT_PREFERENCE_KEY = 'restore_sort_preference_v1';
+const FEED_SORT_PREFERENCE_KEY = 'feed_sort_preference_v1';
 
 function parseSortPreference(raw: string | null): SortPreference | null {
   if (!raw) return null;
@@ -207,6 +228,17 @@ function formatDate(ts: number | undefined): string {
   return new Date(ts * 1000).toLocaleDateString(undefined, {
     year: 'numeric', month: 'short', day: 'numeric',
   });
+}
+
+// Relative time for comments (created_at is a unix second timestamp).
+function formatTimeAgo(ts: number | undefined): string {
+  if (!ts) return '';
+  const diff = Math.floor(Date.now() / 1000) - ts;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return formatDate(ts);
 }
 
 function formatMediaTime(sec: number): string {
@@ -380,6 +412,48 @@ function compareRemoteFiles(a: RemoteFile, b: RemoteFile, field: SortField, dir:
   return dir === 'asc' ? cmp : -cmp;
 }
 
+// Normalize one raw item from GET /api/feed into a RemoteFile. Device-to-device
+// shares (kind 'share') are dated by their share time (created_at) under the
+// 'date' sort; PC shared-folder media (kind 'shared') keep modified_time.
+function mapFeedItem(f: any): RemoteFile {
+  return {
+    path: f.path,
+    size: f.size ?? 0,
+    modified_time: f.modified_time ?? 0,
+    media_id: f.media_id,
+    reaction_counts: f.reaction_counts,
+    user_reactions: f.user_reactions,
+    is_video: f.is_video,
+    kind: f.kind,
+    is_device_share: f.is_device_share,
+    share_id: f.share_id,
+    source_id: f.source_id,
+    caption: f.caption,
+    shared_by: f.shared_by,
+    shared_by_device_id: f.shared_by_device_id,
+    comment_count: f.comment_count,
+    created_at: f.created_at,
+    uploaded_time: f.kind === 'share' ? f.created_at : undefined,
+  };
+}
+
+// Instagram-style snapshot ordering for the unified feed:
+//   A = unreacted device-to-device shares (top)
+//   B = unreacted PC shared-folder media (middle)
+//   C = anything the current device has already reacted to (bottom)
+// Within each group, apply the user's chosen sort. Re-grouping happens only on
+// fetch/poll/sort-change — never on a reaction tap — so a reacted card holds its
+// place until the next refresh, then sinks. Idempotent on already-mapped items.
+function buildFeedDisplayList(rawItems: any[], field: SortField, dir: SortDir): RemoteFile[] {
+  const mapped = (rawItems || []).map(mapFeedItem);
+  const hasReacted = (f: RemoteFile) => (f.user_reactions?.length ?? 0) > 0;
+  const groupA = mapped.filter(f => f.kind === 'share' && !hasReacted(f));
+  const groupB = mapped.filter(f => f.kind !== 'share' && !hasReacted(f));
+  const groupC = mapped.filter(f => hasReacted(f));
+  const sortGroup = (g: RemoteFile[]) => g.slice().sort((x, y) => compareRemoteFiles(x, y, field, dir));
+  return [...sortGroup(groupA), ...sortGroup(groupB), ...sortGroup(groupC)];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Reaction Bar & Feed Card Components
 // ─────────────────────────────────────────────────────────────────────────────
@@ -439,6 +513,7 @@ function SharedFeedCard({
   sourceId,
   onPreview,
   onReact,
+  onOpenComments,
   colors,
 }: {
   item: RemoteFile;
@@ -446,16 +521,25 @@ function SharedFeedCard({
   sourceId: string;
   onPreview: (file: RemoteFile) => void;
   onReact: (file: RemoteFile, emoji: string) => void;
+  onOpenComments: (file: RemoteFile) => void;
   colors: AppColors;
 }) {
   const category = getFileCategory(item.path);
   const isVideo = category === 'video';
   const fileName = item.path.split(/[/\\]/).pop() ?? item.path;
-  const thumbUrl = serverConfig
-    ? isVideo
-      ? buildThumbnailUrl(serverConfig, item.path, 'shared', sourceId)
-      : buildPreviewUrl(serverConfig, item.path, 'shared', sourceId)
-    : '';
+  const isDeviceShare = item.kind === 'share';
+  // Device-to-device shares are addressed by share_id (the thumbnail endpoint
+  // serves the image itself for photos and a generated frame for videos).
+  // PC shared-folder media keeps the existing per-source addressing.
+  const effectiveSourceId = item.source_id ?? sourceId;
+  const thumbUrl = !serverConfig
+    ? ''
+    : isDeviceShare && item.share_id != null
+      ? buildShareThumbnailUrl(serverConfig, item.share_id)
+      : isVideo
+        ? buildThumbnailUrl(serverConfig, item.path, 'shared', effectiveSourceId)
+        : buildPreviewUrl(serverConfig, item.path, 'shared', effectiveSourceId);
+  const commentCount = item.comment_count ?? 0;
 
   return (
     <View style={[feedCardStyles.card, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
@@ -483,12 +567,26 @@ function SharedFeedCard({
             {fileName}
           </Text>
           <Text style={[feedCardStyles.fileDate, { color: colors.textMuted }]}>
-            {formatDate(item.modified_time)}
+            {formatDate(isDeviceShare ? (item.created_at ?? item.modified_time) : item.modified_time)}
           </Text>
         </View>
         <Text style={[feedCardStyles.fileSize, { color: colors.textSecondary }]}>
           {formatSize(item.size)}
         </Text>
+
+        {isDeviceShare && !!item.shared_by && (
+          <View style={feedCardStyles.sharedByRow}>
+            <AppIcon androidName="person" iosName="person.fill" color={colors.primary} size={13} />
+            <Text style={[feedCardStyles.sharedByText, { color: colors.primary }]} numberOfLines={1}>
+              Shared by {item.shared_by}
+            </Text>
+          </View>
+        )}
+        {!!item.caption && (
+          <Text style={[feedCardStyles.caption, { color: colors.text }]}>
+            {item.caption}
+          </Text>
+        )}
 
         <ReactionEmojiBar
           reactionCounts={item.reaction_counts}
@@ -496,10 +594,501 @@ function SharedFeedCard({
           onReact={(emoji) => onReact(item, emoji)}
           colors={colors}
         />
+
+        <View style={feedCardStyles.actionRow}>
+          <TouchableOpacity
+            onPress={() => onOpenComments(item)}
+            style={[feedCardStyles.commentBtn, { backgroundColor: colors.surfaceSoft, borderColor: colors.surfaceBorder }]}
+            activeOpacity={0.7}
+          >
+            <AppIcon androidName="chat_bubble_outline" iosName="bubble.left" color={colors.textSecondary} size={15} />
+            <Text style={[feedCardStyles.commentBtnText, { color: colors.textSecondary }]}>
+              {commentCount > 0 ? `${commentCount} ${commentCount === 1 ? 'Comment' : 'Comments'}` : 'Comment'}
+            </Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </View>
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Comments & Share Modals
+// ─────────────────────────────────────────────────────────────────────────────
+
+type CommentItem = {
+  id: number;
+  media_id: number;
+  source_id: string;
+  device_name?: string | null;
+  text: string;
+  created_at: number;
+  is_own?: boolean;
+};
+
+function CommentsModal({
+  visible,
+  item,
+  colors,
+  onClose,
+  onCountChange,
+}: {
+  visible: boolean;
+  item: RemoteFile | null;
+  colors: AppColors;
+  onClose: () => void;
+  onCountChange: (mediaId: number, delta: number) => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const [comments, setComments] = useState<CommentItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const mediaId = item?.media_id;
+
+  useEffect(() => {
+    if (!visible || mediaId == null) return;
+    let active = true;
+    setLoading(true);
+    setComments([]);
+    setDraft('');
+    getComments(mediaId)
+      .then((res) => { if (active) setComments(Array.isArray(res?.comments) ? res.comments : []); })
+      .catch(() => { if (active) setComments([]); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [visible, mediaId]);
+
+  const handleSend = useCallback(async () => {
+    const text = draft.trim();
+    if (!text || mediaId == null || sending) return;
+    setSending(true);
+    try {
+      const created: CommentItem = await addComment(mediaId, text);
+      setComments((prev) => [...prev, created]);
+      setDraft('');
+      onCountChange(mediaId, 1);
+    } catch {
+      Alert.alert('Error', 'Could not post your comment. Check your connection and try again.');
+    } finally {
+      setSending(false);
+    }
+  }, [draft, mediaId, sending, onCountChange]);
+
+  const handleDelete = useCallback((c: CommentItem) => {
+    Alert.alert('Delete comment', 'Remove this comment?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await deleteComment(c.id);
+            setComments((prev) => prev.filter((x) => x.id !== c.id));
+            if (mediaId != null) onCountChange(mediaId, -1);
+          } catch {
+            Alert.alert('Error', 'Could not delete the comment.');
+          }
+        },
+      },
+    ]);
+  }, [mediaId, onCountChange]);
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={modalSheetStyles.backdrop} onPress={onClose} />
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={modalSheetStyles.avoider}
+        pointerEvents="box-none"
+      >
+        <View style={[modalSheetStyles.sheet, { backgroundColor: colors.surface, paddingBottom: insets.bottom + Spacing.three }]}>
+          <View style={modalSheetStyles.handle} />
+          <View style={modalSheetStyles.header}>
+            <Text style={[modalSheetStyles.title, { color: colors.text }]}>Comments</Text>
+            <TouchableOpacity onPress={onClose} hitSlop={10}>
+              <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={20} />
+            </TouchableOpacity>
+          </View>
+
+          {loading ? (
+            <View style={modalSheetStyles.centerPad}>
+              <ActivityIndicator color={colors.primary} />
+            </View>
+          ) : comments.length === 0 ? (
+            <View style={modalSheetStyles.centerPad}>
+              <Text style={[modalSheetStyles.emptyText, { color: colors.textMuted }]}>
+                No comments yet. Be the first to comment.
+              </Text>
+            </View>
+          ) : (
+            <FlatList
+              data={comments}
+              keyExtractor={(c) => String(c.id)}
+              style={modalSheetStyles.list}
+              contentContainerStyle={modalSheetStyles.listContent}
+              keyboardShouldPersistTaps="handled"
+              renderItem={({ item: c }) => (
+                <View style={modalSheetStyles.commentRow}>
+                  <View style={modalSheetStyles.commentBody}>
+                    <View style={modalSheetStyles.commentMeta}>
+                      <Text style={[modalSheetStyles.commentAuthor, { color: colors.text }]} numberOfLines={1}>
+                        {c.device_name || 'Unknown device'}
+                      </Text>
+                      <Text style={[modalSheetStyles.commentTime, { color: colors.textMuted }]}>
+                        {formatTimeAgo(c.created_at)}
+                      </Text>
+                    </View>
+                    <Text style={[modalSheetStyles.commentText, { color: colors.textSecondary }]}>{c.text}</Text>
+                  </View>
+                  {c.is_own && (
+                    <TouchableOpacity onPress={() => handleDelete(c)} hitSlop={8} style={modalSheetStyles.deleteBtn}>
+                      <AppIcon androidName="delete_outline" iosName="trash" color={colors.textMuted} size={17} />
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
+            />
+          )}
+
+          <View style={[modalSheetStyles.inputRow, { borderTopColor: colors.surfaceBorder }]}>
+            <TextInput
+              value={draft}
+              onChangeText={setDraft}
+              placeholder="Add a comment…"
+              placeholderTextColor={colors.textMuted}
+              style={[modalSheetStyles.input, { backgroundColor: colors.surfaceSoft, color: colors.text, borderColor: colors.surfaceBorder }]}
+              multiline
+              maxLength={2000}
+            />
+            <TouchableOpacity
+              onPress={handleSend}
+              disabled={!draft.trim() || sending}
+              style={[modalSheetStyles.sendBtn, { backgroundColor: draft.trim() && !sending ? colors.primary : colors.surfaceSoft }]}
+              activeOpacity={0.8}
+            >
+              {sending ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <AppIcon androidName="send" iosName="paperplane.fill" color={draft.trim() ? '#fff' : colors.textMuted} size={18} />
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+type ShareTargetDevice = { device_id: string; device_name: string; device_model: string };
+
+function ShareModal({
+  visible,
+  count,
+  colors,
+  onClose,
+  onSubmit,
+}: {
+  visible: boolean;
+  count: number;
+  colors: AppColors;
+  onClose: () => void;
+  onSubmit: (targetIds: string[], caption: string) => Promise<void>;
+}) {
+  const insets = useSafeAreaInsets();
+  const [devices, setDevices] = useState<ShareTargetDevice[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [caption, setCaption] = useState('');
+  const [sending, setSending] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    let active = true;
+    setLoading(true);
+    setSelected(new Set());
+    setCaption('');
+    listShareTargetDevices()
+      .then((res) => { if (active) setDevices(Array.isArray(res?.devices) ? res.devices : []); })
+      .catch(() => { if (active) setDevices([]); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [visible]);
+
+  const toggle = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleSend = useCallback(async () => {
+    if (selected.size === 0 || sending) return;
+    setSending(true);
+    try {
+      await onSubmit(Array.from(selected), caption.trim());
+    } finally {
+      setSending(false);
+    }
+  }, [selected, sending, caption, onSubmit]);
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={modalSheetStyles.backdrop} onPress={onClose} />
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={modalSheetStyles.avoider}
+        pointerEvents="box-none"
+      >
+        <View style={[modalSheetStyles.sheet, { backgroundColor: colors.surface, paddingBottom: insets.bottom + Spacing.three }]}>
+          <View style={modalSheetStyles.handle} />
+          <View style={modalSheetStyles.header}>
+            <Text style={[modalSheetStyles.title, { color: colors.text }]}>
+              Share {count} {count === 1 ? 'file' : 'files'}
+            </Text>
+            <TouchableOpacity onPress={onClose} hitSlop={10}>
+              <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={20} />
+            </TouchableOpacity>
+          </View>
+
+          <TextInput
+            value={caption}
+            onChangeText={setCaption}
+            placeholder="Add a caption (optional)…"
+            placeholderTextColor={colors.textMuted}
+            style={[modalSheetStyles.captionInput, { backgroundColor: colors.surfaceSoft, color: colors.text, borderColor: colors.surfaceBorder }]}
+            multiline
+            maxLength={2000}
+          />
+
+          <Text style={[modalSheetStyles.sectionLabel, { color: colors.textSecondary }]}>
+            Send to devices
+          </Text>
+
+          {loading ? (
+            <View style={modalSheetStyles.centerPad}>
+              <ActivityIndicator color={colors.primary} />
+            </View>
+          ) : devices.length === 0 ? (
+            <View style={modalSheetStyles.centerPad}>
+              <Text style={[modalSheetStyles.emptyText, { color: colors.textMuted }]}>
+                No other devices are connected to share with.
+              </Text>
+            </View>
+          ) : (
+            <FlatList
+              data={devices}
+              keyExtractor={(d) => d.device_id}
+              style={modalSheetStyles.list}
+              contentContainerStyle={modalSheetStyles.listContent}
+              keyboardShouldPersistTaps="handled"
+              renderItem={({ item: d }) => {
+                const active = selected.has(d.device_id);
+                return (
+                  <TouchableOpacity
+                    onPress={() => toggle(d.device_id)}
+                    style={[
+                      modalSheetStyles.deviceRow,
+                      { borderColor: active ? colors.primary : colors.surfaceBorder, backgroundColor: active ? colors.primarySoft : colors.surfaceSoft },
+                    ]}
+                    activeOpacity={0.8}
+                  >
+                    <View style={modalSheetStyles.deviceInfo}>
+                      <Text style={[modalSheetStyles.deviceName, { color: colors.text }]} numberOfLines={1}>
+                        {d.device_name || 'Unknown device'}
+                      </Text>
+                      {!!d.device_model && (
+                        <Text style={[modalSheetStyles.deviceModel, { color: colors.textMuted }]} numberOfLines={1}>
+                          {d.device_model}
+                        </Text>
+                      )}
+                    </View>
+                    <AppIcon
+                      androidName={active ? 'check_circle' : 'radio_button_unchecked'}
+                      iosName={active ? 'checkmark.circle.fill' : 'circle'}
+                      color={active ? colors.primary : colors.textMuted}
+                      size={22}
+                    />
+                  </TouchableOpacity>
+                );
+              }}
+            />
+          )}
+
+          <TouchableOpacity
+            onPress={handleSend}
+            disabled={selected.size === 0 || sending}
+            style={[modalSheetStyles.primaryBtn, { backgroundColor: selected.size > 0 && !sending ? colors.primary : colors.surfaceSoft }]}
+            activeOpacity={0.85}
+          >
+            {sending ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={[modalSheetStyles.primaryBtnText, { color: selected.size > 0 ? '#fff' : colors.textMuted }]}>
+                {selected.size > 0 ? `Share with ${selected.size} ${selected.size === 1 ? 'device' : 'devices'}` : 'Select devices'}
+              </Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
+const modalSheetStyles = StyleSheet.create({
+  backdrop: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  avoider: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  sheet: {
+    borderTopLeftRadius: Radius.xl,
+    borderTopRightRadius: Radius.xl,
+    paddingHorizontal: Spacing.four,
+    paddingTop: Spacing.two,
+    maxHeight: SCREEN_H * 0.85,
+  },
+  handle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(128,128,128,0.4)',
+    marginBottom: Spacing.two,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.three,
+  },
+  title: {
+    fontSize: TextScale.lg,
+    fontWeight: '800',
+  },
+  centerPad: {
+    paddingVertical: Spacing.six,
+    alignItems: 'center',
+  },
+  emptyText: {
+    fontSize: TextScale.sm,
+    textAlign: 'center',
+  },
+  list: {
+    maxHeight: SCREEN_H * 0.45,
+  },
+  listContent: {
+    paddingBottom: Spacing.two,
+    gap: Spacing.two,
+  },
+  commentRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: Spacing.two,
+    paddingVertical: Spacing.two,
+  },
+  commentBody: {
+    flex: 1,
+  },
+  commentMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+  },
+  commentAuthor: {
+    fontSize: TextScale.sm,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+  commentTime: {
+    fontSize: TextScale.xs,
+  },
+  commentText: {
+    fontSize: TextScale.sm,
+    marginTop: 2,
+    lineHeight: 19,
+  },
+  deleteBtn: {
+    padding: 2,
+  },
+  inputRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: Spacing.two,
+    paddingTop: Spacing.two,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  input: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: Radius.lg,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two + 2,
+    fontSize: TextScale.sm,
+    maxHeight: 110,
+  },
+  sendBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  captionInput: {
+    borderWidth: 1,
+    borderRadius: Radius.lg,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two + 2,
+    fontSize: TextScale.sm,
+    minHeight: 44,
+    maxHeight: 120,
+    marginBottom: Spacing.three,
+  },
+  sectionLabel: {
+    fontSize: TextScale.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: Spacing.two,
+  },
+  deviceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.three,
+    borderRadius: Radius.lg,
+    borderWidth: 1.5,
+  },
+  deviceInfo: {
+    flex: 1,
+  },
+  deviceName: {
+    fontSize: TextScale.base,
+    fontWeight: '700',
+  },
+  deviceModel: {
+    fontSize: TextScale.xs,
+    marginTop: 1,
+  },
+  primaryBtn: {
+    marginTop: Spacing.three,
+    borderRadius: Radius.full,
+    paddingVertical: Spacing.three + 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  primaryBtnText: {
+    fontSize: TextScale.base,
+    fontWeight: '800',
+  },
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Source Selector
@@ -840,6 +1429,42 @@ const feedCardStyles = StyleSheet.create({
     fontSize: TextScale.xs,
     marginTop: 1,
   },
+  sharedByRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: Spacing.two,
+  },
+  sharedByText: {
+    fontSize: TextScale.xs,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+  caption: {
+    fontSize: TextScale.sm,
+    marginTop: Spacing.two,
+    lineHeight: 18,
+  },
+  actionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: Spacing.two,
+    marginTop: Spacing.two,
+  },
+  commentBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: Spacing.two + 2,
+    paddingVertical: 5,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+  },
+  commentBtnText: {
+    fontSize: TextScale.xs,
+    fontWeight: '700',
+  },
 });
 
 const srcStyles = StyleSheet.create({
@@ -1048,14 +1673,29 @@ const PreviewModal = React.memo(function PreviewModal({
   const category = currentFile ? getFileCategory(currentFile.path) : 'other';
   const fileName = currentFile ? (currentFile.path.split(/[/\\]/).pop() ?? currentFile.path) : '';
 
-  // Synchronous preview URL generator
+  // Synchronous preview URL generator. Feed items address media differently:
+  // device-to-device shares by share_id; PC shared-folder media always in
+  // 'shared' mode with the item's own source_id (the modal's sourceMode is
+  // 'phone' in the Feed tab). Library rows keep the modal's sourceMode.
   const getUrlForFile = useCallback((f: RemoteFile | null): string => {
     if (!f || !serverConfig) return '';
+    if (f.kind === 'share' && f.share_id != null) {
+      return buildShareThumbnailUrl(serverConfig, f.share_id);
+    }
+    if (f.kind === 'shared') {
+      return buildPreviewUrl(serverConfig, f.path, 'shared', f.source_id ?? selectedSourceId);
+    }
     return buildPreviewUrl(serverConfig, f.path, sourceMode, selectedSourceId);
   }, [serverConfig, sourceMode, selectedSourceId]);
 
   const getVideoPreviewUrlForFile = useCallback((f: RemoteFile | null): string => {
     if (!f || !serverConfig) return '';
+    if (f.kind === 'share' && f.share_id != null) {
+      return buildSharePreviewUrl(serverConfig, f.share_id);
+    }
+    if (f.kind === 'shared') {
+      return buildVideoPreviewUrl(serverConfig, f.path, 'shared', f.source_id ?? selectedSourceId);
+    }
     return buildVideoPreviewUrl(serverConfig, f.path, sourceMode, selectedSourceId);
   }, [serverConfig, sourceMode, selectedSourceId]);
 
@@ -1087,6 +1727,10 @@ const PreviewModal = React.memo(function PreviewModal({
     ].filter(Boolean) as RemoteFile[];
 
     const newlyWarm = candidates
+      // Feed items (kind set) address media by share_id / per-item source_id,
+      // not the modal's sourceMode — skip them here (they warm on demand via
+      // the /share and /shared preview endpoints).
+      .filter(f => !f.kind)
       .filter(f => getFileCategory(f.path) === 'video')
       .filter(f => !warmedPreviewPathsRef.current.has(f.path))
       .slice(0, 3);
@@ -2433,11 +3077,14 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }, [])
   );
 
-  // Source mode state
-  const [sourceMode, setSourceMode] = useState<SourceMode>(variant === 'feed' ? 'shared' : 'phone');
+  // Source mode state. The Feed tab (variant 'feed') sources its data from the
+  // unified /api/feed endpoint independent of sourceMode, so it starts in
+  // 'phone' mode and hides the source picker entirely.
+  const [sourceMode, setSourceMode] = useState<SourceMode>('phone');
   const [sharedSources, setSharedSources] = useState<SharedSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
-  const [sharedViewMode, setSharedViewMode] = useState<'feed' | 'folder'>(variant === 'feed' ? 'feed' : 'folder');
+  // Shared folders always render as a tree now; the Feed/Tree switch is gone.
+  const [sharedViewMode, setSharedViewMode] = useState<'feed' | 'folder'>('folder');
   const [isLoadingSources, setIsLoadingSources] = useState(false);
 
   // Server Config cache
@@ -2477,10 +3124,19 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   // Sort state
   const [sortField, setSortField] = useState<SortField>('date');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
+  // Mirrors of the sort state so the feed poll (a long-lived interval) can
+  // re-rank with the latest sort without tearing down/recreating the timer.
+  const sortFieldRef = useRef(sortField);
+  const sortDirRef = useRef(sortDir);
+  useEffect(() => {
+    sortFieldRef.current = sortField;
+    sortDirRef.current = sortDir;
+  }, [sortField, sortDir]);
 
   useEffect(() => {
     let active = true;
-    AsyncStorage.getItem(RESTORE_SORT_PREFERENCE_KEY)
+    const sortKey = variant === 'feed' ? FEED_SORT_PREFERENCE_KEY : RESTORE_SORT_PREFERENCE_KEY;
+    AsyncStorage.getItem(sortKey)
       .then(raw => {
         const preference = parseSortPreference(raw);
         if (!active || !preference) return;
@@ -2491,7 +3147,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         // Storage failures should not prevent the Restore screen from working.
       });
     return () => { active = false; };
-  }, []);
+  }, [variant]);
 
   // Selection mode state
   const [selectionMode, setSelectionMode] = useState(false);
@@ -2501,6 +3157,10 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchGenRef = useRef(0);
   const [refreshing, setRefreshing] = useState(false);
+
+  // Feed interaction / sharing modals
+  const [commentsItem, setCommentsItem] = useState<RemoteFile | null>(null);
+  const [shareModalVisible, setShareModalVisible] = useState(false);
 
   // Preview state
   const [previewFile, setPreviewFile] = useState<RemoteFile | null>(null);
@@ -2748,7 +3408,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     });
   }, [isFiltering, visibleRows, filteredFiles]);
 
-  const isFeedMode = sourceMode === 'shared' && sharedViewMode === 'feed' && !!selectedSourceId;
+  const isFeedMode = variant === 'feed';
 
   // Reaction handler
   const handleToggleReaction = useCallback(async (file: RemoteFile, emoji: string) => {
@@ -2758,6 +3418,11 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     const currentReactions = file.user_reactions || [];
     const currentCounts = { ...(file.reaction_counts || {}) };
     const hasReacted = currentReactions.includes(emoji);
+    // Prefer media_id identity so a reaction updates the right card even when
+    // the unified feed carries two items with the same relative path from
+    // different sources; fall back to path for library rows.
+    const sameMedia = (f: RemoteFile) =>
+      file.media_id != null && f.media_id != null ? f.media_id === file.media_id : f.path === file.path;
 
     const updatedReactions = hasReacted
       ? currentReactions.filter(e => e !== emoji)
@@ -2770,7 +3435,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
     const updateList = (list: RemoteFile[]) =>
       list.map(f =>
-        f.path === file.path
+        sameMedia(f)
           ? { ...f, user_reactions: updatedReactions, reaction_counts: updatedCounts }
           : f
       );
@@ -2782,7 +3447,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       if (res?.counts && res?.user_reactions) {
         const syncServer = (list: RemoteFile[]) =>
           list.map(f =>
-            f.path === file.path
+            sameMedia(f)
               ? { ...f, user_reactions: res.user_reactions, reaction_counts: res.counts }
               : f
           );
@@ -2792,7 +3457,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       console.warn('[Restore] reaction error:', err);
       const revertList = (list: RemoteFile[]) =>
         list.map(f =>
-          f.path === file.path
+          sameMedia(f)
             ? { ...f, user_reactions: currentReactions, reaction_counts: currentCounts }
             : f
         );
@@ -2800,33 +3465,79 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
   }, []);
 
+  // Keep a feed card's comment count in sync after add/delete inside the
+  // CommentsModal, without refetching the whole feed (snapshot ordering holds).
+  const handleCommentCountChange = useCallback((mediaId: number, delta: number) => {
+    setFiles(list =>
+      list.map(f =>
+        f.media_id === mediaId
+          ? { ...f, comment_count: Math.max(0, (f.comment_count || 0) + delta) }
+          : f
+      )
+    );
+  }, []);
+
+  // Device-to-device share: build items from the current selection and post
+  // them. source_type/source_key are derived from the active Library section
+  // (phone-backup vs a specific shared folder) so both sections can share.
+  const handleShareSubmit = useCallback(async (targetIds: string[], caption: string) => {
+    if (targetIds.length === 0) return;
+    const sourceType = sourceMode === 'shared' ? 'shared' : 'phone';
+    const sourceKey = sourceMode === 'shared' ? selectedSourceId : serverConfig?.deviceId;
+    if (!sourceKey) {
+      Alert.alert('Error', 'Could not determine where the selected files come from.');
+      return;
+    }
+    const items = Array.from(selectedPaths).map(path => {
+      const f = files.find(x => x.path === path);
+      return {
+        source_type: sourceType,
+        source_key: sourceKey,
+        relative_path: path,
+        size: f?.size ?? 0,
+        modified_time: f?.modified_time ?? 0,
+      };
+    });
+    if (items.length === 0) {
+      Alert.alert('Nothing to share', 'Select at least one file first.');
+      return;
+    }
+    try {
+      const res = await createDeviceShare(targetIds, caption, items);
+      const shared = res?.count ?? items.length;
+      setShareModalVisible(false);
+      setSelectedPaths(new Set());
+      setSelectionMode(false);
+      hapticSuccess();
+      Alert.alert(
+        'Shared',
+        `Sent ${shared} ${shared === 1 ? 'file' : 'files'} to ${targetIds.length} ${targetIds.length === 1 ? 'device' : 'devices'}.`,
+      );
+    } catch (err) {
+      hapticError();
+      Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not share the selected files.'));
+    }
+  }, [sourceMode, selectedSourceId, serverConfig, selectedPaths, files]);
+
   const handleSharedViewModeChange = useCallback((vmode: 'feed' | 'folder') => {
     setSharedViewMode(vmode);
   }, []);
 
-  // Periodic refresh of reactions/feed when in shared feed view
+  // Periodic refresh of the unified feed (device-to-device shares + PC shared
+  // media). Re-ranking runs here so reacted cards sink on the next poll.
   useEffect(() => {
     if (!isFeedMode || isOffline) return;
     const interval = setInterval(() => {
-      if (fetchingRef.current || isDownloading || !selectedSourceId) return;
-      getSharedFeed(selectedSourceId)
+      if (fetchingRef.current || isDownloading) return;
+      getFeed()
         .then(res => {
           if (!restoreMountedRef.current || !res?.items) return;
-          const feedFiles: RemoteFile[] = res.items.map((f: any) => ({
-            path: f.path,
-            size: f.size,
-            modified_time: f.modified_time,
-            media_id: f.media_id,
-            reaction_counts: f.reaction_counts,
-            user_reactions: f.user_reactions,
-            is_video: f.is_video,
-          }));
-          setFiles(feedFiles);
+          setFiles(buildFeedDisplayList(res.items, sortFieldRef.current, sortDirRef.current));
         })
         .catch(() => {});
     }, 10000);
     return () => clearInterval(interval);
-  }, [isFeedMode, selectedSourceId, isOffline, isDownloading]);
+  }, [isFeedMode, isOffline, isDownloading]);
 
   // Flat ordered list of previewable files
   const previewableFiles = useMemo<RemoteFile[]>(() => {
@@ -2856,19 +3567,10 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     setIsFetching(true);
     try {
       await loadServerConfig();
-      if (sourceMode === 'shared' && sharedViewMode === 'feed') {
-        const feedData = await getSharedFeed(selectedSourceId!);
+      if (isFeedMode) {
+        const feedData = await getFeed();
         if (!restoreMountedRef.current) return;
-        const feedFiles: RemoteFile[] = (feedData.items || []).map((f: any) => ({
-          path: f.path,
-          size: f.size,
-          modified_time: f.modified_time,
-          media_id: f.media_id,
-          reaction_counts: f.reaction_counts,
-          user_reactions: f.user_reactions,
-          is_video: f.is_video,
-        }));
-        setFiles(feedFiles);
+        setFiles(buildFeedDisplayList(feedData.items || [], sortField, sortDir));
         setTree(null);
       } else {
         const data = sourceMode === 'shared'
@@ -2910,20 +3612,23 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       fetchingRef.current = false;
       if (restoreMountedRef.current) setIsFetching(false);
     }
-  }, [isOffline, isDownloading, sourceMode, selectedSourceId, sharedViewMode, loadServerConfig]);
+  }, [isOffline, isDownloading, sourceMode, selectedSourceId, sharedViewMode, isFeedMode, sortField, sortDir, loadServerConfig]);
 
   useEffect(() => {
-    if (sourceMode !== 'shared' || !selectedSourceId) return;
     if (isOffline || isDownloading) return;
+    // Feed sources from /api/feed (no shared source needed); the library shared
+    // view still requires a selected source.
+    if (!isFeedMode && (sourceMode !== 'shared' || !selectedSourceId)) return;
     queueMicrotask(() => {
       void handleFetch({ quiet: true, preserveSelection: true });
     });
-  }, [sourceMode, selectedSourceId, sharedViewMode, isOffline, isDownloading, handleFetch]);
+  }, [isFeedMode, sourceMode, selectedSourceId, sharedViewMode, isOffline, isDownloading, handleFetch]);
 
   useFocusEffect(useCallback(() => {
-    if (sourceMode !== 'shared' || !selectedSourceId || isOffline || isDownloading) return;
+    if (isOffline || isDownloading) return;
+    if (!isFeedMode && (sourceMode !== 'shared' || !selectedSourceId)) return;
     void handleFetch({ quiet: true, preserveSelection: true });
-  }, [sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]));
+  }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]));
 
   const onRefreshLibrary = useCallback(async () => {
     if (isDownloading) return;
@@ -2940,11 +3645,17 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const handleSortChange = useCallback((field: SortField, dir: SortDir) => {
     setSortField(field);
     setSortDir(dir);
-    void AsyncStorage.setItem(RESTORE_SORT_PREFERENCE_KEY, JSON.stringify({ field, dir }))
+    const sortKey = variant === 'feed' ? FEED_SORT_PREFERENCE_KEY : RESTORE_SORT_PREFERENCE_KEY;
+    void AsyncStorage.setItem(sortKey, JSON.stringify({ field, dir }))
       .catch(() => {
         // Keep the in-memory choice when the device cannot persist it.
       });
-  }, []);
+    // The feed is an explicitly-ordered list, so re-rank it now (an explicit
+    // user action — unlike a reaction, which never reorders under the finger).
+    if (variant === 'feed') {
+      setFiles(prev => buildFeedDisplayList(prev, field, dir));
+    }
+  }, [variant]);
 
   // Preview handlers
   const openPreview = useCallback((file: RemoteFile, index?: number) => {
@@ -3473,7 +4184,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             onSharedViewModeChange={handleSharedViewModeChange}
             isLoadingSources={isLoadingSources}
             isOffline={isOffline}
-            sortEnabled={files.length > 0 && !isFeedMode}
+            sortEnabled={files.length > 0}
             sortField={sortField}
             sortDir={sortDir}
             onModeChange={handleModeChange}
@@ -3511,6 +4222,14 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
                 {selectedPaths.size} {selectedPaths.size === 1 ? 'file' : 'files'} selected
               </Text>
               <TouchableOpacity
+                onPress={() => setShareModalVisible(true)}
+                style={[styles.shareSelBtn, { backgroundColor: colors.primarySoft }, isOffline && styles.disabledBtn]}
+                disabled={isOffline}
+              >
+                <AppIcon androidName="share" iosName="square.and.arrow.up" color={colors.primary} size={15} />
+                <Text style={[styles.shareSelText, { color: colors.primary }]}>Share</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
                 onPress={() => { setSelectedPaths(new Set()); setSelectionMode(false); }}
                 style={styles.clearSelBtn}
               >
@@ -3526,7 +4245,13 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       <FlatList
         style={{ flex: 1 }}
         data={isFeedMode ? (isFiltering ? filteredFiles : files) : (listRows as any)}
-        keyExtractor={(item: any) => (isFeedMode ? item.path : item.node.key)}
+        keyExtractor={(item: any) =>
+          isFeedMode
+            ? (item.share_id != null
+                ? `share:${item.share_id}`
+                : `shared:${item.source_id ?? ''}:${item.path}`)
+            : item.node.key
+        }
         renderItem={({ item }: any) =>
           isFeedMode ? (
             <SharedFeedCard
@@ -3535,6 +4260,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
               sourceId={selectedSourceId!}
               onPreview={handlePreview}
               onReact={handleToggleReaction}
+              onOpenComments={setCommentsItem}
               colors={colors}
             />
           ) : (
@@ -3641,6 +4367,24 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           colors={colors}
         />
       )}
+
+      {/* Share selected files to other devices (Library selection mode) */}
+      <ShareModal
+        visible={shareModalVisible}
+        count={selectedPaths.size}
+        colors={colors}
+        onClose={() => setShareModalVisible(false)}
+        onSubmit={handleShareSubmit}
+      />
+
+      {/* Comments on a feed item */}
+      <CommentsModal
+        visible={commentsItem !== null}
+        item={commentsItem}
+        colors={colors}
+        onClose={() => setCommentsItem(null)}
+        onCountChange={handleCommentCountChange}
+      />
     </View>
   );
 }
@@ -3703,6 +4447,12 @@ const createStyles = (colors: AppColors) =>
     selectionBarText: { fontSize: TextScale.sm, fontWeight: '600', flex: 1 },
     clearSelBtn: { paddingHorizontal: Spacing.two, paddingVertical: Spacing.one },
     clearSelText: { fontSize: TextScale.sm, fontWeight: '500' },
+    shareSelBtn: {
+      flexDirection: 'row', alignItems: 'center', gap: Spacing.one,
+      paddingHorizontal: Spacing.three, paddingVertical: Spacing.one,
+      borderRadius: Radius.full,
+    },
+    shareSelText: { fontSize: TextScale.sm, fontWeight: '700' },
 
     folderRow: {
       flexDirection: 'row', alignItems: 'center',

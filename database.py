@@ -614,6 +614,64 @@ def init_db():
         """
     )
 
+    # 13. comments table for media comments (anchored on media_index.id, like reactions)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS comments
+        (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            media_id    INTEGER NOT NULL,
+            source_id   TEXT    NOT NULL,
+            text        TEXT    NOT NULL,
+            created_at  INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_comments_media ON comments(media_id, created_at)"
+    )
+
+    # 14. device_shares table for device-to-device file sharing (references to origin media)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS device_shares
+        (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            media_id            INTEGER NOT NULL,
+            source_type         TEXT    NOT NULL,
+            source_key          TEXT    NOT NULL,
+            relative_path       TEXT    NOT NULL,
+            size                INTEGER NOT NULL DEFAULT 0,
+            modified_time       INTEGER NOT NULL DEFAULT 0,
+            caption             TEXT,
+            shared_by_device_id TEXT    NOT NULL,
+            created_at          INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_device_shares_media ON device_shares(media_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_device_shares_sharer ON device_shares(shared_by_device_id, created_at)"
+    )
+
+    # 15. device_share_targets: which devices each share is delivered to
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS device_share_targets
+        (
+            share_id         INTEGER NOT NULL,
+            target_device_id TEXT    NOT NULL,
+            PRIMARY KEY (share_id, target_device_id),
+            FOREIGN KEY (share_id) REFERENCES device_shares(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_share_targets_device ON device_share_targets(target_device_id)"
+    )
+
     conn.commit()
     conn.close()
 
@@ -2254,3 +2312,213 @@ def save_cached_geocode(lat: float, lon: float, place_name: str) -> None:
     )
     conn.commit()
     conn.close()
+
+
+# ─── Comments helpers ──────────────────────────────────────────────────────────
+
+MAX_COMMENT_LENGTH = 2000
+
+
+def add_comment(media_id: int, source_id: str, text: str) -> dict:
+    """Insert a comment on a media item and return it with the commenter's device_name."""
+    now_ts = int(_time.time())
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO comments (media_id, source_id, text, created_at) VALUES (?, ?, ?, ?)",
+        (media_id, source_id, text, now_ts),
+    )
+    conn.commit()
+    cid = cur.lastrowid
+    row = conn.execute(
+        "SELECT device_name FROM devices WHERE device_id = ? LIMIT 1",
+        (source_id,),
+    ).fetchone()
+    conn.close()
+    return {
+        "id": cid,
+        "media_id": media_id,
+        "source_id": source_id,
+        "device_name": row["device_name"] if row else None,
+        "text": text,
+        "created_at": now_ts,
+    }
+
+
+def get_comments_for_media(media_id: int) -> list[dict]:
+    """Return all comments for a media item, oldest first, with commenter device_name."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT c.id, c.media_id, c.source_id, c.text, c.created_at,
+               d.device_name AS device_name
+        FROM comments c
+        LEFT JOIN devices d ON d.device_id = c.source_id
+        WHERE c.media_id = ?
+        ORDER BY c.created_at ASC, c.id ASC
+        """,
+        (media_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_comment_counts_for_media_ids(media_ids: list[int]) -> dict[int, int]:
+    """Bulk fetch comment counts for a list of media IDs (chunked to stay under SQLite's param cap)."""
+    if not media_ids:
+        return {}
+    conn = get_conn()
+    counts: dict[int, int] = {}
+    chunk_size = 500
+    for i in range(0, len(media_ids), chunk_size):
+        chunk = media_ids[i:i + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+        rows = conn.execute(
+            f"SELECT media_id, COUNT(*) AS c FROM comments WHERE media_id IN ({placeholders}) GROUP BY media_id",
+            chunk,
+        ).fetchall()
+        for r in rows:
+            counts[r["media_id"]] = r["c"]
+    conn.close()
+    return counts
+
+
+def delete_comment(comment_id: int, source_id: str) -> bool:
+    """Delete a comment only if source_id is its author. Return True if a row was removed."""
+    conn = get_conn()
+    cur = conn.execute(
+        "DELETE FROM comments WHERE id = ? AND source_id = ?",
+        (comment_id, source_id),
+    )
+    conn.commit()
+    conn.close()
+    return cur.rowcount > 0
+
+
+# ─── Device-to-device sharing helpers ──────────────────────────────────────────
+
+def get_share_target_devices(exclude_device_id: str | None = None) -> list[dict]:
+    """Return accepted devices as share targets. SAFE FIELDS ONLY — never expose token."""
+    conn = get_conn()
+    if exclude_device_id:
+        rows = conn.execute(
+            """
+            SELECT device_id, device_name, device_model
+            FROM devices
+            WHERE status = 'accepted' AND device_id IS NOT NULL AND device_id != ?
+            ORDER BY last_seen DESC
+            """,
+            (exclude_device_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT device_id, device_name, device_model
+            FROM devices
+            WHERE status = 'accepted' AND device_id IS NOT NULL
+            ORDER BY last_seen DESC
+            """
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_device_share(
+    shared_by_device_id: str,
+    target_device_ids: list[str],
+    caption: str | None,
+    items: list[dict],
+) -> dict:
+    """Create one share row per item and fan it out to the target devices.
+
+    Each item is a dict with source_type, source_key, relative_path, size, modified_time.
+    media_id is minted via get_or_create_media_id so feed + library share one identity.
+    """
+    # Mint media_ids first — get_or_create_media_id manages its own connection/commits,
+    # so doing this before we open our own transaction avoids premature commits mid-insert.
+    minted: list[tuple] = []
+    for it in items or []:
+        source_type = it.get("source_type")
+        source_key = it.get("source_key")
+        relative_path = it.get("relative_path")
+        if not source_type or not source_key or not relative_path:
+            continue
+        size = int(it.get("size") or 0)
+        modified_time = int(it.get("modified_time") or 0)
+        media_id = get_or_create_media_id(source_type, source_key, relative_path, size, modified_time)
+        minted.append((media_id, source_type, source_key, relative_path, size, modified_time))
+
+    targets = [t for t in (target_device_ids or []) if t and t != shared_by_device_id]
+    if not minted or not targets:
+        return {"ok": False, "count": 0}
+
+    conn = get_conn()
+    now_ts = int(_time.time())
+    cap = (caption or "").strip() or None
+    count = 0
+    for (media_id, source_type, source_key, relative_path, size, modified_time) in minted:
+        cur = conn.execute(
+            """
+            INSERT INTO device_shares
+                (media_id, source_type, source_key, relative_path, size, modified_time,
+                 caption, shared_by_device_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (media_id, source_type, source_key, relative_path, size, modified_time,
+             cap, shared_by_device_id, now_ts),
+        )
+        share_id = cur.lastrowid
+        conn.executemany(
+            "INSERT OR IGNORE INTO device_share_targets (share_id, target_device_id) VALUES (?, ?)",
+            [(share_id, t) for t in targets],
+        )
+        count += 1
+    conn.commit()
+    conn.close()
+    return {"ok": True, "count": count}
+
+
+def get_device_shares_for_target(target_device_id: str) -> list[dict]:
+    """Return device-to-device shares delivered to a device, newest first."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT ds.id AS share_id, ds.media_id, ds.source_type, ds.source_key,
+               ds.relative_path, ds.size, ds.modified_time, ds.caption,
+               ds.shared_by_device_id, ds.created_at,
+               d.device_name AS shared_by_name
+        FROM device_share_targets t
+        JOIN device_shares ds ON ds.id = t.share_id
+        LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        WHERE t.target_device_id = ?
+        ORDER BY ds.created_at DESC, ds.id DESC
+        """,
+        (target_device_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_device_share_by_id(share_id: int) -> dict | None:
+    """Return a single device share row (for serving/authorization), or None."""
+    conn = get_conn()
+    row = conn.execute(
+        """
+        SELECT id AS share_id, media_id, source_type, source_key, relative_path,
+               size, modified_time, caption, shared_by_device_id, created_at
+        FROM device_shares WHERE id = ?
+        """,
+        (share_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def is_share_target(share_id: int, device_id: str) -> bool:
+    """Return True if device_id is a delivery target of the given share."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM device_share_targets WHERE share_id = ? AND target_device_id = ? LIMIT 1",
+        (share_id, device_id),
+    ).fetchone()
+    conn.close()
+    return row is not None

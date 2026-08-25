@@ -45,6 +45,16 @@ from database import (
     get_media_reactions,
     get_reactions_for_media_ids,
     get_or_create_media_id,
+    get_comment_counts_for_media_ids,
+    add_comment,
+    get_comments_for_media,
+    delete_comment,
+    get_share_target_devices,
+    create_device_share,
+    get_device_shares_for_target,
+    get_device_share_by_id,
+    is_share_target,
+    MAX_COMMENT_LENGTH,
 )
 from trips import cluster_source_media, trigger_background_clustering
 from state import add_log, get_current_activity, pending_connections, set_current_activity
@@ -550,11 +560,13 @@ def _enrich_shared_files_with_reactions(source_id: str, files: list[dict], devic
         media_ids.append(mid)
 
     counts_map, user_map = get_reactions_for_media_ids(media_ids, current_source_id=device_id)
+    comment_counts = get_comment_counts_for_media_ids(media_ids)
     video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
     for f in files:
         mid = f["media_id"]
         f["reaction_counts"] = counts_map.get(mid, {})
         f["user_reactions"] = user_map.get(mid, [])
+        f["comment_count"] = comment_counts.get(mid, 0)
         ext = ("." + f["path"].rsplit(".", 1)[-1].lower()) if "." in f["path"] else ""
         f["is_video"] = ext in video_exts
     return files
@@ -565,18 +577,51 @@ def _search_shared_dir(root: str, query: str, limit: int = 500) -> list[dict]:
     results = []
     for dirpath, _dirnames, filenames in os.walk(root):
         for name in filenames:
-            if query not in name.lower():
-                continue
             full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root).replace("\\", "/")
+            # Match against the full relative path so folder names — and every
+            # descendant of a matching folder — are searchable, not just filenames.
+            if query not in rel.lower():
+                continue
             try:
                 stat = os.stat(full)
             except OSError:
                 continue
-            rel = os.path.relpath(full, root).replace("\\", "/")
             results.append({"path": rel, "size": stat.st_size, "modified_time": int(stat.st_mtime)})
             if len(results) >= limit:
                 return results
     return results
+
+
+# Media extensions surfaced in feeds (shared-folder + device-to-device shares).
+_FEED_MEDIA_EXTS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif",
+    ".bmp", ".tiff", ".tif", ".avif",
+    ".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv",
+}
+
+
+def _collect_shared_media(root: str) -> list[dict]:
+    """Walk a shared-folder root, returning media files (path/size/modified_time), newest first."""
+    all_files = []
+    for dirpath, _dirs, filenames in os.walk(root):
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in _FEED_MEDIA_EXTS:
+                continue
+            full = os.path.join(dirpath, fname)
+            try:
+                st = os.stat(full)
+                rel = os.path.relpath(full, root).replace("\\", "/")
+                all_files.append({
+                    "path": rel,
+                    "size": st.st_size,
+                    "modified_time": int(st.st_mtime),
+                })
+            except OSError:
+                continue
+    all_files.sort(key=lambda x: x["modified_time"], reverse=True)
+    return all_files
 
 
 @router.get("/shared/{source_id}/search")
@@ -687,31 +732,7 @@ async def get_shared_feed(
         return {"items": [], "source_id": source_id, "label": entry["label"]}
 
     def _collect_feed():
-        media_exts = {
-            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif",
-            ".bmp", ".tiff", ".tif", ".avif",
-            ".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv",
-        }
-        all_files = []
-        for dirpath, _dirs, filenames in os.walk(root):
-            for fname in filenames:
-                ext = os.path.splitext(fname)[1].lower()
-                if ext not in media_exts:
-                    continue
-                full = os.path.join(dirpath, fname)
-                try:
-                    st = os.stat(full)
-                    rel = os.path.relpath(full, root).replace("\\", "/")
-                    all_files.append({
-                        "path": rel,
-                        "size": st.st_size,
-                        "modified_time": int(st.st_mtime),
-                    })
-                except OSError:
-                    continue
-
-        # Sort chronologically (newest first)
-        all_files.sort(key=lambda x: x["modified_time"], reverse=True)
+        all_files = _collect_shared_media(root)
         return _enrich_shared_files_with_reactions(source_id, all_files, device_id)
 
     items = await asyncio.to_thread(_collect_feed)
@@ -1639,4 +1660,323 @@ async def get_reactions(
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
-    return await asyncio.to_thread(get_media_reactions, media_id)
+    return await asyncio.to_thread(get_media_reactions, media_id)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Media Comments Endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+class CommentRequest(BaseModel):
+    source_id: str
+    text: str
+
+
+class CommentDeleteRequest(BaseModel):
+    source_id: str
+
+
+@router.get("/api/media/{media_id}/comments")
+@router.get("/media/{media_id}/comments")
+async def list_media_comments(
+    media_id: int,
+    device_id: str | None = None,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    comments = await asyncio.to_thread(get_comments_for_media, media_id)
+    for c in comments:
+        c["is_own"] = (device_id is not None and c["source_id"] == device_id)
+    return {"comments": comments}
+
+
+@router.post("/api/media/{media_id}/comments")
+@router.post("/media/{media_id}/comments")
+async def add_media_comment(
+    media_id: int,
+    body: CommentRequest,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), body.source_id)
+    verify_known_device_by_id(body.source_id)
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Comment cannot be empty")
+    if len(text) > MAX_COMMENT_LENGTH:
+        text = text[:MAX_COMMENT_LENGTH]
+    comment = await asyncio.to_thread(add_comment, media_id, body.source_id, text)
+    comment["is_own"] = True
+    return comment
+
+
+@router.post("/api/comments/{comment_id}/delete")
+@router.post("/comments/{comment_id}/delete")
+async def delete_media_comment(
+    comment_id: int,
+    body: CommentDeleteRequest,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), body.source_id)
+    ok = await asyncio.to_thread(delete_comment, comment_id, body.source_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Comment not found or not yours")
+    return {"ok": True}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Device-to-Device Sharing Endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+class ShareItem(BaseModel):
+    source_type: str
+    source_key: str
+    relative_path: str
+    size: int = 0
+    modified_time: int = 0
+
+
+class CreateShareRequest(BaseModel):
+    shared_by_device_id: str
+    target_device_ids: list[str]
+    caption: str | None = None
+    items: list[ShareItem]
+
+
+@router.get("/api/share/devices")
+@router.get("/share/devices")
+async def list_share_target_devices(
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Return accepted devices this device can share to. SAFE FIELDS ONLY — never token."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    devices = await asyncio.to_thread(get_share_target_devices, device_id)
+    return {"devices": devices}
+
+
+@router.post("/api/share/create")
+@router.post("/share/create")
+async def create_share(
+    body: CreateShareRequest,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), body.shared_by_device_id)
+    verify_known_device_by_id(body.shared_by_device_id)
+
+    if not body.items:
+        raise HTTPException(status_code=400, detail="No items to share")
+    if not body.target_device_ids:
+        raise HTTPException(status_code=400, detail="No target devices")
+
+    # Authorize every item for the sharer: phone media must belong to them; a
+    # shared folder must be tagged for them.
+    for it in body.items:
+        if it.source_type == "phone":
+            if it.source_key != body.shared_by_device_id:
+                raise HTTPException(status_code=403, detail="Cannot share another device's phone media")
+        elif it.source_type == "shared":
+            entry = _find_shared_dir(it.source_key)
+            if not entry or not _is_folder_tagged_for_device(entry, body.shared_by_device_id, authorization, token):
+                raise HTTPException(status_code=403, detail="Shared folder not available for this device")
+        else:
+            raise HTTPException(status_code=400, detail="Invalid share source type")
+
+    # Restrict targets to known accepted devices (excluding the sharer).
+    known_ids = {
+        d["device_id"]
+        for d in await asyncio.to_thread(get_share_target_devices, body.shared_by_device_id)
+    }
+    targets = [t for t in body.target_device_ids if t in known_ids]
+    if not targets:
+        raise HTTPException(status_code=400, detail="No valid target devices")
+
+    items = [
+        {
+            "source_type": it.source_type,
+            "source_key": it.source_key,
+            "relative_path": it.relative_path,
+            "size": it.size,
+            "modified_time": it.modified_time,
+        }
+        for it in body.items
+    ]
+    result = await asyncio.to_thread(
+        create_device_share, body.shared_by_device_id, targets, body.caption, items
+    )
+    return result
+
+
+@router.get("/api/feed")
+@router.get("/feed")
+async def get_unified_feed(
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Merged feed: device-to-device shares first (newest first), then the device's
+    permitted PC shared-folder media. Final grouping/re-ranking is done client-side."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+
+    def _build():
+        video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
+        items = []
+
+        # 1. Device-to-device shares delivered to this device.
+        shares = get_device_shares_for_target(device_id)
+        share_media_ids = [s["media_id"] for s in shares]
+        counts_map, user_map = get_reactions_for_media_ids(share_media_ids, current_source_id=device_id)
+        comment_counts = get_comment_counts_for_media_ids(share_media_ids)
+        for s in shares:
+            mid = s["media_id"]
+            path = s["relative_path"]
+            ext = os.path.splitext(path)[1].lower()
+            items.append({
+                "kind": "share",
+                "is_device_share": True,
+                "share_id": s["share_id"],
+                "media_id": mid,
+                "path": path,
+                "size": s["size"],
+                "modified_time": s["modified_time"],
+                "created_at": s["created_at"],
+                "caption": s["caption"],
+                "shared_by": s.get("shared_by_name") or s["shared_by_device_id"],
+                "shared_by_device_id": s["shared_by_device_id"],
+                "reaction_counts": counts_map.get(mid, {}),
+                "user_reactions": user_map.get(mid, []),
+                "comment_count": comment_counts.get(mid, 0),
+                "is_video": ext in video_exts,
+            })
+
+        # 2. PC shared-folder media this device is permitted to see.
+        for entry in _get_shared_dirs():
+            if not entry.get("id") or not entry.get("path"):
+                continue
+            if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
+                continue
+            root = os.path.abspath(entry["path"])
+            if not os.path.isdir(root):
+                continue
+            source_id = entry["id"]
+            media = _collect_shared_media(root)
+            enriched = _enrich_shared_files_with_reactions(source_id, media, device_id)
+            for f in enriched:
+                f["kind"] = "shared"
+                f["is_device_share"] = False
+                f["source_id"] = source_id
+                items.append(f)
+
+        return items
+
+    items = await asyncio.to_thread(_build)
+    return {"items": items}
+
+
+def _authorize_share_access(share_id: int, device_id: str) -> dict:
+    """Return the share row if device_id is its recipient or its sharer, else raise."""
+    share = get_device_share_by_id(share_id)
+    if not share:
+        raise HTTPException(status_code=404, detail="Share not found")
+    if not (share["shared_by_device_id"] == device_id or is_share_target(share_id, device_id)):
+        raise HTTPException(status_code=403, detail="Share not available for this device")
+    return share
+
+
+def _resolve_share_path(share: dict) -> str:
+    """Resolve the on-disk absolute path for a share's origin file (with traversal guard)."""
+    source_type = share["source_type"]
+    source_key = share["source_key"]
+    relative_path = share["relative_path"]
+    if source_type == "phone":
+        return full_path_for(relative_path, device_id=source_key)
+    if source_type == "shared":
+        entry = _find_shared_dir(source_key)
+        if not entry:
+            raise HTTPException(status_code=404, detail="Shared source not found")
+        root = os.path.abspath(entry["path"])
+        if not os.path.isdir(root):
+            raise HTTPException(status_code=404, detail="Shared directory not found on server")
+        safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
+        full_path = os.path.abspath(os.path.join(root, safe_rel))
+        if os.path.commonpath([root, full_path]) != root:
+            raise HTTPException(status_code=400, detail="Invalid path")
+        return full_path
+    raise HTTPException(status_code=400, detail="Unknown share source type")
+
+
+@router.get("/api/share/{share_id}/download")
+@router.get("/share/{share_id}/download")
+async def download_device_share(
+    share_id: int,
+    request: Request,
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    share = _authorize_share_access(share_id, device_id)
+    path = _resolve_share_path(share)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    return _file_range_response(path, request)
+
+
+@router.get("/api/share/{share_id}/preview")
+@router.get("/share/{share_id}/preview")
+async def preview_device_share(
+    share_id: int,
+    request: Request,
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    share = _authorize_share_access(share_id, device_id)
+    path = _resolve_share_path(share)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    if not is_video_path(path):
+        raise HTTPException(status_code=400, detail="Preview is only available for video files")
+    try:
+        preview_path = get_video_preview_path(
+            path,
+            schedule_missing=preview_request_is_active(f"share:{share_id}:{device_id}", path),
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    except subprocess.CalledProcessError:
+        raise HTTPException(status_code=500, detail="Failed to generate video preview")
+    cache_control = "private, no-cache" if preview_path == path else None
+    return _file_range_response(preview_path, request, cache_control=cache_control)
+
+
+@router.get("/api/share/{share_id}/thumbnail")
+@router.get("/share/{share_id}/thumbnail")
+async def thumbnail_device_share(
+    share_id: int,
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    share = _authorize_share_access(share_id, device_id)
+    path = _resolve_share_path(share)
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="File not found")
+    if not is_video_path(path):
+        media_type = guess_type(path)[0] or "image/jpeg"
+        return FileResponse(path, media_type=media_type, headers={"Cache-Control": "public, max-age=86400"})
+    thumb_path = await asyncio.to_thread(get_video_thumbnail_path, path)
+    if not thumb_path:
+        raise HTTPException(status_code=500, detail="Failed to generate thumbnail")
+    return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
