@@ -56,8 +56,12 @@ import {
   getComments,
   addComment,
   deleteComment,
+  deleteShareGroup,
+  removeShareTarget,
+  getShareGroupTargets,
   buildShareThumbnailUrl,
   buildSharePreviewUrl,
+  downloadShareFile,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
@@ -120,7 +124,7 @@ type RemoteFile = {
   reaction_counts?: Record<string, number>;
   user_reactions?: string[];
   is_video?: boolean;
-  // Feed-only fields (device-to-device shares + PC shared-folder media)
+  // Feed-only fields (device-to-device shares)
   kind?: 'share' | 'shared';
   is_device_share?: boolean;
   share_id?: number;
@@ -130,6 +134,10 @@ type RemoteFile = {
   shared_by_device_id?: string;
   comment_count?: number;
   created_at?: number;
+  group_id?: string;
+  group_caption?: string | null;
+  group_items?: RemoteFile[];
+  is_own_post?: boolean;
 };
 
 type ServerConfig = { ip: string; port: string; key: string; deviceId: string } | null;
@@ -411,46 +419,60 @@ function compareRemoteFiles(a: RemoteFile, b: RemoteFile, field: SortField, dir:
   return dir === 'asc' ? cmp : -cmp;
 }
 
-// Normalize one raw item from GET /api/feed into a RemoteFile. Device-to-device
-// shares (kind 'share') are dated by their share time (created_at) under the
-// 'date' sort; PC shared-folder media (kind 'shared') keep modified_time.
+// Normalize one raw item from GET /api/feed into a RemoteFile.
 function mapFeedItem(f: any): RemoteFile {
+  const items: RemoteFile[] = (f.items || []).map((it: any) => ({
+    path: it.path,
+    size: it.size ?? 0,
+    modified_time: it.modified_time ?? 0,
+    media_id: it.media_id,
+    share_id: it.share_id,
+    is_video: it.is_video,
+    kind: 'share' as const,
+    is_device_share: true,
+    created_at: f.created_at,
+    uploaded_time: f.created_at,
+    shared_by: f.shared_by,
+    shared_by_device_id: f.shared_by_device_id,
+    group_id: f.group_id,
+    group_caption: f.caption,
+    caption: f.caption,
+    is_own_post: f.is_own_post,
+  }));
+  const firstItem = items[0] || {};
   return {
-    path: f.path,
-    size: f.size ?? 0,
-    modified_time: f.modified_time ?? 0,
-    media_id: f.media_id,
+    path: firstItem.path || f.path || '',
+    size: items.reduce((acc, it) => acc + (it.size || 0), 0) || f.size || 0,
+    modified_time: firstItem.modified_time ?? f.modified_time ?? 0,
+    media_id: f.media_id ?? firstItem.media_id,
     reaction_counts: f.reaction_counts,
     user_reactions: f.user_reactions,
-    is_video: f.is_video,
-    kind: f.kind,
-    is_device_share: f.is_device_share,
-    share_id: f.share_id,
+    is_video: firstItem.is_video ?? f.is_video,
+    kind: 'share',
+    is_device_share: true,
+    share_id: firstItem.share_id ?? f.share_id,
     source_id: f.source_id,
     caption: f.caption,
+    group_caption: f.caption,
+    group_id: f.group_id,
+    group_items: items.length > 0 ? items : undefined,
     shared_by: f.shared_by,
     shared_by_device_id: f.shared_by_device_id,
     comment_count: f.comment_count,
     created_at: f.created_at,
-    uploaded_time: f.kind === 'share' ? f.created_at : undefined,
+    uploaded_time: f.created_at,
+    is_own_post: f.is_own_post,
   };
 }
 
-// Instagram-style snapshot ordering for the unified feed:
-//   A = unreacted device-to-device shares (top)
-//   B = unreacted PC shared-folder media (middle)
-//   C = anything the current device has already reacted to (bottom)
-// Within each group, apply the user's chosen sort. Re-grouping happens only on
-// fetch/poll/sort-change — never on a reaction tap — so a reacted card holds its
-// place until the next refresh, then sinks. Idempotent on already-mapped items.
+// Group feed items: unreacted on top, reacted at bottom.
 function buildFeedDisplayList(rawItems: any[], field: SortField, dir: SortDir): RemoteFile[] {
   const mapped = (rawItems || []).map(mapFeedItem);
   const hasReacted = (f: RemoteFile) => (f.user_reactions?.length ?? 0) > 0;
-  const groupA = mapped.filter(f => f.kind === 'share' && !hasReacted(f));
-  const groupB = mapped.filter(f => f.kind !== 'share' && !hasReacted(f));
-  const groupC = mapped.filter(f => hasReacted(f));
+  const unreacted = mapped.filter(f => !hasReacted(f));
+  const reacted = mapped.filter(f => hasReacted(f));
   const sortGroup = (g: RemoteFile[]) => g.slice().sort((x, y) => compareRemoteFiles(x, y, field, dir));
-  return [...sortGroup(groupA), ...sortGroup(groupB), ...sortGroup(groupC)];
+  return [...sortGroup(unreacted), ...sortGroup(reacted)];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -513,6 +535,8 @@ function SharedFeedCard({
   onPreview,
   onReact,
   onOpenComments,
+  onManage,
+  onHide,
   colors,
 }: {
   item: RemoteFile;
@@ -521,71 +545,137 @@ function SharedFeedCard({
   onPreview: (file: RemoteFile) => void;
   onReact: (file: RemoteFile, emoji: string) => void;
   onOpenComments: (file: RemoteFile) => void;
+  onManage: (file: RemoteFile) => void;
+  onHide: (file: RemoteFile) => void;
   colors: AppColors;
 }) {
-  const category = getFileCategory(item.path);
-  const isVideo = category === 'video';
-  const fileName = item.path.split(/[/\\]/).pop() ?? item.path;
-  const isDeviceShare = item.kind === 'share';
-  // Device-to-device shares are addressed by share_id (the thumbnail endpoint
-  // serves the image itself for photos and a generated frame for videos).
-  // PC shared-folder media keeps the existing per-source addressing.
-  const effectiveSourceId = item.source_id ?? sourceId;
-  const thumbUrl = !serverConfig
-    ? ''
-    : isDeviceShare && item.share_id != null
-      ? buildShareThumbnailUrl(serverConfig, item.share_id)
-      : isVideo
-        ? buildThumbnailUrl(serverConfig, item.path, 'shared', effectiveSourceId)
-        : buildPreviewUrl(serverConfig, item.path, 'shared', effectiveSourceId);
+  const items = item.group_items && item.group_items.length > 0 ? item.group_items : [item];
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [cardWidth, setCardWidth] = useState(SCREEN_W - Spacing.four * 2);
   const commentCount = item.comment_count ?? 0;
+  const isOwnPost = Boolean(item.is_own_post || (serverConfig?.deviceId && item.shared_by_device_id === serverConfig.deviceId));
 
   return (
-    <View style={[feedCardStyles.card, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
-      <TouchableOpacity
-        style={feedCardStyles.mediaWrap}
-        onPress={() => onPreview(item)}
-        activeOpacity={0.9}
-      >
-        <Image
-          source={{ uri: thumbUrl }}
-          style={feedCardStyles.mediaImage}
-          contentFit="cover"
-          transition={150}
+    <View
+      style={[feedCardStyles.card, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}
+      onLayout={(e) => {
+        const w = e.nativeEvent.layout.width;
+        if (w > 0 && Math.abs(w - cardWidth) > 1) {
+          setCardWidth(w);
+        }
+      }}
+    >
+      <View style={[feedCardStyles.mediaContainer, { width: cardWidth }]}>
+        <FlatList
+          data={items}
+          keyExtractor={(it, idx) => (it.share_id != null ? String(it.share_id) : `${it.path}_${idx}`)}
+          horizontal
+          pagingEnabled
+          showsHorizontalScrollIndicator={false}
+          onScroll={(e) => {
+            const x = e.nativeEvent.contentOffset.x;
+            const idx = Math.round(x / (cardWidth || 1));
+            if (idx !== activeIndex && idx >= 0 && idx < items.length) {
+              setActiveIndex(idx);
+            }
+          }}
+          scrollEventThrottle={32}
+          renderItem={({ item: subItem }) => {
+            const category = getFileCategory(subItem.path);
+            const isVideo = subItem.is_video ?? category === 'video';
+            const effectiveSourceId = subItem.source_id ?? item.source_id ?? sourceId;
+            const thumbUrl = !serverConfig
+              ? ''
+              : subItem.share_id != null
+                ? buildShareThumbnailUrl(serverConfig, subItem.share_id)
+                : isVideo
+                  ? buildThumbnailUrl(serverConfig, subItem.path, 'shared', effectiveSourceId)
+                  : buildPreviewUrl(serverConfig, subItem.path, 'shared', effectiveSourceId);
+
+            return (
+              <TouchableOpacity
+                style={[feedCardStyles.mediaWrap, { width: cardWidth }]}
+                onPress={() => onPreview(subItem)}
+                activeOpacity={0.9}
+              >
+                <Image
+                  source={{ uri: thumbUrl }}
+                  style={feedCardStyles.mediaImage}
+                  contentFit="cover"
+                  transition={150}
+                />
+                {isVideo && (
+                  <View style={feedCardStyles.videoBadge}>
+                    <AppIcon androidName="play_arrow" iosName="play.fill" color="#fff" size={24} />
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          }}
         />
-        {isVideo && (
-          <View style={feedCardStyles.videoBadge}>
-            <AppIcon androidName="play_arrow" iosName="play.fill" color="#fff" size={24} />
-          </View>
-        )}
-      </TouchableOpacity>
 
-      <View style={feedCardStyles.body}>
-        <View style={feedCardStyles.headerRow}>
-          <Text style={[feedCardStyles.fileName, { color: colors.text }]} numberOfLines={1}>
-            {fileName}
-          </Text>
-          <Text style={[feedCardStyles.fileDate, { color: colors.textMuted }]}>
-            {formatDate(isDeviceShare ? (item.created_at ?? item.modified_time) : item.modified_time)}
-          </Text>
-        </View>
-        <Text style={[feedCardStyles.fileSize, { color: colors.textSecondary }]}>
-          {formatSize(item.size)}
-        </Text>
-
-        {isDeviceShare && !!item.shared_by && (
-          <View style={feedCardStyles.sharedByRow}>
-            <AppIcon androidName="person" iosName="person.fill" color={colors.primary} size={13} />
-            <Text style={[feedCardStyles.sharedByText, { color: colors.primary }]} numberOfLines={1}>
-              Shared by {item.shared_by}
+        {items.length > 1 && (
+          <View style={feedCardStyles.indexBadge}>
+            <Text style={feedCardStyles.indexBadgeText}>
+              {activeIndex + 1}/{items.length}
             </Text>
           </View>
         )}
-        {!!item.caption && (
+      </View>
+
+      {items.length > 1 && (
+        <View style={feedCardStyles.dotsRow}>
+          {items.map((_, idx) => (
+            <View
+              key={idx}
+              style={[
+                feedCardStyles.dot,
+                idx === activeIndex
+                  ? [feedCardStyles.dotActive, { backgroundColor: colors.primary }]
+                  : [feedCardStyles.dotInactive, { backgroundColor: colors.surfaceBorder }],
+              ]}
+            />
+          ))}
+        </View>
+      )}
+
+      <View style={feedCardStyles.body}>
+        <View style={feedCardStyles.headerRow}>
+          <View style={feedCardStyles.sharerInfo}>
+            {!!item.shared_by && (
+              <View style={feedCardStyles.sharedByRow}>
+                <AppIcon androidName="person" iosName="person.fill" color={colors.primary} size={14} />
+                <Text style={[feedCardStyles.sharedByText, { color: colors.primary }]} numberOfLines={1}>
+                  Shared by {item.shared_by}
+                </Text>
+              </View>
+            )}
+            <Text style={[feedCardStyles.fileDate, { color: colors.textMuted }]}>
+              {formatDate(item.created_at ?? item.modified_time)}
+            </Text>
+          </View>
+
+          <TouchableOpacity
+            onPress={() => (isOwnPost ? onManage(item) : onHide(item))}
+            style={feedCardStyles.menuBtn}
+            hitSlop={12}
+            accessibilityLabel={isOwnPost ? 'Manage post' : 'Hide post'}
+          >
+            <AppIcon androidName="more_vert" iosName="ellipsis" color={colors.textSecondary} size={20} />
+          </TouchableOpacity>
+        </View>
+
+        {!!(item.group_caption || item.caption) && (
           <Text style={[feedCardStyles.caption, { color: colors.text }]}>
-            {item.caption}
+            {item.group_caption || item.caption}
           </Text>
         )}
+
+        <Text style={[feedCardStyles.fileSize, { color: colors.textSecondary }]}>
+          {items.length > 1
+            ? `${items.length} files · ${formatSize(item.size)}`
+            : `${item.path.split(/[/\\]/).pop() ?? item.path} · ${formatSize(item.size)}`}
+        </Text>
 
         <ReactionEmojiBar
           reactionCounts={item.reaction_counts}
@@ -945,6 +1035,179 @@ function ShareModal({
   );
 }
 
+function ManageShareModal({
+  visible,
+  groupId,
+  colors,
+  onClose,
+  onDeleted,
+}: {
+  visible: boolean;
+  groupId: string | null;
+  colors: AppColors;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  const [targets, setTargets] = useState<{ target_device_id: string; device_name: string; device_model?: string }[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!visible || !groupId) return;
+    let active = true;
+    /* eslint-disable react-hooks/set-state-in-effect */
+    setLoading(true);
+    setTargets([]);
+    /* eslint-enable react-hooks/set-state-in-effect */
+    getShareGroupTargets(groupId)
+      .then((res) => { if (active) setTargets(Array.isArray(res?.targets) ? res.targets : []); })
+      .catch(() => { if (active) setTargets([]); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [visible, groupId]);
+
+  const handleRemoveTarget = useCallback((targetDeviceId: string, deviceName: string) => {
+    if (!groupId) return;
+    Alert.alert(
+      'Remove device',
+      `Remove "${deviceName}" from this share? They will no longer see it in their feed.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            setRemovingId(targetDeviceId);
+            try {
+              await removeShareTarget(groupId, targetDeviceId);
+              setTargets((prev) => prev.filter((t) => t.target_device_id !== targetDeviceId));
+              hapticSuccess();
+            } catch {
+              Alert.alert('Error', 'Could not remove device. Please try again.');
+            } finally {
+              setRemovingId(null);
+            }
+          },
+        },
+      ]
+    );
+  }, [groupId]);
+
+  const handleDeletePost = useCallback(() => {
+    if (!groupId || deleting) return;
+    Alert.alert(
+      'Delete post',
+      'Are you sure you want to delete this shared post? It will be removed for all recipients.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            setDeleting(true);
+            try {
+              await deleteShareGroup(groupId);
+              hapticSuccess();
+              onClose();
+              onDeleted();
+            } catch {
+              Alert.alert('Error', 'Could not delete the post.');
+              setDeleting(false);
+            }
+          },
+        },
+      ]
+    );
+  }, [groupId, deleting, onClose, onDeleted]);
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={modalSheetStyles.backdrop} onPress={onClose} />
+      <View style={modalSheetStyles.avoider} pointerEvents="box-none">
+        <View style={[modalSheetStyles.sheet, { backgroundColor: colors.surface, paddingBottom: insets.bottom + Spacing.three }]}>
+          <View style={modalSheetStyles.handle} />
+          <View style={modalSheetStyles.header}>
+            <Text style={[modalSheetStyles.title, { color: colors.text }]}>Manage Post</Text>
+            <TouchableOpacity onPress={onClose} hitSlop={10}>
+              <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={20} />
+            </TouchableOpacity>
+          </View>
+
+          <Text style={[modalSheetStyles.sectionLabel, { color: colors.textSecondary }]}>
+            Recipients ({targets.length})
+          </Text>
+
+          {loading ? (
+            <View style={modalSheetStyles.centerPad}>
+              <ActivityIndicator color={colors.primary} />
+            </View>
+          ) : targets.length === 0 ? (
+            <View style={modalSheetStyles.centerPad}>
+              <Text style={[modalSheetStyles.emptyText, { color: colors.textMuted }]}>
+                No devices have access to this share.
+              </Text>
+            </View>
+          ) : (
+            <FlatList
+              data={targets}
+              keyExtractor={(t) => t.target_device_id}
+              style={modalSheetStyles.list}
+              contentContainerStyle={modalSheetStyles.listContent}
+              renderItem={({ item: t }) => (
+                <View style={[modalSheetStyles.deviceRow, { borderColor: colors.surfaceBorder, backgroundColor: colors.surfaceSoft }]}>
+                  <View style={modalSheetStyles.deviceInfo}>
+                    <Text style={[modalSheetStyles.deviceName, { color: colors.text }]} numberOfLines={1}>
+                      {t.device_name || 'Unknown device'}
+                    </Text>
+                    {!!t.device_model && (
+                      <Text style={[modalSheetStyles.deviceModel, { color: colors.textMuted }]} numberOfLines={1}>
+                        {t.device_model}
+                      </Text>
+                    )}
+                  </View>
+                  <TouchableOpacity
+                    onPress={() => handleRemoveTarget(t.target_device_id, t.device_name || 'this device')}
+                    disabled={removingId === t.target_device_id}
+                    style={[modalSheetStyles.removeTargetBtn, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}
+                    activeOpacity={0.75}
+                  >
+                    {removingId === t.target_device_id ? (
+                      <ActivityIndicator size="small" color={colors.primary} />
+                    ) : (
+                      <>
+                        <AppIcon androidName="person_remove" iosName="person.badge.minus" color="#e53935" size={16} />
+                        <Text style={[modalSheetStyles.removeTargetBtnText, { color: '#e53935' }]}>Remove</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              )}
+            />
+          )}
+
+          <TouchableOpacity
+            onPress={handleDeletePost}
+            disabled={deleting}
+            style={[modalSheetStyles.deletePostBtn, { backgroundColor: 'rgba(229, 57, 53, 0.12)', borderColor: 'rgba(229, 57, 53, 0.3)' }]}
+            activeOpacity={0.8}
+          >
+            {deleting ? (
+              <ActivityIndicator color="#e53935" />
+            ) : (
+              <>
+                <AppIcon androidName="delete_forever" iosName="trash.fill" color="#e53935" size={18} />
+                <Text style={[modalSheetStyles.deletePostBtnText, { color: '#e53935' }]}>Delete post for everyone</Text>
+              </>
+            )}
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 const modalSheetStyles = StyleSheet.create({
   backdrop: {
     ...StyleSheet.absoluteFill,
@@ -1086,6 +1349,19 @@ const modalSheetStyles = StyleSheet.create({
     fontSize: TextScale.xs,
     marginTop: 1,
   },
+  removeTargetBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: Spacing.two + 2,
+    paddingVertical: 6,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+  },
+  removeTargetBtnText: {
+    fontSize: TextScale.xs,
+    fontWeight: '700',
+  },
   primaryBtn: {
     marginTop: Spacing.three,
     borderRadius: Radius.full,
@@ -1097,6 +1373,20 @@ const modalSheetStyles = StyleSheet.create({
     fontSize: TextScale.base,
     fontWeight: '800',
   },
+  deletePostBtn: {
+    marginTop: Spacing.three,
+    borderRadius: Radius.full,
+    paddingVertical: Spacing.three,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: Spacing.two,
+    borderWidth: 1,
+  },
+  deletePostBtnText: {
+    fontSize: TextScale.sm,
+    fontWeight: '700',
+  },
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1107,8 +1397,6 @@ type SourceSelectorProps = {
   mode: SourceMode;
   sharedSources: SharedSource[];
   selectedSourceId: string | null;
-  sharedViewMode?: 'feed' | 'folder';
-  onSharedViewModeChange?: (vmode: 'feed' | 'folder') => void;
   isLoadingSources: boolean;
   isOffline: boolean;
   sortEnabled: boolean;
@@ -1119,14 +1407,13 @@ type SourceSelectorProps = {
   onSortChange: (field: SortField, dir: SortDir) => void;
   colors: AppColors;
   showModeSwitch?: boolean;
-  showViewModeSwitch?: boolean;
 };
 
 function SourceSelector({
-  mode, sharedSources, selectedSourceId, sharedViewMode = 'feed', onSharedViewModeChange,
+  mode, sharedSources, selectedSourceId,
   isLoadingSources, isOffline, sortEnabled, sortField, sortDir,
   onModeChange, onSourceSelect, onSortChange, colors,
-  showModeSwitch = true, showViewModeSwitch = true,
+  showModeSwitch = true,
 }: SourceSelectorProps) {
   const [showSourceMenu, setShowSourceMenu] = useState(false);
   const [showSortMenu, setShowSortMenu] = useState(false);
@@ -1211,7 +1498,6 @@ function SourceSelector({
         </View>
       )}
 
-
       {showSortMenu && sortEnabled && (
         <View style={[srcStyles.sortMenu, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}>
           {SORT_OPTIONS.map(option => {
@@ -1284,47 +1570,6 @@ function SourceSelector({
                   </Text>
                   <AppIcon androidName={showSourceMenu ? 'expand_less' : 'expand_more'} iosName={showSourceMenu ? 'chevron.up' : 'chevron.down'} color={colors.textSecondary} size={18} />
                 </TouchableOpacity>
-
-                {selectedSourceId && showViewModeSwitch && (
-                  <View style={[srcStyles.viewSwitcherWrap, { backgroundColor: colors.surfaceSoft }]}>
-                    <TouchableOpacity
-                      style={[
-                        srcStyles.viewSwitchBtn,
-                        sharedViewMode === 'feed' && [srcStyles.viewSwitchBtnActive, { backgroundColor: colors.primary }],
-                      ]}
-                      onPress={() => onSharedViewModeChange?.('feed')}
-                      activeOpacity={0.8}
-                    >
-                      <AppIcon
-                        androidName="dynamic_feed"
-                        iosName="rectangle.grid.1x2"
-                        color={sharedViewMode === 'feed' ? '#fff' : colors.textSecondary}
-                        size={14}
-                      />
-                      <Text style={[srcStyles.viewSwitchBtnText, { color: sharedViewMode === 'feed' ? '#fff' : colors.textSecondary }]}>
-                        Feed
-                      </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={[
-                        srcStyles.viewSwitchBtn,
-                        sharedViewMode === 'folder' && [srcStyles.viewSwitchBtnActive, { backgroundColor: colors.primary }],
-                      ]}
-                      onPress={() => onSharedViewModeChange?.('folder')}
-                      activeOpacity={0.8}
-                    >
-                      <AppIcon
-                        androidName="folder"
-                        iosName="folder"
-                        color={sharedViewMode === 'folder' ? '#fff' : colors.textSecondary}
-                        size={14}
-                      />
-                      <Text style={[srcStyles.viewSwitchBtnText, { color: sharedViewMode === 'folder' ? '#fff' : colors.textSecondary }]}>
-                        Tree
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
               </View>
 
               {showSourceMenu && (
@@ -1393,9 +1638,14 @@ const feedCardStyles = StyleSheet.create({
     overflow: 'hidden',
     marginBottom: Spacing.four,
   },
-  mediaWrap: {
+  mediaContainer: {
+    position: 'relative',
     width: '100%',
-    height: 220,
+    height: 260,
+    backgroundColor: '#000',
+  },
+  mediaWrap: {
+    height: 260,
     backgroundColor: '#000',
     position: 'relative',
   },
@@ -1416,38 +1666,75 @@ const feedCardStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  indexBadge: {
+    position: 'absolute',
+    top: Spacing.two,
+    right: Spacing.two,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: Radius.full,
+  },
+  indexBadgeText: {
+    color: '#fff',
+    fontSize: TextScale.xs,
+    fontWeight: '700',
+  },
+  dotsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingVertical: 6,
+  },
+  dot: {
+    height: 6,
+    borderRadius: 3,
+  },
+  dotActive: {
+    width: 14,
+  },
+  dotInactive: {
+    width: 6,
+  },
   body: {
     padding: Spacing.three,
     gap: 2,
   },
   headerRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'flex-start',
     justifyContent: 'space-between',
     gap: Spacing.two,
+  },
+  sharerInfo: {
+    flex: 1,
+    gap: 2,
+  },
+  sharedByRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  sharedByText: {
+    fontSize: TextScale.xs,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+  fileDate: {
+    fontSize: TextScale.xs,
+  },
+  menuBtn: {
+    padding: 4,
   },
   fileName: {
     fontSize: TextScale.base,
     fontWeight: '700',
     flex: 1,
   },
-  fileDate: {
-    fontSize: TextScale.xs,
-  },
   fileSize: {
     fontSize: TextScale.xs,
-    marginTop: 1,
-  },
-  sharedByRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    marginTop: Spacing.two,
-  },
-  sharedByText: {
-    fontSize: TextScale.xs,
-    fontWeight: '700',
-    flexShrink: 1,
+    marginTop: 2,
   },
   caption: {
     fontSize: TextScale.sm,
@@ -3092,9 +3379,13 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const [sourceMode, setSourceMode] = useState<SourceMode>('phone');
   const [sharedSources, setSharedSources] = useState<SharedSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
-  // Shared folders always render as a tree now; the Feed/Tree switch is gone.
-  const [sharedViewMode, setSharedViewMode] = useState<'feed' | 'folder'>('folder');
   const [isLoadingSources, setIsLoadingSources] = useState(false);
+
+  // Feed pagination and management state
+  const [feedOffset, setFeedOffset] = useState(0);
+  const [feedHasMore, setFeedHasMore] = useState(false);
+  const [feedLoadingMore, setFeedLoadingMore] = useState(false);
+  const [manageGroupItem, setManageGroupItem] = useState<RemoteFile | null>(null);
 
   // Server Config cache
   const [serverConfig, setServerConfig] = useState<ServerConfig>(null);
@@ -3176,7 +3467,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const [previewIndex, setPreviewIndex] = useState<number>(0);
   const [warmPreviewFile, setWarmPreviewFile] = useState<RemoteFile | null>(null);
 
-  const headerHeight = Spacing.five + 88 + 130;
+  const headerHeight = 100;
   const {
     containerPaddingTop,
     onScroll: onListScroll,
@@ -3191,10 +3482,9 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   });
 
   useEffect(() => {
-    // Keep the collapsible header expanded around downloads so it does not
-    // reappear collapsed (empty gap) when the progress banner unmounts.
+    // Keep the collapsible header expanded around downloads and selection mode
     expandHeader();
-  }, [isDownloading, expandHeader]);
+  }, [isDownloading, selectionMode, expandHeader]);
 
   useEffect(() => {
     restoreMountedRef.current = true;
@@ -3528,29 +3818,20 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
   }, [sourceMode, selectedSourceId, serverConfig, selectedPaths, files]);
 
-  const handleSharedViewModeChange = useCallback((vmode: 'feed' | 'folder') => {
-    setSharedViewMode(vmode);
-  }, []);
-
-  // Periodic refresh of the unified feed (device-to-device shares + PC shared
-  // media). Re-ranking runs here so reacted cards sink on the next poll.
-  useEffect(() => {
-    if (!isFeedMode || isOffline) return;
-    const interval = setInterval(() => {
-      if (fetchingRef.current || isDownloading) return;
-      getFeed()
-        .then(res => {
-          if (!restoreMountedRef.current || !res?.items) return;
-          setFiles(buildFeedDisplayList(res.items, sortFieldRef.current, sortDirRef.current));
-        })
-        .catch(() => {});
-    }, 10000);
-    return () => clearInterval(interval);
-  }, [isFeedMode, isOffline, isDownloading]);
-
   // Flat ordered list of previewable files
   const previewableFiles = useMemo<RemoteFile[]>(() => {
-    if (isFeedMode) return isFiltering ? filteredFiles : files;
+    if (isFeedMode) {
+      const sourceList = isFiltering ? filteredFiles : files;
+      const flattened: RemoteFile[] = [];
+      for (const f of sourceList) {
+        if (f.group_items && f.group_items.length > 0) {
+          flattened.push(...f.group_items);
+        } else {
+          flattened.push(f);
+        }
+      }
+      return flattened;
+    }
     if (isFiltering) return filteredFiles;
     const result: RemoteFile[] = [];
     function collect(node: TreeNode) {
@@ -3577,9 +3858,12 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     try {
       await loadServerConfig();
       if (isFeedMode) {
-        const feedData = await getFeed();
+        const feedData = await getFeed(0, 50);
         if (!restoreMountedRef.current) return;
-        setFiles(buildFeedDisplayList(feedData.items || [], sortField, sortDir));
+        const feedItems = feedData.items || [];
+        setFiles(buildFeedDisplayList(feedItems, sortField, sortDir));
+        setFeedOffset(feedItems.length);
+        setFeedHasMore(Boolean(feedData.has_more));
         setTree(null);
       } else {
         const data = sourceMode === 'shared'
@@ -3623,6 +3907,50 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
   }, [isOffline, isDownloading, sourceMode, selectedSourceId, isFeedMode, sortField, sortDir, loadServerConfig]);
 
+  const handleLoadMoreFeed = useCallback(async () => {
+    if (feedLoadingMore || !feedHasMore || isFetching || isOffline || isDownloading) return;
+    setFeedLoadingMore(true);
+    try {
+      const feedData = await getFeed(feedOffset, 50);
+      if (!restoreMountedRef.current) return;
+      const newItems = (feedData.items || []).map(mapFeedItem);
+      setFiles(prev => [...prev, ...newItems]);
+      setFeedOffset(prev => prev + (feedData.items?.length || 0));
+      setFeedHasMore(Boolean(feedData.has_more));
+    } catch {
+      // Ignore load more errors
+    } finally {
+      if (restoreMountedRef.current) setFeedLoadingMore(false);
+    }
+  }, [feedLoadingMore, feedHasMore, isFetching, isOffline, isDownloading, feedOffset]);
+
+  const handleHidePost = useCallback((file: RemoteFile) => {
+    Alert.alert(
+      'Hide post',
+      'Hide this post from your feed?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Hide',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              if (file.group_id && serverConfig?.deviceId) {
+                await removeShareTarget(file.group_id, serverConfig.deviceId);
+              } else if (file.share_id != null && serverConfig?.deviceId) {
+                await removeShareTarget(String(file.share_id), serverConfig.deviceId);
+              }
+              setFiles(prev => prev.filter(f => f.group_id ? f.group_id !== file.group_id : f.share_id !== file.share_id));
+              hapticSuccess();
+            } catch {
+              Alert.alert('Error', 'Could not hide this post. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  }, [serverConfig]);
+
   useEffect(() => {
     if (isOffline || isDownloading) return;
     // Feed sources from /api/feed (no shared source needed); the library shared
@@ -3631,7 +3959,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     queueMicrotask(() => {
       void handleFetch({ quiet: true, preserveSelection: true });
     });
-  }, [isFeedMode, sourceMode, selectedSourceId, sharedViewMode, isOffline, isDownloading, handleFetch]);
+  }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]);
 
   useFocusEffect(useCallback(() => {
     if (isOffline || isDownloading) return;
@@ -3668,7 +3996,11 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   // Preview handlers
   const openPreview = useCallback((file: RemoteFile, index?: number) => {
-    const idx = index !== undefined ? index : previewableFiles.findIndex(f => f.path === file.path);
+    const idx = index !== undefined
+      ? index
+      : previewableFiles.findIndex(f =>
+          f.share_id != null && file.share_id != null ? f.share_id === file.share_id : f.path === file.path
+        );
     setPreviewIndex(idx >= 0 ? idx : 0);
     setPreviewFile(file);
   }, [previewableFiles]);
@@ -3945,7 +4277,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       for (const path of pathSet) {
         if (!downloadActiveRef.current) return;
 
-        const fileInfo = files.find(f => f.path === path);
+        const fileInfo = previewableFiles.find(f => f.path === path) || files.find(f => f.path === path);
         const displayName = path.split(/[/\\]/).pop() ?? path;
         const knownSize = fileInfo?.size || 0;
         publishProgress(completed, displayName, 0, knownSize);
@@ -3977,7 +4309,9 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
           if (isMedia && canSaveToGallery) {
             const tmpUri = FileSystem.cacheDirectory + 'restore_tmp_' + Date.now() + '_' + displayName;
-            if (sourceMode === 'shared' && selectedSourceId) {
+            if (fileInfo?.share_id != null) {
+              await downloadShareFile(fileInfo.share_id, tmpUri, onFileProgress);
+            } else if (sourceMode === 'shared' && selectedSourceId) {
               await downloadSharedFile(selectedSourceId, path, tmpUri, onFileProgress);
             } else {
               await downloadFile(path, tmpUri, onFileProgress);
@@ -4016,7 +4350,9 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             continue;
           }
 
-          if (sourceMode === 'shared' && selectedSourceId) {
+          if (fileInfo?.share_id != null) {
+            await downloadShareFile(fileInfo.share_id, destUri, onFileProgress);
+          } else if (sourceMode === 'shared' && selectedSourceId) {
             await downloadSharedFile(selectedSourceId, path, destUri, onFileProgress);
           } else {
             await downloadFile(path, destUri, onFileProgress);
@@ -4056,7 +4392,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         setDownloadProgress(null);
       }
     }
-  }, [files, sourceMode, selectedSourceId, serverStatus]);
+  }, [files, previewableFiles, sourceMode, selectedSourceId, serverStatus]);
 
   const handleDownloadSingle = useCallback(async (file: RemoteFile) => {
     closePreview();
@@ -4147,11 +4483,13 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
               </AnimatedPressable>
             </View>
             <Text style={styles.pageSubtitle}>
-              {files.length > 0
-                ? isFiltering
-                  ? `${filteredFiles.length.toLocaleString()} matching of ${files.length.toLocaleString()} files`
-                  : `${files.length.toLocaleString()} files on server`
-                : 'Download files from server'}
+              {isFeedMode
+                ? 'Your feed'
+                : files.length > 0
+                  ? isFiltering
+                    ? `${filteredFiles.length.toLocaleString()} matching of ${files.length.toLocaleString()} files`
+                    : `${files.length.toLocaleString()} files on server`
+                  : 'Download files from server'}
             </Text>
           </View>
           <View style={styles.headerButtons}>
@@ -4189,8 +4527,6 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             mode={sourceMode}
             sharedSources={sharedSources}
             selectedSourceId={selectedSourceId}
-            sharedViewMode={sharedViewMode}
-            onSharedViewModeChange={handleSharedViewModeChange}
             isLoadingSources={isLoadingSources}
             isOffline={isOffline}
             sortEnabled={files.length > 0}
@@ -4201,7 +4537,6 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             onSortChange={handleSortChange}
             colors={colors}
             showModeSwitch={variant !== 'feed'}
-            showViewModeSwitch={variant !== 'feed'}
           />
 
           {files.length > 0 && (
@@ -4256,9 +4591,11 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         data={isFeedMode ? (isFiltering ? filteredFiles : files) : (listRows as any)}
         keyExtractor={(item: any) =>
           isFeedMode
-            ? (item.share_id != null
-                ? `share:${item.share_id}`
-                : `shared:${item.source_id ?? ''}:${item.path}`)
+            ? (item.group_id != null
+                ? `group:${item.group_id}`
+                : item.share_id != null
+                  ? `share:${item.share_id}`
+                  : `shared:${item.source_id ?? ''}:${item.path}`)
             : item.node.key
         }
         renderItem={({ item }: any) =>
@@ -4270,6 +4607,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
               onPreview={handlePreview}
               onReact={handleToggleReaction}
               onOpenComments={setCommentsItem}
+              onManage={setManageGroupItem}
+              onHide={handleHidePost}
               colors={colors}
             />
           ) : (
@@ -4321,6 +4660,36 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         maxToRenderPerBatch={24}
         updateCellsBatchingPeriod={50}
         windowSize={9}
+        ListFooterComponent={
+          isFeedMode && files.length > 0 ? (
+            <View style={{ paddingVertical: Spacing.four, alignItems: 'center', justifyContent: 'center' }}>
+              {feedLoadingMore ? (
+                <ActivityIndicator color={colors.primary} size="small" />
+              ) : feedHasMore ? (
+                <TouchableOpacity
+                  onPress={handleLoadMoreFeed}
+                  style={{
+                    paddingHorizontal: Spacing.four,
+                    paddingVertical: Spacing.two + 2,
+                    borderRadius: Radius.full,
+                    borderWidth: 1,
+                    borderColor: colors.primary,
+                    backgroundColor: colors.primarySoft,
+                  }}
+                  activeOpacity={0.8}
+                >
+                  <Text style={{ color: colors.primary, fontSize: TextScale.sm, fontWeight: '700' }}>
+                    Load more posts
+                  </Text>
+                </TouchableOpacity>
+              ) : (
+                <Text style={{ color: colors.textMuted, fontSize: TextScale.xs }}>
+                  {"You're all caught up"}
+                </Text>
+              )}
+            </View>
+          ) : null
+        }
         ListEmptyComponent={
           !isFetching && !(isFiltering && isSearching) ? (
             <View style={styles.emptyContainer}>
@@ -4384,6 +4753,22 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         colors={colors}
         onClose={() => setShareModalVisible(false)}
         onSubmit={handleShareSubmit}
+      />
+
+      {/* Manage Post Modal (owner manage/delete) */}
+      <ManageShareModal
+        visible={manageGroupItem !== null}
+        groupId={manageGroupItem?.group_id || null}
+        colors={colors}
+        onClose={() => setManageGroupItem(null)}
+        onDeleted={() => {
+          if (manageGroupItem?.group_id) {
+            setFiles(prev => prev.filter(f => f.group_id !== manageGroupItem.group_id));
+          } else if (manageGroupItem?.share_id != null) {
+            setFiles(prev => prev.filter(f => f.share_id !== manageGroupItem.share_id));
+          }
+          setManageGroupItem(null);
+        }}
       />
 
       {/* Comments on a feed item */}

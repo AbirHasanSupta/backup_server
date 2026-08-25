@@ -231,6 +231,30 @@ export async function downloadSharedFile(sourceId, relativePath, destUri, onProg
   return downloadResumable.downloadAsync();
 }
 
+/**
+ * Download a device-to-device shared file by share_id.
+ * @param {number} shareId
+ * @param {string} destUri - Local file URI to save to
+ * @param {(bytesWritten: number, totalBytes: number) => void} [onProgress]
+ * @returns {Promise<FileSystem.FileSystemDownloadResult>}
+ */
+export async function downloadShareFile(shareId, destUri, onProgress) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const url =
+    `http://${ip}:${port}/share/${encodeURIComponent(shareId)}/download` +
+    `?device_id=${encodeURIComponent(deviceId)}` +
+    `&token=${encodeURIComponent(key)}`;
+  const downloadResumable = FileSystem.createDownloadResumable(
+    url,
+    destUri,
+    { headers: { Authorization: `Bearer ${key}` } },
+    (progress) => {
+      onProgress?.(progress.totalBytesWritten, progress.totalBytesExpectedToWrite);
+    },
+  );
+  return downloadResumable.downloadAsync();
+}
+
 
 /**
  * Build the full authenticated URL for a shared file preview
@@ -597,17 +621,110 @@ export async function createDeviceShare(targetDeviceIds, caption, items) {
 }
 
 /**
- * Fetch the unified feed: device-to-device shares + permitted PC shared-folder media.
+ * Fetch the unified feed: device-to-device shares (received + own sent), grouped by post.
+ * @param {number} [offset=0] - Pagination offset
+ * @param {number} [limit=50] - Max posts per page
+ * @returns {Promise<{items: Array<any>, has_more: boolean}>}
  */
-export async function getFeed() {
+export async function getFeed(offset = 0, limit = 50) {
   const { ip, port, key, deviceId } = await getConfig();
   const res = await fetch(
-    `http://${ip}:${port}/api/feed?device_id=${encodeURIComponent(deviceId)}`,
+    `http://${ip}:${port}/api/feed?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
     { headers: { Authorization: `Bearer ${key}` } },
   );
   if (!res.ok) throw new Error(`Failed to fetch feed (${res.status})`);
   return await res.json();
 }
+
+/**
+ * Get the list of target devices for a share group (owner only).
+ * @param {string} groupId
+ * @returns {Promise<{targets: {target_device_id: string, device_name: string, device_model: string}[]}>}
+ */
+export async function getShareGroupTargets(groupId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/targets?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch share targets (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Delete a share group (owner only — removes post from all recipients' feeds).
+ * @param {string} groupId
+ */
+export async function deleteShareGroup(groupId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/delete?device_id=${encodeURIComponent(deviceId)}`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}` },
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to delete share group (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Delete a single share by its share_id (owner only).
+ * @param {number} shareId
+ */
+export async function deleteShare(shareId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/share/${encodeURIComponent(shareId)}/delete?device_id=${encodeURIComponent(deviceId)}`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}` },
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to delete share (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Remove a specific target device from a share group.
+ * Sharer or recipient self-removal (hide).
+ * @param {string} groupId
+ * @param {string} targetDeviceId - The device_id to remove access for
+ */
+export async function removeShareTarget(groupId, targetDeviceId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/remove_target?device_id=${encodeURIComponent(deviceId)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ device_id: targetDeviceId }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to remove share target (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Remove a specific target device from a share by share_id.
+ * @param {number} shareId
+ * @param {string} targetDeviceId
+ */
+export async function removeShareTargetByShareId(shareId, targetDeviceId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/share/${encodeURIComponent(shareId)}/remove_target?device_id=${encodeURIComponent(deviceId)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ device_id: targetDeviceId }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to remove share target (${res.status})`);
+  return await res.json();
+}
+
+
 
 /**
  * Fetch comments for a media item.

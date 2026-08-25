@@ -672,6 +672,30 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_share_targets_device ON device_share_targets(target_device_id)"
     )
 
+    # 16. device_share_groups: one row per share call, groups multi-file posts together
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS device_share_groups
+        (
+            id                  TEXT    PRIMARY KEY,
+            caption             TEXT,
+            shared_by_device_id TEXT    NOT NULL,
+            created_at          INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_share_groups_sharer ON device_share_groups(shared_by_device_id, created_at)"
+    )
+
+    # Migration: add share_group_id to device_shares if not present
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(device_shares)").fetchall()}
+    if "share_group_id" not in existing_cols:
+        conn.execute("ALTER TABLE device_shares ADD COLUMN share_group_id TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_device_shares_group ON device_shares(share_group_id)"
+        )
+
     conn.commit()
     conn.close()
 
@@ -2428,11 +2452,13 @@ def create_device_share(
     caption: str | None,
     items: list[dict],
 ) -> dict:
-    """Create one share row per item and fan it out to the target devices.
+    """Create one share row per item, grouped under a single share_group_id.
 
     Each item is a dict with source_type, source_key, relative_path, size, modified_time.
     media_id is minted via get_or_create_media_id so feed + library share one identity.
+    All items in one call share the same group_id UUID, making them appear as one post.
     """
+    import uuid as _uuid
     # Mint media_ids first — get_or_create_media_id manages its own connection/commits,
     # so doing this before we open our own transaction avoids premature commits mid-insert.
     minted: list[tuple] = []
@@ -2454,17 +2480,25 @@ def create_device_share(
     conn = get_conn()
     now_ts = int(_time.time())
     cap = (caption or "").strip() or None
+
+    # One group per share call
+    group_id = str(_uuid.uuid4())
+    conn.execute(
+        "INSERT INTO device_share_groups (id, caption, shared_by_device_id, created_at) VALUES (?, ?, ?, ?)",
+        (group_id, cap, shared_by_device_id, now_ts),
+    )
+
     count = 0
     for (media_id, source_type, source_key, relative_path, size, modified_time) in minted:
         cur = conn.execute(
             """
             INSERT INTO device_shares
                 (media_id, source_type, source_key, relative_path, size, modified_time,
-                 caption, shared_by_device_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 caption, shared_by_device_id, created_at, share_group_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (media_id, source_type, source_key, relative_path, size, modified_time,
-             cap, shared_by_device_id, now_ts),
+             cap, shared_by_device_id, now_ts, group_id),
         )
         share_id = cur.lastrowid
         conn.executemany(
@@ -2474,21 +2508,23 @@ def create_device_share(
         count += 1
     conn.commit()
     conn.close()
-    return {"ok": True, "count": count}
+    return {"ok": True, "count": count, "group_id": group_id}
 
 
 def get_device_shares_for_target(target_device_id: str) -> list[dict]:
-    """Return device-to-device shares delivered to a device, newest first."""
+    """Return device-to-device shares delivered to a device, newest first, with group info."""
     conn = get_conn()
     rows = conn.execute(
         """
         SELECT ds.id AS share_id, ds.media_id, ds.source_type, ds.source_key,
                ds.relative_path, ds.size, ds.modified_time, ds.caption,
-               ds.shared_by_device_id, ds.created_at,
-               d.device_name AS shared_by_name
+               ds.shared_by_device_id, ds.created_at, ds.share_group_id,
+               d.device_name AS shared_by_name,
+               COALESCE(dsg.caption, ds.caption) AS group_caption
         FROM device_share_targets t
         JOIN device_shares ds ON ds.id = t.share_id
         LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE t.target_device_id = ?
         ORDER BY ds.created_at DESC, ds.id DESC
         """,
@@ -2498,13 +2534,174 @@ def get_device_shares_for_target(target_device_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_device_shares_by_sharer(sharer_device_id: str) -> list[dict]:
+    """Return device-to-device shares sent BY this device, newest first, with group info."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT ds.id AS share_id, ds.media_id, ds.source_type, ds.source_key,
+               ds.relative_path, ds.size, ds.modified_time, ds.caption,
+               ds.shared_by_device_id, ds.created_at, ds.share_group_id,
+               d.device_name AS shared_by_name,
+               COALESCE(dsg.caption, ds.caption) AS group_caption
+        FROM device_shares ds
+        LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        WHERE ds.shared_by_device_id = ?
+        ORDER BY ds.created_at DESC, ds.id DESC
+        """,
+        (sharer_device_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_share_targets_for_group(group_id: str, requesting_device_id: str = None) -> list[dict]:
+    """Return all target devices that can see any share in a group. Owner-only if requesting_device_id is provided."""
+    conn = get_conn()
+    if requesting_device_id:
+        row = conn.execute(
+            "SELECT shared_by_device_id FROM device_share_groups WHERE id = ?",
+            (group_id,),
+        ).fetchone()
+        if not row or row["shared_by_device_id"] != requesting_device_id:
+            conn.close()
+            return []
+    rows = conn.execute(
+        """
+        SELECT DISTINCT dst.target_device_id, d.device_name, d.device_model
+        FROM device_shares ds
+        JOIN device_share_targets dst ON dst.share_id = ds.id
+        LEFT JOIN devices d ON d.device_id = dst.target_device_id
+        WHERE ds.share_group_id = ?
+        """,
+        (group_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_device_share_group(group_id: str, requesting_device_id: str) -> bool:
+    """Delete all shares belonging to a group. Only the original sharer may do this.
+
+    Explicitly cleans up device_share_targets, device_shares, and device_share_groups.
+    Returns True if rows were deleted, False if not authorized or not found.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT shared_by_device_id FROM device_share_groups WHERE id = ?",
+        (group_id,),
+    ).fetchone()
+    if not row or row["shared_by_device_id"] != requesting_device_id:
+        conn.close()
+        return False
+    share_ids = [
+        r["id"]
+        for r in conn.execute(
+            "SELECT id FROM device_shares WHERE share_group_id = ?", (group_id,)
+        ).fetchall()
+    ]
+    if share_ids:
+        placeholders = ",".join("?" * len(share_ids))
+        conn.execute(f"DELETE FROM device_share_targets WHERE share_id IN ({placeholders})", share_ids)
+    conn.execute("DELETE FROM device_shares WHERE share_group_id = ?", (group_id,))
+    conn.execute("DELETE FROM device_share_groups WHERE id = ?", (group_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_device_share(share_id: int, requesting_device_id: str) -> bool:
+    """Delete a share (or its entire group if grouped). Owner-only."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT shared_by_device_id, share_group_id FROM device_shares WHERE id = ?",
+        (share_id,),
+    ).fetchone()
+    if not row or row["shared_by_device_id"] != requesting_device_id:
+        conn.close()
+        return False
+    group_id = row["share_group_id"]
+    if group_id:
+        conn.close()
+        return delete_device_share_group(group_id, requesting_device_id)
+    conn.execute("DELETE FROM device_share_targets WHERE share_id = ?", (share_id,))
+    conn.execute("DELETE FROM device_shares WHERE id = ?", (share_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def remove_share_group_target(group_id: str, target_device_id: str, requesting_device_id: str) -> bool:
+    """Remove one target device from all shares in a group.
+
+    Allowed if requesting_device_id is the original sharer OR if target_device_id == requesting_device_id (recipient hiding from own feed).
+    Returns True if target was removed.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT shared_by_device_id FROM device_share_groups WHERE id = ?",
+        (group_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    if row["shared_by_device_id"] != requesting_device_id and target_device_id != requesting_device_id:
+        conn.close()
+        return False
+    # Get all share_ids in this group
+    share_ids = [
+        r["share_id"]
+        for r in conn.execute(
+            "SELECT id AS share_id FROM device_shares WHERE share_group_id = ?", (group_id,)
+        ).fetchall()
+    ]
+    if not share_ids:
+        conn.close()
+        return False
+    placeholders = ",".join("?" * len(share_ids))
+    conn.execute(
+        f"DELETE FROM device_share_targets WHERE share_id IN ({placeholders}) AND target_device_id = ?",
+        (*share_ids, target_device_id),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def remove_share_target(share_id: int, target_device_id: str, requesting_device_id: str) -> bool:
+    """Remove one target device from a share. Owner or self-removal allowed."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT shared_by_device_id, share_group_id FROM device_shares WHERE id = ?",
+        (share_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    if row["shared_by_device_id"] != requesting_device_id and target_device_id != requesting_device_id:
+        conn.close()
+        return False
+    group_id = row["share_group_id"]
+    if group_id:
+        conn.close()
+        return remove_share_group_target(group_id, target_device_id, requesting_device_id)
+    conn.execute(
+        "DELETE FROM device_share_targets WHERE share_id = ? AND target_device_id = ?",
+        (share_id, target_device_id),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 def get_device_share_by_id(share_id: int) -> dict | None:
     """Return a single device share row (for serving/authorization), or None."""
     conn = get_conn()
     row = conn.execute(
         """
         SELECT id AS share_id, media_id, source_type, source_key, relative_path,
-               size, modified_time, caption, shared_by_device_id, created_at
+               size, modified_time, caption, shared_by_device_id, created_at, share_group_id
         FROM device_shares WHERE id = ?
         """,
         (share_id,),
@@ -2521,4 +2718,4 @@ def is_share_target(share_id: int, device_id: str) -> bool:
         (share_id, device_id),
     ).fetchone()
     conn.close()
-    return row is not None
+    return row is not None

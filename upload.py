@@ -52,7 +52,13 @@ from database import (
     get_share_target_devices,
     create_device_share,
     get_device_shares_for_target,
+    get_device_shares_by_sharer,
     get_device_share_by_id,
+    get_share_targets_for_group,
+    delete_device_share_group,
+    delete_device_share,
+    remove_share_group_target,
+    remove_share_target,
     is_share_target,
     MAX_COMMENT_LENGTH,
 )
@@ -1816,67 +1822,202 @@ async def create_share(
 @router.get("/feed")
 async def get_unified_feed(
     device_id: str,
+    offset: int = 0,
+    limit: int = 50,
     authorization: str = Header(None),
     token: str = None,
 ):
-    """Merged feed: device-to-device shares first (newest first), then the device's
-    permitted PC shared-folder media. Final grouping/re-ranking is done client-side."""
+    """Device-to-device shares feed for this device.
+
+    Returns shares received by this device plus shares sent by this device,
+    grouped into posts by share_group_id. Supports pagination via offset/limit.
+    Results are sorted newest-first (by group created_at).
+    """
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
 
     def _build():
         video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
-        items = []
 
-        # 1. Device-to-device shares delivered to this device.
-        shares = get_device_shares_for_target(device_id)
-        share_media_ids = [s["media_id"] for s in shares]
-        counts_map, user_map = get_reactions_for_media_ids(share_media_ids, current_source_id=device_id)
-        comment_counts = get_comment_counts_for_media_ids(share_media_ids)
-        for s in shares:
-            mid = s["media_id"]
-            path = s["relative_path"]
-            ext = os.path.splitext(path)[1].lower()
-            items.append({
-                "kind": "share",
-                "is_device_share": True,
+        # 1. Shares received by this device
+        received = get_device_shares_for_target(device_id)
+        # 2. Shares sent by this device (to see/manage own posts)
+        sent = get_device_shares_by_sharer(device_id)
+
+        # Deduplicate: a sender also appears in their own sent list but not received.
+        # Use (share_id) as the dedup key.
+        seen_share_ids: set[int] = set()
+        all_shares: list[dict] = []
+        for s in received:
+            if s["share_id"] not in seen_share_ids:
+                seen_share_ids.add(s["share_id"])
+                all_shares.append({**s, "is_own_post": s["shared_by_device_id"] == device_id})
+        for s in sent:
+            if s["share_id"] not in seen_share_ids:
+                seen_share_ids.add(s["share_id"])
+                all_shares.append({**s, "is_own_post": True})
+
+        # Group shares by share_group_id (or fall back to share_id as a singleton group)
+        from collections import OrderedDict
+        groups: OrderedDict[str, dict] = OrderedDict()
+        for s in all_shares:
+            gid = s.get("share_group_id") or f"__solo__{s['share_id']}"
+            if gid not in groups:
+                groups[gid] = {
+                    "group_id": gid,
+                    "caption": s.get("group_caption") or s.get("caption"),
+                    "shared_by": s.get("shared_by_name") or s["shared_by_device_id"],
+                    "shared_by_device_id": s["shared_by_device_id"],
+                    "created_at": s["created_at"],
+                    "is_own_post": s["is_own_post"],
+                    "items": [],
+                }
+            ext = os.path.splitext(s["relative_path"])[1].lower()
+            groups[gid]["items"].append({
                 "share_id": s["share_id"],
-                "media_id": mid,
-                "path": path,
+                "media_id": s["media_id"],
+                "path": s["relative_path"],
                 "size": s["size"],
                 "modified_time": s["modified_time"],
-                "created_at": s["created_at"],
-                "caption": s["caption"],
-                "shared_by": s.get("shared_by_name") or s["shared_by_device_id"],
-                "shared_by_device_id": s["shared_by_device_id"],
-                "reaction_counts": counts_map.get(mid, {}),
-                "user_reactions": user_map.get(mid, []),
-                "comment_count": comment_counts.get(mid, 0),
                 "is_video": ext in video_exts,
             })
 
-        # 2. PC shared-folder media this device is permitted to see.
-        for entry in _get_shared_dirs():
-            if not entry.get("id") or not entry.get("path"):
-                continue
-            if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
-                continue
-            root = os.path.abspath(entry["path"])
-            if not os.path.isdir(root):
-                continue
-            source_id = entry["id"]
-            media = _collect_shared_media(root)
-            enriched = _enrich_shared_files_with_reactions(source_id, media, device_id)
-            for f in enriched:
-                f["kind"] = "shared"
-                f["is_device_share"] = False
-                f["source_id"] = source_id
-                items.append(f)
+        # Sort groups newest-first by created_at
+        sorted_groups = sorted(groups.values(), key=lambda g: g["created_at"], reverse=True)
 
-        return items
+        # Collect all share_ids and media_ids for bulk reaction/comment fetch
+        all_share_ids = [item["share_id"] for g in sorted_groups for item in g["items"]]
+        all_media_ids = [item["media_id"] for g in sorted_groups for item in g["items"]]
 
-    items = await asyncio.to_thread(_build)
-    return {"items": items}
+        # Use first item's media_id as the reaction anchor for the group
+        counts_map, user_map = get_reactions_for_media_ids(all_media_ids, current_source_id=device_id)
+        comment_counts = get_comment_counts_for_media_ids(all_media_ids)
+
+        # Build final post list with reaction/comment data attached to group
+        posts = []
+        for g in sorted_groups:
+            anchor_mid = g["items"][0]["media_id"] if g["items"] else None
+            posts.append({
+                "kind": "share",
+                "group_id": g["group_id"],
+                "caption": g["caption"],
+                "shared_by": g["shared_by"],
+                "shared_by_device_id": g["shared_by_device_id"],
+                "created_at": g["created_at"],
+                "is_own_post": g["is_own_post"],
+                "media_id": anchor_mid,
+                "reaction_counts": counts_map.get(anchor_mid, {}) if anchor_mid else {},
+                "user_reactions": user_map.get(anchor_mid, []) if anchor_mid else [],
+                "comment_count": comment_counts.get(anchor_mid, 0) if anchor_mid else 0,
+                "items": g["items"],
+            })
+
+        total = len(posts)
+        page = posts[offset: offset + limit]
+        has_more = (offset + limit) < total
+        return page, has_more, total
+
+    page, has_more, total = await asyncio.to_thread(_build)
+    return {"items": page, "has_more": has_more, "total": total}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Share Group Management Endpoints
+# ──────────────────────────────────────────────────────────────────────────────
+
+class RemoveShareTargetRequest(BaseModel):
+    device_id: str  # the target device to remove
+
+
+@router.get("/api/share/group/{group_id}/targets")
+@router.get("/share/group/{group_id}/targets")
+async def get_share_group_targets(
+    group_id: str,
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """List all target devices for a share group. Only the group owner may call this."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    targets = await asyncio.to_thread(get_share_targets_for_group, group_id, device_id)
+    return {"targets": targets}
+
+
+@router.post("/api/share/group/{group_id}/delete")
+@router.post("/share/group/{group_id}/delete")
+async def delete_share_group(
+    group_id: str,
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Delete a share group and all its items. Only the original sharer may do this."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    ok = await asyncio.to_thread(delete_device_share_group, group_id, device_id)
+    if not ok:
+        raise HTTPException(status_code=403, detail="Not authorized or group not found")
+    return {"ok": True}
+
+
+@router.post("/api/share/group/{group_id}/remove_target")
+@router.post("/share/group/{group_id}/remove_target")
+async def remove_share_group_target_endpoint(
+    group_id: str,
+    body: RemoveShareTargetRequest,
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Remove a specific target device from a share group. Sharer or self-removal allowed."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    ok = await asyncio.to_thread(
+        remove_share_group_target, group_id, body.device_id, device_id
+    )
+    if not ok:
+        raise HTTPException(status_code=403, detail="Not authorized or group not found")
+    return {"ok": True}
+
+
+@router.post("/api/share/{share_id}/delete")
+@router.post("/share/{share_id}/delete")
+async def delete_share_by_id_endpoint(
+    share_id: int,
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Delete a share by its share_id. Only the original sharer may do this."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    ok = await asyncio.to_thread(delete_device_share, share_id, device_id)
+    if not ok:
+        raise HTTPException(status_code=403, detail="Not authorized or share not found")
+    return {"ok": True}
+
+
+@router.post("/api/share/{share_id}/remove_target")
+@router.post("/share/{share_id}/remove_target")
+async def remove_share_target_by_id_endpoint(
+    share_id: int,
+    body: RemoveShareTargetRequest,
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Remove a specific target device from a share. Sharer or self-removal allowed."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    ok = await asyncio.to_thread(
+        remove_share_target, share_id, body.device_id, device_id
+    )
+    if not ok:
+        raise HTTPException(status_code=403, detail="Not authorized or share not found")
+    return {"ok": True}
+
+
 
 
 def _authorize_share_access(share_id: int, device_id: str) -> dict:
@@ -1887,6 +2028,7 @@ def _authorize_share_access(share_id: int, device_id: str) -> dict:
     if not (share["shared_by_device_id"] == device_id or is_share_target(share_id, device_id)):
         raise HTTPException(status_code=403, detail="Share not available for this device")
     return share
+
 
 
 def _resolve_share_path(share: dict) -> str:
