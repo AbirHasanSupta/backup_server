@@ -123,6 +123,7 @@ export default function FreeUpScreen() {
   const [scanning, setScanning] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [hasScanned, setHasScanned] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [confirmVisible, setConfirmVisible] = useState(false);
   const shouldStopRef = useRef(false);
@@ -146,6 +147,7 @@ export default function FreeUpScreen() {
       if (cached.length > 0 && !isRefresh) {
         setFiles(cached);
         setSelected(new Set(cached.map(fileKey)));
+        setHasScanned(true);
         setStatusMsg('');
         return;
       }
@@ -168,6 +170,7 @@ export default function FreeUpScreen() {
       const resultFiles = result.files as CandidateFile[];
       setFiles(resultFiles);
       setSelected(new Set(resultFiles.map(fileKey)));
+      setHasScanned(true);
       setStatusMsg('');
     } catch (err: any) {
       setStatusMsg(err?.message || 'Scan failed');
@@ -179,9 +182,17 @@ export default function FreeUpScreen() {
   }, []);
 
   useFocusEffect(useCallback(() => {
-    scan(false);
+    // Show previously scanned results instantly when they're still cached in
+    // memory, but never trigger a filesystem walk on focus — scanning is
+    // on-demand only (the "Scan now" button, or pull-to-refresh).
+    const cached = getCleanupCandidateFiles() as CandidateFile[];
+    if (cached.length > 0) {
+      setFiles(cached);
+      setSelected(new Set(cached.map(fileKey)));
+      setHasScanned(true);
+    }
     return () => { shouldStopRef.current = true; };
-  }, [scan]));
+  }, []));
 
   const onRefresh = useCallback(() => {
     invalidateCleanupCache();
@@ -335,6 +346,31 @@ export default function FreeUpScreen() {
 
   const renderEmpty = () => {
     if (scanning) return null;
+
+    // Not yet scanned this session (no cached candidates): on-demand entry point.
+    // We never auto-walk the filesystem on focus, so the first scan starts here.
+    if (!hasScanned) {
+      return (
+        <View style={styles.emptyState}>
+          <View style={[styles.emptyIcon, { backgroundColor: colors.primarySoft }]}>
+            <AppIcon androidName="cleaning_services" iosName="sparkles" color={colors.primary} size={40} fallback="🧹" />
+          </View>
+          <Text style={styles.emptyTitle}>Free up phone storage</Text>
+          <Text style={styles.emptyBody}>
+            Scan for photos and videos that are already safely backed up on your server. You can then remove them from your phone to reclaim space — your backups stay intact.
+          </Text>
+          <AnimatedPressable
+            style={[styles.rescanBtn, { backgroundColor: colors.primary }]}
+            onPress={() => { hapticMedium(); scan(false); }}
+            scaleDown={0.96}
+          >
+            <AppIcon androidName="search" iosName="magnifyingglass" color={colors.white} size={16} fallback="⌕" />
+            <Text style={[styles.rescanBtnText, { color: colors.white }]}>Scan now</Text>
+          </AnimatedPressable>
+        </View>
+      );
+    }
+
     return (
       <View style={styles.emptyState}>
         <View style={[styles.emptyIcon, { backgroundColor: colors.successSoft }]}>

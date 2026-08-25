@@ -178,8 +178,11 @@ export async function uploadPendingFiles(files, options = {}) {
   }
 
   if (cachedFiles) {
-    const uploadedKeys = new Set(uploaded.map(pendingFileKey));
-    cachedFiles = cachedFiles.filter((file) => !uploadedKeys.has(pendingFileKey(file)));
+    // Key on the stable SAF `uri`: `uploaded` holds enriched objects (real
+    // size|mtime) while cachedFiles may hold noMetadata entries (0|0) from a
+    // prior sync, so pendingFileKey would never match and the count would stall.
+    const uploadedUris = new Set(uploaded.map((file) => file.uri));
+    cachedFiles = cachedFiles.filter((file) => !uploadedUris.has(file.uri));
     const summary = buildSummary(cachedFiles);
     await persistSummary(summary);
   }

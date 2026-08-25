@@ -845,8 +845,12 @@ export async function performActualSync(onProgress, runOptions = {}) {
   await Promise.all(Array.from({ length: uploadConcurrency }, () => worker()));
   await markUploadedBatch(uploadedFiles);
 
-  const uploadedKeys = new Set(uploadedFiles.map(pendingFileKey));
-  const remainingPending = pending.filter((file) => !uploadedKeys.has(pendingFileKey(file)));
+  // Match on the stable SAF document `uri` (unique per file and preserved by
+  // enrichFileMetadata). pendingFileKey embeds size|mtime, which differ between
+  // the noMetadata `pending` entries (0|0) and the enriched `uploadedFiles`, so
+  // keying on it would leave every uploaded file counted as still-pending.
+  const uploadedUris = new Set(uploadedFiles.map((file) => file.uri));
+  const remainingPending = pending.filter((file) => !uploadedUris.has(file.uri));
 
   if (!(await shouldAbortSync())) {
     const scannedSuccessfully = [...trustedFiles, ...presentFiles, ...uploadedFiles];

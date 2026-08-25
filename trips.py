@@ -13,6 +13,7 @@ import time
 import urllib.request
 import urllib.error
 
+from config import load_config
 from database import (
     get_conn,
     get_devices,
@@ -128,24 +129,54 @@ def generate_trip_title(start_time: int, end_time: int, place_name: str | None) 
     return f"Trip in {month_str}"
 
 
+def _sources_for(source_id: str) -> list[tuple[str, str]]:
+    """Resolve the (source_type, source_key) pairs a device draws media from.
+
+    Mirrors memories._shared_sources_for_device so Trips clusters the same media
+    set that Places surfaces: the device's own phone media plus every shared
+    directory tagged for this device (or tagged for "all"). Phone media typically
+    carries no GPS, so without the shared sources trips would always be empty for
+    devices whose geotagged photos live in shared folders.
+    """
+    sources: list[tuple[str, str]] = [("phone", source_id)]
+    try:
+        shared_dirs = load_config().get("SHARED_DIRS", []) or []
+    except Exception:
+        shared_dirs = []
+    for d in shared_dirs:
+        sid = d.get("id")
+        tagged = d.get("device_ids", [])
+        if sid and isinstance(tagged, list) and (source_id in tagged or "all" in tagged):
+            sources.append(("shared", sid))
+    return sources
+
+
 def cluster_source_media(source_id: str) -> list[dict]:
     """
     Cluster all geotagged media for source_id based on time and spatial proximity.
-    Persists qualifying trip records (>= 5 media items) to the database.
+    Clusters across the device's own phone media and any shared directories tagged
+    for it (the same source set Places uses). Persists qualifying trip records
+    (>= 5 media items) to the database, keyed by source_id.
     """
+    sources = _sources_for(source_id)
+    where_clause = " OR ".join("(source_type = ? AND source_key = ?)" for _ in sources)
+    params: list[str] = []
+    for stype, skey in sources:
+        params.extend((stype, skey))
+
     conn = get_conn()
     rows = conn.execute(
-        """
+        f"""
         SELECT id, source_type, source_key, relative_path, size, modified_time,
                capture_time, cap_lat, cap_lon
         FROM media_index
-        WHERE source_key = ?
+        WHERE ({where_clause})
           AND cap_lat IS NOT NULL
           AND cap_lon IS NOT NULL
           AND capture_time IS NOT NULL
         ORDER BY capture_time ASC
         """,
-        (source_id,),
+        params,
     ).fetchall()
     conn.close()
 

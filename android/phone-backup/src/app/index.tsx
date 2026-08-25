@@ -803,7 +803,7 @@ export default function HomeScreen() {
           </Animated.View>
         )}
 
-        {!syncing && cleanupSummary && cleanupSummary.totalBytes > 0 && (
+        {!syncing && (
           <Animated.View entering={FadeInDown.duration(400).delay(270)} style={styles.pendingSection}>
             <Text style={styles.sectionKicker}>Storage</Text>
             <AnimatedPressable
@@ -817,10 +817,14 @@ export default function HomeScreen() {
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.pendingTitle}>
-                  Free up {formatFreeUpBytes(cleanupSummary.totalBytes)}
+                  {cleanupSummary && cleanupSummary.totalBytes > 0
+                    ? `Free up ${formatFreeUpBytes(cleanupSummary.totalBytes)}`
+                    : 'Free up storage'}
                 </Text>
                 <Text style={styles.pendingSubtitle}>
-                  {cleanupSummary.count} backed-up file{cleanupSummary.count === 1 ? '' : 's'} can be safely removed from your phone
+                  {cleanupSummary && cleanupSummary.totalBytes > 0
+                    ? `${cleanupSummary.count} backed-up file${cleanupSummary.count === 1 ? '' : 's'} can be safely removed from your phone`
+                    : 'Find backed-up files you can safely remove from your phone'}
                 </Text>
               </View>
               <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
