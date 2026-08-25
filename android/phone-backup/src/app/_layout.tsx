@@ -269,6 +269,15 @@ function RootLayoutContent() {
           }}
         />
         <Tabs.Screen
+          name="feed"
+          options={{
+            title: 'Feed',
+            tabBarIcon: ({ focused }) => (
+              <TabIcon androidName="dynamic_feed" iosName="heart.text.square" focused={focused} colors={colors} styles={styles} />
+            ),
+          }}
+        />
+        <Tabs.Screen
           name="history"
           options={{
             title: 'History',
@@ -308,6 +317,10 @@ function RootLayoutContent() {
         />
         <Tabs.Screen
           name="places"
+          options={{ href: null, tabBarStyle: { display: 'none' } }}
+        />
+        <Tabs.Screen
+          name="free-up"
           options={{ href: null, tabBarStyle: { display: 'none' } }}
         />
       </Tabs>

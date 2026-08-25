@@ -520,12 +520,15 @@ type SourceSelectorProps = {
   onSourceSelect: (source: SharedSource) => void;
   onSortChange: (field: SortField, dir: SortDir) => void;
   colors: AppColors;
+  showModeSwitch?: boolean;
+  showViewModeSwitch?: boolean;
 };
 
 function SourceSelector({
   mode, sharedSources, selectedSourceId, sharedViewMode = 'feed', onSharedViewModeChange,
   isLoadingSources, isOffline, sortEnabled, sortField, sortDir,
   onModeChange, onSourceSelect, onSortChange, colors,
+  showModeSwitch = true, showViewModeSwitch = true,
 }: SourceSelectorProps) {
   const [showSourceMenu, setShowSourceMenu] = useState(false);
   const [showSortMenu, setShowSortMenu] = useState(false);
@@ -538,71 +541,78 @@ function SourceSelector({
 
   return (
     <View style={[srcStyles.container, { backgroundColor: colors.surface, borderBottomColor: colors.surfaceBorder }]}>
-      <View style={srcStyles.pillRow}>
-        <TouchableOpacity
-          onPress={() => {
-            setShowSourceMenu(false);
-            setShowSortMenu(false);
-            onModeChange('phone');
-          }}
-          style={[
-            srcStyles.pill,
-            { borderColor: mode === 'phone' ? colors.primary : colors.surfaceBorder,
-              backgroundColor: mode === 'phone' ? colors.primarySoft : 'transparent' },
-          ]}
-          activeOpacity={0.75}
-        >
-          <AppIcon androidName="smartphone" iosName="iphone" color={mode === 'phone' ? colors.primary : colors.textSecondary} size={14} />
-          <Text style={[srcStyles.pillText, { color: mode === 'phone' ? colors.primary : colors.textSecondary }]}>
-            Phone Backups
-          </Text>
-        </TouchableOpacity>
+      {(showModeSwitch || sortEnabled) && (
+        <View style={srcStyles.pillRow}>
+          {showModeSwitch && (
+            <>
+              <TouchableOpacity
+                onPress={() => {
+                  setShowSourceMenu(false);
+                  setShowSortMenu(false);
+                  onModeChange('phone');
+                }}
+                style={[
+                  srcStyles.pill,
+                  { borderColor: mode === 'phone' ? colors.primary : colors.surfaceBorder,
+                    backgroundColor: mode === 'phone' ? colors.primarySoft : 'transparent' },
+                ]}
+                activeOpacity={0.75}
+              >
+                <AppIcon androidName="smartphone" iosName="iphone" color={mode === 'phone' ? colors.primary : colors.textSecondary} size={14} />
+                <Text style={[srcStyles.pillText, { color: mode === 'phone' ? colors.primary : colors.textSecondary }]}>
+                  Phone Backups
+                </Text>
+              </TouchableOpacity>
 
-        <TouchableOpacity
-          onPress={() => {
-            setShowSortMenu(false);
-            onModeChange('shared');
-          }}
-          style={[
-            srcStyles.pill,
-            { borderColor: mode === 'shared' ? colors.primary : colors.surfaceBorder,
-              backgroundColor: mode === 'shared' ? colors.primarySoft : 'transparent' },
-          ]}
-          activeOpacity={0.75}
-        >
-          <AppIcon androidName="folder_open" iosName="folder" color={mode === 'shared' ? colors.primary : colors.textSecondary} size={14} />
-          <Text style={[srcStyles.pillText, { color: mode === 'shared' ? colors.primary : colors.textSecondary }]}>
-            Shared Folders
-          </Text>
-        </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => {
+                  setShowSortMenu(false);
+                  onModeChange('shared');
+                }}
+                style={[
+                  srcStyles.pill,
+                  { borderColor: mode === 'shared' ? colors.primary : colors.surfaceBorder,
+                    backgroundColor: mode === 'shared' ? colors.primarySoft : 'transparent' },
+                ]}
+                activeOpacity={0.75}
+              >
+                <AppIcon androidName="folder_open" iosName="folder" color={mode === 'shared' ? colors.primary : colors.textSecondary} size={14} />
+                <Text style={[srcStyles.pillText, { color: mode === 'shared' ? colors.primary : colors.textSecondary }]}>
+                  Shared Folders
+                </Text>
+              </TouchableOpacity>
+            </>
+          )}
 
-        {sortEnabled && (
-          <TouchableOpacity
-            onPress={() => {
-              setShowSourceMenu(false);
-              setShowSortMenu(visible => !visible);
-            }}
-            style={[
-              srcStyles.sortButton,
-              {
-                backgroundColor: showSortMenu ? colors.primarySoft : 'transparent',
-                borderColor: showSortMenu ? colors.primary : colors.surfaceBorder,
-              },
-            ]}
-            activeOpacity={0.75}
-            accessibilityLabel="Sort files"
-            accessibilityHint={`Currently sorted by ${sortField}, ${sortDir === 'asc' ? 'asc' : 'desc'}`}
-          >
-            <AppIcon
-              androidName="sort"
-              iosName="arrow.up.arrow.down"
-              color={showSortMenu ? colors.primary : colors.textSecondary}
-              size={18}
-              fallback="↕"
-            />
-          </TouchableOpacity>
-        )}
-      </View>
+          {sortEnabled && (
+            <TouchableOpacity
+              onPress={() => {
+                setShowSourceMenu(false);
+                setShowSortMenu(visible => !visible);
+              }}
+              style={[
+                srcStyles.sortButton,
+                {
+                  backgroundColor: showSortMenu ? colors.primarySoft : 'transparent',
+                  borderColor: showSortMenu ? colors.primary : colors.surfaceBorder,
+                },
+              ]}
+              activeOpacity={0.75}
+              accessibilityLabel="Sort files"
+              accessibilityHint={`Currently sorted by ${sortField}, ${sortDir === 'asc' ? 'asc' : 'desc'}`}
+            >
+              <AppIcon
+                androidName="sort"
+                iosName="arrow.up.arrow.down"
+                color={showSortMenu ? colors.primary : colors.textSecondary}
+                size={18}
+                fallback="↕"
+              />
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+
 
       {showSortMenu && sortEnabled && (
         <View style={[srcStyles.sortMenu, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}>
@@ -677,7 +687,7 @@ function SourceSelector({
                   <AppIcon androidName={showSourceMenu ? 'expand_less' : 'expand_more'} iosName={showSourceMenu ? 'chevron.up' : 'chevron.down'} color={colors.textSecondary} size={18} />
                 </TouchableOpacity>
 
-                {selectedSourceId && (
+                {selectedSourceId && showViewModeSwitch && (
                   <View style={[srcStyles.viewSwitcherWrap, { backgroundColor: colors.surfaceSoft }]}>
                     <TouchableOpacity
                       style={[
@@ -2394,7 +2404,7 @@ const TreeNodeView = React.memo(function TreeNodeView({
 // Main Restore Screen Component
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function RestoreScreen() {
+export default function RestoreScreen({ variant = 'library' }: { variant?: 'library' | 'feed' } = {}) {
   const { colors, isDark } = useAppTheme();
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(colors), [colors]);
@@ -2424,10 +2434,10 @@ export default function RestoreScreen() {
   );
 
   // Source mode state
-  const [sourceMode, setSourceMode] = useState<SourceMode>('phone');
+  const [sourceMode, setSourceMode] = useState<SourceMode>(variant === 'feed' ? 'shared' : 'phone');
   const [sharedSources, setSharedSources] = useState<SharedSource[]>([]);
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
-  const [sharedViewMode, setSharedViewMode] = useState<'feed' | 'folder'>('feed');
+  const [sharedViewMode, setSharedViewMode] = useState<'feed' | 'folder'>(variant === 'feed' ? 'feed' : 'folder');
   const [isLoadingSources, setIsLoadingSources] = useState(false);
 
   // Server Config cache
@@ -3405,7 +3415,7 @@ export default function RestoreScreen() {
           <View style={styles.pageHeaderTopRow}>
           <View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-              <Text style={styles.pageTitle}>Library</Text>
+              <Text style={styles.pageTitle}>{variant === 'feed' ? 'Feed' : 'Library'}</Text>
               <AnimatedPressable
                 onPress={() => router.push('/memories')}
                 style={styles.memoriesHeaderBtn}
@@ -3470,6 +3480,8 @@ export default function RestoreScreen() {
             onSourceSelect={handleSourceSelect}
             onSortChange={handleSortChange}
             colors={colors}
+            showModeSwitch={variant !== 'feed'}
+            showViewModeSwitch={variant !== 'feed'}
           />
 
           {files.length > 0 && (

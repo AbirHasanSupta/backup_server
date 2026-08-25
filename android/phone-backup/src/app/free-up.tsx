@@ -126,13 +126,16 @@ export default function FreeUpScreen() {
   const [statusMsg, setStatusMsg] = useState('');
   const [confirmVisible, setConfirmVisible] = useState(false);
   const shouldStopRef = useRef(false);
+  const scanningRef = useRef(false);
+  const deletingRef = useRef(false);
 
   // ─── Scan ────────────────────────────────────────────────────────────────
 
   const scan = useCallback(async (isRefresh = false) => {
     // Guard: don't start a new scan if one is already running or a delete is in progress
-    if (scanning || deleting) return;
+    if (scanningRef.current || deletingRef.current) return;
     shouldStopRef.current = false;
+    scanningRef.current = true;
     if (isRefresh) setRefreshing(true);
     else setScanning(true);
     setStatusMsg('Scanning backed-up files…');
@@ -169,10 +172,11 @@ export default function FreeUpScreen() {
     } catch (err: any) {
       setStatusMsg(err?.message || 'Scan failed');
     } finally {
+      scanningRef.current = false;
       setScanning(false);
       setRefreshing(false);
     }
-  }, [scanning, deleting]);
+  }, []);
 
   useFocusEffect(useCallback(() => {
     scan(false);
@@ -228,40 +232,45 @@ export default function FreeUpScreen() {
   const handleConfirmDelete = useCallback(async () => {
     setConfirmVisible(false);
     if (selectedFiles.length === 0) return;
+    deletingRef.current = true;
     setDeleting(true);
     setStatusMsg(`Deleting ${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'}…`);
 
     const succeeded: CandidateFile[] = [];
     const failed: string[] = [];
 
-    for (const file of selectedFiles) {
-      try {
-        await FileSystem.deleteAsync(file.uri, { idempotent: true });
-        succeeded.push(file);
-      } catch {
-        failed.push(getDisplayName(file));
+    try {
+      for (const file of selectedFiles) {
+        try {
+          await FileSystem.deleteAsync(file.uri, { idempotent: true });
+          succeeded.push(file);
+        } catch {
+          failed.push(getDisplayName(file));
+        }
       }
-    }
 
-    // Update local state immediately
-    if (succeeded.length > 0) {
-      const deletedKeys = new Set(succeeded.map(fileKey));
-      const remaining = files.filter((f) => !deletedKeys.has(fileKey(f)));
-      setFiles(remaining);
-      setSelected(new Set(remaining.map(fileKey)));
+      // Update local state immediately
+      if (succeeded.length > 0) {
+        const deletedKeys = new Set(succeeded.map(fileKey));
+        const remaining = files.filter((f) => !deletedKeys.has(fileKey(f)));
+        setFiles(remaining);
+        setSelected(new Set(remaining.map(fileKey)));
 
-      // Persist cleaned paths + update cache
-      await markAsCleanedLocally(succeeded.map((f) => f.relativePath));
+        // Persist cleaned paths + update cache
+        await markAsCleanedLocally(succeeded.map((f) => f.relativePath)).catch(() => {});
 
-      // Report to server — pass only the fields the endpoint needs (best-effort)
-      reportDeletedFiles(
-        succeeded.map((f) => ({ relativePath: f.relativePath, size: f.size || 0 }))
-      ).catch(() => {});
+        // Report to server — pass only the fields the endpoint needs (best-effort)
+        reportDeletedFiles(
+          succeeded.map((f) => ({ relativePath: f.relativePath, size: f.size || 0 }))
+        ).catch(() => {});
+      }
+    } finally {
+      deletingRef.current = false;
+      setDeleting(false);
+      setStatusMsg('');
     }
 
     const freedBytes = succeeded.reduce((s, f) => s + (f.size || 0), 0);
-    setDeleting(false);
-    setStatusMsg('');
 
     // Determine result and fire appropriate haptic
     if (succeeded.length === 0) {

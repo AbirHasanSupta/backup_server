@@ -463,6 +463,7 @@ export default function PlacesScreen() {
           </View>
         ) : (
           <FlatList
+            key="places-grid-3"
             data={places}
             keyExtractor={(item) => item.cluster_key}
             numColumns={3}
@@ -513,6 +514,7 @@ export default function PlacesScreen() {
         // ─── TRIPS TAB ────────────────────────────────────────────────────────
         trips.length === 0 ? (
           <FlatList
+            key="trips-list-1"
             data={trips}
             keyExtractor={(item) => `trip_${item.id}`}
             renderItem={null}
@@ -534,6 +536,7 @@ export default function PlacesScreen() {
           />
         ) : (
           <FlatList
+            key="trips-list-1"
             data={trips}
             keyExtractor={(item) => `trip_${item.id}`}
             refreshControl={
