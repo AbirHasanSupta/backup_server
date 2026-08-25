@@ -58,7 +58,6 @@ import {
   deleteComment,
   buildShareThumbnailUrl,
   buildSharePreviewUrl,
-  buildShareDownloadUrl,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp } from '../../settings';
@@ -649,9 +648,14 @@ function CommentsModal({
   useEffect(() => {
     if (!visible || mediaId == null) return;
     let active = true;
+    // Reset the sheet's UI state each time it opens (or the item changes), then
+    // load fresh comments. These synchronous resets are intentional — a clean
+    // sheet per open — and the fetch below is the external-sync work this effect exists for.
+    /* eslint-disable react-hooks/set-state-in-effect */
     setLoading(true);
     setComments([]);
     setDraft('');
+    /* eslint-enable react-hooks/set-state-in-effect */
     getComments(mediaId)
       .then((res) => { if (active) setComments(Array.isArray(res?.comments) ? res.comments : []); })
       .catch(() => { if (active) setComments([]); })
@@ -805,9 +809,14 @@ function ShareModal({
   useEffect(() => {
     if (!visible) return;
     let active = true;
+    // Reset the share sheet each time it opens, then load target devices. These
+    // synchronous resets are intentional — a clean sheet per open — and the fetch
+    // below is the external-sync work this effect exists for.
+    /* eslint-disable react-hooks/set-state-in-effect */
     setLoading(true);
     setSelected(new Set());
     setCaption('');
+    /* eslint-enable react-hooks/set-state-in-effect */
     listShareTargetDevices()
       .then((res) => { if (active) setDevices(Array.isArray(res?.devices) ? res.devices : []); })
       .catch(() => { if (active) setDevices([]); })
@@ -3612,7 +3621,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       fetchingRef.current = false;
       if (restoreMountedRef.current) setIsFetching(false);
     }
-  }, [isOffline, isDownloading, sourceMode, selectedSourceId, sharedViewMode, isFeedMode, sortField, sortDir, loadServerConfig]);
+  }, [isOffline, isDownloading, sourceMode, selectedSourceId, isFeedMode, sortField, sortDir, loadServerConfig]);
 
   useEffect(() => {
     if (isOffline || isDownloading) return;
