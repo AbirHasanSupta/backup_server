@@ -61,6 +61,7 @@ import {
   getShareGroupTargets,
   buildShareThumbnailUrl,
   buildSharePreviewUrl,
+  buildShareDownloadUrl,
   downloadShareFile,
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
@@ -1987,7 +1988,7 @@ const PreviewModal = React.memo(function PreviewModal({
   const getUrlForFile = useCallback((f: RemoteFile | null): string => {
     if (!f || !serverConfig) return '';
     if (f.kind === 'share' && f.share_id != null) {
-      return buildShareThumbnailUrl(serverConfig, f.share_id);
+      return buildShareDownloadUrl(serverConfig, f.share_id);
     }
     if (f.kind === 'shared') {
       return buildPreviewUrl(serverConfig, f.path, 'shared', f.source_id ?? selectedSourceId);
@@ -2855,7 +2856,7 @@ function NativeVideoPreviewPlayer({
         });
         if (cancelled) return;
         upgradedRef.current = true;
-        player.currentTime = position;
+        safeMediaCall(() => { player.currentTime = position; });
         if (wasPlaying) {
           safeMediaCall(() => player.play());
         }
@@ -4482,6 +4483,12 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const warmPreviewUrl = useMemo(() => {
     if (!warmPreviewFile || !serverConfig || getFileCategory(warmPreviewFile.path) !== 'video') {
       return '';
+    }
+    if (warmPreviewFile.kind === 'share' && warmPreviewFile.share_id != null) {
+      return buildSharePreviewUrl(serverConfig, warmPreviewFile.share_id);
+    }
+    if (warmPreviewFile.kind === 'shared') {
+      return buildVideoPreviewUrl(serverConfig, warmPreviewFile.path, 'shared', warmPreviewFile.source_id ?? selectedSourceId);
     }
     return buildVideoPreviewUrl(serverConfig, warmPreviewFile.path, sourceMode, selectedSourceId);
   }, [warmPreviewFile, serverConfig, sourceMode, selectedSourceId]);

@@ -2096,7 +2096,7 @@ async def preview_device_share(
     try:
         preview_path = get_video_preview_path(
             path,
-            schedule_missing=preview_request_is_active(f"share:{share_id}:{device_id}", path),
+            schedule_missing=True,
         )
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="File not found")
