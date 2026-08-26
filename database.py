@@ -2406,13 +2406,51 @@ def get_comment_counts_for_media_ids(media_ids: list[int]) -> dict[int, int]:
     return counts
 
 
-def delete_comment(comment_id: int, source_id: str) -> bool:
-    """Delete a comment only if source_id is its author. Return True if a row was removed."""
+def is_media_or_post_creator(media_id: int, device_id: str | None) -> bool:
+    """Return True if device_id created the post or owns the media item."""
+    if not device_id:
+        return False
     conn = get_conn()
-    cur = conn.execute(
-        "DELETE FROM comments WHERE id = ? AND source_id = ?",
-        (comment_id, source_id),
-    )
+    # Check device_shares (shared_by_device_id)
+    row = conn.execute(
+        "SELECT 1 FROM device_shares WHERE media_id = ? AND shared_by_device_id = ? LIMIT 1",
+        (media_id, device_id),
+    ).fetchone()
+    if row:
+        conn.close()
+        return True
+    # Check media_index (source_type = 'device', source_key = device_id)
+    row = conn.execute(
+        "SELECT 1 FROM media_index WHERE id = ? AND source_type = 'device' AND source_key = ? LIMIT 1",
+        (media_id, device_id),
+    ).fetchone()
+    conn.close()
+    return bool(row)
+
+
+def delete_comment(comment_id: int, source_id: str) -> bool:
+    """Delete a comment if source_id is its author OR the creator of the post/media."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT media_id, source_id FROM comments WHERE id = ?",
+        (comment_id,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return False
+    media_id = row["media_id"]
+    author_id = row["source_id"]
+    if author_id != source_id:
+        is_creator = False
+        if conn.execute("SELECT 1 FROM device_shares WHERE media_id = ? AND shared_by_device_id = ? LIMIT 1", (media_id, source_id)).fetchone():
+            is_creator = True
+        elif conn.execute("SELECT 1 FROM media_index WHERE id = ? AND source_type = 'device' AND source_key = ? LIMIT 1", (media_id, source_id)).fetchone():
+            is_creator = True
+        if not is_creator:
+            conn.close()
+            return False
+
+    cur = conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
     conn.commit()
     conn.close()
     return cur.rowcount > 0

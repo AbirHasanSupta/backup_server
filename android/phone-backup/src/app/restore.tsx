@@ -421,7 +421,8 @@ function compareRemoteFiles(a: RemoteFile, b: RemoteFile, field: SortField, dir:
 
 // Normalize one raw item from GET /api/feed into a RemoteFile.
 function mapFeedItem(f: any): RemoteFile {
-  const items: RemoteFile[] = (f.items || []).map((it: any) => ({
+  const rawSubItems = f.items || f.group_items || [];
+  const items: RemoteFile[] = rawSubItems.map((it: any) => ({
     path: it.path,
     size: it.size ?? 0,
     modified_time: it.modified_time ?? 0,
@@ -430,19 +431,20 @@ function mapFeedItem(f: any): RemoteFile {
     is_video: it.is_video,
     kind: 'share' as const,
     is_device_share: true,
-    created_at: f.created_at,
-    uploaded_time: f.created_at,
-    shared_by: f.shared_by,
-    shared_by_device_id: f.shared_by_device_id,
-    group_id: f.group_id,
-    group_caption: f.caption,
-    caption: f.caption,
-    is_own_post: f.is_own_post,
+    created_at: it.created_at ?? f.created_at,
+    uploaded_time: it.uploaded_time ?? f.created_at,
+    shared_by: it.shared_by ?? f.shared_by,
+    shared_by_device_id: it.shared_by_device_id ?? f.shared_by_device_id,
+    group_id: it.group_id ?? f.group_id,
+    group_caption: it.group_caption ?? f.caption,
+    caption: it.caption ?? f.caption,
+    is_own_post: it.is_own_post ?? f.is_own_post,
+    source_id: it.source_id ?? f.source_id,
   }));
   const firstItem = items[0] || {};
   return {
     path: firstItem.path || f.path || '',
-    size: items.reduce((acc, it) => acc + (it.size || 0), 0) || f.size || 0,
+    size: items.length > 0 ? items.reduce((acc, it) => acc + (it.size || 0), 0) : (f.size || 0),
     modified_time: firstItem.modified_time ?? f.modified_time ?? 0,
     media_id: f.media_id ?? firstItem.media_id,
     reaction_counts: f.reaction_counts,
@@ -453,14 +455,14 @@ function mapFeedItem(f: any): RemoteFile {
     share_id: firstItem.share_id ?? f.share_id,
     source_id: f.source_id,
     caption: f.caption,
-    group_caption: f.caption,
+    group_caption: f.group_caption ?? f.caption,
     group_id: f.group_id,
     group_items: items.length > 0 ? items : undefined,
     shared_by: f.shared_by,
     shared_by_device_id: f.shared_by_device_id,
     comment_count: f.comment_count,
     created_at: f.created_at,
-    uploaded_time: f.created_at,
+    uploaded_time: f.uploaded_time ?? f.created_at,
     is_own_post: f.is_own_post,
   };
 }
@@ -542,7 +544,7 @@ function SharedFeedCard({
   item: RemoteFile;
   serverConfig: ServerConfig;
   sourceId: string;
-  onPreview: (file: RemoteFile) => void;
+  onPreview: (file: RemoteFile, postItems?: RemoteFile[]) => void;
   onReact: (file: RemoteFile, emoji: string) => void;
   onOpenComments: (file: RemoteFile) => void;
   onManage: (file: RemoteFile) => void;
@@ -595,7 +597,7 @@ function SharedFeedCard({
             return (
               <TouchableOpacity
                 style={[feedCardStyles.mediaWrap, { width: cardWidth }]}
-                onPress={() => onPreview(subItem)}
+                onPress={() => onPreview(subItem, items)}
                 activeOpacity={0.9}
               >
                 <Image
@@ -713,17 +715,20 @@ type CommentItem = {
   text: string;
   created_at: number;
   is_own?: boolean;
+  can_delete?: boolean;
 };
 
 function CommentsModal({
   visible,
   item,
+  serverConfig,
   colors,
   onClose,
   onCountChange,
 }: {
   visible: boolean;
   item: RemoteFile | null;
+  serverConfig?: ServerConfig;
   colors: AppColors;
   onClose: () => void;
   onCountChange: (mediaId: number, delta: number) => void;
@@ -734,6 +739,11 @@ function CommentsModal({
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const mediaId = item?.media_id;
+  const isPostCreator = Boolean(
+    item?.is_own_post ||
+    (serverConfig?.deviceId && item?.shared_by_device_id === serverConfig.deviceId)
+  );
+  const canDeleteComment = (c: CommentItem) => Boolean(c.can_delete || c.is_own || isPostCreator);
 
   useEffect(() => {
     if (!visible || mediaId == null) return;
@@ -835,7 +845,7 @@ function CommentsModal({
                     </View>
                     <Text style={[modalSheetStyles.commentText, { color: colors.textSecondary }]}>{c.text}</Text>
                   </View>
-                  {c.is_own && (
+                  {canDeleteComment(c) && (
                     <TouchableOpacity onPress={() => handleDelete(c)} hitSlop={8} style={modalSheetStyles.deleteBtn}>
                       <AppIcon androidName="delete_outline" iosName="trash" color={colors.textMuted} size={17} />
                     </TouchableOpacity>
@@ -1059,6 +1069,8 @@ function ManageShareModal({
     let active = true;
     /* eslint-disable react-hooks/set-state-in-effect */
     setLoading(true);
+    setDeleting(false);
+    setRemovingId(null);
     setTargets([]);
     /* eslint-enable react-hooks/set-state-in-effect */
     getShareGroupTargets(groupId)
@@ -1114,6 +1126,7 @@ function ManageShareModal({
               onDeleted();
             } catch {
               Alert.alert('Error', 'Could not delete the post.');
+            } finally {
               setDeleting(false);
             }
           },
@@ -1389,223 +1402,6 @@ const modalSheetStyles = StyleSheet.create({
   },
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Source Selector
-// ─────────────────────────────────────────────────────────────────────────────
-
-type SourceSelectorProps = {
-  mode: SourceMode;
-  sharedSources: SharedSource[];
-  selectedSourceId: string | null;
-  isLoadingSources: boolean;
-  isOffline: boolean;
-  sortEnabled: boolean;
-  sortField: SortField;
-  sortDir: SortDir;
-  onModeChange: (mode: SourceMode) => void;
-  onSourceSelect: (source: SharedSource) => void;
-  onSortChange: (field: SortField, dir: SortDir) => void;
-  colors: AppColors;
-  showModeSwitch?: boolean;
-};
-
-function SourceSelector({
-  mode, sharedSources, selectedSourceId,
-  isLoadingSources, isOffline, sortEnabled, sortField, sortDir,
-  onModeChange, onSourceSelect, onSortChange, colors,
-  showModeSwitch = true,
-}: SourceSelectorProps) {
-  const [showSourceMenu, setShowSourceMenu] = useState(false);
-  const [showSortMenu, setShowSortMenu] = useState(false);
-  const selectedSource = sharedSources.find(s => s.id === selectedSourceId);
-
-  const handleSortSelect = (field: SortField) => {
-    onSortChange(field, field === sortField && sortDir === 'asc' ? 'desc' : 'asc');
-    setShowSortMenu(false);
-  };
-
-  return (
-    <View style={[srcStyles.container, { backgroundColor: colors.surface, borderBottomColor: colors.surfaceBorder }]}>
-      {(showModeSwitch || sortEnabled) && (
-        <View style={srcStyles.pillRow}>
-          {showModeSwitch && (
-            <>
-              <TouchableOpacity
-                onPress={() => {
-                  setShowSourceMenu(false);
-                  setShowSortMenu(false);
-                  onModeChange('phone');
-                }}
-                style={[
-                  srcStyles.pill,
-                  { borderColor: mode === 'phone' ? colors.primary : colors.surfaceBorder,
-                    backgroundColor: mode === 'phone' ? colors.primarySoft : 'transparent' },
-                ]}
-                activeOpacity={0.75}
-              >
-                <AppIcon androidName="smartphone" iosName="iphone" color={mode === 'phone' ? colors.primary : colors.textSecondary} size={14} />
-                <Text style={[srcStyles.pillText, { color: mode === 'phone' ? colors.primary : colors.textSecondary }]}>
-                  Phone Backups
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                onPress={() => {
-                  setShowSortMenu(false);
-                  onModeChange('shared');
-                }}
-                style={[
-                  srcStyles.pill,
-                  { borderColor: mode === 'shared' ? colors.primary : colors.surfaceBorder,
-                    backgroundColor: mode === 'shared' ? colors.primarySoft : 'transparent' },
-                ]}
-                activeOpacity={0.75}
-              >
-                <AppIcon androidName="folder_open" iosName="folder" color={mode === 'shared' ? colors.primary : colors.textSecondary} size={14} />
-                <Text style={[srcStyles.pillText, { color: mode === 'shared' ? colors.primary : colors.textSecondary }]}>
-                  Shared Folders
-                </Text>
-              </TouchableOpacity>
-            </>
-          )}
-
-          {sortEnabled && (
-            <TouchableOpacity
-              onPress={() => {
-                setShowSourceMenu(false);
-                setShowSortMenu(visible => !visible);
-              }}
-              style={[
-                srcStyles.sortButton,
-                {
-                  backgroundColor: showSortMenu ? colors.primarySoft : 'transparent',
-                  borderColor: showSortMenu ? colors.primary : colors.surfaceBorder,
-                },
-              ]}
-              activeOpacity={0.75}
-              accessibilityLabel="Sort files"
-              accessibilityHint={`Currently sorted by ${sortField}, ${sortDir === 'asc' ? 'asc' : 'desc'}`}
-            >
-              <AppIcon
-                androidName="sort"
-                iosName="arrow.up.arrow.down"
-                color={showSortMenu ? colors.primary : colors.textSecondary}
-                size={18}
-                fallback="↕"
-              />
-            </TouchableOpacity>
-          )}
-        </View>
-      )}
-
-      {showSortMenu && sortEnabled && (
-        <View style={[srcStyles.sortMenu, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}>
-          {SORT_OPTIONS.map(option => {
-            const isActive = option.field === sortField;
-            return (
-              <TouchableOpacity
-                key={option.field}
-                style={[
-                  srcStyles.sortMenuItem,
-                  isActive && { backgroundColor: colors.primarySoft },
-                ]}
-                onPress={() => handleSortSelect(option.field)}
-                activeOpacity={0.75}
-              >
-                <Text
-                  style={[
-                    srcStyles.sortMenuItemText,
-                    { color: isActive ? colors.primary : colors.text },
-                  ]}
-                >
-                  {option.label}
-                </Text>
-                {isActive && (
-                  <View style={srcStyles.sortDirection}>
-                    <Text style={[srcStyles.sortDirectionText, { color: colors.primary }]}>
-                      {sortDir === 'asc' ? '↑' : '↓'}
-                    </Text>
-                    <AppIcon
-                      androidName="check"
-                      iosName="checkmark"
-                      color={colors.primary}
-                      size={14}
-                    />
-                  </View>
-                )}
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      )}
-
-      {mode === 'shared' && (
-        <View style={srcStyles.sourceRow}>
-          {isOffline ? (
-            <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
-              Connect to a server to load shared folders.
-            </Text>
-          ) : isLoadingSources ? (
-            <View style={srcStyles.sourceLoadingRow}>
-              <ActivityIndicator size="small" color={colors.primary} />
-              <Text style={[srcStyles.sourceLoadingText, { color: colors.textSecondary }]}>
-                Loading shared sources…
-              </Text>
-            </View>
-          ) : sharedSources.length === 0 ? (
-            <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
-              No shared folders configured. Add folders in the Desktop app → Settings.
-            </Text>
-          ) : (
-            <>
-              <View style={srcStyles.sharedControlsRow}>
-                <TouchableOpacity
-                  style={[srcStyles.sourcePicker, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}
-                  onPress={() => setShowSourceMenu(v => !v)}
-                  activeOpacity={0.8}
-                >
-                  <AppIcon androidName="folder" iosName="folder.fill" color={colors.primary} size={16} />
-                  <Text style={[srcStyles.sourcePickerText, { color: colors.text }]} numberOfLines={1}>
-                    {selectedSource ? selectedSource.label : 'Select a folder…'}
-                  </Text>
-                  <AppIcon androidName={showSourceMenu ? 'expand_less' : 'expand_more'} iosName={showSourceMenu ? 'chevron.up' : 'chevron.down'} color={colors.textSecondary} size={18} />
-                </TouchableOpacity>
-              </View>
-
-              {showSourceMenu && (
-                <View style={[srcStyles.sourceMenu, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
-                  {sharedSources.map(src => (
-                    <TouchableOpacity
-                      key={src.id}
-                      style={[
-                        srcStyles.sourceMenuItem,
-                        src.id === selectedSourceId && { backgroundColor: colors.primarySoft },
-                      ]}
-                      onPress={() => {
-                        onSourceSelect(src);
-                        setShowSourceMenu(false);
-                      }}
-                      activeOpacity={0.75}
-                    >
-                      <AppIcon androidName="folder" iosName="folder.fill" color={src.id === selectedSourceId ? colors.primary : colors.textSecondary} size={16} />
-                      <Text style={[srcStyles.sourceMenuItemText, { color: src.id === selectedSourceId ? colors.primary : colors.text }]}>
-                        {src.label}
-                      </Text>
-                      {src.id === selectedSourceId && (
-                        <AppIcon androidName="check" iosName="checkmark" color={colors.primary} size={14} />
-                      )}
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              )}
-            </>
-          )}
-        </View>
-      )}
-    </View>
-  );
-}
-
 const reactionStyles = StyleSheet.create({
   bar: {
     flexDirection: 'row',
@@ -1763,6 +1559,135 @@ const feedCardStyles = StyleSheet.create({
   },
 });
 
+type SourceSelectorProps = {
+  mode: SourceMode;
+  sharedSources: SharedSource[];
+  selectedSourceId: string | null;
+  isLoadingSources: boolean;
+  isOffline: boolean;
+  onModeChange: (mode: SourceMode) => void;
+  onSourceSelect: (source: SharedSource) => void;
+  colors: AppColors;
+  showModeSwitch?: boolean;
+};
+
+function SourceSelector({
+  mode, sharedSources, selectedSourceId,
+  isLoadingSources, isOffline,
+  onModeChange, onSourceSelect, colors,
+  showModeSwitch = true,
+}: SourceSelectorProps) {
+  const [showSourceMenu, setShowSourceMenu] = useState(false);
+  const selectedSource = sharedSources.find(s => s.id === selectedSourceId);
+
+  if (!showModeSwitch) return null;
+
+  return (
+    <View style={[srcStyles.container, { backgroundColor: colors.surface, borderBottomColor: colors.surfaceBorder }]}>
+      <View style={srcStyles.pillRow}>
+        <TouchableOpacity
+          onPress={() => {
+            setShowSourceMenu(false);
+            onModeChange('phone');
+          }}
+          style={[
+            srcStyles.pill,
+            { borderColor: mode === 'phone' ? colors.primary : colors.surfaceBorder,
+              backgroundColor: mode === 'phone' ? colors.primarySoft : 'transparent' },
+          ]}
+          activeOpacity={0.75}
+        >
+          <AppIcon androidName="smartphone" iosName="iphone" color={mode === 'phone' ? colors.primary : colors.textSecondary} size={14} />
+          <Text style={[srcStyles.pillText, { color: mode === 'phone' ? colors.primary : colors.textSecondary }]}>
+            Phone Backups
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          onPress={() => {
+            onModeChange('shared');
+          }}
+          style={[
+            srcStyles.pill,
+            { borderColor: mode === 'shared' ? colors.primary : colors.surfaceBorder,
+              backgroundColor: mode === 'shared' ? colors.primarySoft : 'transparent' },
+          ]}
+          activeOpacity={0.75}
+        >
+          <AppIcon androidName="folder_open" iosName="folder" color={mode === 'shared' ? colors.primary : colors.textSecondary} size={14} />
+          <Text style={[srcStyles.pillText, { color: mode === 'shared' ? colors.primary : colors.textSecondary }]}>
+            Shared Folders
+          </Text>
+        </TouchableOpacity>
+      </View>
+
+      {mode === 'shared' && (
+        <View style={srcStyles.sourceRow}>
+          {isOffline ? (
+            <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
+              Connect to a server to load shared folders.
+            </Text>
+          ) : isLoadingSources ? (
+            <View style={srcStyles.sourceLoadingRow}>
+              <ActivityIndicator size="small" color={colors.primary} />
+              <Text style={[srcStyles.sourceLoadingText, { color: colors.textSecondary }]}>
+                Loading shared sources…
+              </Text>
+            </View>
+          ) : sharedSources.length === 0 ? (
+            <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
+              No shared folders configured. Add folders in the Desktop app → Settings.
+            </Text>
+          ) : (
+            <>
+              <View style={srcStyles.sharedControlsRow}>
+                <TouchableOpacity
+                  style={[srcStyles.sourcePicker, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}
+                  onPress={() => setShowSourceMenu(v => !v)}
+                  activeOpacity={0.8}
+                >
+                  <AppIcon androidName="folder" iosName="folder.fill" color={colors.primary} size={16} />
+                  <Text style={[srcStyles.sourcePickerText, { color: colors.text }]} numberOfLines={1}>
+                    {selectedSource ? selectedSource.label : 'Select a folder…'}
+                  </Text>
+                  <AppIcon androidName={showSourceMenu ? 'expand_less' : 'expand_more'} iosName={showSourceMenu ? 'chevron.up' : 'chevron.down'} color={colors.textSecondary} size={18} />
+                </TouchableOpacity>
+              </View>
+
+              {showSourceMenu && (
+                <View style={[srcStyles.sourceMenu, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
+                  {sharedSources.map(src => (
+                    <TouchableOpacity
+                      key={src.id}
+                      style={[
+                        srcStyles.sourceMenuItem,
+                        src.id === selectedSourceId && { backgroundColor: colors.primarySoft },
+                      ]}
+                      onPress={() => {
+                        onSourceSelect(src);
+                        setShowSourceMenu(false);
+                      }}
+                      activeOpacity={0.75}
+                    >
+                      <AppIcon androidName="folder" iosName="folder.fill" color={src.id === selectedSourceId ? colors.primary : colors.textSecondary} size={16} />
+                      <Text style={[srcStyles.sourceMenuItemText, { color: src.id === selectedSourceId ? colors.primary : colors.text }]}>
+                        {src.label}
+                      </Text>
+                      {src.id === selectedSourceId && (
+                        <AppIcon androidName="check" iosName="checkmark" color={colors.primary} size={14} />
+                      )}
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+            </>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
 const srcStyles = StyleSheet.create({
   container: {
     borderBottomWidth: StyleSheet.hairlineWidth,
@@ -1785,31 +1710,6 @@ const srcStyles = StyleSheet.create({
     borderWidth: 1.5,
   },
   pillText: { fontSize: TextScale.xs, fontWeight: '700' },
-  sortButton: {
-    width: 32,
-    height: 32,
-    marginLeft: 'auto',
-    borderWidth: 1,
-    borderRadius: Radius.full,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sortMenu: {
-    marginHorizontal: Spacing.four,
-    marginTop: Spacing.two,
-    borderWidth: 1,
-    borderRadius: Radius.md,
-    overflow: 'hidden',
-  },
-  sortMenuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two + 2,
-  },
-  sortMenuItemText: { flex: 1, fontSize: TextScale.sm, fontWeight: '600' },
-  sortDirection: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
-  sortDirectionText: { fontSize: TextScale.sm, fontWeight: '800' },
   sourceRow: { paddingHorizontal: Spacing.four, paddingTop: Spacing.two },
   sourceLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   sourceLoadingText: { fontSize: TextScale.xs },
@@ -1868,40 +1768,121 @@ function LibraryFilterBar({
   onQueryChange,
   matchCount,
   totalCount,
+  isFeed = false,
+  sortField,
+  sortDir,
+  onSortChange,
   colors,
 }: {
   query: string;
   onQueryChange: (value: string) => void;
   matchCount: number;
   totalCount: number;
+  isFeed?: boolean;
+  sortField: SortField;
+  sortDir: SortDir;
+  onSortChange: (field: SortField, dir: SortDir) => void;
   colors: AppColors;
 }) {
+  const [showSortMenu, setShowSortMenu] = useState(false);
   const isFiltering = query.trim().length > 0;
+
+  const handleSortSelect = (field: SortField) => {
+    onSortChange(field, field === sortField && sortDir === 'asc' ? 'desc' : 'asc');
+    setShowSortMenu(false);
+  };
+
   return (
     <View style={[filterStyles.wrap, { borderBottomColor: colors.surfaceBorder }]}>
-      <View style={[filterStyles.searchBox, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}>
-        <AppIcon androidName="search" iosName="magnifyingglass" color={colors.textMuted} size={16} />
-        <TextInput
-          style={[filterStyles.searchInput, { color: colors.text }]}
-          value={query}
-          onChangeText={onQueryChange}
-          placeholder="Search files by name"
-          placeholderTextColor={colors.textMuted}
-          autoCapitalize="none"
-          autoCorrect={false}
-          returnKeyType="search"
-          underlineColorAndroid="transparent"
-          accessibilityLabel="Search files by name"
-        />
-        {query.length > 0 && (
-          <TouchableOpacity onPress={() => onQueryChange('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <AppIcon androidName="close" iosName="xmark.circle.fill" color={colors.textMuted} size={16} />
-          </TouchableOpacity>
-        )}
+      <View style={filterStyles.searchAndSortRow}>
+        <View style={[filterStyles.searchBox, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}>
+          <AppIcon androidName="search" iosName="magnifyingglass" color={colors.textMuted} size={16} />
+          <TextInput
+            style={[filterStyles.searchInput, { color: colors.text }]}
+            value={query}
+            onChangeText={onQueryChange}
+            placeholder={isFeed ? 'Search device, file, folder, caption…' : 'Search files by name'}
+            placeholderTextColor={colors.textMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            returnKeyType="search"
+            underlineColorAndroid="transparent"
+            accessibilityLabel={isFeed ? 'Search feed' : 'Search files by name'}
+          />
+          {query.length > 0 && (
+            <TouchableOpacity onPress={() => onQueryChange('')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <AppIcon androidName="close" iosName="xmark.circle.fill" color={colors.textMuted} size={16} />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <TouchableOpacity
+          onPress={() => setShowSortMenu(visible => !visible)}
+          style={[
+            filterStyles.sortButton,
+            {
+              backgroundColor: showSortMenu ? colors.primarySoft : colors.surfaceElevated,
+              borderColor: showSortMenu ? colors.primary : colors.surfaceBorder,
+            },
+          ]}
+          activeOpacity={0.75}
+          accessibilityLabel="Sort files"
+          accessibilityHint={`Currently sorted by ${sortField}, ${sortDir === 'asc' ? 'asc' : 'desc'}`}
+        >
+          <AppIcon
+            androidName="sort"
+            iosName="arrow.up.arrow.down"
+            color={showSortMenu ? colors.primary : colors.textSecondary}
+            size={18}
+            fallback="↕"
+          />
+        </TouchableOpacity>
       </View>
+
+      {showSortMenu && (
+        <View style={[filterStyles.sortMenu, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}>
+          {SORT_OPTIONS.map(option => {
+            const isActive = option.field === sortField;
+            return (
+              <TouchableOpacity
+                key={option.field}
+                style={[
+                  filterStyles.sortMenuItem,
+                  isActive && { backgroundColor: colors.primarySoft },
+                ]}
+                onPress={() => handleSortSelect(option.field)}
+                activeOpacity={0.75}
+              >
+                <Text
+                  style={[
+                    filterStyles.sortMenuItemText,
+                    { color: isActive ? colors.primary : colors.text },
+                  ]}
+                >
+                  {option.label}
+                </Text>
+                {isActive && (
+                  <View style={filterStyles.sortDirection}>
+                    <Text style={[filterStyles.sortDirectionText, { color: colors.primary }]}>
+                      {sortDir === 'asc' ? '↑' : '↓'}
+                    </Text>
+                    <AppIcon
+                      androidName="check"
+                      iosName="checkmark"
+                      color={colors.primary}
+                      size={14}
+                    />
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      )}
+
       {isFiltering && (
         <Text style={[filterStyles.matchLabel, { color: colors.textMuted }]}>
-          {matchCount.toLocaleString()} of {totalCount.toLocaleString()} files
+          {matchCount.toLocaleString()} of {totalCount.toLocaleString()} {isFeed ? 'posts' : 'files'}
         </Text>
       )}
     </View>
@@ -1916,7 +1897,13 @@ const filterStyles = StyleSheet.create({
     gap: Spacing.two,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
+  searchAndSortRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
   searchBox: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
@@ -1931,6 +1918,29 @@ const filterStyles = StyleSheet.create({
     fontWeight: '600',
     paddingVertical: 8,
   },
+  sortButton: {
+    width: 40,
+    height: 40,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sortMenu: {
+    marginTop: Spacing.one,
+    borderWidth: 1,
+    borderRadius: Radius.md,
+    overflow: 'hidden',
+  },
+  sortMenuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two + 2,
+  },
+  sortMenuItemText: { flex: 1, fontSize: TextScale.sm, fontWeight: '600' },
+  sortDirection: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
+  sortDirectionText: { fontSize: TextScale.sm, fontWeight: '800' },
   matchLabel: { fontSize: TextScale.xs, fontWeight: '600' },
 });
 
@@ -1948,6 +1958,7 @@ type PreviewModalProps = {
   onClose: () => void;
   onNavigate: (index: number) => void;  // called when user navigates
   onDownload: (file: RemoteFile) => void;
+  onShare?: (file: RemoteFile) => void;
   colors: AppColors;
 };
 
@@ -1957,7 +1968,7 @@ type TransitionState = {
 
 const PreviewModal = React.memo(function PreviewModal({
   file, fileList, currentIndex, sourceMode, selectedSourceId, serverConfig,
-  onClose, onNavigate, onDownload, colors,
+  onClose, onNavigate, onDownload, onShare, colors,
 }: PreviewModalProps) {
   const insets = useSafeAreaInsets();
 
@@ -2549,6 +2560,17 @@ const PreviewModal = React.memo(function PreviewModal({
                 size={20}
               />
             </TouchableOpacity>
+            {/* Share Button (Phone backup & Shared folder views) */}
+            {onShare && currentFile && (
+              <TouchableOpacity
+                onPress={() => onShare(currentFile)}
+                style={[pvStyles.topBarBtn, pvStyles.downloadBtn]}
+                activeOpacity={0.8}
+              >
+                <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={18} />
+                <Text style={pvStyles.downloadBtnText}>Share</Text>
+              </TouchableOpacity>
+            )}
             {/* Save Button */}
             <TouchableOpacity
               onPress={() => onDownload(currentFile)}
@@ -3349,6 +3371,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const router = useRouter();
+  const isFeedMode = variant === 'feed';
 
   // Memories availability state
   const [hasMemories, setHasMemories] = useState(false);
@@ -3461,11 +3484,13 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   // Feed interaction / sharing modals
   const [commentsItem, setCommentsItem] = useState<RemoteFile | null>(null);
   const [shareModalVisible, setShareModalVisible] = useState(false);
+  const [singleShareFile, setSingleShareFile] = useState<RemoteFile | null>(null);
 
   // Preview state
   const [previewFile, setPreviewFile] = useState<RemoteFile | null>(null);
   const [previewIndex, setPreviewIndex] = useState<number>(0);
   const [warmPreviewFile, setWarmPreviewFile] = useState<RemoteFile | null>(null);
+  const [feedPreviewItems, setFeedPreviewItems] = useState<RemoteFile[] | null>(null);
 
   const headerHeight = 100;
   const {
@@ -3650,10 +3675,36 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   const filteredFiles = useMemo(() => {
     if (!isFiltering) return files;
+    if (isFeedMode) {
+      const q = searchQuery.trim().toLowerCase();
+      const matched = files.filter(f => {
+        // 1. Device name & ID
+        const deviceName = (f.shared_by || '').toLowerCase();
+        const deviceId = (f.shared_by_device_id || '').toLowerCase();
+        if (deviceName.includes(q) || deviceId.includes(q)) return true;
+
+        // 2. Post caption & group caption
+        const caption = (f.caption || f.group_caption || '').toLowerCase();
+        if (caption.includes(q)) return true;
+
+        // 3. File name & folder names (main path)
+        const mainPath = (f.path || '').toLowerCase();
+        if (mainPath.includes(q)) return true;
+
+        // 4. File names & folder names (group items)
+        if (f.group_items && f.group_items.length > 0) {
+          return f.group_items.some(it => (it.path || '').toLowerCase().includes(q));
+        }
+
+        return false;
+      });
+      return matched.sort((a, b) => compareRemoteFiles(a, b, sortField, sortDir));
+    }
     return [...searchResults].sort((a, b) => compareRemoteFiles(a, b, sortField, sortDir));
-  }, [isFiltering, searchResults, sortField, sortDir, files]);
+  }, [isFiltering, isFeedMode, searchQuery, files, sortField, sortDir, searchResults]);
 
   const runSearch = useCallback((query: string) => {
+    if (isFeedMode) return;
     const trimmed = query.trim();
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
     if (!trimmed) {
@@ -3679,7 +3730,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         if (generation === searchGenRef.current && restoreMountedRef.current) setIsSearching(false);
       }
     }, 350);
-  }, [sourceMode, selectedSourceId]);
+  }, [isFeedMode, sourceMode, selectedSourceId]);
 
   useEffect(() => {
     return () => {
@@ -3706,8 +3757,6 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       };
     });
   }, [isFiltering, visibleRows, filteredFiles]);
-
-  const isFeedMode = variant === 'feed';
 
   // Reaction handler
   const handleToggleReaction = useCallback(async (file: RemoteFile, emoji: string) => {
@@ -3776,27 +3825,28 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     );
   }, []);
 
-  // Device-to-device share: build items from the current selection and post
-  // them. source_type/source_key are derived from the active Library section
+  // Device-to-device share: build items from the current selection (or single previewed file)
+  // and post them. source_type/source_key are derived from the active Library section
   // (phone-backup vs a specific shared folder) so both sections can share.
   const handleShareSubmit = useCallback(async (targetIds: string[], caption: string) => {
     if (targetIds.length === 0) return;
     const sourceType = sourceMode === 'shared' ? 'shared' : 'phone';
-    const sourceKey = sourceMode === 'shared' ? selectedSourceId : serverConfig?.deviceId;
-    if (!sourceKey) {
+    const defaultSourceKey = sourceMode === 'shared' ? (singleShareFile?.source_id ?? selectedSourceId) : serverConfig?.deviceId;
+    if (!defaultSourceKey) {
       Alert.alert('Error', 'Could not determine where the selected files come from.');
       return;
     }
-    const items = Array.from(selectedPaths).map(path => {
-      const f = files.find(x => x.path === path);
-      return {
-        source_type: sourceType,
-        source_key: sourceKey,
-        relative_path: path,
-        size: f?.size ?? 0,
-        modified_time: f?.modified_time ?? 0,
-      };
-    });
+    const targetFiles: RemoteFile[] = singleShareFile
+      ? [singleShareFile]
+      : Array.from(selectedPaths).map(path => files.find(x => x.path === path)).filter(Boolean) as RemoteFile[];
+
+    const items = targetFiles.map(f => ({
+      source_type: f.kind === 'shared' || sourceMode === 'shared' ? 'shared' : sourceType,
+      source_key: f.source_id ?? defaultSourceKey,
+      relative_path: f.path,
+      size: f.size ?? 0,
+      modified_time: f.modified_time ?? 0,
+    }));
     if (items.length === 0) {
       Alert.alert('Nothing to share', 'Select at least one file first.');
       return;
@@ -3805,8 +3855,11 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       const res = await createDeviceShare(targetIds, caption, items);
       const shared = res?.count ?? items.length;
       setShareModalVisible(false);
-      setSelectedPaths(new Set());
-      setSelectionMode(false);
+      setSingleShareFile(null);
+      if (!singleShareFile) {
+        setSelectedPaths(new Set());
+        setSelectionMode(false);
+      }
       hapticSuccess();
       Alert.alert(
         'Shared',
@@ -3816,7 +3869,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       hapticError();
       Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not share the selected files.'));
     }
-  }, [sourceMode, selectedSourceId, serverConfig, selectedPaths, files]);
+  }, [sourceMode, selectedSourceId, serverConfig, singleShareFile, selectedPaths, files]);
 
   // Flat ordered list of previewable files
   const previewableFiles = useMemo<RemoteFile[]>(() => {
@@ -3953,9 +4006,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   useEffect(() => {
     if (isOffline || isDownloading) return;
-    // Feed sources from /api/feed (no shared source needed); the library shared
-    // view still requires a selected source.
-    if (!isFeedMode && (sourceMode !== 'shared' || !selectedSourceId)) return;
+    // Feed sources from /api/feed (no shared source needed); shared mode requires selectedSourceId.
+    if (!isFeedMode && sourceMode === 'shared' && !selectedSourceId) return;
     queueMicrotask(() => {
       void handleFetch({ quiet: true, preserveSelection: true });
     });
@@ -3963,7 +4015,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   useFocusEffect(useCallback(() => {
     if (isOffline || isDownloading) return;
-    if (!isFeedMode && (sourceMode !== 'shared' || !selectedSourceId)) return;
+    if (!isFeedMode && sourceMode === 'shared' && !selectedSourceId) return;
     void handleFetch({ quiet: true, preserveSelection: true });
   }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]));
 
@@ -3994,21 +4046,33 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
   }, [variant]);
 
+  const handleShareFromPreview = useCallback((file: RemoteFile) => {
+    setSingleShareFile(file);
+    setShareModalVisible(true);
+  }, []);
+
   // Preview handlers
-  const openPreview = useCallback((file: RemoteFile, index?: number) => {
+  const openPreview = useCallback((file: RemoteFile, postItems?: RemoteFile[], index?: number) => {
+    const activeList = postItems ?? (isFeedMode ? [file] : previewableFiles);
     const idx = index !== undefined
       ? index
-      : previewableFiles.findIndex(f =>
+      : activeList.findIndex(f =>
           f.share_id != null && file.share_id != null ? f.share_id === file.share_id : f.path === file.path
         );
     setPreviewIndex(idx >= 0 ? idx : 0);
     setPreviewFile(file);
-  }, [previewableFiles]);
+  }, [isFeedMode, previewableFiles]);
 
-  const handlePreview = useCallback((file: RemoteFile) => {
+  const handlePreview = useCallback((file: RemoteFile, postItems?: RemoteFile[]) => {
     setWarmPreviewFile(file);
-    openPreview(file);
-  }, [openPreview]);
+    if (isFeedMode && postItems && postItems.length > 0) {
+      setFeedPreviewItems(postItems);
+      openPreview(file, postItems);
+    } else {
+      setFeedPreviewItems(null);
+      openPreview(file);
+    }
+  }, [isFeedMode, openPreview]);
 
   const handleWarmPreview = useCallback((file: RemoteFile) => {
     if (getFileCategory(file.path) === 'video') {
@@ -4017,13 +4081,17 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   }, []);
 
   const handlePreviewNavigate = useCallback((newIndex: number) => {
-    if (newIndex < 0 || newIndex >= previewableFiles.length) return;
+    const activeList = isFeedMode && feedPreviewItems && feedPreviewItems.length > 0
+      ? feedPreviewItems
+      : previewableFiles;
+    if (newIndex < 0 || newIndex >= activeList.length) return;
     setPreviewIndex(newIndex);
-    setPreviewFile(previewableFiles[newIndex]);
-  }, [previewableFiles]);
+    setPreviewFile(activeList[newIndex]);
+  }, [isFeedMode, feedPreviewItems, previewableFiles]);
 
   const closePreview = useCallback(() => {
     setPreviewFile(null);
+    setFeedPreviewItems(null);
   }, []);
 
   const handleToggleExpand = useCallback(async (nodeKey: string) => {
@@ -4510,7 +4578,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
                 </>
               )}
             </AnimatedPressable>
-            {files.length > 0 && (
+            {files.length > 0 && !isFeedMode && (
               <AnimatedPressable onPress={selectAll} style={[styles.actionBtn, isOffline && styles.disabledBtn]} disabled={isDownloading || isOffline} scaleDown={0.92} haptic>
                 <AppIcon androidName="select_all" iosName="checkmark.circle" color={isOffline ? colors.textMuted : colors.primary} size={16} />
                 <Text style={[styles.actionBtnText, { color: isOffline ? colors.textMuted : colors.primary }]}>
@@ -4523,31 +4591,31 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           </View>
           </View>
 
-          <SourceSelector
-            mode={sourceMode}
-            sharedSources={sharedSources}
-            selectedSourceId={selectedSourceId}
-            isLoadingSources={isLoadingSources}
-            isOffline={isOffline}
-            sortEnabled={files.length > 0}
-            sortField={sortField}
-            sortDir={sortDir}
-            onModeChange={handleModeChange}
-            onSourceSelect={handleSourceSelect}
-            onSortChange={handleSortChange}
-            colors={colors}
-            showModeSwitch={variant !== 'feed'}
-          />
-
-          {files.length > 0 && (
-            <LibraryFilterBar
-              query={searchQuery}
-              onQueryChange={(q) => { setSearchQuery(q); runSearch(q); }}
-              matchCount={filteredFiles.length}
-              totalCount={files.length}
+          {variant !== 'feed' && (
+            <SourceSelector
+              mode={sourceMode}
+              sharedSources={sharedSources}
+              selectedSourceId={selectedSourceId}
+              isLoadingSources={isLoadingSources}
+              isOffline={isOffline}
+              onModeChange={handleModeChange}
+              onSourceSelect={handleSourceSelect}
               colors={colors}
+              showModeSwitch
             />
           )}
+
+          <LibraryFilterBar
+            query={searchQuery}
+            onQueryChange={(q) => { setSearchQuery(q); runSearch(q); }}
+            matchCount={filteredFiles.length}
+            totalCount={files.length}
+            isFeed={isFeedMode}
+            sortField={sortField}
+            sortDir={sortDir}
+            onSortChange={handleSortChange}
+            colors={colors}
+          />
           {/* Hint Bar */}
           {files.length > 0 && selectedPaths.size === 0 && !selectionMode && !isDownloading && (
             <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
@@ -4695,20 +4763,26 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             <View style={styles.emptyContainer}>
               <View style={[styles.emptyIconWrap, { backgroundColor: colors.primarySoft }]}>
                 <AppIcon
-                  androidName={isFiltering ? 'search' : 'cloud_download'}
-                  iosName={isFiltering ? 'magnifyingglass' : 'icloud.and.arrow.down'}
+                  androidName={isFiltering ? 'search' : isFeedMode ? 'dynamic_feed' : 'cloud_download'}
+                  iosName={isFiltering ? 'magnifyingglass' : isFeedMode ? 'rectangle.stack' : 'icloud.and.arrow.down'}
                   color={colors.primary}
                   size={36}
                   fallback={isFiltering ? '?' : '⬇️'}
                 />
               </View>
-              <Text style={styles.emptyTitle}>{isFiltering ? 'No matching files' : 'No files fetched'}</Text>
+              <Text style={styles.emptyTitle}>
+                {isFiltering
+                  ? isFeedMode ? 'No matching posts' : 'No matching files'
+                  : isFeedMode ? 'Your feed is empty' : 'No files fetched'}
+              </Text>
               <Text style={styles.emptySubtitle}>
                 {isFiltering
-                  ? 'Try a different name.'
-                  : sourceMode === 'shared' && !selectedSourceId
-                    ? 'Select a shared folder above, then tap Fetch.'
-                    : 'Tap Fetch to see files available on the server.'}
+                  ? 'Try a different search term.'
+                  : isFeedMode
+                    ? 'Shared photos and videos from connected devices will appear here.'
+                    : sourceMode === 'shared' && !selectedSourceId
+                      ? 'Select a shared folder above, then tap Fetch.'
+                      : 'Tap Fetch to see files available on the server.'}
               </Text>
             </View>
           ) : null
@@ -4734,7 +4808,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       {previewFile && (
         <PreviewModal
           file={previewFile}
-          fileList={previewableFiles}
+          fileList={isFeedMode && feedPreviewItems && feedPreviewItems.length > 0 ? feedPreviewItems : previewableFiles}
           currentIndex={previewIndex}
           sourceMode={sourceMode}
           selectedSourceId={selectedSourceId}
@@ -4742,6 +4816,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           onClose={closePreview}
           onNavigate={handlePreviewNavigate}
           onDownload={handleDownloadSingle}
+          onShare={!isFeedMode ? handleShareFromPreview : undefined}
           colors={colors}
         />
       )}
@@ -4749,9 +4824,9 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       {/* Share selected files to other devices (Library selection mode) */}
       <ShareModal
         visible={shareModalVisible}
-        count={selectedPaths.size}
+        count={singleShareFile ? 1 : selectedPaths.size}
         colors={colors}
-        onClose={() => setShareModalVisible(false)}
+        onClose={() => { setShareModalVisible(false); setSingleShareFile(null); }}
         onSubmit={handleShareSubmit}
       />
 
@@ -4775,6 +4850,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       <CommentsModal
         visible={commentsItem !== null}
         item={commentsItem}
+        serverConfig={serverConfig}
         colors={colors}
         onClose={() => setCommentsItem(null)}
         onCountChange={handleCommentCountChange}

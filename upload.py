@@ -49,6 +49,7 @@ from database import (
     add_comment,
     get_comments_for_media,
     delete_comment,
+    is_media_or_post_creator,
     get_share_target_devices,
     create_device_share,
     get_device_shares_for_target,
@@ -1692,8 +1693,12 @@ async def list_media_comments(
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     comments = await asyncio.to_thread(get_comments_for_media, media_id)
+    is_post_creator = False
+    if device_id:
+        is_post_creator = await asyncio.to_thread(is_media_or_post_creator, media_id, device_id)
     for c in comments:
         c["is_own"] = (device_id is not None and c["source_id"] == device_id)
+        c["can_delete"] = c["is_own"] or is_post_creator
     return {"comments": comments}
 
 
