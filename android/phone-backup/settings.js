@@ -413,6 +413,21 @@ export async function clearScanSnapshotForFolder(folderName) {
   if (changed) await AsyncStorage.setItem(KEYS.SCAN_SNAPSHOT, JSON.stringify(obj));
 }
 
+export async function removePathsFromScanSnapshot(paths) {
+  if (!paths || !paths.length) return;
+  const raw = await AsyncStorage.getItem(KEYS.SCAN_SNAPSHOT);
+  const obj = safeJsonParse(raw, null);
+  if (!obj || typeof obj !== 'object') return;
+  let changed = false;
+  for (const p of paths) {
+    if (obj[p] !== undefined) {
+      delete obj[p];
+      changed = true;
+    }
+  }
+  if (changed) await AsyncStorage.setItem(KEYS.SCAN_SNAPSHOT, JSON.stringify(obj));
+}
+
 // ─── Device token (per-device auth from server) ───────────────────────────────
 export async function getDeviceToken() { return (await AsyncStorage.getItem(KEYS.DEVICE_TOKEN)) || ''; }
 export async function setDeviceToken(token) { await AsyncStorage.setItem(KEYS.DEVICE_TOKEN, token); }
