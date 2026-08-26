@@ -178,6 +178,18 @@ def cluster_source_media(source_id: str) -> list[dict]:
         """,
         params,
     ).fetchall()
+
+    all_source_rows = conn.execute(
+        f"""
+        SELECT id, source_type, source_key, relative_path, size, modified_time,
+               capture_time, cap_lat, cap_lon
+        FROM media_index
+        WHERE ({where_clause})
+          AND capture_time IS NOT NULL
+        ORDER BY capture_time ASC
+        """,
+        params,
+    ).fetchall()
     conn.close()
 
     if not rows:
@@ -186,6 +198,7 @@ def cluster_source_media(source_id: str) -> list[dict]:
         return []
 
     items = [dict(r) for r in rows]
+    all_source_items = [dict(r) for r in all_source_rows]
 
     # Cluster media chronologically
     clusters: list[list[dict]] = []
@@ -226,16 +239,40 @@ def cluster_source_media(source_id: str) -> list[dict]:
         start_time = min(times)
         end_time = max(times)
 
+        # Correlate all photos and videos from the source taken during this trip window
+        cluster_ids = {x["id"] for x in c}
+        trip_media_items = list(c)
+
+        for candidate in all_source_items:
+            cid = candidate["id"]
+            if cid in cluster_ids:
+                continue
+            ctime = candidate.get("capture_time")
+            if ctime is not None and start_time <= ctime <= end_time:
+                clat = candidate.get("cap_lat")
+                clon = candidate.get("cap_lon")
+                if clat is not None and clon is not None:
+                    # Geotagged candidate: verify it occurred within proximity
+                    if _haversine_km(clat, clon, center_lat, center_lon) <= MAX_DISTANCE_KM * 1.5:
+                        trip_media_items.append(candidate)
+                        cluster_ids.add(cid)
+                else:
+                    # Non-geotagged video/photo captured during the verified trip timeframe
+                    trip_media_items.append(candidate)
+                    cluster_ids.add(cid)
+
+        trip_media_items.sort(key=lambda x: (x.get("capture_time") or 0, x.get("relative_path") or ""))
+
         # Pick cover media: prefer first image, fallback to first item
         cover_id = None
-        for it in c:
+        for it in trip_media_items:
             path = it["relative_path"].lower()
             ext = ("." + path.rsplit(".", 1)[-1]) if "." in path else ""
             if ext in image_exts:
                 cover_id = it["id"]
                 break
-        if not cover_id and c:
-            cover_id = c[0]["id"]
+        if not cover_id and trip_media_items:
+            cover_id = trip_media_items[0]["id"]
 
         place_name = reverse_geocode(center_lat, center_lon) or coord_place_label(center_lat, center_lon)
         title = generate_trip_title(start_time, end_time, place_name)
@@ -246,9 +283,9 @@ def cluster_source_media(source_id: str) -> list[dict]:
             "end_time": end_time,
             "center_lat": center_lat,
             "center_lon": center_lon,
-            "media_count": len(c),
+            "media_count": len(trip_media_items),
             "cover_media_id": cover_id,
-            "media_ids": [x["id"] for x in c],
+            "media_ids": [x["id"] for x in trip_media_items],
         })
 
     # Save to database idempotently

@@ -76,7 +76,7 @@ from video_preview import (
 
 router = APIRouter()
 
-APP_VERSION = "3.4.2"
+APP_VERSION = "4.0.0"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

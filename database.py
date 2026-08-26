@@ -1956,10 +1956,33 @@ def get_trips(source_id: str) -> list[dict]:
         """,
         (source_id,),
     ).fetchall()
+
+    video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
+    media_counts = {}
+    counts_rows = conn.execute(
+        """
+        SELECT tm.trip_id, mi.relative_path
+        FROM trip_media tm
+        JOIN media_index mi ON tm.media_id = mi.id
+        WHERE tm.trip_id IN (SELECT id FROM trips WHERE source_id = ?)
+        """,
+        (source_id,),
+    ).fetchall()
+    for cr in counts_rows:
+        tid = cr["trip_id"]
+        path = (cr["relative_path"] or "").lower()
+        ext = ("." + path.rsplit(".", 1)[-1]) if "." in path else ""
+        is_vid = ext in video_exts
+        if tid not in media_counts:
+            media_counts[tid] = [0, 0]  # [photo_count, video_count]
+        if is_vid:
+            media_counts[tid][1] += 1
+        else:
+            media_counts[tid][0] += 1
+
     conn.close()
 
     trips = []
-    video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
     for r in rows:
         cover_path = r["cover_path"]
         ext = ("." + cover_path.rsplit(".", 1)[-1].lower()) if cover_path and "." in cover_path else ""
@@ -1972,6 +1995,7 @@ def get_trips(source_id: str) -> list[dict]:
                 "source_id": r["cover_source_key"] or source_id,
                 "is_video": ext in video_exts,
             }
+        p_cnt, v_cnt = media_counts.get(r["id"], (r["media_count"], 0))
         trips.append({
             "id": r["id"],
             "source_id": r["source_id"],
@@ -1981,6 +2005,8 @@ def get_trips(source_id: str) -> list[dict]:
             "center_lat": r["center_lat"],
             "center_lon": r["center_lon"],
             "media_count": r["media_count"],
+            "photo_count": p_cnt,
+            "video_count": v_cnt,
             "cover_media_id": r["cover_media_id"],
             "cover": cover_obj,
             "created_at": r["created_at"],

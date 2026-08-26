@@ -10,6 +10,7 @@ import concurrent.futures
 import json
 import os
 import random
+import re
 import subprocess
 import threading
 import time as time_module
@@ -153,16 +154,50 @@ def _extract_image_exif_and_gps(full_path: str) -> tuple[int | None, tuple[float
     return cap_time, gps_point
 
 
-def _extract_video_creation_time(full_path: str) -> int | None:
+def _parse_iso6709_location(val: str) -> tuple[float, float] | None:
+    if not val or not isinstance(val, str):
+        return None
+    val = val.strip()
+    if not val:
+        return None
+
+    # Match ISO 6709 format: [+-]DD.DDDD[+-]DDD.DDDD([+-]AAA.AAA)?(/)?
+    # Examples: +37.7749-122.4194/ or +37.7749-122.4194+015.000/ or +37.7749-122.4194
+    m = re.match(r"^([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)(?:[+-][\d\.]+)?/?$", val)
+    if m:
+        try:
+            lat = float(m.group(1))
+            lon = float(m.group(2))
+            if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0 and not (lat == 0.0 and lon == 0.0):
+                return round(lat, 6), round(lon, 6)
+        except Exception:
+            pass
+
+    # Match comma/space separated decimal coords: e.g. "37.7749, -122.4194" or "+37.7749, -122.4194"
+    m2 = re.match(r"^([+-]?\d+(?:\.\d+)?)[,\s]+([+-]?\d+(?:\.\d+)?)$", val)
+    if m2:
+        try:
+            lat = float(m2.group(1))
+            lon = float(m2.group(2))
+            if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0 and not (lat == 0.0 and lon == 0.0):
+                return round(lat, 6), round(lon, 6)
+        except Exception:
+            pass
+
+    return None
+
+
+def _extract_video_creation_time_and_gps(full_path: str) -> tuple[int | None, tuple[float, float] | None]:
     ffprobe = _ffprobe_path()
     if not ffprobe:
-        return None
+        return None, None
     try:
         cmd = [
             ffprobe,
             "-v", "quiet",
             "-print_format", "json",
             "-show_format",
+            "-show_streams",
             full_path,
         ]
         run_options = {
@@ -175,18 +210,76 @@ def _extract_video_creation_time(full_path: str) -> int | None:
             run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
         proc = subprocess.run(cmd, **run_options)
         if proc.returncode != 0 or not proc.stdout:
-            return None
+            return None, None
         data = json.loads(proc.stdout)
-        tags = data.get("format", {}).get("tags", {})
-        if isinstance(tags, dict):
-            for key, val in tags.items():
-                if key.lower() in ("creation_time", "date", "date-time"):
-                    ts = _parse_date_str(str(val))
-                    if ts is not None:
-                        return ts
+
+        tag_dicts = []
+        format_tags = data.get("format", {}).get("tags", {})
+        if isinstance(format_tags, dict):
+            tag_dicts.append(format_tags)
+        for s in data.get("streams", []):
+            stags = s.get("tags", {})
+            if isinstance(stags, dict):
+                tag_dicts.append(stags)
+
+        cap_time = None
+        gps_point = None
+
+        time_keys = ("creation_time", "date", "date-time", "com.apple.quicktime.creationdate")
+        gps_keys = (
+            "location",
+            "location-eng",
+            "com.apple.quicktime.location.iso6709",
+            "location.iso6709",
+            "©xyz",
+            "xyz",
+            "gps_coordinates",
+            "coordinates",
+        )
+
+        for tags in tag_dicts:
+            lower_tags = {str(k).lower(): v for k, v in tags.items()}
+            if cap_time is None:
+                for k in time_keys:
+                    raw_val = lower_tags.get(k)
+                    if raw_val:
+                        ts = _parse_date_str(str(raw_val))
+                        if ts is not None:
+                            cap_time = ts
+                            break
+
+            if gps_point is None:
+                for k in gps_keys:
+                    raw_val = lower_tags.get(k)
+                    if raw_val:
+                        pt = _parse_iso6709_location(str(raw_val))
+                        if pt is not None:
+                            gps_point = pt
+                            break
+                if gps_point is None:
+                    lat_val = lower_tags.get("latitude") or lower_tags.get("gpslatitude")
+                    lon_val = lower_tags.get("longitude") or lower_tags.get("gpslongitude")
+                    if lat_val and lon_val:
+                        try:
+                            lat = float(str(lat_val).strip("+"))
+                            lon = float(str(lon_val).strip("+"))
+                            if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0 and not (lat == 0.0 and lon == 0.0):
+                                gps_point = (round(lat, 6), round(lon, 6))
+                        except Exception:
+                            pass
+
+            if cap_time is not None and gps_point is not None:
+                break
+
+        return cap_time, gps_point
     except Exception:
         pass
-    return None
+    return None, None
+
+
+def _extract_video_creation_time(full_path: str) -> int | None:
+    ts, _ = _extract_video_creation_time_and_gps(full_path)
+    return ts
 
 
 def _fallback_capture_time(full_path: str, fallback_mtime: int | None) -> tuple[int | None, str]:
@@ -228,9 +321,9 @@ def _extract_media_row_metadata(item: dict) -> dict:
     now_ts = item["now_ts"]
 
     cap_lat, cap_lon = None, None
-    gps_checked = ext in IMAGE_EXTS
+    gps_checked = True
 
-    if gps_checked:
+    if ext in IMAGE_EXTS:
         cap_time, gps = _extract_image_exif_and_gps(full_path)
         cap_source = "exif" if cap_time is not None else None
         if gps:
@@ -238,11 +331,14 @@ def _extract_media_row_metadata(item: dict) -> dict:
         if cap_time is None:
             cap_time, cap_source = _fallback_capture_time(full_path, mtime)
     elif ext in VIDEO_EXTS:
-        cap_time = _extract_video_creation_time(full_path)
+        cap_time, gps = _extract_video_creation_time_and_gps(full_path)
         cap_source = "video" if cap_time is not None else None
+        if gps:
+            cap_lat, cap_lon = gps
         if cap_time is None:
             cap_time, cap_source = _fallback_capture_time(full_path, mtime)
     else:
+        gps_checked = False
         cap_time, cap_source = _fallback_capture_time(full_path, mtime)
 
     cap_month, cap_day, cap_year = None, None, None
@@ -921,11 +1017,15 @@ def get_place_clusters(device_id: str) -> dict:
         items.sort(key=lambda it: it.get("capture_time") or 0, reverse=True)
         cover = items[0]
         ext = os.path.splitext(cover["relative_path"])[1].lower()
+        video_count = sum(1 for it in items if os.path.splitext(it["relative_path"])[1].lower() in VIDEO_EXTS)
+        photo_count = len(items) - video_count
         results.append({
             "cluster_key": f"{lat}:{lon}",
             "lat": lat,
             "lon": lon,
             "count": len(items),
+            "photo_count": photo_count,
+            "video_count": video_count,
             "cover": {
                 "source_type": cover["source_type"],
                 "source_id": cover["source_key"],

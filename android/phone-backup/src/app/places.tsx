@@ -57,6 +57,8 @@ type PlaceCluster = {
   lat: number;
   lon: number;
   count: number;
+  photo_count?: number;
+  video_count?: number;
   cover: { source_type: string; source_id: string; relative_path: string; is_video: boolean };
 };
 
@@ -69,6 +71,8 @@ type Trip = {
   center_lat: number;
   center_lon: number;
   media_count: number;
+  photo_count?: number;
+  video_count?: number;
   cover_media_id: number | null;
   cover?: { source_type: string; source_id: string; relative_path: string; is_video: boolean } | null;
 };
@@ -139,6 +143,7 @@ export default function PlacesScreen() {
   const [clusterLoading, setClusterLoading] = useState(false);
   const [placeNames, setPlaceNames] = useState<Record<string, string | null>>({});
   const resolvedPlaceKeysRef = useRef<Set<string>>(new Set());
+  const [placeMediaFilter, setPlaceMediaFilter] = useState<'all' | 'photos' | 'videos'>('all');
 
   // Trips state
   const [trips, setTrips] = useState<Trip[]>([]);
@@ -146,6 +151,7 @@ export default function PlacesScreen() {
   const [activeTrip, setActiveTrip] = useState<Trip | null>(null);
   const [tripItems, setTripItems] = useState<PlaceItem[]>([]);
   const [tripLoading, setTripLoading] = useState(false);
+  const [tripMediaFilter, setTripMediaFilter] = useState<'all' | 'photos' | 'videos'>('all');
 
   // Full-Screen Viewer state (shared)
   const [viewerItems, setViewerItems] = useState<PlaceItem[]>([]);
@@ -153,6 +159,22 @@ export default function PlacesScreen() {
   const viewerListRef = useRef<FlatList<PlaceItem>>(null);
   const [saving, setSaving] = useState(false);
   const [sharing, setSharing] = useState(false);
+
+  const clusterPhotoCount = useMemo(() => clusterItems.filter(it => !it.is_video).length, [clusterItems]);
+  const clusterVideoCount = useMemo(() => clusterItems.filter(it => it.is_video).length, [clusterItems]);
+  const filteredClusterItems = useMemo(() => {
+    if (placeMediaFilter === 'photos') return clusterItems.filter(it => !it.is_video);
+    if (placeMediaFilter === 'videos') return clusterItems.filter(it => it.is_video);
+    return clusterItems;
+  }, [clusterItems, placeMediaFilter]);
+
+  const tripPhotoCount = useMemo(() => tripItems.filter(it => !it.is_video).length, [tripItems]);
+  const tripVideoCount = useMemo(() => tripItems.filter(it => it.is_video).length, [tripItems]);
+  const filteredTripItems = useMemo(() => {
+    if (tripMediaFilter === 'photos') return tripItems.filter(it => !it.is_video);
+    if (tripMediaFilter === 'videos') return tripItems.filter(it => it.is_video);
+    return tripItems;
+  }, [tripItems, tripMediaFilter]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -207,6 +229,7 @@ export default function PlacesScreen() {
     hapticMedium();
     setActiveCluster(cluster);
     setClusterItems([]);
+    setPlaceMediaFilter('all');
     setClusterLoading(true);
     try {
       const res = await getPlaceItems(cluster.cluster_key);
@@ -221,12 +244,14 @@ export default function PlacesScreen() {
   const closeCluster = useCallback(() => {
     setActiveCluster(null);
     setClusterItems([]);
+    setPlaceMediaFilter('all');
   }, []);
 
   const openTrip = useCallback(async (trip: Trip) => {
     hapticMedium();
     setActiveTrip(trip);
     setTripItems([]);
+    setTripMediaFilter('all');
     setTripLoading(true);
     try {
       const res = await getTripMedia(trip.id);
@@ -241,19 +266,20 @@ export default function PlacesScreen() {
   const closeTrip = useCallback(() => {
     setActiveTrip(null);
     setTripItems([]);
+    setTripMediaFilter('all');
   }, []);
 
   const openViewerForCluster = useCallback((index: number) => {
     hapticLight();
-    setViewerItems(clusterItems);
+    setViewerItems(filteredClusterItems);
     setViewerIndex(index);
-  }, [clusterItems]);
+  }, [filteredClusterItems]);
 
   const openViewerForTrip = useCallback((index: number) => {
     hapticLight();
-    setViewerItems(tripItems);
+    setViewerItems(filteredTripItems);
     setViewerIndex(index);
-  }, [tripItems]);
+  }, [filteredTripItems]);
 
   const closeViewer = useCallback(() => {
     setViewerIndex(null);
@@ -396,7 +422,7 @@ export default function PlacesScreen() {
             {loading
               ? 'Loading…'
               : activeTab === 'places'
-              ? (places.length > 0 ? `${places.length} places discovered` : 'No geotagged memories yet')
+              ? (places.length > 0 ? `${places.length} places discovered` : 'No geotagged photos or videos yet')
               : (trips.length > 0 ? `${trips.length} auto-generated trip${trips.length !== 1 ? 's' : ''}` : 'No trips generated yet')}
           </Text>
         </View>
@@ -458,7 +484,7 @@ export default function PlacesScreen() {
             </View>
             <Text style={styles.emptyTitle}>No places yet</Text>
             <Text style={styles.emptySubtitle}>
-              Photos with GPS location data will appear here once they&apos;re backed up and indexed.
+              Photos and videos with GPS location data will appear here once they&apos;re backed up and indexed.
             </Text>
           </View>
         ) : (
@@ -470,7 +496,7 @@ export default function PlacesScreen() {
             contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: gridGap }}
             columnWrapperStyle={{ gap: gridGap }}
             renderItem={({ item, index }) => {
-              const thumbUrl = serverConfig
+              const thumbUrl = serverConfig && item.cover?.relative_path
                 ? (item.cover.is_video
                   ? buildThumbnailUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id)
                   : buildPreviewUrl(serverConfig, item.cover.relative_path, item.cover.source_type, item.cover.source_id))
@@ -493,6 +519,11 @@ export default function PlacesScreen() {
                         contentFit="cover"
                         transition={150}
                       />
+                      {item.cover?.is_video && (
+                        <View style={styles.videoBadge}>
+                          <AppIcon androidName="play_arrow" iosName="play.fill" color="#fff" size={14} />
+                        </View>
+                      )}
                       <View style={styles.placeCellOverlay}>
                         <Text style={styles.placeCellCount}>{item.count}</Text>
                       </View>
@@ -529,7 +560,7 @@ export default function PlacesScreen() {
                 </View>
                 <Text style={styles.emptyTitle}>No trip albums yet</Text>
                 <Text style={styles.emptySubtitle}>
-                  Trips are automatically curated when 5+ photos are taken in the same region over a day, weekend, or vacation.
+                  Trips are automatically curated when 5+ photos and videos are taken in the same region over a day, weekend, or vacation.
                 </Text>
               </>
             }
@@ -565,8 +596,13 @@ export default function PlacesScreen() {
                           <AppIcon androidName="photo" iosName="photo" color={colors.textMuted} size={32} />
                         </View>
                       )}
+                      {item.cover?.is_video && (
+                        <View style={styles.videoBadge}>
+                          <AppIcon androidName="play_arrow" iosName="play.fill" color="#fff" size={12} />
+                        </View>
+                      )}
                       <View style={styles.tripCountBadge}>
-                        <AppIcon androidName="photo_library" iosName="photo.on.rectangle" color="#fff" size={12} />
+                        <AppIcon androidName="perm_media" iosName="photo.on.rectangle" color="#fff" size={12} />
                         <Text style={styles.tripCountText}>{item.media_count}</Text>
                       </View>
                     </View>
@@ -584,6 +620,21 @@ export default function PlacesScreen() {
                           {formatCoordinates(item.center_lat, item.center_lon)}
                         </Text>
                       </View>
+                      {item.photo_count != null && item.video_count != null && item.photo_count > 0 && item.video_count > 0 ? (
+                        <View style={styles.tripCardMetaRow}>
+                          <AppIcon androidName="perm_media" iosName="photo.stack" color={colors.primary} size={13} />
+                          <Text style={[styles.tripCardCoords, { color: colors.textSecondary }]}>
+                            {item.photo_count} photo{item.photo_count !== 1 ? 's' : ''}, {item.video_count} video{item.video_count !== 1 ? 's' : ''}
+                          </Text>
+                        </View>
+                      ) : item.video_count != null && item.video_count > 0 ? (
+                        <View style={styles.tripCardMetaRow}>
+                          <AppIcon androidName="videocam" iosName="video" color={colors.primary} size={13} />
+                          <Text style={[styles.tripCardCoords, { color: colors.textSecondary }]}>
+                            {item.video_count} video{item.video_count !== 1 ? 's' : ''}
+                          </Text>
+                        </View>
+                      ) : null}
                     </View>
                     <View style={styles.tripChevron}>
                       <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={20} />
@@ -613,11 +664,56 @@ export default function PlacesScreen() {
               </Text>
               <Text style={styles.headerSubtitle} numberOfLines={1}>
                 {activeCluster ? `${formatCoordinates(activeCluster.lat, activeCluster.lon)} · ` : ''}
-                {clusterLoading ? 'Loading…' : `${clusterItems.length} ${clusterItems.length === 1 ? 'memory' : 'memories'}`}
+                {clusterLoading
+                  ? 'Loading…'
+                  : clusterItems.length === 0
+                  ? '0 items'
+                  : clusterVideoCount > 0 && clusterPhotoCount > 0
+                  ? `${clusterPhotoCount} photo${clusterPhotoCount !== 1 ? 's' : ''}, ${clusterVideoCount} video${clusterVideoCount !== 1 ? 's' : ''}`
+                  : clusterVideoCount > 0
+                  ? `${clusterVideoCount} video${clusterVideoCount !== 1 ? 's' : ''}`
+                  : `${clusterPhotoCount} photo${clusterPhotoCount !== 1 ? 's' : ''}`}
               </Text>
             </View>
             <View style={{ width: 36 }} />
           </View>
+
+          {/* Place Media Filter Tabs */}
+          {clusterItems.length > 0 && !clusterLoading && (
+            <View style={[styles.filterBarWrap, { backgroundColor: colors.bg }]}>
+              <View style={[styles.filterBar, { backgroundColor: colors.surfaceSoft }]}>
+                <TouchableOpacity
+                  style={[styles.filterBtn, placeMediaFilter === 'all' && [styles.filterBtnActive, { backgroundColor: colors.primary }]]}
+                  onPress={() => { hapticLight(); setPlaceMediaFilter('all'); }}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[styles.filterBtnText, { color: placeMediaFilter === 'all' ? '#fff' : colors.textSecondary }]}>
+                    All ({clusterItems.length})
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.filterBtn, placeMediaFilter === 'photos' && [styles.filterBtnActive, { backgroundColor: colors.primary }]]}
+                  onPress={() => { hapticLight(); setPlaceMediaFilter('photos'); }}
+                  activeOpacity={0.8}
+                >
+                  <AppIcon androidName="photo" iosName="photo" color={placeMediaFilter === 'photos' ? '#fff' : colors.textSecondary} size={13} />
+                  <Text style={[styles.filterBtnText, { color: placeMediaFilter === 'photos' ? '#fff' : colors.textSecondary }]}>
+                    Photos ({clusterPhotoCount})
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.filterBtn, placeMediaFilter === 'videos' && [styles.filterBtnActive, { backgroundColor: colors.primary }]]}
+                  onPress={() => { hapticLight(); setPlaceMediaFilter('videos'); }}
+                  activeOpacity={0.8}
+                >
+                  <AppIcon androidName="videocam" iosName="video" color={placeMediaFilter === 'videos' ? '#fff' : colors.textSecondary} size={13} />
+                  <Text style={[styles.filterBtnText, { color: placeMediaFilter === 'videos' ? '#fff' : colors.textSecondary }]}>
+                    Videos ({clusterVideoCount})
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
 
           {clusterLoading ? (
             <View style={styles.centered}>
@@ -625,11 +721,19 @@ export default function PlacesScreen() {
             </View>
           ) : (
             <FlatList
-              data={clusterItems}
+              data={filteredClusterItems}
               keyExtractor={(item, idx) => `cluster_${item.source_type}:${item.source_id}:${item.relative_path}:${idx}`}
               numColumns={3}
               contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: gridGap }}
               columnWrapperStyle={{ gap: gridGap }}
+              ListEmptyComponent={
+                <View style={styles.centeredEmptyModal}>
+                  <AppIcon androidName="perm_media" iosName="photo.on.rectangle" color={colors.textMuted} size={32} />
+                  <Text style={[styles.emptySubtitle, { marginTop: Spacing.two }]}>
+                    {placeMediaFilter === 'videos' ? 'No videos found in this place.' : 'No photos found in this place.'}
+                  </Text>
+                </View>
+              }
               renderItem={({ item, index }) => {
                 const itemThumbUrl = serverConfig
                   ? (item.is_video
@@ -679,11 +783,56 @@ export default function PlacesScreen() {
               </Text>
               <Text style={styles.headerSubtitle} numberOfLines={1}>
                 {activeTrip ? `${formatTripDateRange(activeTrip.start_time, activeTrip.end_time)} · ` : ''}
-                {tripLoading ? 'Loading…' : `${tripItems.length} ${tripItems.length === 1 ? 'item' : 'items'}`}
+                {tripLoading
+                  ? 'Loading…'
+                  : tripItems.length === 0
+                  ? '0 items'
+                  : tripVideoCount > 0 && tripPhotoCount > 0
+                  ? `${tripPhotoCount} photo${tripPhotoCount !== 1 ? 's' : ''}, ${tripVideoCount} video${tripVideoCount !== 1 ? 's' : ''}`
+                  : tripVideoCount > 0
+                  ? `${tripVideoCount} video${tripVideoCount !== 1 ? 's' : ''}`
+                  : `${tripPhotoCount} photo${tripPhotoCount !== 1 ? 's' : ''}`}
               </Text>
             </View>
             <View style={{ width: 36 }} />
           </View>
+
+          {/* Trip Media Filter Tabs */}
+          {tripItems.length > 0 && !tripLoading && (
+            <View style={[styles.filterBarWrap, { backgroundColor: colors.bg }]}>
+              <View style={[styles.filterBar, { backgroundColor: colors.surfaceSoft }]}>
+                <TouchableOpacity
+                  style={[styles.filterBtn, tripMediaFilter === 'all' && [styles.filterBtnActive, { backgroundColor: colors.primary }]]}
+                  onPress={() => { hapticLight(); setTripMediaFilter('all'); }}
+                  activeOpacity={0.8}
+                >
+                  <Text style={[styles.filterBtnText, { color: tripMediaFilter === 'all' ? '#fff' : colors.textSecondary }]}>
+                    All ({tripItems.length})
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.filterBtn, tripMediaFilter === 'photos' && [styles.filterBtnActive, { backgroundColor: colors.primary }]]}
+                  onPress={() => { hapticLight(); setTripMediaFilter('photos'); }}
+                  activeOpacity={0.8}
+                >
+                  <AppIcon androidName="photo" iosName="photo" color={tripMediaFilter === 'photos' ? '#fff' : colors.textSecondary} size={13} />
+                  <Text style={[styles.filterBtnText, { color: tripMediaFilter === 'photos' ? '#fff' : colors.textSecondary }]}>
+                    Photos ({tripPhotoCount})
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.filterBtn, tripMediaFilter === 'videos' && [styles.filterBtnActive, { backgroundColor: colors.primary }]]}
+                  onPress={() => { hapticLight(); setTripMediaFilter('videos'); }}
+                  activeOpacity={0.8}
+                >
+                  <AppIcon androidName="videocam" iosName="video" color={tripMediaFilter === 'videos' ? '#fff' : colors.textSecondary} size={13} />
+                  <Text style={[styles.filterBtnText, { color: tripMediaFilter === 'videos' ? '#fff' : colors.textSecondary }]}>
+                    Videos ({tripVideoCount})
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
 
           {tripLoading ? (
             <View style={styles.centered}>
@@ -691,11 +840,19 @@ export default function PlacesScreen() {
             </View>
           ) : (
             <FlatList
-              data={tripItems}
+              data={filteredTripItems}
               keyExtractor={(item, idx) => `trip_media_${item.id || idx}_${item.relative_path}`}
               numColumns={3}
               contentContainerStyle={{ padding: Spacing.four, paddingBottom: insets.bottom + Spacing.six, gap: gridGap }}
               columnWrapperStyle={{ gap: gridGap }}
+              ListEmptyComponent={
+                <View style={styles.centeredEmptyModal}>
+                  <AppIcon androidName="perm_media" iosName="photo.on.rectangle" color={colors.textMuted} size={32} />
+                  <Text style={[styles.emptySubtitle, { marginTop: Spacing.two }]}>
+                    {tripMediaFilter === 'videos' ? 'No videos found in this trip.' : 'No photos found in this trip.'}
+                  </Text>
+                </View>
+              }
               ListHeaderComponent={
                 activeTrip ? (
                   <View style={[styles.tripMapCard, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
@@ -773,12 +930,21 @@ export default function PlacesScreen() {
       {/* Full-Screen Swipable Viewer Modal */}
       <Modal visible={viewerIndex !== null} transparent animationType="fade" onRequestClose={closeViewer}>
         <View style={styles.viewerOverlay}>
-          {/* Top Bar with Title, Index & Close */}
+          {/* Top Bar with Title, Index, Media Type & Close */}
           <View style={[styles.viewerTopBar, { top: insets.top + Spacing.two }]}>
             <View style={styles.viewerHeaderInfo}>
-              <Text style={styles.viewerIndexText}>
-                {viewerIndex !== null ? `${viewerIndex + 1} / ${viewerItems.length}` : ''}
-              </Text>
+              <View style={styles.viewerBadgeRow}>
+                <Text style={styles.viewerIndexText}>
+                  {viewerIndex !== null ? `${viewerIndex + 1} / ${viewerItems.length}` : ''}
+                </Text>
+                {activeViewerItem && (
+                  <View style={[styles.viewerTypeTag, { backgroundColor: activeViewerItem.is_video ? 'rgba(239, 68, 68, 0.4)' : 'rgba(59, 130, 246, 0.4)' }]}>
+                    <Text style={styles.viewerTypeTagText}>
+                      {activeViewerItem.is_video ? 'VIDEO' : 'PHOTO'}
+                    </Text>
+                  </View>
+                )}
+              </View>
               {activeViewerItem?.source_label ? (
                 <Text style={styles.viewerSubText} numberOfLines={1}>
                   {activeViewerItem.source_label}
@@ -1077,6 +1243,46 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     marginLeft: -14,
   },
 
+  // Filter bar in Modals
+  filterBarWrap: {
+    paddingHorizontal: Spacing.four,
+    paddingBottom: Spacing.three,
+    backgroundColor: colors.bg,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.surfaceBorder,
+  },
+  filterBar: {
+    flexDirection: 'row',
+    borderRadius: Radius.full,
+    padding: 3,
+  },
+  filterBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 6,
+    borderRadius: Radius.full,
+    gap: 5,
+  },
+  filterBtnActive: {
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 1 },
+  },
+  filterBtnText: {
+    fontSize: TextScale.xs - 1,
+    fontWeight: '700',
+  },
+  centeredEmptyModal: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: Spacing.eight,
+    paddingHorizontal: Spacing.six,
+  },
+
   // Viewer Styles
   viewerOverlay: { flex: 1, backgroundColor: '#000', alignItems: 'center', justifyContent: 'center' },
   viewerTopBar: {
@@ -1084,7 +1290,19 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
   },
   viewerHeaderInfo: { flexDirection: 'column' },
+  viewerBadgeRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   viewerIndexText: { color: '#fff', fontSize: TextScale.sm, fontWeight: '700' },
+  viewerTypeTag: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  viewerTypeTagText: {
+    color: '#fff',
+    fontSize: TextScale.xs - 3,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
   viewerSubText: { color: 'rgba(255,255,255,0.7)', fontSize: TextScale.xs, fontWeight: '500', marginTop: 2 },
   viewerCloseBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 20 },
   viewerImage: { width: '100%', height: '100%' },
