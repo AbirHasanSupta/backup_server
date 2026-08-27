@@ -41,6 +41,9 @@ interface Server {
   name: string;
   version: string;
   certFingerprint?: string;
+  all_ips?: string[];
+  candidateIps?: string[];
+  hostname?: string;
 }
 
 interface Props {

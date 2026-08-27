@@ -1,18 +1,24 @@
-import { getServerPort } from './settings';
+import { getServerPort, getSavedServers } from './settings';
 
-const TIMEOUT_MS = 2500;
-const BATCH_SIZE = 30;
+const TIMEOUT_MS = 1500;
+const BATCH_SIZE = 40;
+
+// Common mesh node & router subnets across various manufacturers
+// (TP-Link Deco = 192.168.68.x, Google Nest = 192.168.86.x, Asus = 192.168.50.x, etc.)
+const COMMON_MESH_SUBNETS = [
+  '192.168.0',
+  '192.168.1',
+  '192.168.2',
+  '192.168.68',
+  '192.168.86',
+  '192.168.50',
+  '192.168.8',
+  '192.168.178',
+  '10.0.0',
+  '10.0.1',
+];
 
 // ─── Lazy native module guard ──────────────────────────────────────────────────
-//
-// `expo-network` requires the native 'ExpoNetwork' module which is only present
-// in a compiled dev-client or production build — not in Expo Go.
-// Same lazy require() pattern used in notificationService.js and backgroundTask.js.
-//
-// • If native module is absent → Network stays null, discoverServers() throws a
-//   user-friendly error that the UI will display in the discovery sheet.
-// • If native module is present → full LAN scanning works normally.
-
 /** @type {import('expo-network') | null} */
 let Network = null;
 
@@ -42,31 +48,76 @@ async function fetchWithTimeout(url, timeoutMs) {
   }
 }
 
-async function probeServer(ip, port) {
-  const data = await fetchWithTimeout(`http://${ip}:${port}/ping`, TIMEOUT_MS);
+async function probeServer(ip, port, timeoutMs = TIMEOUT_MS) {
+  const data = await fetchWithTimeout(`http://${ip}:${port}/ping`, timeoutMs);
   if (data && data.status === 'ok') {
-    return { ip, port, name: data.name || ip, version: data.version || '?', certFingerprint: data.cert_fingerprint || '' };
+    const allIps = Array.isArray(data.all_ips) && data.all_ips.length > 0 ? data.all_ips : [ip];
+    return {
+      ip,
+      port,
+      name: data.name || ip,
+      hostname: data.hostname || '',
+      version: data.version || '?',
+      certFingerprint: data.cert_fingerprint || '',
+      all_ips: allIps,
+      candidateIps: Array.from(new Set([ip, ...allIps])),
+    };
   }
   return null;
 }
 
-function buildSubnetIps(deviceIp) {
-  const parts = deviceIp.split('.');
-  if (parts.length !== 4) return [];
-  const subnet = parts.slice(0, 3).join('.');
-  const ips = [];
-  for (let i = 1; i <= 254; i++) ips.push(`${subnet}.${i}`);
-  return ips;
+export function buildMultiSubnetIps(deviceIp, savedServers = []) {
+  const ipList = [];
+  const seen = new Set();
+
+  const addIp = (ip) => {
+    if (ip && !seen.has(ip)) {
+      seen.add(ip);
+      ipList.push(ip);
+    }
+  };
+
+  // 1. High priority: Saved servers and known candidates
+  savedServers.forEach((s) => {
+    if (s.ip) addIp(s.ip);
+    if (Array.isArray(s.candidateIps)) {
+      s.candidateIps.forEach((cip) => addIp(cip));
+    }
+  });
+
+  // 2. Primary Subnet (where device is currently assigned)
+  const parts = (deviceIp || '').split('.');
+  const primarySubnet = parts.length === 4 ? parts.slice(0, 3).join('.') : null;
+
+  if (primarySubnet) {
+    for (let i = 1; i <= 254; i++) {
+      addIp(`${primarySubnet}.${i}`);
+    }
+  }
+
+  // 3. Secondary Mesh Node Subnets
+  // Scan high-probability host pools (.1, .100–.150, .200, then rest)
+  for (const subnet of COMMON_MESH_SUBNETS) {
+    if (subnet !== primarySubnet) {
+      addIp(`${subnet}.1`);
+      for (let i = 100; i <= 150; i++) addIp(`${subnet}.${i}`);
+      addIp(`${subnet}.200`);
+      for (let i = 2; i <= 99; i++) addIp(`${subnet}.${i}`);
+      for (let i = 151; i <= 254; i++) addIp(`${subnet}.${i}`);
+    }
+  }
+
+  return ipList;
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Scans the current LAN subnet for backup servers.
- * Uses the user-configured port (default 8000) so custom ports are found.
+ * Scans the local network (including across mesh nodes and multi-subnets) for backup servers.
  *
  * @param {(progress: number, found: Array) => void} onProgress
- * @returns {Promise<Array<{ip, port, name, version}>>}
+ * @param {{ shouldStop?: () => boolean, signal?: AbortSignal, maxSubnets?: number }} [options]
+ * @returns {Promise<Array<{ip, port, name, version, all_ips, candidateIps}>>}
  */
 export async function discoverServers(onProgress, options = {}) {
   if (!Network) {
@@ -84,11 +135,13 @@ export async function discoverServers(onProgress, options = {}) {
     throw new Error('Could not determine device IP address');
   }
 
-  // Use the configured port so non-default setups are discoverable
-  const port = await getServerPort();
+  const [port, savedServers] = await Promise.all([
+    getServerPort(),
+    getSavedServers(),
+  ]);
 
-  const ips = buildSubnetIps(deviceIp);
-  const found = [];
+  const ips = buildMultiSubnetIps(deviceIp, savedServers);
+  const foundMap = new Map(); // key by server name or ip:port
   let scanned = 0;
   const total = ips.length;
 
@@ -97,15 +150,31 @@ export async function discoverServers(onProgress, options = {}) {
     const batch = ips.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(batch.map((ip) => probeServer(ip, port)));
     if (options.shouldStop?.() || options.signal?.aborted) break;
-    results.forEach((r) => { if (r) found.push(r); });
+
+    results.forEach((r) => {
+      if (r) {
+        const key = r.name && r.name !== r.ip ? r.name : `${r.ip}:${r.port}`;
+        if (foundMap.has(key)) {
+          const existing = foundMap.get(key);
+          const mergedCandidates = Array.from(new Set([
+            ...(existing.candidateIps || [existing.ip]),
+            ...(r.candidateIps || [r.ip]),
+          ]));
+          foundMap.set(key, { ...existing, candidateIps: mergedCandidates });
+        } else {
+          foundMap.set(key, r);
+        }
+      }
+    });
+
     scanned += batch.length;
-    onProgress && onProgress(Math.round((scanned / total) * 100), [...found]);
+    onProgress && onProgress(Math.min(100, Math.round((scanned / total) * 100)), Array.from(foundMap.values()));
   }
 
-  return found;
+  return Array.from(foundMap.values());
 }
 
 export function getDeviceIp() {
   if (!Network) return Promise.resolve(null);
   return Network.getIpAddressAsync();
-}
+}

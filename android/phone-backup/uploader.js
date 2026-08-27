@@ -1,5 +1,47 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { getServerIp, getApiKey, getServerPort, getDeviceId, getDeviceToken } from './settings';
+import {
+  getServerIp,
+  getApiKey,
+  getServerPort,
+  getDeviceId,
+  getDeviceToken,
+  resolveReachableServer,
+} from './settings';
+
+function isNetworkError(err) {
+  // AbortError is an intentional cancel (user timeout or explicit abort) — not a mesh roaming
+  // failure. Do not trigger failover for these; let the caller handle them explicitly.
+  if (err?.name === 'AbortError' || err?.code === 20 /* DOMException.ABORT_ERR */) return false;
+
+  const msg = (err?.message || String(err || '')).toLowerCase();
+  return (
+    msg.includes('network request failed') ||
+    msg.includes('timeout') ||
+    msg.includes('econnrefused') ||
+    msg.includes('noroutetohost') ||
+    msg.includes('socketexception') ||
+    msg.includes('host unreachable') ||
+    msg.includes('failed to connect') ||
+    msg.includes('software caused connection abort') ||
+    msg.includes('connection refused')
+  );
+}
+
+async function withAutoFailover(action) {
+  try {
+    return await action();
+  } catch (err) {
+    if (isNetworkError(err)) {
+      console.log('[Uploader] Network error encountered. Attempting mesh failover re-resolution...');
+      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
+      if (resolved.ok && resolved.reconnected) {
+        console.log(`[Uploader] Re-executing request against new server IP: ${resolved.ip}`);
+        return await action();
+      }
+    }
+    throw err;
+  }
+}
 
 /**
  * Returns true only for files with a real extension that are not hidden system
@@ -122,59 +164,68 @@ function removedDeviceError() {
 }
 
 export async function checkDeviceConnection(options = {}) {
-  const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
-  const params = new URLSearchParams({ device_id: deviceId });
-  const res = await fetch(`http://${serverIp}:${serverPort}/status?${params.toString()}`, {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${apiKey}` },
-    signal: options.signal,
+  let retrying = false;
+  return withAutoFailover(async () => {
+    const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
+    const params = new URLSearchParams({ device_id: deviceId });
+    // On retry (after mesh failover), do not reuse the original AbortSignal since it may
+    // already be aborted (e.g. a 6-second UI timeout fired while resolveReachableServer ran).
+    const signal = retrying ? undefined : options.signal;
+    retrying = true;
+    const res = await fetch(`http://${serverIp}:${serverPort}/status?${params.toString()}`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal,
+    });
+
+    if (res.status === 401) throw new Error('Invalid API key');
+    if (!res.ok) throw new Error(`Server status failed (${res.status})`);
+
+    const body = await readJsonResponse(res, 'Server status failed');
+    return {
+      connected: body.device_connected === true,
+      serverVersion: body.server_version || '',
+    };
   });
-
-  if (res.status === 401) throw new Error('Invalid API key');
-  if (!res.ok) throw new Error(`Server status failed (${res.status})`);
-
-  const body = await readJsonResponse(res, 'Server status failed');
-  return {
-    connected: body.device_connected === true,
-    serverVersion: body.server_version || '',
-  };
 }
 
 export async function checkServerFiles(files, options = {}) {
-  const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
-  const url = `http://${serverIp}:${serverPort}/files/check`;
+  return withAutoFailover(async () => {
+    const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
+    const url = `http://${serverIp}:${serverPort}/files/check`;
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      device_id: deviceId,
-      verify_disk: options.verifyDisk === true,
-      files: files.map((file) => ({
-        relative_path: file.relativePath,
-        modified_time: file.modifiedTime,
-        size: file.size || 0,
-        external_id: file.id,
-      })),
-    }),
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        device_id: deviceId,
+        verify_disk: options.verifyDisk === true,
+        files: files.map((file) => ({
+          relative_path: file.relativePath,
+          modified_time: file.modifiedTime,
+          size: file.size || 0,
+          external_id: file.id,
+        })),
+      }),
+    });
+
+    if (res.status === 401) throw new Error('Invalid API key');
+    if (res.status === 403) throw removedDeviceError();
+    if (!res.ok) throw new Error(`Server check failed (${res.status})`);
+
+    const body = await readJsonResponse(res, 'Server check failed');
+    if (!Array.isArray(body.files)) {
+      throw new Error('Server check failed: invalid file list response');
+    }
+    return {
+      files: body.files,
+      deviceTotalFiles: body.device_total_files || 0,
+      deviceTotalSize: body.device_total_size || 0,
+    };
   });
-
-  if (res.status === 401) throw new Error('Invalid API key');
-  if (res.status === 403) throw removedDeviceError();
-  if (!res.ok) throw new Error(`Server check failed (${res.status})`);
-
-  const body = await readJsonResponse(res, 'Server check failed');
-  if (!Array.isArray(body.files)) {
-    throw new Error('Server check failed: invalid file list response');
-  }
-  return {
-    files: body.files,
-    deviceTotalFiles: body.device_total_files || 0,
-    deviceTotalSize: body.device_total_size || 0,
-  };
 }
 
 /**
@@ -192,20 +243,7 @@ export async function uploadFile(item, onProgress, options = {}) {
     return { success: true, status: 'skipped', deviceTotalFiles: 0, deviceTotalSize: 0 };
   }
 
-  const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
   const verifyDisk = options.verifyDisk === true ? 'true' : 'false';
-
-  const params = new URLSearchParams({
-    relative_path: item.relativePath,
-    modified_time: String(item.modifiedTime),
-    size: String(item.size || 0),
-    external_id: item.id || '',
-    sha256: item.sha256 || '',
-    device_id: deviceId,
-    verify_disk: verifyDisk,
-  });
-  const rawUrl = `http://${serverIp}:${serverPort}/upload/raw?${params.toString()}`;
-  const multipartUrl = `http://${serverIp}:${serverPort}/upload`;
   const safeName = (item.name || item.relativePath.split('/').pop() || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
   const uniqueId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
   const cacheUri = `${FileSystem.cacheDirectory}${uniqueId}_${safeName}`;
@@ -226,24 +264,11 @@ export async function uploadFile(item, onProgress, options = {}) {
     throw new Error(toUserFriendlyError(copyErr));
   }
 
-  // ── Step 2: Upload via HTTP ────────────────────────────────────────────────
+  // ── Step 2: Upload via HTTP (with mesh auto-failover) ───────────────────────
   try {
-    const uploadRaw = () => FileSystem.uploadAsync(rawUrl, cacheUri, {
-      httpMethod: 'POST',
-      uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-      mimeType: 'application/octet-stream',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/octet-stream',
-      },
-    });
-
-    const uploadMultipart = () => FileSystem.uploadAsync(multipartUrl, cacheUri, {
-      httpMethod: 'POST',
-      uploadType: FileSystem.FileSystemUploadType.MULTIPART,
-      fieldName: 'file',
-      mimeType: 'application/octet-stream',
-      parameters: {
+    const doUpload = async () => {
+      const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
+      const params = new URLSearchParams({
         relative_path: item.relativePath,
         modified_time: String(item.modifiedTime),
         size: String(item.size || 0),
@@ -251,20 +276,50 @@ export async function uploadFile(item, onProgress, options = {}) {
         sha256: item.sha256 || '',
         device_id: deviceId,
         verify_disk: verifyDisk,
-      },
-      headers: { Authorization: `Bearer ${apiKey}` },
-    });
+      });
+      const rawUrl = `http://${serverIp}:${serverPort}/upload/raw?${params.toString()}`;
+      const multipartUrl = `http://${serverIp}:${serverPort}/upload`;
+
+      const uploadRaw = () => FileSystem.uploadAsync(rawUrl, cacheUri, {
+        httpMethod: 'POST',
+        uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+        mimeType: 'application/octet-stream',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/octet-stream',
+        },
+      });
+
+      const uploadMultipart = () => FileSystem.uploadAsync(multipartUrl, cacheUri, {
+        httpMethod: 'POST',
+        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+        fieldName: 'file',
+        mimeType: 'application/octet-stream',
+        parameters: {
+          relative_path: item.relativePath,
+          modified_time: String(item.modifiedTime),
+          size: String(item.size || 0),
+          external_id: item.id || '',
+          sha256: item.sha256 || '',
+          device_id: deviceId,
+          verify_disk: verifyDisk,
+        },
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+
+      if (FileSystem.FileSystemUploadType.BINARY_CONTENT) {
+        let response = await uploadRaw();
+        if ([404, 405, 414, 422].includes(response.status)) {
+          response = await uploadMultipart();
+        }
+        return response;
+      }
+      return await uploadMultipart();
+    };
 
     let res;
     try {
-      if (FileSystem.FileSystemUploadType.BINARY_CONTENT) {
-        res = await uploadRaw();
-        if ([404, 405, 414, 422].includes(res.status)) {
-          res = await uploadMultipart();
-        }
-      } else {
-        res = await uploadMultipart();
-      }
+      res = await withAutoFailover(doUpload);
     } catch (uploadErr) {
       // Raw native rejection from ExponentFileSystem — sanitize before propagating.
       console.warn(

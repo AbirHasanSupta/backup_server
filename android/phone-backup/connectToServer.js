@@ -84,6 +84,9 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
         port: serverPort,
         apiKey,
         deviceToken: result.token || '',
+        all_ips: Array.isArray(result.all_ips) ? result.all_ips : [serverIp],
+        candidateIps: Array.isArray(result.all_ips) ? result.all_ips : [serverIp],
+        hostname: result.hostname || '',
       });
     }
     return result;

@@ -36,6 +36,7 @@ import {
   getFolders,
   formatSyncIntervalLabel,
   saveServerProfile,
+  resolveReachableServer,
 } from '../../settings';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { SyncProgressRing, SyncPhase } from '@/components/SyncProgressRing';
@@ -245,6 +246,14 @@ export default function HomeScreen() {
       setServerStatus(result.connected ? 'connected' : 'removed');
     } catch {
       clearTimeout(timeout);
+      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
+      if (resolved.ok && resolved.reconnected) {
+        try {
+          const result = await checkDeviceConnection();
+          setServerStatus(result.connected ? 'connected' : 'removed');
+          return;
+        } catch {}
+      }
       setServerStatus('disconnected');
     }
   }, []);

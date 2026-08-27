@@ -38,6 +38,7 @@ import {
   getSavedServers,
   saveServerProfile,
   removeSavedServer,
+  resolveReachableServer,
   switchToSavedServer,
 } from '../../settings';
 import { hapticMedium, hapticLight } from '@/utils/haptics';
@@ -129,6 +130,16 @@ export default function SettingsScreen() {
       setServerStatus(result.connected ? 'connected' : 'disconnected');
     } catch {
       clearTimeout(timeout);
+      // Attempt mesh failover re-discovery before marking offline
+      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
+      if (resolved.ok && resolved.reconnected) {
+        setServerIpState(resolved.ip);
+        try {
+          const result = await checkDeviceConnection();
+          setServerStatus(result.connected ? 'connected' : 'disconnected');
+          return;
+        } catch {}
+      }
       setServerStatus('disconnected');
     }
   }, []);
@@ -282,6 +293,9 @@ export default function SettingsScreen() {
     port: number;
     name: string;
     version: string;
+    all_ips?: string[];
+    candidateIps?: string[];
+    hostname?: string;
   }) => {
     const cleanIp = normalizeServerAddress(server.ip);
     setServerIpState(cleanIp);
@@ -299,6 +313,9 @@ export default function SettingsScreen() {
         port: server.port,
         name: server.name || cleanIp,
         apiKey: key,
+        all_ips: server.all_ips || [cleanIp],
+        candidateIps: server.candidateIps || server.all_ips || [cleanIp],
+        hostname: server.hostname || '',
       }),
     ]);
 

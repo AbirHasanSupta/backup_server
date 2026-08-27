@@ -26,6 +26,7 @@ import {
   clearScanSnapshotForFolder,
   getAutoSyncSuppressedUntil,
   setAutoSyncSuppressedUntil,
+  resolveReachableServer,
 } from './settings';
 import {
   showSyncProgressNotification,
@@ -976,8 +977,27 @@ export async function runSync(onProgress, runOptions = {}) {
         }
       } catch (_err) {
         clearTimeout(timeout);
-        console.log('[BackgroundTask] Sync skipped: Server unreachable/offline.');
-        return emptySyncResult('server_unreachable');
+        // Before giving up, attempt mesh roaming failover: the phone may have switched to
+        // a different mesh node while the app was in the background.
+        console.log('[BackgroundTask] Server unreachable — attempting mesh roaming resolution...');
+        try {
+          const resolved = await resolveReachableServer({ timeoutMs: 1500 });
+          if (resolved.ok) {
+            // New IP found — verify the device is still connected
+            const retryStatus = await checkDeviceConnection();
+            if (!retryStatus.connected) {
+              console.log('[BackgroundTask] Sync skipped: Device no longer approved after re-resolve.');
+              return emptySyncResult('device_removed');
+            }
+            console.log(`[BackgroundTask] Mesh re-resolution successful (IP: ${resolved.ip}). Proceeding with sync.`);
+          } else {
+            console.log('[BackgroundTask] Sync skipped: Server unreachable after mesh resolution attempt.');
+            return emptySyncResult('server_unreachable');
+          }
+        } catch {
+          console.log('[BackgroundTask] Sync skipped: Server unreachable/offline.');
+          return emptySyncResult('server_unreachable');
+        }
       }
     }
 

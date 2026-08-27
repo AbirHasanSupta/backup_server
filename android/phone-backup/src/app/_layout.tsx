@@ -25,6 +25,7 @@ import {
   setLastFlashbackNotifiedAt,
   getLastRecapNotifiedMonth,
   setLastRecapNotifiedMonth,
+  resolveReachableServer,
 } from '../../settings';
 import { getTodaysMemories, getRandomFlashback, generateRewindReel, getRewindReelStatus } from '../../downloader';
 import {
@@ -186,11 +187,30 @@ function RootLayoutContent() {
       await setupNotifications().catch(() => {});
       await registerBackgroundTask();
       syncWidgetServerConfig().catch(() => {});
+      resolveReachableServer().catch(() => {});
       checkAndNotifyMemories().catch(() => {});
       checkAndNotifyFlashback().catch(() => {});
       checkAndNotifyStreakRisk().catch(() => {});
       checkAndNotifyRecap().catch(() => {});
     })();
+
+    // Background mesh network roaming / Wi-Fi reconnect listener
+    let networkSub: { remove: () => void } | null = null;
+    try {
+      /* eslint-disable-next-line @typescript-eslint/no-require-imports */
+      const Network = require('expo-network');
+      if (Network?.addNetworkStateListener) {
+        networkSub = Network.addNetworkStateListener((state: any) => {
+          if (state?.isConnected && state?.type === Network.NetworkStateType?.WIFI) {
+            resolveReachableServer().catch(() => {});
+          }
+        });
+      }
+    } catch {}
+
+    return () => {
+      networkSub?.remove?.();
+    };
   }, []);
 
   useEffect(() => {

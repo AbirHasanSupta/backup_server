@@ -126,6 +126,42 @@ def verify_known_device_by_id(device_id: str) -> None:
         raise HTTPException(status_code=403, detail="Device not approved")
 
 
+def get_all_local_ips() -> list[str]:
+    """
+    Returns all active, non-loopback, non-link-local IPv4 addresses across
+    all network interfaces on the host.
+    """
+    ips = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            outbound_ip = s.getsockname()[0]
+            if outbound_ip and not outbound_ip.startswith("127."):
+                ips.add(outbound_ip)
+    except Exception:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                ips.add(ip)
+    except Exception:
+        pass
+
+    try:
+        _, _, host_ips = socket.gethostbyname_ex(socket.gethostname())
+        for ip in host_ips:
+            if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                ips.add(ip)
+    except Exception:
+        pass
+
+    res = list(ips)
+    return res if res else ["127.0.0.1"]
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Discovery / health-check
 # ──────────────────────────────────────────────────────────────────────────────
@@ -134,12 +170,18 @@ def verify_known_device_by_id(device_id: str) -> None:
 async def ping():
     """
     LAN discovery endpoint.
-    The Android app scans the subnet and identifies backup servers by this response.
+    The Android app scans the subnet(s) and identifies backup servers by this response.
     """
+    local_ips = get_all_local_ips()
+    hostname = socket.gethostname()
+    cfg = load_config()
     return {
         "status": "ok",
-        "name": socket.gethostname(),
+        "name": hostname,
+        "hostname": f"{hostname}.local",
         "version": APP_VERSION,
+        "all_ips": local_ips,
+        "port": int(cfg.get("PORT", 8000)),
     }
 
 
@@ -188,10 +230,17 @@ async def connect_device(
     device_model = (body.device_model or "").strip() or None
 
     def accepted_response() -> dict:
+        local_ips = get_all_local_ips()
+        hostname = socket.gethostname()
+        resp = {
+            "status": "accepted",
+            "all_ips": local_ips,
+            "hostname": hostname,
+        }
         if device_id:
             token = ensure_device_token(device_id)
-            return {"status": "accepted", "token": token}
-        return {"status": "accepted"}
+            resp["token"] = token
+        return resp
 
     # Already registered — just refresh the record, no dialog needed
     if is_device_known(device_ip, device_id):
@@ -293,6 +342,8 @@ async def status(request: Request, device_id: str | None = None, authorization: 
         "device_connected": device_connected,
         "server_version": APP_VERSION,
         "current_activity": get_current_activity(),
+        "all_ips": get_all_local_ips(),
+        "hostname": socket.gethostname(),
     }
 
 

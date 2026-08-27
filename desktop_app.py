@@ -8,6 +8,7 @@ Run with:  python desktop_app.py
 from __future__ import annotations
 
 import io
+import json
 import os
 import socket
 import sys
@@ -180,18 +181,45 @@ FONT_CAPTION: ctk.CTkFont
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
+def get_all_local_ips() -> list[str]:
+    """
+    Returns all active, non-loopback, non-link-local IPv4 addresses across
+    all network interfaces on the host.
+    """
+    ips = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            outbound_ip = s.getsockname()[0]
+            if outbound_ip and not outbound_ip.startswith("127."):
+                ips.add(outbound_ip)
+    except Exception:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                ips.add(ip)
+    except Exception:
+        pass
+
+    try:
+        _, _, host_ips = socket.gethostbyname_ex(socket.gethostname())
+        for ip in host_ips:
+            if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                ips.add(ip)
+    except Exception:
+        pass
+
+    res = list(ips)
+    return res if res else ["127.0.0.1"]
+
 
 def get_local_ip() -> str:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
+    ips = get_all_local_ips()
+    return ips[0] if ips else "127.0.0.1"
 
 
 def fmt_bytes(n: int) -> str:
@@ -2659,13 +2687,65 @@ class BackupServerApp(ctk.CTk):
             _memories_daemon_started = True
             threading.Thread(target=memories.startup_scan_loop, daemon=True).start()
 
-        local_ip = get_local_ip()
-        addr = f"http://{local_ip}:{PORT}"
+        local_ips = get_all_local_ips()
+        primary_ip = local_ips[0] if local_ips else "127.0.0.1"
+        addr = f"http://{primary_ip}:{PORT}"
         self.after(0, lambda: self._set_status(True, addr))
         self.after(0, self._configure_server_button)
-        add_log(f"Server started - {addr}")
+        if len(local_ips) > 1:
+            alt_ips = ", ".join(local_ips[1:])
+            add_log(f"Server started - {addr} (also reachable on: {alt_ips})")
+        else:
+            add_log(f"Server started - {addr}")
+
+        self._start_udp_discovery_responder(PORT)
+
+    def _start_udp_discovery_responder(self, port: int):
+        self._stop_udp_discovery_responder()
+        try:
+            udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            udp_sock.bind(("0.0.0.0", port))
+            self._udp_sock = udp_sock
+
+            def _udp_loop():
+                while getattr(self, "_server_running", False) and getattr(self, "_udp_sock", None):
+                    try:
+                        data, addr = udp_sock.recvfrom(2048)
+                        if not data:
+                            continue
+                        msg = data.decode("utf-8", errors="ignore")
+                        if "PING" in msg or "DISCOVER" in msg or "backup" in msg.lower():
+                            resp = json.dumps({
+                                "status": "ok",
+                                "name": socket.gethostname(),
+                                "hostname": f"{socket.gethostname()}.local",
+                                "version": "4.0.0",
+                                "all_ips": get_all_local_ips(),
+                                "port": port,
+                            }).encode("utf-8")
+                            udp_sock.sendto(resp, addr)
+                    except (socket.error, OSError):
+                        break
+                    except Exception:
+                        pass
+
+            self._udp_thread = threading.Thread(target=_udp_loop, daemon=True)
+            self._udp_thread.start()
+        except Exception:
+            pass
+
+    def _stop_udp_discovery_responder(self):
+        sock = getattr(self, "_udp_sock", None)
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            self._udp_sock = None
 
     def _stop_server(self):
+        self._stop_udp_discovery_responder()
         if self._uvicorn_server:
             self._uvicorn_server.should_exit = True
         try:

@@ -444,6 +444,10 @@ export async function getSavedServers() {
   return Array.isArray(parsed) ? parsed : [];
 }
 
+// Max number of candidate IPs to persist per server profile. Prevents unbounded growth
+// when the phone roams across many mesh subnets over time.
+const MAX_CANDIDATE_IPS = 20;
+
 export async function saveServerProfile(server) {
   if (!server?.ip) return await getSavedServers();
   const servers = await getSavedServers();
@@ -451,16 +455,39 @@ export async function saveServerProfile(server) {
   const id = `${server.ip}:${port}`;
   const now = Date.now();
 
-  const idx = servers.findIndex((s) => s.id === id || (s.ip === server.ip && (Number(s.port) || 8000) === port));
+  // Match by: exact id, exact ip:port, or candidateIps overlap.
+  // The candidateIps overlap is critical for mesh roaming: after the phone switches
+  // mesh nodes, resolveReachableServer may call saveServerProfile with a new primary IP
+  // that doesn't match the saved id/ip — but it IS in the saved candidateIps list.
+  const idx = servers.findIndex((s) =>
+    s.id === id ||
+    (s.ip === server.ip && (Number(s.port) || 8000) === port) ||
+    (
+      Array.isArray(s.candidateIps) &&
+      s.candidateIps.includes(server.ip) &&
+      (Number(s.port) || 8000) === port
+    )
+  );
   const existing = idx >= 0 ? servers[idx] : null;
 
   const resolvedName = (server.name && server.name !== server.ip)
     ? server.name
     : (existing?.name && existing.name !== server.ip ? existing.name : (server.name || server.ip));
 
+  const existingCandidates = Array.isArray(existing?.candidateIps) ? existing.candidateIps : [];
+  const incomingCandidates = Array.isArray(server.candidateIps)
+    ? server.candidateIps
+    : (Array.isArray(server.all_ips) ? server.all_ips : []);
+  const candidateSet = new Set([server.ip, ...incomingCandidates, ...existingCandidates].filter(Boolean));
+  // Keep most-recent IPs (first added = highest priority) within cap
+  const candidateIps = Array.from(candidateSet).slice(0, MAX_CANDIDATE_IPS);
+
   const profile = {
+    // If matching an existing profile via candidateIps, keep id consistent with new primary IP
     id,
     ip: server.ip,
+    candidateIps,
+    hostname: server.hostname || existing?.hostname || '',
     port,
     name: resolvedName,
     apiKey: server.apiKey || existing?.apiKey || 'YOUR_SECRET_KEY',
@@ -507,3 +534,141 @@ export async function switchToSavedServer(id) {
   DeviceEventEmitter.emit('settings-updated');
   return server;
 }
+
+export async function getActiveServerCandidates() {
+  const [currentIp, savedServers] = await Promise.all([
+    getServerIp(),
+    getSavedServers(),
+  ]);
+  const activeProfile = savedServers.find((s) => s.ip === currentIp) || savedServers[0];
+  const candidates = new Set();
+  if (currentIp) candidates.add(currentIp);
+  if (activeProfile) {
+    if (Array.isArray(activeProfile.candidateIps)) {
+      activeProfile.candidateIps.forEach((ip) => { if (ip) candidates.add(ip); });
+    }
+    if (activeProfile.hostname) {
+      candidates.add(activeProfile.hostname);
+      if (!activeProfile.hostname.endsWith('.local')) {
+        candidates.add(`${activeProfile.hostname}.local`);
+      }
+    }
+  }
+  return Array.from(candidates);
+}
+
+// ─── Mesh Roaming Auto-Failover Resolver ──────────────────────────────────────
+let _resolvingPromise = null;
+
+async function quickProbe(target, port, timeoutMs = 1200) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`http://${target}:${port}/ping`, { signal: controller.signal });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json().catch(() => null);
+      if (data && data.status === 'ok') {
+        return { ok: true, data };
+      }
+    }
+    return { ok: false };
+  } catch {
+    clearTimeout(timer);
+    return { ok: false };
+  }
+}
+
+/**
+ * Probes the currently configured server IP and, if unreachable (e.g. after mesh roaming),
+ * concurrently probes candidate IPs and hostname to find the server's new IP.
+ * Automatically updates active settings and returns { ok: boolean, ip: string, reconnected: boolean }.
+ */
+export async function resolveReachableServer(options = {}) {
+  if (_resolvingPromise && !options.force) {
+    return _resolvingPromise;
+  }
+
+  _resolvingPromise = (async () => {
+    try {
+      const [currentIp, port, savedServers, serverName] = await Promise.all([
+        getServerIp(),
+        getServerPort(),
+        getSavedServers(),
+        getServerName(),
+      ]);
+
+      if (!currentIp) {
+        return { ok: false, ip: '', reconnected: false };
+      }
+
+      // Step 1: Probe current configured IP first
+      const currentProbe = await quickProbe(currentIp, port, options.timeoutMs || 1000);
+      if (currentProbe.ok) {
+        // Refresh candidate list if server returned all_ips
+        if (Array.isArray(currentProbe.data?.all_ips) && currentProbe.data.all_ips.length > 0) {
+          saveServerProfile({
+            ip: currentIp,
+            port,
+            name: currentProbe.data.name || serverName || currentIp,
+            all_ips: currentProbe.data.all_ips,
+            hostname: currentProbe.data.hostname || '',
+          }).catch(() => {});
+        }
+        return { ok: true, ip: currentIp, reconnected: false, data: currentProbe.data };
+      }
+
+      // Step 2: Probe all candidates from saved servers (mesh multi-homing failover)
+      const candidates = new Set();
+      savedServers.forEach((s) => {
+        if (s.ip && s.ip !== currentIp) candidates.add(s.ip);
+        if (Array.isArray(s.candidateIps)) {
+          s.candidateIps.forEach((cip) => { if (cip && cip !== currentIp) candidates.add(cip); });
+        }
+        if (s.hostname) {
+          candidates.add(s.hostname);
+          if (!s.hostname.endsWith('.local')) candidates.add(`${s.hostname}.local`);
+        }
+      });
+
+      const candidateList = Array.from(candidates);
+      if (candidateList.length > 0) {
+        const probeResults = await Promise.all(
+          candidateList.map(async (cand) => {
+            const probe = await quickProbe(cand, port, 1500);
+            return { target: cand, probe };
+          })
+        );
+
+        const found = probeResults.find((r) => r.probe.ok);
+        if (found) {
+          const newIp = found.target;
+          console.log(`[Mesh Roaming] Found server at candidate address: ${newIp} (was ${currentIp})`);
+          await AsyncStorage.setItem(KEYS.SERVER_IP, newIp);
+
+          // Update saved profile with newly confirmed IP and candidates
+          await saveServerProfile({
+            ip: newIp,
+            port,
+            name: found.probe.data?.name || serverName || newIp,
+            all_ips: found.probe.data?.all_ips || candidateList,
+            hostname: found.probe.data?.hostname || '',
+          });
+
+          DeviceEventEmitter.emit('settings-updated');
+          return { ok: true, ip: newIp, reconnected: true, data: found.probe.data };
+        }
+      }
+
+      return { ok: false, ip: currentIp, reconnected: false };
+    } catch (e) {
+      console.warn('[resolveReachableServer] Error resolving server:', e?.message);
+      return { ok: false, ip: '', reconnected: false };
+    } finally {
+      _resolvingPromise = null;
+    }
+  })();
+
+  return _resolvingPromise;
+}
+
