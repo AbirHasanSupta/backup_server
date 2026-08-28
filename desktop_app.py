@@ -1735,6 +1735,13 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._post_selected_files.remove(path)
         self._refresh_post_files_list()
 
+    def _move_post_file(self, index: int, delta: int):
+        new_index = index + delta
+        if 0 <= new_index < len(self._post_selected_files):
+            self._post_selected_files[index], self._post_selected_files[new_index] = \
+                self._post_selected_files[new_index], self._post_selected_files[index]
+        self._refresh_post_files_list()
+
     def _refresh_post_files_list(self):
         for w in self._post_files_list_frame.winfo_children():
             w.destroy()
@@ -1742,7 +1749,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         if not self._post_selected_files:
             ctk.CTkLabel(self._post_files_list_frame, text="No files selected yet", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
             return
-        for path in self._post_selected_files:
+        last = len(self._post_selected_files) - 1
+        for i, path in enumerate(self._post_selected_files):
             row = ctk.CTkFrame(self._post_files_list_frame, fg_color="transparent")
             row.pack(fill="x", pady=3)
             ctk.CTkLabel(row, text=os.path.basename(path), font=FONT_SMALL, text_color=C_TEXT, anchor="w").pack(side="left", fill="x", expand=True, padx=(4, 6))
@@ -1751,6 +1759,18 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 hover_color=C_SOFT_RED, text_color=C_MUTED, corner_radius=8,
                 font=FONT_CAPTION, command=lambda p=path: self._remove_post_file(p),
             ).pack(side="right", padx=4)
+            ctk.CTkButton(
+                row, text="▼", width=26, height=26, fg_color="transparent",
+                hover_color=C_ELEVATED, text_color=C_MUTED, corner_radius=8,
+                font=FONT_CAPTION, state="disabled" if i == last else "normal",
+                command=lambda idx=i: self._move_post_file(idx, 1),
+            ).pack(side="right", padx=2)
+            ctk.CTkButton(
+                row, text="▲", width=26, height=26, fg_color="transparent",
+                hover_color=C_ELEVATED, text_color=C_MUTED, corner_radius=8,
+                font=FONT_CAPTION, state="disabled" if i == 0 else "normal",
+                command=lambda idx=i: self._move_post_file(idx, -1),
+            ).pack(side="right", padx=2)
 
     def _refresh_post_devices_list(self):
         for w in self._post_devices_frame.winfo_children():
@@ -1760,6 +1780,20 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         if not devices:
             ctk.CTkLabel(self._post_devices_frame, text="No connected devices", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
             return
+
+        def _toggle_all():
+            v = all_var.get()
+            for var in self._post_device_vars.values():
+                var.set(v)
+
+        all_var = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            self._post_devices_frame, text="All", variable=all_var,
+            font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
+            command=_toggle_all,
+        ).pack(anchor="w", padx=8, pady=4)
+        self._divider(self._post_devices_frame)
+
         for dev in devices:
             did = dev.get("device_id")
             var = tk.BooleanVar(value=False)
@@ -1846,17 +1880,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ).pack(side="left", fill="x", expand=True)
             ctk.CTkLabel(top, text=fmt_rel(head.get("created_at")), font=FONT_CAPTION, text_color=C_MUTED, anchor="e").pack(side="right")
 
-            names = ", ".join(os.path.basename(it["relative_path"]) for it in items)
-            ctk.CTkLabel(
-                card, text=f"{len(items)} file(s): {names}",
-                font=FONT_SMALL, text_color=C_MUTED, anchor="w", wraplength=460, justify="left",
-            ).pack(fill="x", padx=14, pady=(0, 8))
-
             targets = get_share_targets_for_group(gid, DESKTOP_SHARE_DEVICE_ID)
             target_names = ", ".join(t.get("device_name") or t["target_device_id"] for t in targets) or "No devices"
             ctk.CTkLabel(
-                card, text=f"Shared with: {target_names}",
-                font=FONT_CAPTION, text_color=C_MUTED, anchor="w",
+                card, text=f"{len(items)} file(s)   •   Shared with: {target_names}",
+                font=FONT_SMALL, text_color=C_MUTED, anchor="w",
             ).pack(fill="x", padx=14, pady=(0, 10))
 
             btn_row = ctk.CTkFrame(card, fg_color="transparent")

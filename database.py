@@ -2607,7 +2607,7 @@ def get_device_shares_for_target(target_device_id: str) -> list[dict]:
         LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE t.target_device_id = ?
-        ORDER BY ds.created_at DESC, ds.id DESC
+        ORDER BY ds.created_at DESC, ds.id ASC
         """,
         (target_device_id,),
     ).fetchall()
@@ -2629,7 +2629,7 @@ def get_device_shares_by_sharer(sharer_device_id: str) -> list[dict]:
         LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE ds.shared_by_device_id = ?
-        ORDER BY ds.created_at DESC, ds.id DESC
+        ORDER BY ds.created_at DESC, ds.id ASC
         """,
         (sharer_device_id,),
     ).fetchall()
