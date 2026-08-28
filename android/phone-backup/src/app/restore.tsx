@@ -2072,8 +2072,9 @@ const PreviewModal = React.memo(function PreviewModal({
 
   const hasPrev = activeIdx > 0;
   const hasNext = activeIdx < fileList.length - 1;
-  const canZoom = category === 'image' || category === 'video';
-  // Zoom UI (buttons + pill) only for images — video outer panResponder is disabled so no gesture zoom
+  // Zoom (pinch + double-tap) is image-only — kept off for video so it can't
+  // clash with swipe-to-change-file or seekbar dragging.
+  const canZoom = category === 'image';
   const canZoomUI = category === 'image';
 
   // Zoom parameters
@@ -2257,8 +2258,11 @@ const PreviewModal = React.memo(function PreviewModal({
       onMoveShouldSetPanResponder: (evt, gs) => {
         const touches = evt.nativeEvent.touches;
         const cur = latestRef.current;
-        // The seekbar captures its own touches via onStartShouldSetPanResponderCapture,
-        // so swipes elsewhere on the video (or photo) reach this responder normally.
+        // Video: this only ever gets asked for touches over the plain video
+        // body (via the video's own touch-catcher) or the ExternalMediaPlayer
+        // fallback. The seek track and controls-panel guard claim their own
+        // regions first via normal target-first bubbling, so they never reach
+        // here. Photo: this is the sole responder, nothing else competes.
         if (cur.canZoom && touches.length === 2) return true;
         if (cur.canZoom && scaleRef.current > 1.02) return true;
         return Math.abs(gs.dx) > 10 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.2;
@@ -2419,6 +2423,7 @@ const PreviewModal = React.memo(function PreviewModal({
             originalUri={targetUrl}
             fileSize={targetFile.size}
             isActive={mediaActive}
+            swipePanHandlers={panResponder.panHandlers}
           />
         </Animated.View>
       );
@@ -2641,11 +2646,18 @@ function MetaRow({ label, value, colors, last }: { label: string; value: string;
 }
 
 // ── Video Preview Player ──────────────────────────────────────────────────────
+type PanHandlers = ReturnType<typeof PanResponder.create>['panHandlers'];
+
 type VideoPreviewPlayerProps = {
   previewUri: string;
   originalUri: string;
   fileSize: number;
   isActive?: boolean;
+  // Outer gallery swipe-navigation PanResponder handlers, re-attached to a
+  // transparent catcher layered above the native VideoView — the native
+  // player otherwise swallows touches before RN's JS responder system on
+  // the ancestor contentArea ever sees them.
+  swipePanHandlers?: PanHandlers;
 };
 
 function VideoPreviewPlayer(props: VideoPreviewPlayerProps) {
@@ -2655,11 +2667,25 @@ function VideoPreviewPlayer(props: VideoPreviewPlayerProps) {
   return <NativeVideoPreviewPlayer {...props} videoModule={expoVideoModule} />;
 }
 
+// Swallows any touch that starts inside the controls panel but isn't
+// claimed by a more specific descendant (seek track / buttons). Without
+// this, a touch landing on the panel's padding/gaps (not exactly on the
+// track or a button) falls through — past the video's own touch catcher,
+// which is a sibling, not an ancestor, of this panel — straight up to the
+// outer gallery PanResponder, which reads it as a file-swipe or a
+// fullscreen-chrome tap. Stateless and shared across every video instance;
+// PanResponder view identity, not object identity, is what's tracked.
+const controlsPanelGuard = PanResponder.create({
+  onStartShouldSetPanResponder: () => true,
+  onMoveShouldSetPanResponder: () => true,
+});
+
 function NativeVideoPreviewPlayer({
   previewUri,
   originalUri,
   fileSize,
   isActive = true,
+  swipePanHandlers,
   videoModule,
 }: VideoPreviewPlayerProps & { videoModule: ExpoVideoModule }) {
   const PREVIEW_TRANSCODE_MIN_BYTES = 40 * 1024 * 1024;
@@ -2753,7 +2779,10 @@ function NativeVideoPreviewPlayer({
     });
   }, [player]);
 
-  // Seekbar PanResponder — handles tap + drag to seek
+  // Seekbar PanResponder — handles tap + drag to seek.
+  // Capture handlers are defense-in-depth: normal target-first bubbling already
+  // resolves touches on this exact view to this responder before the panel
+  // guard or outer gallery responder ever get asked.
   // seekProgressRef/seekBarWidthRef/wasPlayingBeforeSeekRef are accessed only inside gesture
   // event callbacks (grant/move/release/terminate), never during render — disable is correct.
   // eslint-disable-next-line react-hooks/refs
@@ -2892,10 +2921,21 @@ function NativeVideoPreviewPlayer({
         </View>
       )}
 
+      {/* Transparent swipe-gesture catcher — sits above the native VideoView
+          (which otherwise swallows touches before RN's JS responder system
+          on the ancestor contentArea ever sees them) and below the controls
+          panel, so swipe-to-change-file works anywhere on the video, while
+          the controls panel (rendered after it, on top) keeps first claim
+          over its own bounds for seeking/buttons. */}
+      {swipePanHandlers && (
+        <View style={StyleSheet.absoluteFill} {...swipePanHandlers} />
+      )}
+
       {/* ── Full video controls panel ── */}
       <View
         style={[pvStyles.videoControlsPanel, { bottom: insets.bottom + Spacing.two }]}
         pointerEvents="auto"
+        {...controlsPanelGuard.panHandlers}
       >
         {/* Seekbar row */}
         <View style={pvStyles.videoSeekRow} pointerEvents="auto">
