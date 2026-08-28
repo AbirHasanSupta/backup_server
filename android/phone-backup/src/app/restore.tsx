@@ -2253,18 +2253,12 @@ const PreviewModal = React.memo(function PreviewModal({
   const panResponder = useMemo(() => {
     // eslint-disable-next-line react-hooks/refs
     return PanResponder.create({
-      onStartShouldSetPanResponder: (evt) => {
-        // For video files, let all touches go directly to the video controls/seekbar.
-        // The video player has its own panResponder with capture flags.
-        const cur = latestRef.current;
-        if (cur.category === 'video') return false;
-        return true;
-      },
+      onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: (evt, gs) => {
         const touches = evt.nativeEvent.touches;
         const cur = latestRef.current;
-        // Never steal moves from the video controls
-        if (cur.category === 'video') return false;
+        // The seekbar captures its own touches via onStartShouldSetPanResponderCapture,
+        // so swipes elsewhere on the video (or photo) reach this responder normally.
         if (cur.canZoom && touches.length === 2) return true;
         if (cur.canZoom && scaleRef.current > 1.02) return true;
         return Math.abs(gs.dx) > 10 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.2;
@@ -2577,7 +2571,7 @@ const PreviewModal = React.memo(function PreviewModal({
         </Animated.View>
 
         {/* Left / Right Nav Arrows
-            • Videos: always visible and tappable (only navigation method — no swipe)
+            • Videos: always visible and tappable, swipe also works
             • Photos: fade with chrome, hidden in fullscreen (swipe is primary navigation) */}
         {hasPrev && (
           <Animated.View
@@ -5077,9 +5071,8 @@ const pvStyles = StyleSheet.create({
     zIndex: 20,
   },
   navArrowBtnInner: { width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center' },
-  // For video: override vertical position to sit at ~35% from top (clear of the controls bar)
-  // and force full opacity so arrows are always visible.
-  navArrowVideoPosition: { top: '35%', marginTop: -22, opacity: 1 },
+  // For video: force full opacity so arrows are always visible (position stays centered, same as photos).
+  navArrowVideoPosition: { opacity: 1 },
 
   bottomBar: {
     position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 10,
