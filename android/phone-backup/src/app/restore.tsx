@@ -674,20 +674,14 @@ function SharedFeedCard({
           </Text>
         )}
 
-        <Text style={[feedCardStyles.fileSize, { color: colors.textSecondary }]}>
-          {items.length > 1
-            ? `${items.length} files · ${formatSize(item.size)}`
-            : `${item.path.split(/[/\\]/).pop() ?? item.path} · ${formatSize(item.size)}`}
-        </Text>
-
-        <ReactionEmojiBar
-          reactionCounts={item.reaction_counts}
-          userReactions={item.user_reactions}
-          onReact={(emoji) => onReact(item, emoji)}
-          colors={colors}
-        />
-
         <View style={feedCardStyles.actionRow}>
+          <ReactionEmojiBar
+            reactionCounts={item.reaction_counts}
+            userReactions={item.user_reactions}
+            onReact={(emoji) => onReact(item, emoji)}
+            colors={colors}
+          />
+
           <TouchableOpacity
             onPress={() => onOpenComments(item)}
             style={[feedCardStyles.commentBtn, { backgroundColor: colors.surfaceSoft, borderColor: colors.surfaceBorder }]}
@@ -1408,7 +1402,6 @@ const reactionStyles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
-    marginTop: Spacing.two,
   },
   emojiBtn: {
     flexDirection: 'row',
@@ -1543,7 +1536,7 @@ const feedCardStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: Spacing.two,
-    marginTop: Spacing.two,
+    marginTop: Spacing.two + 2,
   },
   commentBtn: {
     flexDirection: 'row',
