@@ -2094,6 +2094,8 @@ def _resolve_share_path(share: dict) -> str:
     relative_path = share["relative_path"]
     if source_type == "phone":
         return full_path_for(relative_path, device_id=source_key)
+    if source_type == "desktop":
+        return full_path_for(relative_path, device_id=source_key)
     if source_type == "shared":
         entry = _find_shared_dir(source_key)
         if not entry:
@@ -2177,4 +2179,4 @@ async def thumbnail_device_share(
     thumb_path = await asyncio.to_thread(get_video_thumbnail_path, path)
     if not thumb_path:
         raise HTTPException(status_code=500, detail="Failed to generate thumbnail")
-    return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
+    return FileResponse(thumb_path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})

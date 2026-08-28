@@ -19,6 +19,8 @@ from datetime import datetime
 from tkinter import filedialog, messagebox
 import tkinter as tk
 
+from tkinterdnd2 import DND_FILES, TkinterDnD
+
 # ── Windowed-PyInstaller guard ─────────────────────────────────────────────────
 # When built with --windowed there is no console, so sys.stdout / sys.stderr are
 # None.  uvicorn's log formatter calls .isatty() on these streams before we can
@@ -60,7 +62,8 @@ try:
 except Exception:
     pystray = None
     _PILImage = None
-from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessions, init_db, remove_device
+from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessions, init_db, remove_device, create_device_share, get_device_shares_by_sharer, get_share_targets_for_group, delete_device_share_group, remove_share_group_target, add_share_group_targets, edit_device_share_group_caption
+from storage import save_file, sanitize_relative_path
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
 ctk.set_default_color_theme("blue")
@@ -428,6 +431,10 @@ class NavigationIcon(ctk.CTkCanvas):
             self.create_oval(3, 2, 15, 6, outline=color, width=1.5, tags="icon")
             self.create_line(3, 4, 3, 14, 15, 14, 15, 4, **line)
             self.create_arc(3, 10, 15, 15, start=0, extent=180, style="arc", outline=color, width=1.5, tags="icon")
+        elif self._kind == "share":
+            self.create_rectangle(2, 8, 16, 16.5, outline=color, width=1.5, tags="icon")
+            self.create_line(9, 2, 9, 11, **line)
+            self.create_line(5.5, 5.5, 9, 2, 12.5, 5.5, **line)
         else:  # file
             self.create_line(5, 1.5, 11.5, 1.5, 15, 5, 15, 16.5, 5, 16.5, 5, 1.5, **line)
             self.create_line(11.5, 1.5, 11.5, 5, 15, 5, **line)
@@ -437,12 +444,16 @@ class NavigationIcon(ctk.CTkCanvas):
 # Main Application
 # ──────────────────────────────────────────────────────────────────────────────
 
-class BackupServerApp(ctk.CTk):
+DESKTOP_SHARE_DEVICE_ID = "desktop-server"
 
-    PAGES      = ["dashboard", "devices", "shared_folders", "settings", "logs", "history"]
+
+class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
+
+    PAGES      = ["dashboard", "devices", "post_to_devices", "shared_folders", "settings", "logs", "history"]
     PAGE_LABELS = {
         "dashboard": "Dashboard",
         "devices":   "Devices",
+        "post_to_devices": "Post to Devices",
         "shared_folders": "Shared Folders",
         "settings":  "Settings",
         "logs":      "Logs",
@@ -451,6 +462,7 @@ class BackupServerApp(ctk.CTk):
     PAGE_NAV_ICONS = {
         "dashboard": "dashboard",
         "devices": "devices",
+        "post_to_devices": "share",
         "shared_folders": "folders",
         "settings": "settings",
         "logs": "logs",
@@ -459,6 +471,7 @@ class BackupServerApp(ctk.CTk):
 
     def __init__(self):
         super().__init__()
+        self.TkdndVersion = TkinterDnD._require(self)
 
         # Fonts
         global FONT_TITLE, FONT_SECTION, FONT_BODY, FONT_SMALL, FONT_MONO, FONT_CAPTION
@@ -493,6 +506,8 @@ class BackupServerApp(ctk.CTk):
         self._theme_rebuild_after_id: str | None = None
         self._shared_dirs: list[dict] = list(load_config().get("SHARED_DIRS", []))
         self._shared_dirs_save_after_id: str | None = None
+        self._post_selected_files: list[str] = []
+        self._post_device_vars: dict[str, tk.BooleanVar] = {}
 
         self._tray_icon = None
         self._tray_thread: threading.Thread | None = None
@@ -763,6 +778,7 @@ class BackupServerApp(ctk.CTk):
         self._pages: dict[str, ctk.CTkFrame] = {
             "dashboard": self._build_dashboard(container),
             "devices":   self._build_devices(container),
+            "post_to_devices": self._build_post_to_devices(container),
             "shared_folders": self._build_shared_folders(container),
             "settings":  self._build_settings(container),
             "logs":      self._build_logs(container),
@@ -1608,6 +1624,331 @@ class BackupServerApp(ctk.CTk):
         self._refresh_shared_dirs_list()
         return frame
 
+    def _build_post_to_devices(self, parent) -> ctk.CTkFrame:
+        frame = ctk.CTkFrame(parent, fg_color=C_BG)
+        self._page_header(frame, "Post to Devices", "Send files from this PC directly to a device's feed")
+        self._divider(frame)
+
+        work_area = ctk.CTkFrame(frame, fg_color="transparent", height=360)
+        work_area.pack(fill="x", padx=36, pady=(16, 10))
+        work_area.pack_propagate(False)
+        work_area.grid_columnconfigure(0, weight=3)
+        work_area.grid_columnconfigure(1, weight=2)
+        work_area.grid_rowconfigure(0, weight=1)
+
+        left = ctk.CTkFrame(work_area, fg_color=C_SURFACE, corner_radius=18, border_width=1, border_color=C_BORDER)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+
+        self._post_drop_zone = ctk.CTkFrame(
+            left, fg_color=C_ELEVATED, corner_radius=14, border_width=2, border_color=C_BORDER, height=110,
+        )
+        self._post_drop_zone.pack(fill="x", padx=18, pady=(18, 10))
+        self._post_drop_zone.pack_propagate(False)
+        ctk.CTkLabel(self._post_drop_zone, text="Drag & drop files here, or", font=FONT_BODY, text_color=C_MUTED).pack(pady=(22, 6))
+        ctk.CTkButton(
+            self._post_drop_zone, text="Browse Files", width=140, height=34,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER, corner_radius=10, font=FONT_SMALL,
+            command=self._browse_post_files,
+        ).pack()
+        self._post_drop_zone.drop_target_register(DND_FILES)
+        self._post_drop_zone.dnd_bind("<<Drop>>", self._on_files_dropped)
+
+        list_header = ctk.CTkFrame(left, fg_color="transparent")
+        list_header.pack(fill="x", padx=18, pady=(4, 6))
+        ctk.CTkLabel(list_header, text="SELECTED FILES", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(side="left")
+        self._post_files_count = ctk.CTkLabel(list_header, text="0 files", font=FONT_CAPTION, text_color=C_MUTED, anchor="e")
+        self._post_files_count.pack(side="right")
+
+        self._post_files_list_frame = ctk.CTkScrollableFrame(
+            left, fg_color=C_ELEVATED, corner_radius=12, border_width=1, border_color=C_BORDER, label_text="",
+        )
+        self._post_files_list_frame.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+
+        right = ctk.CTkFrame(work_area, fg_color=C_SURFACE, corner_radius=18, border_width=1, border_color=C_BORDER)
+        right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+
+        ctk.CTkLabel(right, text="CAPTION", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(fill="x", padx=18, pady=(18, 6))
+        self._post_caption_box = ctk.CTkTextbox(
+            right, height=70, fg_color=C_ELEVATED, corner_radius=10, border_width=1, border_color=C_BORDER, font=FONT_BODY,
+        )
+        self._post_caption_box.pack(fill="x", padx=18)
+
+        dev_header = ctk.CTkFrame(right, fg_color="transparent")
+        dev_header.pack(fill="x", padx=18, pady=(18, 6))
+        ctk.CTkLabel(dev_header, text="POST TO", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(side="left")
+        ctk.CTkButton(
+            dev_header, text="Refresh", width=80, height=26,
+            fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION,
+            command=self._refresh_post_devices_list,
+        ).pack(side="right")
+
+        self._post_devices_frame = ctk.CTkScrollableFrame(
+            right, fg_color=C_ELEVATED, corner_radius=12, border_width=1, border_color=C_BORDER, label_text="",
+        )
+        self._post_devices_frame.pack(fill="both", expand=True, padx=18, pady=(0, 10))
+
+        self._post_btn = ctk.CTkButton(
+            right, text="Post to Devices", height=42,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER, corner_radius=12, font=FONT_BODY,
+            command=self._post_files_to_devices,
+        )
+        self._post_btn.pack(fill="x", padx=18, pady=(0, 18))
+
+        posts_header = ctk.CTkFrame(frame, fg_color="transparent")
+        posts_header.pack(fill="x", padx=36, pady=(4, 6))
+        ctk.CTkLabel(posts_header, text="MY POSTS", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(side="left")
+        ctk.CTkButton(
+            posts_header, text="Refresh", width=80, height=26,
+            fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION,
+            command=self._refresh_post_posts_list,
+        ).pack(side="right")
+
+        self._post_posts_frame = ctk.CTkScrollableFrame(
+            frame, fg_color="transparent", label_text="",
+        )
+        self._post_posts_frame.pack(fill="both", expand=True, padx=36, pady=(0, 20))
+
+        self._refresh_post_files_list()
+        self._refresh_post_devices_list()
+        self._refresh_post_posts_list()
+        return frame
+
+    def _browse_post_files(self):
+        paths = filedialog.askopenfilenames(title="Select Files to Post")
+        for p in paths:
+            if p not in self._post_selected_files:
+                self._post_selected_files.append(p)
+        self._refresh_post_files_list()
+
+    def _on_files_dropped(self, event):
+        for p in self.tk.splitlist(event.data):
+            if os.path.isfile(p) and p not in self._post_selected_files:
+                self._post_selected_files.append(p)
+        self._refresh_post_files_list()
+
+    def _remove_post_file(self, path: str):
+        if path in self._post_selected_files:
+            self._post_selected_files.remove(path)
+        self._refresh_post_files_list()
+
+    def _refresh_post_files_list(self):
+        for w in self._post_files_list_frame.winfo_children():
+            w.destroy()
+        self._post_files_count.configure(text=f"{len(self._post_selected_files)} files")
+        if not self._post_selected_files:
+            ctk.CTkLabel(self._post_files_list_frame, text="No files selected yet", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
+            return
+        for path in self._post_selected_files:
+            row = ctk.CTkFrame(self._post_files_list_frame, fg_color="transparent")
+            row.pack(fill="x", pady=3)
+            ctk.CTkLabel(row, text=os.path.basename(path), font=FONT_SMALL, text_color=C_TEXT, anchor="w").pack(side="left", fill="x", expand=True, padx=(4, 6))
+            ctk.CTkButton(
+                row, text="✕", width=26, height=26, fg_color="transparent",
+                hover_color=C_SOFT_RED, text_color=C_MUTED, corner_radius=8,
+                font=FONT_CAPTION, command=lambda p=path: self._remove_post_file(p),
+            ).pack(side="right", padx=4)
+
+    def _refresh_post_devices_list(self):
+        for w in self._post_devices_frame.winfo_children():
+            w.destroy()
+        self._post_device_vars.clear()
+        devices = get_devices()
+        if not devices:
+            ctk.CTkLabel(self._post_devices_frame, text="No connected devices", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
+            return
+        for dev in devices:
+            did = dev.get("device_id")
+            var = tk.BooleanVar(value=False)
+            ctk.CTkCheckBox(
+                self._post_devices_frame, text=dev.get("device_name") or did,
+                variable=var, font=FONT_SMALL, text_color=C_TEXT,
+                border_color=C_BORDER, fg_color=C_ACCENT,
+            ).pack(anchor="w", padx=8, pady=4)
+            self._post_device_vars[did] = var
+
+    def _post_files_to_devices(self):
+        if not self._post_selected_files:
+            messagebox.showwarning("No files", "Select at least one file to post.")
+            return
+        targets = [did for did, var in self._post_device_vars.items() if var.get()]
+        if not targets:
+            messagebox.showwarning("No devices", "Choose at least one device to post to.")
+            return
+        caption = self._post_caption_box.get("1.0", "end").strip()
+        files = list(self._post_selected_files)
+        self._post_btn.configure(state="disabled", text="Posting...")
+
+        def _run():
+            items = []
+            for path in files:
+                try:
+                    rel = f"{int(time.time() * 1000)}_{sanitize_relative_path(os.path.basename(path))}"
+                    with open(path, "rb") as f:
+                        data = f.read()
+                    save_file(rel, data, device_id=DESKTOP_SHARE_DEVICE_ID)
+                    items.append({
+                        "source_type": "desktop",
+                        "source_key": DESKTOP_SHARE_DEVICE_ID,
+                        "relative_path": rel,
+                        "size": len(data),
+                        "modified_time": int(os.path.getmtime(path)),
+                    })
+                except Exception:
+                    continue
+            result = create_device_share(DESKTOP_SHARE_DEVICE_ID, targets, caption, items) if items else {"ok": False}
+
+            def _finish():
+                self._post_btn.configure(state="normal", text="Post to Devices")
+                if result.get("ok"):
+                    self._post_selected_files.clear()
+                    self._post_caption_box.delete("1.0", "end")
+                    self._refresh_post_files_list()
+                    self._refresh_post_posts_list()
+                    messagebox.showinfo("Posted", f"Posted {result['count']} file(s) to {len(targets)} device(s).")
+                else:
+                    messagebox.showerror("Failed", "Could not post the selected files.")
+            self.after(0, _finish)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _refresh_post_posts_list(self):
+        for w in self._post_posts_frame.winfo_children():
+            w.destroy()
+        rows = get_device_shares_by_sharer(DESKTOP_SHARE_DEVICE_ID)
+        groups: dict[str, list[dict]] = {}
+        order: list[str] = []
+        for r in rows:
+            gid = r.get("share_group_id") or str(r["share_id"])
+            if gid not in groups:
+                groups[gid] = []
+                order.append(gid)
+            groups[gid].append(r)
+
+        if not order:
+            ctk.CTkLabel(self._post_posts_frame, text="No posts yet", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
+            return
+
+        for gid in order:
+            items = groups[gid]
+            head = items[0]
+            card = ctk.CTkFrame(self._post_posts_frame, fg_color=C_SURFACE, corner_radius=14, border_width=1, border_color=C_BORDER)
+            card.pack(fill="x", padx=4, pady=6)
+
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.pack(fill="x", padx=14, pady=(12, 4))
+            ctk.CTkLabel(
+                top, text=head.get("group_caption") or "(no caption)",
+                font=FONT_BODY, text_color=C_TEXT, anchor="w",
+            ).pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(top, text=fmt_rel(head.get("created_at")), font=FONT_CAPTION, text_color=C_MUTED, anchor="e").pack(side="right")
+
+            names = ", ".join(os.path.basename(it["relative_path"]) for it in items)
+            ctk.CTkLabel(
+                card, text=f"{len(items)} file(s): {names}",
+                font=FONT_SMALL, text_color=C_MUTED, anchor="w", wraplength=460, justify="left",
+            ).pack(fill="x", padx=14, pady=(0, 8))
+
+            targets = get_share_targets_for_group(gid, DESKTOP_SHARE_DEVICE_ID)
+            target_names = ", ".join(t.get("device_name") or t["target_device_id"] for t in targets) or "No devices"
+            ctk.CTkLabel(
+                card, text=f"Shared with: {target_names}",
+                font=FONT_CAPTION, text_color=C_MUTED, anchor="w",
+            ).pack(fill="x", padx=14, pady=(0, 10))
+
+            btn_row = ctk.CTkFrame(card, fg_color="transparent")
+            btn_row.pack(fill="x", padx=14, pady=(0, 12))
+            ctk.CTkButton(
+                btn_row, text="Edit Caption", width=110, height=30,
+                fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
+                border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION,
+                command=lambda g=gid, c=head.get("group_caption"): self._open_edit_caption_dialog(g, c),
+            ).pack(side="left", padx=(0, 8))
+            ctk.CTkButton(
+                btn_row, text="Manage Access", width=120, height=30,
+                fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
+                border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION,
+                command=lambda g=gid: self._open_manage_access_dialog(g),
+            ).pack(side="left", padx=(0, 8))
+            ctk.CTkButton(
+                btn_row, text="Delete", width=90, height=30,
+                fg_color="transparent", hover_color=C_SOFT_RED, text_color=C_ERROR,
+                border_width=1, border_color=C_ERROR_BORDER, corner_radius=8, font=FONT_CAPTION,
+                command=lambda g=gid: self._delete_post(g),
+            ).pack(side="left")
+
+    def _open_edit_caption_dialog(self, group_id: str, current_caption: str | None):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Edit Caption")
+        dialog.geometry("360x220")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text="CAPTION", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(fill="x", padx=16, pady=(16, 6))
+        box = ctk.CTkTextbox(dialog, height=90, fg_color=C_ELEVATED, corner_radius=10, border_width=1, border_color=C_BORDER, font=FONT_BODY)
+        box.pack(fill="x", padx=16)
+        box.insert("1.0", current_caption or "")
+
+        def _save():
+            edit_device_share_group_caption(group_id, DESKTOP_SHARE_DEVICE_ID, box.get("1.0", "end").strip())
+            dialog.destroy()
+            self._refresh_post_posts_list()
+
+        ctk.CTkButton(
+            dialog, text="Save", height=38,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER, corner_radius=10, font=FONT_BODY,
+            command=_save,
+        ).pack(fill="x", padx=16, pady=(16, 16))
+
+    def _open_manage_access_dialog(self, group_id: str):
+        current = {t["target_device_id"] for t in get_share_targets_for_group(group_id, DESKTOP_SHARE_DEVICE_ID)}
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Manage Device Access")
+        dialog.geometry("360x420")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text="DEVICES", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(fill="x", padx=16, pady=(16, 6))
+        scroll = ctk.CTkScrollableFrame(dialog, fg_color=C_ELEVATED, corner_radius=12, border_width=1, border_color=C_BORDER, label_text="")
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        vars_map: dict[str, tk.BooleanVar] = {}
+        for dev in get_devices():
+            did = dev.get("device_id")
+            var = tk.BooleanVar(value=did in current)
+            ctk.CTkCheckBox(
+                scroll, text=dev.get("device_name") or did, variable=var,
+                font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
+            ).pack(anchor="w", padx=8, pady=4)
+            vars_map[did] = var
+
+        def _save():
+            selected = {did for did, v in vars_map.items() if v.get()}
+            to_add = list(selected - current)
+            to_remove = current - selected
+            if to_add:
+                add_share_group_targets(group_id, to_add, DESKTOP_SHARE_DEVICE_ID)
+            for did in to_remove:
+                remove_share_group_target(group_id, did, DESKTOP_SHARE_DEVICE_ID)
+            dialog.destroy()
+            self._refresh_post_posts_list()
+
+        ctk.CTkButton(
+            dialog, text="Save", height=38,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER, corner_radius=10, font=FONT_BODY,
+            command=_save,
+        ).pack(fill="x", padx=16, pady=(0, 16))
+
+    def _delete_post(self, group_id: str):
+        if not confirm_dialog(self, "Delete Post", "Delete this post from all device feeds?"):
+            return
+        delete_device_share_group(group_id, DESKTOP_SHARE_DEVICE_ID)
+        self._refresh_post_posts_list()
 
     def _browse_root(self):
         folder = filedialog.askdirectory(title="Select Backup Root Folder")

@@ -2575,6 +2575,23 @@ def create_device_share(
     return {"ok": True, "count": count, "group_id": group_id}
 
 
+def edit_device_share_group_caption(group_id: str, requesting_device_id: str, caption: str | None) -> bool:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT shared_by_device_id FROM device_share_groups WHERE id = ?",
+        (group_id,),
+    ).fetchone()
+    if not row or row["shared_by_device_id"] != requesting_device_id:
+        conn.close()
+        return False
+    cap = (caption or "").strip() or None
+    conn.execute("UPDATE device_share_groups SET caption = ? WHERE id = ?", (cap, group_id))
+    conn.execute("UPDATE device_shares SET caption = ? WHERE share_group_id = ?", (cap, group_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
 def get_device_shares_for_target(target_device_id: str) -> list[dict]:
     """Return device-to-device shares delivered to a device, newest first, with group info."""
     conn = get_conn()
@@ -2733,6 +2750,34 @@ def remove_share_group_target(group_id: str, target_device_id: str, requesting_d
     return True
 
 
+def add_share_group_targets(group_id: str, target_device_ids: list[str], requesting_device_id: str) -> bool:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT shared_by_device_id FROM device_share_groups WHERE id = ?",
+        (group_id,),
+    ).fetchone()
+    if not row or row["shared_by_device_id"] != requesting_device_id:
+        conn.close()
+        return False
+    share_ids = [
+        r["id"]
+        for r in conn.execute(
+            "SELECT id FROM device_shares WHERE share_group_id = ?", (group_id,)
+        ).fetchall()
+    ]
+    targets = [t for t in (target_device_ids or []) if t and t != requesting_device_id]
+    if not share_ids or not targets:
+        conn.close()
+        return False
+    conn.executemany(
+        "INSERT OR IGNORE INTO device_share_targets (share_id, target_device_id) VALUES (?, ?)",
+        [(sid, t) for sid in share_ids for t in targets],
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 def remove_share_target(share_id: int, target_device_id: str, requesting_device_id: str) -> bool:
     """Remove one target device from a share. Owner or self-removal allowed."""
     conn = get_conn()
@@ -2782,4 +2827,4 @@ def is_share_target(share_id: int, device_id: str) -> bool:
         (share_id, device_id),
     ).fetchone()
     conn.close()
-    return row is not None
+    return row is not None

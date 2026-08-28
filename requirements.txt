@@ -6,3 +6,4 @@ pyinstaller
 pillow
 pillow-heif
 pystray
+tkinterdnd2
