@@ -2690,6 +2690,10 @@ function NativeVideoPreviewPlayer({
   const upgradeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const videoViewRef = useRef<InstanceType<ExpoVideoModule['VideoView']> | null>(null);
 
+  const enterFullscreen = useCallback(() => {
+    safeMediaCall(() => { videoViewRef.current?.enterFullscreen(); });
+  }, []);
+
   useEffect(() => {
     return () => {
       onSeekingChange?.(false);
@@ -3022,6 +3026,16 @@ function NativeVideoPreviewPlayer({
           <View style={pvStyles.videoCtrlBtn}>
             <Text style={pvStyles.videoDurationText}>{formatMediaTime(durationSec)}</Text>
           </View>
+
+          <TouchableOpacity
+            onPress={enterFullscreen}
+            style={pvStyles.videoCtrlBtn}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Play fullscreen"
+          >
+            <AppIcon androidName="fullscreen" iosName="arrow.up.left.and.arrow.down.right" color="#fff" size={20} />
+          </TouchableOpacity>
+
         </View>
       </View>
     </View>
