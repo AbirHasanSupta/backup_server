@@ -2088,6 +2088,10 @@ const PreviewModal = React.memo(function PreviewModal({
 
   const scaleRef = useRef(1);
   const translateRef = useRef({ x: 0, y: 0 });
+  const isVideoSeekingRef = useRef(false);
+  const handleVideoSeekingChange = useCallback((seeking: boolean) => {
+    isVideoSeekingRef.current = seeking;
+  }, []);
   const panStartRef = useRef({ x: 0, y: 0 });
   const pinchStartRef = useRef<{ distance: number; scale: number } | null>(null);
   const lastTapRef = useRef(0);
@@ -2147,6 +2151,7 @@ const PreviewModal = React.memo(function PreviewModal({
     translateYAnim.setValue(0);
     scaleRef.current = 1;
     translateRef.current = { x: 0, y: 0 };
+    isVideoSeekingRef.current = false;
   }, [currentFile?.path, scaleAnim, translateXAnim, translateYAnim]);
 
   const setZoomTo = useCallback((targetScale: number) => {
@@ -2254,15 +2259,11 @@ const PreviewModal = React.memo(function PreviewModal({
   const panResponder = useMemo(() => {
     // eslint-disable-next-line react-hooks/refs
     return PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponder: () => !isVideoSeekingRef.current,
       onMoveShouldSetPanResponder: (evt, gs) => {
+        if (isVideoSeekingRef.current) return false;
         const touches = evt.nativeEvent.touches;
         const cur = latestRef.current;
-        // Video: this only ever gets asked for touches over the plain video
-        // body (via the video's own touch-catcher) or the ExternalMediaPlayer
-        // fallback. The seek track and controls-panel guard claim their own
-        // regions first via normal target-first bubbling, so they never reach
-        // here. Photo: this is the sole responder, nothing else competes.
         if (cur.canZoom && touches.length === 2) return true;
         if (cur.canZoom && scaleRef.current > 1.02) return true;
         return Math.abs(gs.dx) > 10 && Math.abs(gs.dx) > Math.abs(gs.dy) * 1.2;
@@ -2424,6 +2425,7 @@ const PreviewModal = React.memo(function PreviewModal({
             fileSize={targetFile.size}
             isActive={mediaActive}
             swipePanHandlers={panResponder.panHandlers}
+            onSeekingChange={handleVideoSeekingChange}
           />
         </Animated.View>
       );
@@ -2544,15 +2546,6 @@ const PreviewModal = React.memo(function PreviewModal({
                 <AppIcon androidName="zoom_in" iosName="plus.magnifyingglass" color="#fff" size={18} />
               </TouchableOpacity>
             )}
-            {/* Fullscreen Toggle */}
-            <TouchableOpacity onPress={() => setIsFullscreen(v => !v)} style={pvStyles.topBarBtn}>
-              <AppIcon
-                androidName={isFullscreen ? 'fullscreen_exit' : 'fullscreen'}
-                iosName={isFullscreen ? 'arrow.down.right.and.arrow.up.left' : 'arrow.up.left.and.arrow.down.right'}
-                color="#fff"
-                size={20}
-              />
-            </TouchableOpacity>
             {/* Share Button (Phone backup & Shared folder views) */}
             {onShare && currentFile && (
               <TouchableOpacity
@@ -2658,6 +2651,7 @@ type VideoPreviewPlayerProps = {
   // player otherwise swallows touches before RN's JS responder system on
   // the ancestor contentArea ever sees them.
   swipePanHandlers?: PanHandlers;
+  onSeekingChange?: (seeking: boolean) => void;
 };
 
 function VideoPreviewPlayer(props: VideoPreviewPlayerProps) {
@@ -2686,6 +2680,7 @@ function NativeVideoPreviewPlayer({
   fileSize,
   isActive = true,
   swipePanHandlers,
+  onSeekingChange,
   videoModule,
 }: VideoPreviewPlayerProps & { videoModule: ExpoVideoModule }) {
   const PREVIEW_TRANSCODE_MIN_BYTES = 40 * 1024 * 1024;
@@ -2695,9 +2690,11 @@ function NativeVideoPreviewPlayer({
   const upgradeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const videoViewRef = useRef<InstanceType<ExpoVideoModule['VideoView']> | null>(null);
 
-  const enterFullscreen = useCallback(() => {
-    safeMediaCall(() => { videoViewRef.current?.enterFullscreen(); });
-  }, []);
+  useEffect(() => {
+    return () => {
+      onSeekingChange?.(false);
+    };
+  }, [onSeekingChange]);
 
   const source = useMemo<VideoSource>(() => ({
     uri: previewUri,
@@ -2779,20 +2776,15 @@ function NativeVideoPreviewPlayer({
     });
   }, [player]);
 
-  // Seekbar PanResponder — handles tap + drag to seek.
-  // Capture handlers are defense-in-depth: normal target-first bubbling already
-  // resolves touches on this exact view to this responder before the panel
-  // guard or outer gallery responder ever get asked.
-  // seekProgressRef/seekBarWidthRef/wasPlayingBeforeSeekRef are accessed only inside gesture
-  // event callbacks (grant/move/release/terminate), never during render — disable is correct.
   // eslint-disable-next-line react-hooks/refs
   const seekPanResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
-    // Steal the touch from the parent gallery pan-responder so seek works
     onStartShouldSetPanResponderCapture: () => true,
     onMoveShouldSetPanResponderCapture: () => true,
+    onPanResponderTerminationRequest: () => false,
     onPanResponderGrant: (evt) => {
+      onSeekingChange?.(true);
       wasPlayingBeforeSeekRef.current = player.playing;
       safeMediaCall(() => player.pause());
       setIsSeeking(true);
@@ -2801,32 +2793,30 @@ function NativeVideoPreviewPlayer({
       setSeekProgress(ratio);
     },
     onPanResponderMove: (evt) => {
-      // locationX is the touch position within the seekbar track view — use it directly.
       const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / seekBarWidthRef.current));
       seekProgressRef.current = ratio;
       setSeekProgress(ratio);
     },
     onPanResponderRelease: () => {
-      // Use the ref to get the current ratio — avoids stale-closure from useMemo deps.
       const finalRatio = seekProgressRef.current;
-      // Read duration directly from player at release time — freshest possible value,
-      // no stale closure risk regardless of when the useMemo was last created.
       const dur = player.duration || 0;
       const newTime = finalRatio * dur;
       safeMediaCall(() => { player.currentTime = newTime; });
       setPositionSec(newTime);
       setIsSeeking(false);
+      onSeekingChange?.(false);
       if (wasPlayingBeforeSeekRef.current) {
         safeMediaCall(() => player.play());
       }
     },
     onPanResponderTerminate: () => {
       setIsSeeking(false);
+      onSeekingChange?.(false);
       if (wasPlayingBeforeSeekRef.current) {
         safeMediaCall(() => player.play());
       }
     },
-  }), [player]);
+  }), [player, onSeekingChange]);
 
   useEffect(() => {
     upgradedRef.current = false;
@@ -3032,16 +3022,6 @@ function NativeVideoPreviewPlayer({
           <View style={pvStyles.videoCtrlBtn}>
             <Text style={pvStyles.videoDurationText}>{formatMediaTime(durationSec)}</Text>
           </View>
-
-          {/* Fullscreen */}
-          <TouchableOpacity
-            onPress={enterFullscreen}
-            style={pvStyles.videoCtrlBtn}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            accessibilityLabel="Play fullscreen"
-          >
-            <AppIcon androidName="fullscreen" iosName="arrow.up.left.and.arrow.down.right" color="#fff" size={20} />
-          </TouchableOpacity>
         </View>
       </View>
     </View>
