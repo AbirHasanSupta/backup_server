@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import secrets
 import threading
@@ -2548,6 +2549,51 @@ def get_share_target_devices(exclude_device_id: str | None = None) -> list[dict]
     return [dict(r) for r in rows]
 
 
+def _cleanup_rewind_shared_files(share_ids: list[int]) -> None:
+    """Delete persisted rewind-reel copies for the given share ids (best-effort)."""
+    if not share_ids:
+        return
+    conn = get_conn()
+    placeholders = ",".join("?" * len(share_ids))
+    rows = conn.execute(
+        f"SELECT relative_path FROM device_shares WHERE id IN ({placeholders}) AND source_type = 'rewind_shared'",
+        share_ids,
+    ).fetchall()
+    conn.close()
+    for r in rows:
+        try:
+            os.remove(r["relative_path"])
+        except OSError:
+            pass
+
+
+def _cleanup_orphaned_media(media_ids: list[int]) -> None:
+    """Delete reactions/comments for media_ids no longer referenced by any
+    remaining device_shares row. media_id is a shared identity (feed + library),
+    so a reaction/comment thread must only be removed once nothing still points
+    at it. Must be called AFTER the owning device_shares row(s) are deleted.
+    """
+    unique_ids = sorted({m for m in media_ids if m is not None})
+    if not unique_ids:
+        return
+    conn = get_conn()
+    placeholders = ",".join("?" * len(unique_ids))
+    still_used = {
+        r["media_id"]
+        for r in conn.execute(
+            f"SELECT DISTINCT media_id FROM device_shares WHERE media_id IN ({placeholders})",
+            unique_ids,
+        ).fetchall()
+    }
+    orphaned = [mid for mid in unique_ids if mid not in still_used]
+    if orphaned:
+        o_placeholders = ",".join("?" * len(orphaned))
+        conn.execute(f"DELETE FROM reactions WHERE media_id IN ({o_placeholders})", orphaned)
+        conn.execute(f"DELETE FROM comments WHERE media_id IN ({o_placeholders})", orphaned)
+    conn.commit()
+    conn.close()
+
+
 def create_device_share(
     shared_by_device_id: str,
     target_device_ids: list[str],
@@ -2769,15 +2815,21 @@ def delete_device_share_group(group_id: str, requesting_device_id: str) -> bool:
             "SELECT id FROM device_shares WHERE share_group_id = ?", (group_id,)
         ).fetchall()
     ]
+    media_ids = [
+        r["media_id"]
+        for r in conn.execute(
+            "SELECT media_id FROM device_shares WHERE share_group_id = ?", (group_id,)
+        ).fetchall()
+    ]
     if share_ids:
         placeholders = ",".join("?" * len(share_ids))
         conn.execute(f"DELETE FROM device_share_targets WHERE share_id IN ({placeholders})", share_ids)
-        conn.execute(f"DELETE FROM reactions WHERE media_id IN ({placeholders})", share_ids)
-        conn.execute(f"DELETE FROM comments WHERE media_id IN ({placeholders})", share_ids)
+    _cleanup_rewind_shared_files(share_ids)
     conn.execute("DELETE FROM device_shares WHERE share_group_id = ?", (group_id,))
     conn.execute("DELETE FROM device_share_groups WHERE id = ?", (group_id,))
     conn.commit()
     conn.close()
+    _cleanup_orphaned_media(media_ids)
     return True
 
 
@@ -2795,12 +2847,13 @@ def delete_device_share(share_id: int, requesting_device_id: str) -> bool:
     if group_id:
         conn.close()
         return delete_device_share_group(group_id, requesting_device_id)
+    media_id = row["media_id"]
     conn.execute("DELETE FROM device_share_targets WHERE share_id = ?", (share_id,))
-    conn.execute("DELETE FROM reactions WHERE media_id = ?", (share_id,))
-    conn.execute("DELETE FROM comments WHERE media_id = ?", (share_id,))
+    _cleanup_rewind_shared_files([share_id])
     conn.execute("DELETE FROM device_shares WHERE id = ?", (share_id,))
     conn.commit()
     conn.close()
+    _cleanup_orphaned_media([media_id])
     return True
 
 

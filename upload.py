@@ -3,6 +3,7 @@ from email.utils import formatdate
 from mimetypes import guess_type
 import os
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -15,7 +16,7 @@ from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 
-from config import load_config
+from config import load_config, APP_DATA_DIR
 from database import (
     batch_check_files,
     find_device_by_name_model,
@@ -1830,6 +1831,24 @@ async def delete_media_comment(
 # Device-to-Device Sharing Endpoints
 # ──────────────────────────────────────────────────────────────────────────────
 
+SHARED_REWIND_DIR = os.path.join(APP_DATA_DIR, "shared_rewind_reels")
+os.makedirs(SHARED_REWIND_DIR, exist_ok=True)
+
+
+def _persist_shared_rewind_reel(source_key: str, relative_path: str) -> str:
+    """Copy the live (session-cached) rewind reel into a durable location so
+    the share survives server restarts / cache clears. Only deleted when the
+    owning share/post is deleted (see database._cleanup_rewind_shared_files).
+    """
+    year_str, _, month_str = relative_path.partition("-")
+    live_path = rewind.get_rewind_path(source_key, int(year_str), int(month_str) if month_str else None)
+    if not live_path or not os.path.isfile(live_path):
+        raise HTTPException(status_code=404, detail="Reel not ready")
+    dest_path = os.path.join(SHARED_REWIND_DIR, f"{uuid.uuid4().hex}.mp4")
+    shutil.copy2(live_path, dest_path)
+    return dest_path
+
+
 class ShareItem(BaseModel):
     source_type: str
     source_key: str
@@ -1903,6 +1922,24 @@ async def create_share(
     if not targets:
         raise HTTPException(status_code=400, detail="No valid target devices")
 
+    persisted_paths: list[str] = []
+    try:
+        for it in body.items:
+            if it.source_type == "rewind":
+                persisted = await asyncio.to_thread(
+                    _persist_shared_rewind_reel, it.source_key, it.relative_path
+                )
+                persisted_paths.append(persisted)
+                it.relative_path = persisted
+                it.source_type = "rewind_shared"
+    except Exception:
+        for p in persisted_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        raise
+
     items = [
         {
             "source_type": it.source_type,
@@ -1917,6 +1954,12 @@ async def create_share(
         create_device_share, body.shared_by_device_id, targets, body.caption, items,
         body.post_kind, body.post_title,
     )
+    if not result.get("ok"):
+        for p in persisted_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
     return result
 
 
@@ -1983,7 +2026,7 @@ async def get_unified_feed(
                 "path": s["relative_path"],
                 "size": s["size"],
                 "modified_time": s["modified_time"],
-                "is_video": s["source_type"] == "rewind" or ext in video_exts,
+                "is_video": s["source_type"] in ("rewind", "rewind_shared") or ext in video_exts,
             })
 
         # Sort groups newest-first by created_at
@@ -2200,6 +2243,11 @@ def _resolve_share_path(share: dict) -> str:
         if not path:
             raise HTTPException(status_code=404, detail="Reel not ready")
         return path
+    if source_type == "rewind_shared":
+        full_path = os.path.abspath(relative_path)
+        if os.path.commonpath([SHARED_REWIND_DIR, full_path]) != SHARED_REWIND_DIR:
+            raise HTTPException(status_code=400, detail="Invalid path")
+        return full_path
     raise HTTPException(status_code=400, detail="Unknown share source type")
 
 

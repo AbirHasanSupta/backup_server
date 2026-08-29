@@ -486,6 +486,7 @@ const POST_KIND_BADGES: Record<string, { emoji: string; label: string; bg: strin
   memory: { emoji: '📅', label: 'Memory', bg: 'rgba(139, 92, 246, 0.15)', fg: '#8B5CF6' },
   flashback: { emoji: '⚡', label: 'Flashback', bg: 'rgba(245, 158, 11, 0.15)', fg: '#F59E0B' },
   rewind: { emoji: '🎬', label: 'Rewind Reel', bg: 'rgba(236, 72, 153, 0.15)', fg: '#EC4899' },
+  roulette: { emoji: '🎲', label: 'Roulette', bg: 'rgba(99, 102, 241, 0.15)', fg: '#6366F1' },
   trip: { emoji: '🧭', label: 'Trip', bg: 'rgba(16, 185, 129, 0.15)', fg: '#10B981' },
   place: { emoji: '📍', label: 'Place', bg: 'rgba(59, 130, 246, 0.15)', fg: '#3B82F6' },
 };
@@ -744,6 +745,7 @@ function SharedFeedCard({
                   contentFit="cover"
                   transition={150}
                   onLoad={handleImageLoad}
+                  onError={() => { if (!mediaAspectRatio) setMediaAspectRatio(1.0); }}
                 />
                 {isVideo && (
                   <View style={feedCardStyles.videoBadge}>
@@ -1409,10 +1411,14 @@ const reactionStyles = StyleSheet.create({
   },
   emojiText: {
     fontSize: TextScale.sm,
+    lineHeight: TextScale.sm + 2,
+    includeFontPadding: false,
   },
   countText: {
     fontSize: TextScale.xs,
+    lineHeight: TextScale.sm + 2,
     fontWeight: '700',
+    includeFontPadding: false,
   },
   totalBtn: {
     flexDirection: 'row',
@@ -1425,7 +1431,9 @@ const reactionStyles = StyleSheet.create({
   },
   totalText: {
     fontSize: TextScale.xs,
+    lineHeight: TextScale.sm + 2,
     fontWeight: '700',
+    includeFontPadding: false,
   },
 });
 

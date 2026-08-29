@@ -11,6 +11,7 @@ import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
+import { ShareModal } from '@/components/ShareModal';
 import {
   getRouletteItem,
   getConfig,
@@ -18,6 +19,7 @@ import {
   buildVideoPreviewUrl,
   downloadFile,
   downloadSharedFile,
+  createDeviceShare,
 } from '../../downloader';
 
 type ExpoSensorsModule = typeof import('expo-sensors');
@@ -95,6 +97,7 @@ export default function RouletteScreen() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [feedShareVisible, setFeedShareVisible] = useState(false);
 
   const phaseRef = useRef<Phase>('idle');
   useEffect(() => { phaseRef.current = phase; }, [phase]);
@@ -276,6 +279,18 @@ export default function RouletteScreen() {
     }
   };
 
+  const handleFeedShareSubmit = async (targetIds: string[], caption: string) => {
+    if (!item) return;
+    await createDeviceShare(targetIds, caption, [{
+      source_type: item.source_type,
+      source_key: item.source_id,
+      relative_path: item.relative_path,
+      size: item.size || 0,
+      modified_time: item.capture_time || 0,
+    }], { postKind: 'roulette', postTitle: item.year ? String(item.year) : item.source_label });
+    setFeedShareVisible(false);
+  };
+
   const mediaUrl = item && serverConfig
     ? (item.is_video
       ? buildVideoPreviewUrl(serverConfig, item.relative_path, item.source_type, item.source_id)
@@ -344,6 +359,9 @@ export default function RouletteScreen() {
                 {formatCaptureDate(item.capture_time, item.year ? String(item.year) : item.source_label)}
               </Text>
               <View style={styles.revealActions}>
+                <TouchableOpacity onPress={() => setFeedShareVisible(true)} style={styles.revealSaveBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} accessibilityLabel="Share to feed">
+                  <AppIcon androidName="dynamic_feed" iosName="person.2.fill" color="#fff" size={20} />
+                </TouchableOpacity>
                 <TouchableOpacity onPress={handleShare} disabled={sharing} style={styles.revealSaveBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                   {sharing ? (
                     <ActivityIndicator size="small" color="#fff" />
@@ -375,6 +393,14 @@ export default function RouletteScreen() {
           <Text style={styles.spinBtnText}>{phase === 'idle' ? 'Spin' : 'Spin Again'}</Text>
         </TouchableOpacity>
       </View>
+
+      <ShareModal
+        visible={feedShareVisible}
+        count={1}
+        colors={colors}
+        onClose={() => setFeedShareVisible(false)}
+        onSubmit={handleFeedShareSubmit}
+      />
     </View>
   );
 }
