@@ -1,7 +1,7 @@
 import { getServerPort, getSavedServers } from './settings';
 
-const TIMEOUT_MS = 1500;
-const BATCH_SIZE = 40;
+const TIMEOUT_MS = 1200;
+const BATCH_SIZE = 45;
 
 // Common mesh node & router subnets across various manufacturers
 // (TP-Link Deco = 192.168.68.x, Google Nest = 192.168.86.x, Asus = 192.168.50.x, etc.)

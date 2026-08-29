@@ -481,36 +481,6 @@ export default function SettingsScreen() {
         }
       >
         <Animated.View entering={FadeInDown.duration(300).delay(100)}>
-          <SectionHeader title="Your profile" styles={styles} />
-          <SettingsCard styles={styles}>
-            <FieldLabel text="Your name" styles={styles} />
-            <TextInput
-              id="username-input"
-              style={styles.textInput}
-              value={username}
-              onChangeText={setUsernameState}
-              placeholder="e.g. Alex"
-              placeholderTextColor={colors.textMuted}
-              autoCapitalize="words"
-              autoCorrect={false}
-              returnKeyType="done"
-              onSubmitEditing={handleSaveUsername}
-            />
-            <AnimatedPressable
-              id="save-username-button"
-              style={[styles.primaryBtn, savingUsername && { opacity: 0.65 }]}
-              onPress={handleSaveUsername}
-              disabled={savingUsername}
-              scaleDown={0.95}
-              accessibilityLabel="Save your name"
-            >
-              <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={18} fallback="OK" />
-              <Text style={styles.primaryBtnText}>{savingUsername ? 'Saving' : 'Save'}</Text>
-            </AnimatedPressable>
-          </SettingsCard>
-        </Animated.View>
-
-        <Animated.View entering={FadeInDown.duration(300).delay(150)}>
           <SectionHeader title="Server connection" styles={styles} />
           <SettingsCard styles={styles}>
             {savedServers.length > 0 && (
@@ -631,7 +601,7 @@ export default function SettingsScreen() {
               </AnimatedPressable>
               <AnimatedPressable
                 id="save-server-button"
-                style={[styles.primaryBtn, savingServer && { opacity: 0.65 }]}
+                style={styles.primaryBtn}
                 onPress={handleSaveServer}
                 disabled={savingServer}
                 scaleDown={0.95}
@@ -644,37 +614,7 @@ export default function SettingsScreen() {
           </SettingsCard>
         </Animated.View>
 
-        <Animated.View entering={FadeInDown.duration(300).delay(200)}>
-          <SectionHeader title="Appearance" styles={styles} />
-          <SettingsCard styles={styles}>
-            <View style={styles.toggleRow}>
-              <View style={styles.toggleIcon}>
-                <AppIcon
-                  androidName={isDark ? 'dark_mode' : 'light_mode'}
-                  iosName={isDark ? 'moon.fill' : 'sun.max.fill'}
-                  color={isDark ? colors.primaryLight : colors.warning}
-                  size={20}
-                  fallback={isDark ? 'D' : 'L'}
-                />
-              </View>
-              <View style={styles.toggleInfo}>
-                <Text style={styles.toggleLabel}>Dark mode</Text>
-                <Text style={styles.toggleSub}>
-                  {isDark ? 'Using the darker app theme.' : 'Using the light app theme.'}
-                </Text>
-              </View>
-              <Switch
-                value={mode === 'dark'}
-                onValueChange={(val) => setMode(val ? 'dark' : 'light')}
-                trackColor={{ false: colors.surfaceBorder, true: colors.primarySoft }}
-                thumbColor={isDark ? colors.primary : colors.textMuted}
-                accessibilityLabel="Toggle dark mode"
-              />
-            </View>
-          </SettingsCard>
-        </Animated.View>
-
-        <Animated.View entering={FadeInDown.duration(300).delay(300)}>
+        <Animated.View entering={FadeInDown.duration(300).delay(150)}>
           <SectionHeader title="Sync schedule" styles={styles} />
           <SettingsCard styles={styles}>
             <View style={styles.toggleRow}>
@@ -732,7 +672,37 @@ export default function SettingsScreen() {
           </SettingsCard>
         </Animated.View>
 
-        <Animated.View entering={FadeInDown.duration(300).delay(400)}>
+        <Animated.View entering={FadeInDown.duration(300).delay(200)}>
+          <SectionHeader title="Your profile" styles={styles} />
+          <SettingsCard styles={styles}>
+            <FieldLabel text="Your name" styles={styles} />
+            <TextInput
+              id="username-input"
+              style={styles.textInput}
+              value={username}
+              onChangeText={setUsernameState}
+              placeholder="e.g. Alex"
+              placeholderTextColor={colors.textMuted}
+              autoCapitalize="words"
+              autoCorrect={false}
+              returnKeyType="done"
+              onSubmitEditing={handleSaveUsername}
+            />
+            <AnimatedPressable
+              id="save-username-button"
+              style={styles.primaryBtn}
+              onPress={handleSaveUsername}
+              disabled={savingUsername}
+              scaleDown={0.95}
+              accessibilityLabel="Save your name"
+            >
+              <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={18} fallback="OK" />
+              <Text style={styles.primaryBtnText}>{savingUsername ? 'Saving…' : 'Save'}</Text>
+            </AnimatedPressable>
+          </SettingsCard>
+        </Animated.View>
+
+        <Animated.View entering={FadeInDown.duration(300).delay(300)}>
           <SectionHeader title="Data management" styles={styles} />
           <SettingsCard styles={styles}>
             <AnimatedPressable
@@ -767,6 +737,36 @@ export default function SettingsScreen() {
                 ? 'Connect to a server first to use this feature.'
                 : 'Use this when files are missing on the server. Existing cache entries are cleared, then files upload again.'}
             </Text>
+          </SettingsCard>
+        </Animated.View>
+
+        <Animated.View entering={FadeInDown.duration(300).delay(400)}>
+          <SectionHeader title="Appearance" styles={styles} />
+          <SettingsCard styles={styles}>
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleIcon}>
+                <AppIcon
+                  androidName={isDark ? 'dark_mode' : 'light_mode'}
+                  iosName={isDark ? 'moon.fill' : 'sun.max.fill'}
+                  color={isDark ? colors.primaryLight : colors.warning}
+                  size={20}
+                  fallback={isDark ? 'D' : 'L'}
+                />
+              </View>
+              <View style={styles.toggleInfo}>
+                <Text style={styles.toggleLabel}>Dark mode</Text>
+                <Text style={styles.toggleSub}>
+                  {isDark ? 'Using the darker app theme.' : 'Using the light app theme.'}
+                </Text>
+              </View>
+              <Switch
+                value={mode === 'dark'}
+                onValueChange={(val) => setMode(val ? 'dark' : 'light')}
+                trackColor={{ false: colors.surfaceBorder, true: colors.primarySoft }}
+                thumbColor={isDark ? colors.primary : colors.textMuted}
+                accessibilityLabel="Toggle dark mode"
+              />
+            </View>
           </SettingsCard>
         </Animated.View>
 

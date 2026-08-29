@@ -71,6 +71,15 @@ export function ShareModal({
     });
   }, []);
 
+  const allSelected = devices.length > 0 && selected.size === devices.length;
+  const toggleSelectAll = useCallback(() => {
+    if (allSelected) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(devices.map((d) => d.device_id)));
+    }
+  }, [allSelected, devices]);
+
   const handleSend = useCallback(async () => {
     if (selected.size === 0 || sending) return;
     setSending(true);
@@ -110,9 +119,18 @@ export function ShareModal({
             maxLength={2000}
           />
 
-          <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>
-            Send to devices
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: Spacing.two }}>
+            <Text style={[styles.sectionLabel, { color: colors.textSecondary, marginBottom: 0 }]}>
+              Send to devices
+            </Text>
+            {devices.length > 1 && (
+              <TouchableOpacity onPress={toggleSelectAll} hitSlop={6}>
+                <Text style={{ fontSize: TextScale.xs, fontWeight: '700', color: colors.primary }}>
+                  {allSelected ? 'Deselect all' : 'Select all'}
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
 
           {loading ? (
             <View style={styles.centerPad}>

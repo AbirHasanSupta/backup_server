@@ -574,6 +574,12 @@ export async function getActiveServerCandidates() {
 // ─── Mesh Roaming Auto-Failover Resolver ──────────────────────────────────────
 let _resolvingPromise = null;
 
+/** @type {import('expo-network') | null} */
+let _Network = null;
+try {
+  _Network = require('expo-network');
+} catch (_e) {}
+
 async function quickProbe(target, port, timeoutMs = 1200) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -602,8 +608,7 @@ function ipv4Octets(ip) {
 
 /**
  * Last-resort fallback for resolveReachableServer: sweeps the /24 subnet of the
- * last-known IP for a responding server. Handles a mesh node whose IP was never
- * previously recorded as a candidate (new node, first time on that subnet).
+ * given IP for a responding server.
  */
 async function subnetSweep(baseIp, port, exclude) {
   const octets = ipv4Octets(baseIp);
@@ -708,24 +713,40 @@ export async function resolveReachableServer(options = {}) {
         }
       }
 
-      // Step 3: last-resort same-subnet sweep — catches a mesh node whose IP
-      // was never recorded as a candidate yet (skipped if disabled or currentIp isn't IPv4).
+      // Step 3: Subnet sweep — sweeps device's current network subnet (if roaming to a new mesh node AP)
+      // as well as the last-known server IP's subnet.
       if (options.subnetSweep !== false) {
         candidates.add(currentIp);
-        const swept = await subnetSweep(currentIp, port, candidates);
-        if (swept) {
-          const newIp = swept.ip;
-          console.log(`[Mesh Roaming] Found server via subnet sweep: ${newIp} (was ${currentIp})`);
-          await AsyncStorage.setItem(KEYS.SERVER_IP, newIp);
-          await saveServerProfile({
-            ip: newIp,
-            port,
-            name: swept.probe.data?.name || serverName || newIp,
-            all_ips: swept.probe.data?.all_ips || [newIp],
-            hostname: swept.probe.data?.hostname || '',
-          });
-          DeviceEventEmitter.emit('settings-updated');
-          return { ok: true, ip: newIp, reconnected: true, data: swept.probe.data };
+
+        let deviceIp = null;
+        try {
+          if (_Network?.getIpAddressAsync) {
+            deviceIp = await _Network.getIpAddressAsync();
+          }
+        } catch (_e) {}
+
+        const subnetsToSweep = [];
+        if (deviceIp && deviceIp !== '0.0.0.0' && deviceIp !== currentIp) {
+          subnetsToSweep.push(deviceIp);
+        }
+        subnetsToSweep.push(currentIp);
+
+        for (const baseIp of subnetsToSweep) {
+          const swept = await subnetSweep(baseIp, port, candidates);
+          if (swept) {
+            const newIp = swept.ip;
+            console.log(`[Mesh Roaming] Found server via subnet sweep: ${newIp} (was ${currentIp})`);
+            await AsyncStorage.setItem(KEYS.SERVER_IP, newIp);
+            await saveServerProfile({
+              ip: newIp,
+              port,
+              name: swept.probe.data?.name || serverName || newIp,
+              all_ips: swept.probe.data?.all_ips || [newIp],
+              hostname: swept.probe.data?.hostname || '',
+            });
+            DeviceEventEmitter.emit('settings-updated');
+            return { ok: true, ip: newIp, reconnected: true, data: swept.probe.data };
+          }
         }
       }
 

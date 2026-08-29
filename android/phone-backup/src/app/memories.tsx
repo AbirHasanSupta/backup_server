@@ -332,7 +332,7 @@ export default function MemoriesScreen() {
   }, [activeItemIdx]);
 
   useEffect(() => {
-    if (activeDayIdx === null || !currentItem || isPaused) {
+    if (activeDayIdx === null || !currentItem || isPaused || shareVisible) {
       if (photoTimerRef.current) clearInterval(photoTimerRef.current);
       return;
     }
@@ -358,7 +358,7 @@ export default function MemoriesScreen() {
     return () => {
       if (photoTimerRef.current) clearInterval(photoTimerRef.current);
     };
-  }, [activeDayIdx, activeItemIdx, currentItem, isPaused, advanceItem]);
+  }, [activeDayIdx, activeItemIdx, currentItem, isPaused, shareVisible, advanceItem]);
 
   const openFlashback = useCallback(async (prefetched?: FlashbackItem | null) => {
     setFlashbackVisible(true);

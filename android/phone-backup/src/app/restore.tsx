@@ -572,8 +572,14 @@ function ReactionEmojiBar({
         );
       })}
       {total > 0 && onShowReactors && (
-        <TouchableOpacity onPress={onShowReactors} hitSlop={8} style={reactionStyles.totalBtn}>
-          <Text style={[reactionStyles.totalText, { color: colors.textMuted }]}>{total}</Text>
+        <TouchableOpacity
+          onPress={onShowReactors}
+          hitSlop={8}
+          style={[reactionStyles.totalBtn, { backgroundColor: colors.surfaceSoft, borderColor: colors.surfaceBorder }]}
+          activeOpacity={0.7}
+        >
+          <AppIcon androidName="people" iosName="person.2.fill" color={colors.textSecondary} size={13} />
+          <Text style={[reactionStyles.totalText, { color: colors.textSecondary }]}>{total}</Text>
         </TouchableOpacity>
       )}
     </View>
@@ -608,12 +614,27 @@ function SharedFeedCard({
   const items = item.group_items && item.group_items.length > 0 ? item.group_items : [item];
   const [activeIndex, setActiveIndex] = useState(0);
   const [cardWidth, setCardWidth] = useState(SCREEN_W);
-  const mediaHeight = Math.round(cardWidth * 1.35);
+  const [mediaAspectRatio, setMediaAspectRatio] = useState<number | null>(null);
+  const effectiveRatio = mediaAspectRatio ?? 1.0;
+  const mediaHeight = Math.round(cardWidth / effectiveRatio);
   const commentCount = item.comment_count ?? 0;
   const isOwnPost = Boolean(item.is_own_post || (serverConfig?.deviceId && item.shared_by_device_id === serverConfig.deviceId));
   const lastTapRef = useRef(0);
   const [showHeart, setShowHeart] = useState(false);
   const heartScale = useRef(new Animated.Value(0)).current;
+  const sharerDisplayName = item.shared_by || item.shared_by_device_id || '';
+  const initial = sharerDisplayName.trim().charAt(0).toUpperCase();
+
+  const handleImageLoad = (e: any) => {
+    const w = e?.source?.width;
+    const h = e?.source?.height;
+    if (w && h && !mediaAspectRatio) {
+      const rawRatio = w / h;
+      // Instagram clamps between 4:5 (0.8 portrait) and 1.91:1 (1.91 landscape)
+      const clampedRatio = Math.min(Math.max(rawRatio, 0.8), 1.91);
+      setMediaAspectRatio(clampedRatio);
+    }
+  };
 
   const handleMediaPress = (subItem: RemoteFile) => {
     const isDoubleTap = registerDoubleTap(lastTapRef);
@@ -644,19 +665,23 @@ function SharedFeedCard({
     >
       <View style={[feedCardStyles.cardHeader, { borderBottomColor: colors.surfaceBorder }]}>
         <View style={feedCardStyles.sharerInfo}>
-          {!!item.shared_by && (
+          {!!sharerDisplayName && (
             <TouchableOpacity
               style={feedCardStyles.sharedByRow}
-              onPress={() => item.shared_by_device_id && onOpenDeviceProfile(item.shared_by_device_id, item.shared_by!)}
+              onPress={() => item.shared_by_device_id && onOpenDeviceProfile(item.shared_by_device_id, sharerDisplayName)}
               hitSlop={6}
               disabled={!item.shared_by_device_id}
             >
               <View style={[feedCardStyles.avatarCircle, { backgroundColor: colors.primarySoft }]}>
-                <AppIcon androidName="person" iosName="person.fill" color={colors.primary} size={14} />
+                {initial ? (
+                  <Text style={[feedCardStyles.avatarInitial, { color: colors.primary }]}>{initial}</Text>
+                ) : (
+                  <AppIcon androidName="person" iosName="person.fill" color={colors.primary} size={14} />
+                )}
               </View>
               <View>
                 <Text style={[feedCardStyles.sharedByText, { color: colors.text }]} numberOfLines={1}>
-                  {item.shared_by}
+                  {sharerDisplayName}
                 </Text>
                 <Text style={[feedCardStyles.fileDate, { color: colors.textMuted }]}>
                   {formatDate(item.created_at ?? item.modified_time)}
@@ -664,7 +689,7 @@ function SharedFeedCard({
               </View>
             </TouchableOpacity>
           )}
-          {!item.shared_by && (
+          {!sharerDisplayName && (
             <Text style={[feedCardStyles.fileDate, { color: colors.textMuted }]}>
               {formatDate(item.created_at ?? item.modified_time)}
             </Text>
@@ -718,6 +743,7 @@ function SharedFeedCard({
                   style={feedCardStyles.mediaImage}
                   contentFit="cover"
                   transition={150}
+                  onLoad={handleImageLoad}
                 />
                 {isVideo && (
                   <View style={feedCardStyles.videoBadge}>
@@ -766,24 +792,6 @@ function SharedFeedCard({
       )}
 
       <View style={feedCardStyles.body}>
-        {(() => {
-          const badge = getPostKindBadge(item);
-          return badge ? (
-            <View style={[feedCardStyles.postKindBadge, { backgroundColor: badge.bg }]}>
-              <Text style={{ fontSize: TextScale.xs }}>{badge.emoji}</Text>
-              <Text style={[feedCardStyles.postKindBadgeText, { color: badge.fg }]} numberOfLines={1}>
-                {badge.text}
-              </Text>
-            </View>
-          ) : null;
-        })()}
-
-        {!!(item.group_caption || item.caption) && (
-          <Text style={[feedCardStyles.caption, { color: colors.text }]}>
-            {item.group_caption || item.caption}
-          </Text>
-        )}
-
         <View style={feedCardStyles.actionRow}>
           <ReactionEmojiBar
             reactionCounts={item.reaction_counts}
@@ -804,6 +812,41 @@ function SharedFeedCard({
             </Text>
           </TouchableOpacity>
         </View>
+
+        {(() => {
+          const badge = getPostKindBadge(item);
+          return badge ? (
+            <View style={[feedCardStyles.postKindBadge, { backgroundColor: badge.bg }]}>
+              <Text style={{ fontSize: TextScale.xs }}>{badge.emoji}</Text>
+              <Text style={[feedCardStyles.postKindBadgeText, { color: badge.fg }]} numberOfLines={1}>
+                {badge.text}
+              </Text>
+            </View>
+          ) : null;
+        })()}
+
+        {!!(item.group_caption || item.caption) && (
+          <Text style={[feedCardStyles.caption, { color: colors.text }]}>
+            {!!item.shared_by && (
+              <Text style={{ fontWeight: '700', color: colors.text }}>
+                {item.shared_by}{' '}
+              </Text>
+            )}
+            {item.group_caption || item.caption}
+          </Text>
+        )}
+
+        {commentCount > 0 && (
+          <TouchableOpacity
+            onPress={() => onOpenComments(item)}
+            hitSlop={6}
+            style={{ marginTop: 4 }}
+          >
+            <Text style={{ fontSize: TextScale.xs, color: colors.textMuted, fontWeight: '500' }}>
+              View all {commentCount} {commentCount === 1 ? 'comment' : 'comments'}
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   );
@@ -1372,13 +1415,17 @@ const reactionStyles = StyleSheet.create({
     fontWeight: '700',
   },
   totalBtn: {
-    paddingHorizontal: Spacing.two,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: Spacing.two + 2,
     paddingVertical: 5,
+    borderRadius: Radius.full,
+    borderWidth: 1,
   },
   totalText: {
     fontSize: TextScale.xs,
-    fontWeight: '600',
-    textDecorationLine: 'underline',
+    fontWeight: '700',
   },
 });
 
@@ -1480,6 +1527,10 @@ const feedCardStyles = StyleSheet.create({
     borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  avatarInitial: {
+    fontSize: TextScale.sm,
+    fontWeight: '800',
   },
   sharerInfo: {
     flex: 1,

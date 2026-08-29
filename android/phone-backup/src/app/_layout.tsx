@@ -17,7 +17,10 @@ import {
   showRecapReadyNotification,
   addRecapTapListener,
   getInitialRecapTap,
+  getInitialSharedPostTap,
+  addSharedPostTapListener,
 } from '../../notificationService';
+import { checkAndNotifyNewShares } from '../../uploader';
 import {
   getLastMemoryNotifiedDate,
   setLastMemoryNotifiedDate,
@@ -192,6 +195,7 @@ function RootLayoutContent() {
       checkAndNotifyFlashback().catch(() => {});
       checkAndNotifyStreakRisk().catch(() => {});
       checkAndNotifyRecap().catch(() => {});
+      checkAndNotifyNewShares().catch(() => {});
     })();
 
     // Background mesh network roaming / Wi-Fi reconnect listener
@@ -202,7 +206,8 @@ function RootLayoutContent() {
       if (Network?.addNetworkStateListener) {
         networkSub = Network.addNetworkStateListener((state: any) => {
           if (state?.isConnected && state?.type === Network.NetworkStateType?.WIFI) {
-            resolveReachableServer().catch(() => {});
+            resolveReachableServer({ force: true }).catch(() => {});
+            checkAndNotifyNewShares().catch(() => {});
           }
         });
       }
@@ -215,8 +220,14 @@ function RootLayoutContent() {
 
   useEffect(() => {
     let active = true;
-    // Read once so memories/flashback don't race on the same sticky last-response.
+    // Read once so memories/flashback/shares don't race on the same sticky last-response.
     (async () => {
+      const isSharedPost = await getInitialSharedPostTap();
+      if (!active) return;
+      if (isSharedPost) {
+        router.push('/feed');
+        return;
+      }
       const isFlashback = await getInitialFlashbackTap();
       if (!active) return;
       if (isFlashback) {
@@ -238,11 +249,13 @@ function RootLayoutContent() {
     const unsubscribeRecap = addRecapTapListener((target: { year: number; month: number | null }) =>
       router.push(`/memories?recap=1&recapYear=${target.year}&recapMonth=${target.month ?? ''}`)
     );
+    const unsubscribeSharedPost = addSharedPostTapListener(() => router.push('/feed'));
     return () => {
       active = false;
       unsubscribeMemories();
       unsubscribeFlashback();
       unsubscribeRecap();
+      unsubscribeSharedPost();
     };
   }, [router]);
 

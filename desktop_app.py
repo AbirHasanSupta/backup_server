@@ -68,9 +68,10 @@ from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessi
 def format_display_name(dev: dict) -> str:
     username = (dev.get("username") or "").strip()
     device_name = (dev.get("device_name") or "").strip()
+    device_id = (dev.get("device_id") or dev.get("target_device_id") or "").strip()
     if username and device_name:
         return f"{username} ({device_name})"
-    return username or device_name or "Unknown device"
+    return username or device_name or device_id or "Unknown device"
 
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
@@ -1833,7 +1834,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             did = dev.get("device_id")
             var = tk.BooleanVar(value=False)
             ctk.CTkCheckBox(
-                self._post_devices_frame, text=format_display_name(dev) if dev.get("device_name") else did,
+                self._post_devices_frame, text=format_display_name(dev),
                 variable=var, font=FONT_SMALL, text_color=C_TEXT,
                 border_color=C_BORDER, fg_color=C_ACCENT,
             ).pack(anchor="w", padx=8, pady=4)
@@ -1913,7 +1914,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ctk.CTkLabel(top, text=fmt_rel(head.get("created_at")), font=FONT_CAPTION, text_color=C_MUTED, anchor="e").pack(side="right")
 
             targets = get_share_targets_for_group(gid, DESKTOP_SHARE_DEVICE_ID)
-            target_names = ", ".join(format_display_name(t) if t.get("device_name") else t["target_device_id"] for t in targets) or "No devices"
+            target_names = ", ".join(format_display_name(t) for t in targets) or "No devices"
             ctk.CTkLabel(
                 card, text=f"{len(items)} file(s)   •   Shared with: {target_names}",
                 font=FONT_SMALL, text_color=C_MUTED, anchor="w",
@@ -1981,7 +1982,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             did = dev.get("device_id")
             var = tk.BooleanVar(value=did in current)
             ctk.CTkCheckBox(
-                scroll, text=format_display_name(dev) if dev.get("device_name") else did, variable=var,
+                scroll, text=format_display_name(dev), variable=var,
                 font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
             ).pack(anchor="w", padx=8, pady=4)
             vars_map[did] = var
@@ -2349,7 +2350,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     self._shared_dirs[i]["device_ids"] = list(ids)
                     self._save_shared_dirs_to_config()
                 ctk.CTkCheckBox(
-                    dev_row, text=format_display_name(dev) if dev.get("device_name") else did,
+                    dev_row, text=format_display_name(dev),
                     variable=dvar, font=FONT_SMALL,
                     command=_on_toggle,
                     width=0, checkbox_width=16, checkbox_height=16,
@@ -2671,7 +2672,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
     @staticmethod
     def _history_device_options(devices: list[dict]) -> tuple[list[str], dict[str, str | None]]:
         """Build unambiguous filter labels even when two phones share a name."""
-        names = [format_display_name(d) if d.get("device_name") else (d.get("device_id") or "Unknown device") for d in devices]
+        names = [format_display_name(d) for d in devices]
         duplicate_counts = {name: names.count(name) for name in set(names)}
         values = ["All Devices"]
         device_id_map: dict[str, str | None] = {}
