@@ -63,7 +63,6 @@ except Exception:
     pystray = None
     _PILImage = None
 from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessions, init_db, remove_device, create_device_share, get_device_shares_by_sharer, get_share_targets_for_group, delete_device_share_group, remove_share_group_target, add_share_group_targets, edit_device_share_group_caption
-from storage import save_file, sanitize_relative_path
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
 ctk.set_default_color_theme("blue")
@@ -1820,15 +1819,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             items = []
             for path in files:
                 try:
-                    rel = f"{int(time.time() * 1000)}_{sanitize_relative_path(os.path.basename(path))}"
-                    with open(path, "rb") as f:
-                        data = f.read()
-                    save_file(rel, data, device_id=DESKTOP_SHARE_DEVICE_ID)
                     items.append({
                         "source_type": "desktop",
                         "source_key": DESKTOP_SHARE_DEVICE_ID,
-                        "relative_path": rel,
-                        "size": len(data),
+                        "relative_path": os.path.abspath(path),
+                        "size": os.path.getsize(path),
                         "modified_time": int(os.path.getmtime(path)),
                     })
                 except Exception:
@@ -1845,6 +1840,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     messagebox.showinfo("Posted", f"Posted {result['count']} file(s) to {len(targets)} device(s).")
                 else:
                     messagebox.showerror("Failed", "Could not post the selected files.")
+
             self.after(0, _finish)
 
         threading.Thread(target=_run, daemon=True).start()

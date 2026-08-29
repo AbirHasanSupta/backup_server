@@ -2095,7 +2095,7 @@ def _resolve_share_path(share: dict) -> str:
     if source_type == "phone":
         return full_path_for(relative_path, device_id=source_key)
     if source_type == "desktop":
-        return full_path_for(relative_path, device_id=source_key)
+        return relative_path
     if source_type == "shared":
         entry = _find_shared_dir(source_key)
         if not entry:

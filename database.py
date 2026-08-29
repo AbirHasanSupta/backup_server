@@ -2523,22 +2523,13 @@ def create_device_share(
     All items in one call share the same group_id UUID, making them appear as one post.
     """
     import uuid as _uuid
-    # Mint media_ids first — get_or_create_media_id manages its own connection/commits,
-    # so doing this before we open our own transaction avoids premature commits mid-insert.
-    minted: list[tuple] = []
-    for it in items or []:
-        source_type = it.get("source_type")
-        source_key = it.get("source_key")
-        relative_path = it.get("relative_path")
-        if not source_type or not source_key or not relative_path:
-            continue
-        size = int(it.get("size") or 0)
-        modified_time = int(it.get("modified_time") or 0)
-        media_id = get_or_create_media_id(source_type, source_key, relative_path, size, modified_time)
-        minted.append((media_id, source_type, source_key, relative_path, size, modified_time))
 
+    items = [
+        it for it in (items or [])
+        if it.get("source_type") and it.get("source_key") and it.get("relative_path")
+    ]
     targets = [t for t in (target_device_ids or []) if t and t != shared_by_device_id]
-    if not minted or not targets:
+    if not items or not targets:
         return {"ok": False, "count": 0}
 
     conn = get_conn()
@@ -2553,18 +2544,25 @@ def create_device_share(
     )
 
     count = 0
-    for (media_id, source_type, source_key, relative_path, size, modified_time) in minted:
+    for it in items:
+        source_type = it["source_type"]
+        source_key = it["source_key"]
+        relative_path = it["relative_path"]
+        size = int(it.get("size") or 0)
+        modified_time = int(it.get("modified_time") or 0)
+
         cur = conn.execute(
             """
             INSERT INTO device_shares
                 (media_id, source_type, source_key, relative_path, size, modified_time,
                  caption, shared_by_device_id, created_at, share_group_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (media_id, source_type, source_key, relative_path, size, modified_time,
+            (source_type, source_key, relative_path, size, modified_time,
              cap, shared_by_device_id, now_ts, group_id),
         )
         share_id = cur.lastrowid
+        conn.execute("UPDATE device_shares SET media_id = ? WHERE id = ?", (share_id, share_id))
         conn.executemany(
             "INSERT OR IGNORE INTO device_share_targets (share_id, target_device_id) VALUES (?, ?)",
             [(share_id, t) for t in targets],
@@ -2685,6 +2683,8 @@ def delete_device_share_group(group_id: str, requesting_device_id: str) -> bool:
     if share_ids:
         placeholders = ",".join("?" * len(share_ids))
         conn.execute(f"DELETE FROM device_share_targets WHERE share_id IN ({placeholders})", share_ids)
+        conn.execute(f"DELETE FROM reactions WHERE media_id IN ({placeholders})", share_ids)
+        conn.execute(f"DELETE FROM comments WHERE media_id IN ({placeholders})", share_ids)
     conn.execute("DELETE FROM device_shares WHERE share_group_id = ?", (group_id,))
     conn.execute("DELETE FROM device_share_groups WHERE id = ?", (group_id,))
     conn.commit()
@@ -2707,6 +2707,8 @@ def delete_device_share(share_id: int, requesting_device_id: str) -> bool:
         conn.close()
         return delete_device_share_group(group_id, requesting_device_id)
     conn.execute("DELETE FROM device_share_targets WHERE share_id = ?", (share_id,))
+    conn.execute("DELETE FROM reactions WHERE media_id = ?", (share_id,))
+    conn.execute("DELETE FROM comments WHERE media_id = ?", (share_id,))
     conn.execute("DELETE FROM device_shares WHERE id = ?", (share_id,))
     conn.commit()
     conn.close()
