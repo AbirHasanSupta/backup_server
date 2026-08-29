@@ -607,8 +607,8 @@ function SharedFeedCard({
 }) {
   const items = item.group_items && item.group_items.length > 0 ? item.group_items : [item];
   const [activeIndex, setActiveIndex] = useState(0);
-  const [cardWidth, setCardWidth] = useState(SCREEN_W - Spacing.four * 2);
-  const mediaHeight = Math.round(cardWidth * 1.25);
+  const [cardWidth, setCardWidth] = useState(SCREEN_W);
+  const mediaHeight = Math.round(cardWidth * 1.35);
   const commentCount = item.comment_count ?? 0;
   const isOwnPost = Boolean(item.is_own_post || (serverConfig?.deviceId && item.shared_by_device_id === serverConfig.deviceId));
   const lastTapRef = useRef(0);
@@ -634,7 +634,7 @@ function SharedFeedCard({
 
   return (
     <View
-      style={[feedCardStyles.card, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}
+      style={[feedCardStyles.card, { backgroundColor: colors.surface, borderBottomColor: colors.surfaceBorder }]}
       onLayout={(e) => {
         const w = e.nativeEvent.layout.width;
         if (w > 0 && Math.abs(w - cardWidth) > 1) {
@@ -642,6 +642,44 @@ function SharedFeedCard({
         }
       }}
     >
+      <View style={[feedCardStyles.cardHeader, { borderBottomColor: colors.surfaceBorder }]}>
+        <View style={feedCardStyles.sharerInfo}>
+          {!!item.shared_by && (
+            <TouchableOpacity
+              style={feedCardStyles.sharedByRow}
+              onPress={() => item.shared_by_device_id && onOpenDeviceProfile(item.shared_by_device_id, item.shared_by!)}
+              hitSlop={6}
+              disabled={!item.shared_by_device_id}
+            >
+              <View style={[feedCardStyles.avatarCircle, { backgroundColor: colors.primarySoft }]}>
+                <AppIcon androidName="person" iosName="person.fill" color={colors.primary} size={14} />
+              </View>
+              <View>
+                <Text style={[feedCardStyles.sharedByText, { color: colors.text }]} numberOfLines={1}>
+                  {item.shared_by}
+                </Text>
+                <Text style={[feedCardStyles.fileDate, { color: colors.textMuted }]}>
+                  {formatDate(item.created_at ?? item.modified_time)}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          )}
+          {!item.shared_by && (
+            <Text style={[feedCardStyles.fileDate, { color: colors.textMuted }]}>
+              {formatDate(item.created_at ?? item.modified_time)}
+            </Text>
+          )}
+        </View>
+        <TouchableOpacity
+          onPress={() => (isOwnPost ? onManage(item) : onHide(item))}
+          style={feedCardStyles.menuBtn}
+          hitSlop={12}
+          accessibilityLabel={isOwnPost ? 'Manage post' : 'Hide post'}
+        >
+          <AppIcon androidName="more_vert" iosName="ellipsis" color={colors.textSecondary} size={20} />
+        </TouchableOpacity>
+      </View>
+
       <View style={[feedCardStyles.mediaContainer, { width: cardWidth, height: mediaHeight }]}>
         <FlatList
           data={items}
@@ -739,35 +777,6 @@ function SharedFeedCard({
             </View>
           ) : null;
         })()}
-        <View style={feedCardStyles.headerRow}>
-          <View style={feedCardStyles.sharerInfo}>
-            {!!item.shared_by && (
-              <TouchableOpacity
-                style={feedCardStyles.sharedByRow}
-                onPress={() => item.shared_by_device_id && onOpenDeviceProfile(item.shared_by_device_id, item.shared_by!)}
-                hitSlop={6}
-                disabled={!item.shared_by_device_id}
-              >
-                <AppIcon androidName="person" iosName="person.fill" color={colors.primary} size={14} />
-                <Text style={[feedCardStyles.sharedByText, { color: colors.primary }]} numberOfLines={1}>
-                  Shared by {item.shared_by}
-                </Text>
-              </TouchableOpacity>
-            )}
-            <Text style={[feedCardStyles.fileDate, { color: colors.textMuted }]}>
-              {formatDate(item.created_at ?? item.modified_time)}
-            </Text>
-          </View>
-
-          <TouchableOpacity
-            onPress={() => (isOwnPost ? onManage(item) : onHide(item))}
-            style={feedCardStyles.menuBtn}
-            hitSlop={12}
-            accessibilityLabel={isOwnPost ? 'Manage post' : 'Hide post'}
-          >
-            <AppIcon androidName="more_vert" iosName="ellipsis" color={colors.textSecondary} size={20} />
-          </TouchableOpacity>
-        </View>
 
         {!!(item.group_caption || item.caption) && (
           <Text style={[feedCardStyles.caption, { color: colors.text }]}>
@@ -1375,10 +1384,17 @@ const reactionStyles = StyleSheet.create({
 
 const feedCardStyles = StyleSheet.create({
   card: {
-    borderRadius: Radius.lg,
-    borderWidth: 1,
     overflow: 'hidden',
-    marginBottom: Spacing.four,
+    marginBottom: Spacing.two,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two + 2,
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
   mediaContainer: {
     position: 'relative',
@@ -1447,7 +1463,9 @@ const feedCardStyles = StyleSheet.create({
     width: 6,
   },
   body: {
-    padding: Spacing.three,
+    paddingHorizontal: Spacing.three,
+    paddingTop: Spacing.two + 2,
+    paddingBottom: Spacing.three,
     gap: 2,
   },
   headerRow: {
@@ -1456,6 +1474,13 @@ const feedCardStyles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: Spacing.two,
   },
+  avatarCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   sharerInfo: {
     flex: 1,
     gap: 2,
@@ -1463,10 +1488,11 @@ const feedCardStyles = StyleSheet.create({
   sharedByRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: Spacing.two,
+    flex: 1,
   },
   sharedByText: {
-    fontSize: TextScale.xs,
+    fontSize: TextScale.sm,
     fontWeight: '700',
     flexShrink: 1,
   },
@@ -4745,6 +4771,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             paddingTop: isDownloading ? Spacing.two : containerPaddingTop + Spacing.two,
             paddingBottom: BottomTabInset + Spacing.eight,
           },
+          isFeedMode && { paddingHorizontal: 0 },
         ]}
         showsVerticalScrollIndicator={false}
         onScroll={isDownloading ? undefined : onListScroll}
