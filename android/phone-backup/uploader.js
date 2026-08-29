@@ -7,6 +7,8 @@ import {
   getDeviceToken,
   resolveReachableServer,
 } from './settings';
+import { getPendingShareNotifications, markShareNotificationsSeen } from './downloader';
+import { showNewSharePostNotification } from './notificationService';
 
 function isNetworkError(err) {
   // AbortError is an intentional cancel (user timeout or explicit abort) — not a mesh roaming
@@ -163,6 +165,24 @@ function removedDeviceError() {
   return new Error('This phone was removed from the desktop app. Reconnect from Settings to resume backup.');
 }
 
+/**
+ * Best-effort check for newly shared posts targeting this device; fires a
+ * local notification per post and marks it seen. Never throws — this rides
+ * along on the periodic status check and must not disrupt it on failure.
+ */
+export async function checkAndNotifyNewShares() {
+  try {
+    const { posts } = await getPendingShareNotifications();
+    if (!Array.isArray(posts) || posts.length === 0) return;
+    for (const post of posts) {
+      await showNewSharePostNotification(post);
+    }
+    await markShareNotificationsSeen(posts.map((p) => p.group_id));
+  } catch {
+    // Notifications are supplementary — silently ignore failures
+  }
+}
+
 export async function checkDeviceConnection(options = {}) {
   let retrying = false;
   return withAutoFailover(async () => {
@@ -182,6 +202,9 @@ export async function checkDeviceConnection(options = {}) {
     if (!res.ok) throw new Error(`Server status failed (${res.status})`);
 
     const body = await readJsonResponse(res, 'Server status failed');
+    if (body.device_connected === true) {
+      checkAndNotifyNewShares();
+    }
     return {
       connected: body.device_connected === true,
       serverVersion: body.server_version || '',

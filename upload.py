@@ -35,6 +35,7 @@ from database import (
     remove_file_record,
     touch_device,
     upsert_device,
+    set_device_username,
     ensure_device_token,
     verify_device_token, get_files_browse,
     get_cleanup_candidates,
@@ -61,6 +62,8 @@ from database import (
     remove_share_group_target,
     remove_share_target,
     is_share_target,
+    get_unseen_share_notifications,
+    mark_share_notifications_seen,
     MAX_COMMENT_LENGTH,
 )
 from trips import cluster_source_media, trigger_background_clustering
@@ -82,6 +85,15 @@ APP_VERSION = "4.1.2"
 # ──────────────────────────────────────────────────────────────────────────────
 # Auth helper
 # ──────────────────────────────────────────────────────────────────────────────
+
+def format_display_name(username: str | None, device_name: str | None) -> str | None:
+    """Primary: username (device_name). Fallback: device_name only."""
+    username = (username or "").strip() or None
+    device_name = (device_name or "").strip() or None
+    if username and device_name:
+        return f"{username} ({device_name})"
+    return username or device_name
+
 
 def _extract_bearer(authorization: str | None) -> str | None:
     if not authorization or not isinstance(authorization, str) or not authorization.startswith("Bearer "):
@@ -193,6 +205,7 @@ class ConnectRequest(BaseModel):
     device_name: str
     device_id: str | None = None
     device_model: str | None = None
+    username: str | None = None
 
 
 class FileCheckItem(BaseModel):
@@ -228,6 +241,7 @@ async def connect_device(
     device_name = body.device_name.strip() or device_ip
     device_id = body.device_id
     device_model = (body.device_model or "").strip() or None
+    username = (body.username or "").strip() or None
 
     def accepted_response() -> dict:
         local_ips = get_all_local_ips()
@@ -244,7 +258,7 @@ async def connect_device(
 
     # Already registered — just refresh the record, no dialog needed
     if is_device_known(device_ip, device_id):
-        upsert_device(device_name, device_ip, device_id, device_model)
+        upsert_device(device_name, device_ip, device_id, device_model, username)
         add_log(f"📱 Re-connected: {device_name} ({device_id or device_ip})")
         return accepted_response()
 
@@ -263,13 +277,13 @@ async def connect_device(
             )
             merge_device_id(old_id, device_id, device_ip)
             # Update the name/ip/model in case they changed slightly
-            upsert_device(device_name, device_ip, device_id, device_model)
+            upsert_device(device_name, device_ip, device_id, device_model, username)
             return accepted_response()
 
     add_log(f"📱 New connection request: {device_name} ({device_id or device_ip})")
 
     if not load_config().get("REQUIRE_APPROVAL", True):
-        upsert_device(device_name, device_ip, device_id, device_model)
+        upsert_device(device_name, device_ip, device_id, device_model, username)
         add_log(f"✅ Auto-accepted: {device_name} ({device_id or device_ip})")
         return accepted_response()
 
@@ -295,7 +309,7 @@ async def connect_device(
         return {"status": "rejected", "reason": "timeout"}
 
     if accepted:
-        upsert_device(device_name, device_ip, device_id, device_model)
+        upsert_device(device_name, device_ip, device_id, device_model, username)
         return accepted_response()
 
     return {"status": "rejected"}
@@ -309,7 +323,10 @@ async def connect_device(
 async def list_devices(authorization: str = Header(None)):
     """Returns the list of accepted connected devices."""
     verify_auth(authorization)
-    return {"devices": await asyncio.to_thread(get_devices)}
+    devices = await asyncio.to_thread(get_devices)
+    for d in devices:
+        d["display_name"] = format_display_name(d.get("username"), d.get("device_name"))
+    return {"devices": devices}
 
 
 @router.delete("/devices/{device_id}")
@@ -319,6 +336,22 @@ async def delete_device(device_id: int, authorization: str = Header(None)):
     await asyncio.to_thread(remove_device, device_id)
     add_log(f"🗑️ Device #{device_id} removed via API")
     return {"status": "removed"}
+
+
+class UsernameUpdateRequest(BaseModel):
+    username: str | None = None
+
+
+@router.post("/devices/{device_id}/username")
+async def update_device_username(
+    device_id: str,
+    body: UsernameUpdateRequest,
+    authorization: str = Header(None),
+):
+    """Set or clear a device's display username. device_id may be its own token."""
+    verify_auth(authorization, device_id)
+    await asyncio.to_thread(set_device_username, device_id, body.username)
+    return {"status": "ok", "username": (body.username or "").strip() or None}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1718,7 +1751,11 @@ async def get_reactions(
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
-    return await asyncio.to_thread(get_media_reactions, media_id)
+    result = await asyncio.to_thread(get_media_reactions, media_id)
+    for r in result["reactions"]:
+        r["display_name"] = format_display_name(r.get("username"), r.get("device_name")) or r["source_id"]
+        r["is_own"] = device_id is not None and r["source_id"] == device_id
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1750,6 +1787,7 @@ async def list_media_comments(
     for c in comments:
         c["is_own"] = (device_id is not None and c["source_id"] == device_id)
         c["can_delete"] = c["is_own"] or is_post_creator
+        c["display_name"] = format_display_name(c.get("username"), c.get("device_name"))
     return {"comments": comments}
 
 
@@ -1805,6 +1843,8 @@ class CreateShareRequest(BaseModel):
     target_device_ids: list[str]
     caption: str | None = None
     items: list[ShareItem]
+    post_kind: str | None = None
+    post_title: str | None = None
 
 
 @router.get("/api/share/devices")
@@ -1818,6 +1858,8 @@ async def list_share_target_devices(
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
     devices = await asyncio.to_thread(get_share_target_devices, device_id)
+    for d in devices:
+        d["display_name"] = format_display_name(d.get("username"), d.get("device_name"))
     return {"devices": devices}
 
 
@@ -1846,6 +1888,9 @@ async def create_share(
             entry = _find_shared_dir(it.source_key)
             if not entry or not _is_folder_tagged_for_device(entry, body.shared_by_device_id, authorization, token):
                 raise HTTPException(status_code=403, detail="Shared folder not available for this device")
+        elif it.source_type == "rewind":
+            if it.source_key != body.shared_by_device_id:
+                raise HTTPException(status_code=403, detail="Cannot share another device's rewind reel")
         else:
             raise HTTPException(status_code=400, detail="Invalid share source type")
 
@@ -1869,7 +1914,8 @@ async def create_share(
         for it in body.items
     ]
     result = await asyncio.to_thread(
-        create_device_share, body.shared_by_device_id, targets, body.caption, items
+        create_device_share, body.shared_by_device_id, targets, body.caption, items,
+        body.post_kind, body.post_title,
     )
     return result
 
@@ -1922,10 +1968,12 @@ async def get_unified_feed(
                 groups[gid] = {
                     "group_id": gid,
                     "caption": s.get("group_caption") or s.get("caption"),
-                    "shared_by": s.get("shared_by_name") or s["shared_by_device_id"],
+                    "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
                     "shared_by_device_id": s["shared_by_device_id"],
                     "created_at": s["created_at"],
                     "is_own_post": s["is_own_post"],
+                    "post_kind": s.get("post_kind"),
+                    "post_title": s.get("post_title"),
                     "items": [],
                 }
             ext = os.path.splitext(s["relative_path"])[1].lower()
@@ -1935,7 +1983,7 @@ async def get_unified_feed(
                 "path": s["relative_path"],
                 "size": s["size"],
                 "modified_time": s["modified_time"],
-                "is_video": ext in video_exts,
+                "is_video": s["source_type"] == "rewind" or ext in video_exts,
             })
 
         # Sort groups newest-first by created_at
@@ -1961,6 +2009,8 @@ async def get_unified_feed(
                 "shared_by_device_id": g["shared_by_device_id"],
                 "created_at": g["created_at"],
                 "is_own_post": g["is_own_post"],
+                "post_kind": g.get("post_kind"),
+                "post_title": g.get("post_title"),
                 "media_id": anchor_mid,
                 "reaction_counts": counts_map.get(anchor_mid, {}) if anchor_mid else {},
                 "user_reactions": user_map.get(anchor_mid, []) if anchor_mid else [],
@@ -1975,6 +2025,40 @@ async def get_unified_feed(
 
     page, has_more, total = await asyncio.to_thread(_build)
     return {"items": page, "has_more": has_more, "total": total}
+
+
+@router.get("/api/notifications/pending")
+@router.get("/notifications/pending")
+async def get_pending_share_notifications(
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Post groups shared to this device that it hasn't been notified about yet."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    posts = await asyncio.to_thread(get_unseen_share_notifications, device_id)
+    for p in posts:
+        p["shared_by"] = format_display_name(p.get("shared_by_username"), p.get("shared_by_name")) or p["shared_by_device_id"]
+    return {"posts": posts}
+
+
+class MarkNotificationsSeenRequest(BaseModel):
+    device_id: str
+    group_ids: list[str]
+
+
+@router.post("/api/notifications/seen")
+@router.post("/notifications/seen")
+async def mark_pending_share_notifications_seen(
+    body: MarkNotificationsSeenRequest,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    verify_auth(authorization or (f"Bearer {token}" if token else None), body.device_id)
+    verify_known_device_by_id(body.device_id)
+    await asyncio.to_thread(mark_share_notifications_seen, body.device_id, body.group_ids)
+    return {"ok": True}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1997,6 +2081,8 @@ async def get_share_group_targets(
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
     targets = await asyncio.to_thread(get_share_targets_for_group, group_id, device_id)
+    for t in targets:
+        t["display_name"] = format_display_name(t.get("username"), t.get("device_name"))
     return {"targets": targets}
 
 
@@ -2108,6 +2194,12 @@ def _resolve_share_path(share: dict) -> str:
         if os.path.commonpath([root, full_path]) != root:
             raise HTTPException(status_code=400, detail="Invalid path")
         return full_path
+    if source_type == "rewind":
+        year_str, _, month_str = relative_path.partition("-")
+        path = rewind.get_rewind_path(source_key, int(year_str), int(month_str) if month_str else None)
+        if not path:
+            raise HTTPException(status_code=404, detail="Reel not ready")
+        return path
     raise HTTPException(status_code=400, detail="Unknown share source type")
 
 

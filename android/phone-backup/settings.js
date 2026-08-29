@@ -26,6 +26,7 @@ const KEYS = {
   LAST_FLASHBACK_NOTIFIED_AT: 'last_flashback_notified_at',
   LAST_RECAP_NOTIFIED_MONTH: 'last_recap_notified_month',
   SAVED_SERVERS: 'saved_servers_v1',
+  USERNAME: 'username',
 };
 
 export async function getLastMemoryNotifiedDate() { return (await AsyncStorage.getItem(KEYS.LAST_MEMORY_NOTIFIED_DATE)) || ''; }
@@ -121,6 +122,19 @@ export async function getApiKey()          { return (await AsyncStorage.getItem(
 export async function setApiKey(key)       {
   await AsyncStorage.setItem(KEYS.API_KEY, key);
   DeviceEventEmitter.emit('settings-updated');
+}
+
+export async function getUsername()        { return (await AsyncStorage.getItem(KEYS.USERNAME)) || ''; }
+export async function setUsername(name)    {
+  await AsyncStorage.setItem(KEYS.USERNAME, (name || '').trim());
+  DeviceEventEmitter.emit('settings-updated');
+}
+
+export function formatDisplayName(username, deviceName) {
+  const u = (username || '').trim();
+  const d = (deviceName || '').trim();
+  if (u && d) return `${u} (${d})`;
+  return u || d || '';
 }
 
 export async function getDeviceId() {
@@ -579,6 +593,40 @@ async function quickProbe(target, port, timeoutMs = 1200) {
   }
 }
 
+function ipv4Octets(ip) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip || '');
+  if (!m) return null;
+  const parts = m.slice(1, 5).map(Number);
+  return parts.every((n) => n >= 0 && n <= 255) ? parts : null;
+}
+
+/**
+ * Last-resort fallback for resolveReachableServer: sweeps the /24 subnet of the
+ * last-known IP for a responding server. Handles a mesh node whose IP was never
+ * previously recorded as a candidate (new node, first time on that subnet).
+ */
+async function subnetSweep(baseIp, port, exclude) {
+  const octets = ipv4Octets(baseIp);
+  if (!octets) return null;
+  const prefix = `${octets[0]}.${octets[1]}.${octets[2]}.`;
+  const candidates = [];
+  for (let i = 1; i <= 254; i++) {
+    const ip = `${prefix}${i}`;
+    if (ip !== baseIp && !exclude.has(ip)) candidates.push(ip);
+  }
+
+  const BATCH = 32;
+  for (let i = 0; i < candidates.length; i += BATCH) {
+    const batch = candidates.slice(i, i + BATCH);
+    const results = await Promise.all(
+      batch.map(async (ip) => ({ ip, probe: await quickProbe(ip, port, 400) }))
+    );
+    const found = results.find((r) => r.probe.ok);
+    if (found) return found;
+  }
+  return null;
+}
+
 /**
  * Probes the currently configured server IP and, if unreachable (e.g. after mesh roaming),
  * concurrently probes candidate IPs and hostname to find the server's new IP.
@@ -660,6 +708,27 @@ export async function resolveReachableServer(options = {}) {
         }
       }
 
+      // Step 3: last-resort same-subnet sweep — catches a mesh node whose IP
+      // was never recorded as a candidate yet (skipped if disabled or currentIp isn't IPv4).
+      if (options.subnetSweep !== false) {
+        candidates.add(currentIp);
+        const swept = await subnetSweep(currentIp, port, candidates);
+        if (swept) {
+          const newIp = swept.ip;
+          console.log(`[Mesh Roaming] Found server via subnet sweep: ${newIp} (was ${currentIp})`);
+          await AsyncStorage.setItem(KEYS.SERVER_IP, newIp);
+          await saveServerProfile({
+            ip: newIp,
+            port,
+            name: swept.probe.data?.name || serverName || newIp,
+            all_ips: swept.probe.data?.all_ips || [newIp],
+            hostname: swept.probe.data?.hostname || '',
+          });
+          DeviceEventEmitter.emit('settings-updated');
+          return { ok: true, ip: newIp, reconnected: true, data: swept.probe.data };
+        }
+      }
+
       return { ok: false, ip: currentIp, reconnected: false };
     } catch (e) {
       console.warn('[resolveReachableServer] Error resolving server:', e?.message);
@@ -671,4 +740,3 @@ export async function resolveReachableServer(options = {}) {
 
   return _resolvingPromise;
 }
-

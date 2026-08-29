@@ -28,6 +28,7 @@ import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticMedium, hapticLight } from '@/utils/haptics';
 import { getPlaceName } from '@/utils/geocode';
+import { ShareModal } from '@/components/ShareModal';
 import {
   getPlaceClusters,
   getPlaceItems,
@@ -40,6 +41,7 @@ import {
   buildThumbnailUrl,
   downloadFile,
   downloadSharedFile,
+  createDeviceShare,
 } from '../../downloader';
 
 type ExpoVideoModule = typeof import('expo-video');
@@ -93,6 +95,13 @@ type PlaceItem = {
 
 function safeCall(fn: () => void): void {
   try { fn(); } catch (e) { console.warn('[Places] player error:', e); }
+}
+
+/** Module-level (non-component) so Date.now() isn't flagged as an impure render call. */
+function buildTempMediaUri(prefix: string, relativePath: string): string {
+  const displayName = relativePath.split(/[/\\]/).pop() ?? `media_${Date.now()}`;
+  const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
+  return `${cacheDir}${prefix}_${Date.now()}_${displayName}`;
 }
 
 function formatCoordinates(lat?: number, lon?: number): string {
@@ -159,6 +168,8 @@ export default function PlacesScreen() {
   const viewerListRef = useRef<FlatList<PlaceItem>>(null);
   const [saving, setSaving] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [feedShareVisible, setFeedShareVisible] = useState(false);
+  const [albumShareVisible, setAlbumShareVisible] = useState(false);
 
   const clusterPhotoCount = useMemo(() => clusterItems.filter(it => !it.is_video).length, [clusterItems]);
   const clusterVideoCount = useMemo(() => clusterItems.filter(it => it.is_video).length, [clusterItems]);
@@ -336,9 +347,7 @@ export default function PlacesScreen() {
         Alert.alert('Permission Needed', 'Media library permission is required to save photos and videos.');
         return;
       }
-      const displayName = activeViewerItem.relative_path.split(/[/\\]/).pop() ?? `media_${Date.now()}`;
-      const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
-      const tmpUri = `${cacheDir}media_save_${Date.now()}_${displayName}`;
+      const tmpUri = buildTempMediaUri('media_save', activeViewerItem.relative_path);
       if (activeViewerItem.source_type === 'shared') {
         await downloadSharedFile(activeViewerItem.source_id, activeViewerItem.relative_path, tmpUri);
       } else {
@@ -358,9 +367,7 @@ export default function PlacesScreen() {
     if (!activeViewerItem || sharing) return;
     setSharing(true);
     try {
-      const displayName = activeViewerItem.relative_path.split(/[/\\]/).pop() ?? `media_${Date.now()}`;
-      const cacheDir = FileSystem.cacheDirectory || FileSystem.documentDirectory || '';
-      const tmpUri = `${cacheDir}media_share_${Date.now()}_${displayName}`;
+      const tmpUri = buildTempMediaUri('media_share', activeViewerItem.relative_path);
       if (activeViewerItem.source_type === 'shared') {
         await downloadSharedFile(activeViewerItem.source_id, activeViewerItem.relative_path, tmpUri);
       } else {
@@ -379,6 +386,53 @@ export default function PlacesScreen() {
       setSharing(false);
     }
   };
+
+  const handleFeedShareSubmit = useCallback(async (targetIds: string[], caption: string) => {
+    if (!activeViewerItem || targetIds.length === 0) return;
+    const items = [{
+      source_type: activeViewerItem.source_type,
+      source_key: activeViewerItem.source_id,
+      relative_path: activeViewerItem.relative_path,
+      size: activeViewerItem.size || 0,
+      modified_time: activeViewerItem.capture_time || 0,
+    }];
+    const postKind = activeTrip ? 'trip' : activeCluster ? 'place' : null;
+    const postTitle = activeTrip
+      ? activeTrip.title
+      : activeCluster
+      ? (placeNames[activeCluster.cluster_key] || formatCoordinates(activeCluster.lat, activeCluster.lon))
+      : null;
+    try {
+      await createDeviceShare(targetIds, caption, items, { postKind, postTitle });
+      setFeedShareVisible(false);
+    } catch (err: any) {
+      Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not share to feed.'));
+    }
+  }, [activeViewerItem, activeTrip, activeCluster, placeNames]);
+
+  const handleAlbumShareSubmit = useCallback(async (targetIds: string[], caption: string) => {
+    if (targetIds.length === 0) return;
+    const sourceItems = activeTrip ? tripItems : activeCluster ? clusterItems : [];
+    if (sourceItems.length === 0) return;
+    const items = sourceItems.map((it) => ({
+      source_type: it.source_type,
+      source_key: it.source_id,
+      relative_path: it.relative_path,
+      size: it.size || 0,
+      modified_time: it.capture_time || 0,
+    }));
+    const postKind = activeTrip ? 'trip' : 'place';
+    const postTitle = activeTrip
+      ? activeTrip.title
+      : (placeNames[activeCluster!.cluster_key] || formatCoordinates(activeCluster!.lat, activeCluster!.lon));
+    try {
+      await createDeviceShare(targetIds, caption, items, { postKind, postTitle });
+      setAlbumShareVisible(false);
+      Alert.alert('Shared', `Sent ${items.length} ${items.length === 1 ? 'file' : 'files'} to ${targetIds.length} ${targetIds.length === 1 ? 'device' : 'devices'}.`);
+    } catch (err: any) {
+      Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not share to feed.'));
+    }
+  }, [activeTrip, activeCluster, tripItems, clusterItems, placeNames]);
 
   const goToPrevious = () => {
     if (viewerIndex != null && viewerIndex > 0) {
@@ -675,7 +729,14 @@ export default function PlacesScreen() {
                   : `${clusterPhotoCount} photo${clusterPhotoCount !== 1 ? 's' : ''}`}
               </Text>
             </View>
-            <View style={{ width: 36 }} />
+            <TouchableOpacity
+              style={styles.backBtn}
+              onPress={() => setAlbumShareVisible(true)}
+              disabled={clusterItems.length === 0}
+              accessibilityLabel="Share place to feed"
+            >
+              <AppIcon androidName="post_add" iosName="square.and.arrow.up.on.square" color={colors.text} size={20} />
+            </TouchableOpacity>
           </View>
 
           {/* Place Media Filter Tabs */}
@@ -794,7 +855,14 @@ export default function PlacesScreen() {
                   : `${tripPhotoCount} photo${tripPhotoCount !== 1 ? 's' : ''}`}
               </Text>
             </View>
-            <View style={{ width: 36 }} />
+            <TouchableOpacity
+              style={styles.backBtn}
+              onPress={() => setAlbumShareVisible(true)}
+              disabled={tripItems.length === 0}
+              accessibilityLabel="Share trip to feed"
+            >
+              <AppIcon androidName="post_add" iosName="square.and.arrow.up.on.square" color={colors.text} size={20} />
+            </TouchableOpacity>
           </View>
 
           {/* Trip Media Filter Tabs */}
@@ -1024,6 +1092,9 @@ export default function PlacesScreen() {
 
           {/* Bottom Actions Bar */}
           <View style={[styles.viewerActions, { bottom: insets.bottom + Spacing.five }]}>
+            <TouchableOpacity onPress={() => setFeedShareVisible(true)} style={styles.viewerActionBtn}>
+              <AppIcon androidName="post_add" iosName="square.and.arrow.up.on.square" color="#fff" size={20} />
+            </TouchableOpacity>
             <TouchableOpacity onPress={handleShareViewerItem} disabled={sharing} style={styles.viewerActionBtn}>
               {sharing ? <ActivityIndicator size="small" color="#fff" /> : <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={20} />}
             </TouchableOpacity>
@@ -1033,6 +1104,22 @@ export default function PlacesScreen() {
           </View>
         </View>
       </Modal>
+
+      <ShareModal
+        visible={feedShareVisible}
+        count={1}
+        colors={colors}
+        onClose={() => setFeedShareVisible(false)}
+        onSubmit={handleFeedShareSubmit}
+      />
+
+      <ShareModal
+        visible={albumShareVisible}
+        count={activeTrip ? tripItems.length : clusterItems.length}
+        colors={colors}
+        onClose={() => setAlbumShareVisible(false)}
+        onSubmit={handleAlbumShareSubmit}
+      />
     </View>
   );
 }

@@ -28,6 +28,7 @@ import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticLight, hapticMedium, hapticSelection, hapticSuccess, hapticError } from '@/utils/haptics';
+import { ShareModal } from '@/components/ShareModal';
 import {
   getRecentMemories,
   getConfig,
@@ -41,6 +42,7 @@ import {
   getRewindReelStatus,
   buildRewindReelStreamUrl,
   downloadRewindReel,
+  createDeviceShare,
 } from '../../downloader';
 import { consumePendingFlashbackItem } from '../../notificationService';
 
@@ -172,6 +174,10 @@ export default function MemoriesScreen() {
   const [activeItemIdx, setActiveItemIdx] = useState<number>(0);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [savingItem, setSavingItem] = useState<boolean>(false);
+  const [shareVisible, setShareVisible] = useState(false);
+  const [shareItem, setShareItem] = useState<MemoryItem | null>(null);
+  const [shareKind, setShareKind] = useState<string | null>(null);
+  const [shareTitle, setShareTitle] = useState<string | null>(null);
 
   const photoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [progressRatio, setProgressRatio] = useState<number>(0);
@@ -751,6 +757,28 @@ export default function MemoriesScreen() {
     }
   };
 
+  const handleShareSubmit = useCallback(async (targetIds: string[], caption: string) => {
+    if (!shareItem || targetIds.length === 0) return;
+    const items = [{
+      source_type: shareItem.source_type,
+      source_key: shareItem.source_id,
+      relative_path: shareItem.relative_path,
+      size: shareItem.size || 0,
+      modified_time: shareItem.capture_time || 0,
+    }];
+    try {
+      await createDeviceShare(targetIds, caption, items, { postKind: shareKind, postTitle: shareTitle });
+      hapticSuccess();
+      setShareVisible(false);
+      setShareItem(null);
+      setShareKind(null);
+      setShareTitle(null);
+    } catch (err: any) {
+      hapticError();
+      Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not share to feed.'));
+    }
+  }, [shareItem, shareKind, shareTitle]);
+
   // PanResponder for swipe gestures in flashback:
   // Swipe right (dx > 50) -> next surprise
   // Swipe left (dx < -50) -> previous surprise
@@ -1186,8 +1214,15 @@ export default function MemoriesScreen() {
               </View>
             </View>
 
-            {/* Bottom Action Row: Save to Device */}
+            {/* Bottom Action Row: Share / Save to Device */}
             <View style={[styles.storyBottomBar, { paddingBottom: Math.max(insets.bottom, 20) }]}>
+              <TouchableOpacity
+                style={styles.saveBtn}
+                onPress={() => { setShareItem(currentItem); setShareKind('memory'); setShareTitle(activeDay ? formatDayLabel(activeDay) : 'A memory'); setShareVisible(true); }}
+              >
+                <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={20} />
+                <Text style={styles.saveBtnText}>Share</Text>
+              </TouchableOpacity>
               <TouchableOpacity
                 style={styles.saveBtn}
                 onPress={() => handleSaveItem(currentItem)}
@@ -1308,6 +1343,13 @@ export default function MemoriesScreen() {
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.flashbackIconBtn}
+                  onPress={() => { setShareItem(flashbackItem); setShareKind('flashback'); setShareTitle(flashbackItem?.capture_time ? formatCaptureDate(flashbackItem.capture_time) : 'A flashback'); setShareVisible(true); }}
+                  accessibilityLabel="Share to feed"
+                >
+                  <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={20} />
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.flashbackIconBtn}
                   onPress={handleSaveFlashback}
                   disabled={flashbackSaving}
                   accessibilityLabel="Save to device"
@@ -1399,7 +1441,7 @@ export default function MemoriesScreen() {
           {rewindStatus === 'ready' && (
             <View style={[styles.storyBottomBar, { paddingBottom: Math.max(insets.bottom, 20) }]}>
               <TouchableOpacity
-                style={styles.saveBtn}
+                style={styles.saveBtnCompact}
                 onPress={handleShareRewind}
                 disabled={rewindSharing}
               >
@@ -1407,13 +1449,34 @@ export default function MemoriesScreen() {
                   <ActivityIndicator size="small" color="#fff" />
                 ) : (
                   <>
-                    <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={20} />
+                    <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={18} />
                     <Text style={styles.saveBtnText}>Share</Text>
                   </>
                 )}
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.saveBtn}
+                style={styles.saveBtnCompact}
+                onPress={() => {
+                  if (!rewindYear) return;
+                  setShareItem({
+                    source_type: 'rewind',
+                    source_id: serverConfig?.deviceId || '',
+                    source_label: rewindMonth ? `${MONTH_NAMES[rewindMonth - 1]} ${rewindYear} Recap` : `${rewindYear} Rewind Reel`,
+                    relative_path: `${rewindYear}${rewindMonth ? '-' + rewindMonth : ''}`,
+                    size: 0,
+                    capture_time: null,
+                    is_video: true,
+                  });
+                  setShareKind('rewind');
+                  setShareTitle(rewindMonth ? `${MONTH_NAMES[rewindMonth - 1]} ${rewindYear} Recap` : `${rewindYear} Rewind Reel`);
+                  setShareVisible(true);
+                }}
+              >
+                <AppIcon androidName="post_add" iosName="square.and.arrow.up.on.square" color="#fff" size={18} />
+                <Text style={styles.saveBtnText}>Feed</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.saveBtnCompact}
                 onPress={handleSaveRewind}
                 disabled={rewindSaving}
               >
@@ -1421,8 +1484,8 @@ export default function MemoriesScreen() {
                   <ActivityIndicator size="small" color="#fff" />
                 ) : (
                   <>
-                    <AppIcon androidName="download" iosName="arrow.down.circle" color="#fff" size={20} />
-                    <Text style={styles.saveBtnText}>Save to Device</Text>
+                    <AppIcon androidName="download" iosName="arrow.down.circle" color="#fff" size={18} />
+                    <Text style={styles.saveBtnText}>Save</Text>
                   </>
                 )}
               </TouchableOpacity>
@@ -1608,6 +1671,14 @@ export default function MemoriesScreen() {
           </View>
         </View>
       </Modal>
+
+      <ShareModal
+        visible={shareVisible}
+        count={1}
+        colors={colors}
+        onClose={() => { setShareVisible(false); setShareItem(null); setShareKind(null); setShareTitle(null); }}
+        onSubmit={handleShareSubmit}
+      />
     </View>
   );
 }
@@ -2135,6 +2206,18 @@ const createStyles = (colors: AppColors, insets: any) =>
       borderColor: 'rgba(255,255,255,0.4)',
     },
     saveBtnText: { color: '#fff', fontWeight: '700', fontSize: TextScale.sm },
+    saveBtnCompact: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingHorizontal: Spacing.three,
+      paddingVertical: Spacing.three,
+      borderRadius: Radius.full,
+      backgroundColor: 'rgba(255,255,255,0.25)',
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.4)',
+      flexShrink: 1,
+    },
 
     videoContainer: { flex: 1, width: '100%', height: '100%', justifyContent: 'center', alignItems: 'center' },
     videoFull: { width: '100%', height: '100%' },

@@ -23,6 +23,7 @@ const STREAK_CHANNEL_ID = 'streak';
 const STREAK_NOTIFICATION_ID = 'streak-risk';
 const RECAP_CHANNEL_ID = 'recap';
 const RECAP_NOTIFICATION_ID = 'monthly-recap-ready';
+const SHARED_POST_CHANNEL_ID = 'shared-posts';
 const APP_PRIMARY_COLOR = '#2563EB';
 
 const MONTH_NAMES = [
@@ -108,6 +109,12 @@ export async function setupNotifications() {
       });
       await N.setNotificationChannelAsync(RECAP_CHANNEL_ID, {
         name: 'Monthly Recap',
+        importance: N.AndroidImportance.DEFAULT,
+        lightColor: APP_PRIMARY_COLOR,
+        showBadge: false,
+      });
+      await N.setNotificationChannelAsync(SHARED_POST_CHANNEL_ID, {
+        name: 'Shared Posts',
         importance: N.AndroidImportance.DEFAULT,
         lightColor: APP_PRIMARY_COLOR,
         showBadge: false,
@@ -334,6 +341,66 @@ export async function showRecapReadyNotification(year, month) {
     });
   } catch (e) {
     console.warn('[Notifications] showRecapReadyNotification failed:', e?.message);
+  }
+}
+
+function sharedPostNotificationTrigger() {
+  return Platform.OS === 'android' ? { channelId: SHARED_POST_CHANNEL_ID } : null;
+}
+
+export async function showNewSharePostNotification(post) {
+  if (!N || !post) return;
+  try {
+    const sharer = post.shared_by || 'Someone';
+    const count = post.item_count || 1;
+    const body = post.caption || post.post_title
+      || `Shared ${count} ${count === 1 ? 'file' : 'files'} with you`;
+    await N.scheduleNotificationAsync({
+      content: {
+        title: `📸 New post from ${sharer}`,
+        body,
+        data: { type: 'shared_post', group_id: post.group_id },
+      },
+      trigger: sharedPostNotificationTrigger(),
+    });
+  } catch (e) {
+    console.warn('[Notifications] showNewSharePostNotification failed:', e?.message);
+  }
+}
+
+function sharedPostTargetFromNotificationData(data) {
+  if (!data || data.type !== 'shared_post' || !data.group_id) return null;
+  return { group_id: data.group_id };
+}
+
+export async function getInitialSharedPostTap() {
+  if (!N) return null;
+  try {
+    const response = await Promise.resolve(readLastNotificationResponse());
+    const target = sharedPostTargetFromNotificationData(response?.notification?.request?.content?.data);
+    if (!target) return null;
+    clearHandledNotificationResponse();
+    return target;
+  } catch (e) {
+    console.warn('[Notifications] getInitialSharedPostTap failed:', e?.message);
+    return null;
+  }
+}
+
+export function addSharedPostTapListener(onTap) {
+  if (!N) return () => {};
+  try {
+    const sub = N.addNotificationResponseReceivedListener(response => {
+      const target = sharedPostTargetFromNotificationData(response.notification.request.content.data);
+      if (target) {
+        clearHandledNotificationResponse();
+        onTap(target);
+      }
+    });
+    return () => sub.remove();
+  } catch (e) {
+    console.warn('[Notifications] addSharedPostTapListener failed:', e?.message);
+    return () => {};
   }
 }
 

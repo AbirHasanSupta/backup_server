@@ -582,6 +582,24 @@ export async function getSharedFeed(sourceId) {
 }
 
 /**
+ * Push this device's username to the server (idempotent, safe to call on save or reconnect).
+ * @param {string} username
+ */
+export async function updateUsernameOnServer(username) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/devices/${encodeURIComponent(deviceId)}/username`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ username: username || null }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to update username (${res.status})`);
+  return await res.json();
+}
+
+/**
  * List accepted devices this device can share to (safe fields only — never a token).
  * @returns {Promise<{devices: {device_id: string, device_name: string, device_model: string}[]}>}
  */
@@ -601,7 +619,7 @@ export async function listShareTargetDevices() {
  * @param {string} caption
  * @param {{source_type: string, source_key: string, relative_path: string, size?: number, modified_time?: number}[]} items
  */
-export async function createDeviceShare(targetDeviceIds, caption, items) {
+export async function createDeviceShare(targetDeviceIds, caption, items, options = {}) {
   const { ip, port, key, deviceId } = await getConfig();
   const res = await fetch(
     `http://${ip}:${port}/api/share/create`,
@@ -613,6 +631,8 @@ export async function createDeviceShare(targetDeviceIds, caption, items) {
         target_device_ids: targetDeviceIds,
         caption: caption || null,
         items,
+        post_kind: options.postKind || null,
+        post_title: options.postTitle || null,
       }),
     },
   );
@@ -633,6 +653,38 @@ export async function getFeed(offset = 0, limit = 50) {
     { headers: { Authorization: `Bearer ${key}` } },
   );
   if (!res.ok) throw new Error(`Failed to fetch feed (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Post groups shared to this device that it hasn't been notified about yet.
+ * @returns {Promise<{posts: Array<{group_id: string, shared_by: string, caption?: string, post_title?: string, item_count: number, created_at: number}>}>}
+ */
+export async function getPendingShareNotifications() {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/notifications/pending?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch notifications (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Mark post groups as seen so they are not notified about again.
+ * @param {string[]} groupIds
+ */
+export async function markShareNotificationsSeen(groupIds) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/notifications/seen`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ device_id: deviceId, group_ids: groupIds }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to mark notifications seen (${res.status})`);
   return await res.json();
 }
 

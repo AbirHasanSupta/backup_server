@@ -19,6 +19,7 @@ import {
   RefreshControl,
   KeyboardAvoidingView,
   Platform,
+  BackHandler,
 } from 'react-native';
 import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
@@ -30,6 +31,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
+import { ShareModal } from '@/components/ShareModal';
+import { ReactorsListSheet } from '@/components/ReactorsListSheet';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
@@ -51,7 +54,6 @@ import {
   listSharedFiles,
   reactToMedia,
   getFeed,
-  listShareTargetDevices,
   createDeviceShare,
   getComments,
   addComment,
@@ -107,6 +109,14 @@ function safeMediaCall(fn: () => void): void {
   }
 }
 
+/** Module-level (non-component) so Date.now() isn't flagged as an impure render call. */
+function registerDoubleTap(ref: { current: number }): boolean {
+  const now = Date.now();
+  const isDouble = now - ref.current < 300;
+  ref.current = now;
+  return isDouble;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -139,6 +149,8 @@ type RemoteFile = {
   group_caption?: string | null;
   group_items?: RemoteFile[];
   is_own_post?: boolean;
+  post_kind?: string | null;
+  post_title?: string | null;
 };
 
 type ServerConfig = { ip: string; port: string; key: string; deviceId: string } | null;
@@ -465,6 +477,34 @@ function mapFeedItem(f: any): RemoteFile {
     created_at: f.created_at,
     uploaded_time: f.uploaded_time ?? f.created_at,
     is_own_post: f.is_own_post,
+    post_kind: f.post_kind,
+    post_title: f.post_title,
+  };
+}
+
+const POST_KIND_BADGES: Record<string, { emoji: string; label: string; bg: string; fg: string }> = {
+  memory: { emoji: '📅', label: 'Memory', bg: 'rgba(139, 92, 246, 0.15)', fg: '#8B5CF6' },
+  flashback: { emoji: '⚡', label: 'Flashback', bg: 'rgba(245, 158, 11, 0.15)', fg: '#F59E0B' },
+  rewind: { emoji: '🎬', label: 'Rewind Reel', bg: 'rgba(236, 72, 153, 0.15)', fg: '#EC4899' },
+  trip: { emoji: '🧭', label: 'Trip', bg: 'rgba(16, 185, 129, 0.15)', fg: '#10B981' },
+  place: { emoji: '📍', label: 'Place', bg: 'rgba(59, 130, 246, 0.15)', fg: '#3B82F6' },
+};
+
+function getPostKindBadge(item: RemoteFile): { emoji: string; text: string; bg: string; fg: string } | null {
+  const kind = item.post_kind;
+  const total = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
+  const trending = total >= 5;
+  if (!kind) {
+    return trending ? { emoji: '🔥', text: 'Trending', bg: 'rgba(239, 68, 68, 0.15)', fg: '#EF4444' } : null;
+  }
+  const def = POST_KIND_BADGES[kind];
+  if (!def) return null;
+  const title = (item.post_title || '').trim();
+  return {
+    emoji: trending ? '🔥' : def.emoji,
+    text: title ? `${def.label} · ${title}` : def.label,
+    bg: def.bg,
+    fg: def.fg,
   };
 }
 
@@ -488,13 +528,16 @@ function ReactionEmojiBar({
   reactionCounts,
   userReactions,
   onReact,
+  onShowReactors,
   colors,
 }: {
   reactionCounts?: Record<string, number>;
   userReactions?: string[];
   onReact: (emoji: string) => void;
+  onShowReactors?: () => void;
   colors: AppColors;
 }) {
+  const total = Object.values(reactionCounts || {}).reduce((a, b) => a + b, 0);
   return (
     <View style={reactionStyles.bar}>
       {REACTION_EMOJIS.map((emoji) => {
@@ -504,6 +547,7 @@ function ReactionEmojiBar({
           <TouchableOpacity
             key={emoji}
             onPress={() => onReact(emoji)}
+            onLongPress={total > 0 ? onShowReactors : undefined}
             style={[
               reactionStyles.emojiBtn,
               {
@@ -527,6 +571,11 @@ function ReactionEmojiBar({
           </TouchableOpacity>
         );
       })}
+      {total > 0 && onShowReactors && (
+        <TouchableOpacity onPress={onShowReactors} hitSlop={8} style={reactionStyles.totalBtn}>
+          <Text style={[reactionStyles.totalText, { color: colors.textMuted }]}>{total}</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -538,8 +587,10 @@ function SharedFeedCard({
   onPreview,
   onReact,
   onOpenComments,
+  onShowReactors,
   onManage,
   onHide,
+  onOpenDeviceProfile,
   colors,
 }: {
   item: RemoteFile;
@@ -548,15 +599,38 @@ function SharedFeedCard({
   onPreview: (file: RemoteFile, postItems?: RemoteFile[]) => void;
   onReact: (file: RemoteFile, emoji: string) => void;
   onOpenComments: (file: RemoteFile) => void;
+  onShowReactors: (file: RemoteFile) => void;
   onManage: (file: RemoteFile) => void;
   onHide: (file: RemoteFile) => void;
+  onOpenDeviceProfile: (deviceId: string, deviceName: string) => void;
   colors: AppColors;
 }) {
   const items = item.group_items && item.group_items.length > 0 ? item.group_items : [item];
   const [activeIndex, setActiveIndex] = useState(0);
   const [cardWidth, setCardWidth] = useState(SCREEN_W - Spacing.four * 2);
+  const mediaHeight = Math.round(cardWidth * 1.25);
   const commentCount = item.comment_count ?? 0;
   const isOwnPost = Boolean(item.is_own_post || (serverConfig?.deviceId && item.shared_by_device_id === serverConfig.deviceId));
+  const lastTapRef = useRef(0);
+  const [showHeart, setShowHeart] = useState(false);
+  const heartScale = useRef(new Animated.Value(0)).current;
+
+  const handleMediaPress = (subItem: RemoteFile) => {
+    const isDoubleTap = registerDoubleTap(lastTapRef);
+    if (isDoubleTap) {
+      if (!(item.user_reactions || []).includes('❤️')) {
+        onReact(item, '❤️');
+      }
+      setShowHeart(true);
+      heartScale.setValue(0);
+      Animated.sequence([
+        Animated.spring(heartScale, { toValue: 1, friction: 4, useNativeDriver: true }),
+        Animated.timing(heartScale, { toValue: 0, duration: 200, delay: 450, useNativeDriver: true }),
+      ]).start(() => setShowHeart(false));
+    } else {
+      onPreview(subItem, items);
+    }
+  };
 
   return (
     <View
@@ -568,7 +642,7 @@ function SharedFeedCard({
         }
       }}
     >
-      <View style={[feedCardStyles.mediaContainer, { width: cardWidth }]}>
+      <View style={[feedCardStyles.mediaContainer, { width: cardWidth, height: mediaHeight }]}>
         <FlatList
           data={items}
           keyExtractor={(it, idx) => (it.share_id != null ? String(it.share_id) : `${it.path}_${idx}`)}
@@ -597,8 +671,8 @@ function SharedFeedCard({
 
             return (
               <TouchableOpacity
-                style={[feedCardStyles.mediaWrap, { width: cardWidth }]}
-                onPress={() => onPreview(subItem, items)}
+                style={[feedCardStyles.mediaWrap, { width: cardWidth, height: mediaHeight }]}
+                onPress={() => handleMediaPress(subItem)}
                 activeOpacity={0.9}
               >
                 <Image
@@ -611,6 +685,17 @@ function SharedFeedCard({
                   <View style={feedCardStyles.videoBadge}>
                     <AppIcon androidName="play_arrow" iosName="play.fill" color="#fff" size={24} />
                   </View>
+                )}
+                {showHeart && (
+                  <Animated.View
+                    pointerEvents="none"
+                    style={[
+                      feedCardStyles.heartOverlay,
+                      { transform: [{ scale: heartScale }], opacity: heartScale },
+                    ]}
+                  >
+                    <AppIcon androidName="favorite" iosName="heart.fill" color="#fff" size={72} />
+                  </Animated.View>
                 )}
               </TouchableOpacity>
             );
@@ -643,15 +728,31 @@ function SharedFeedCard({
       )}
 
       <View style={feedCardStyles.body}>
+        {(() => {
+          const badge = getPostKindBadge(item);
+          return badge ? (
+            <View style={[feedCardStyles.postKindBadge, { backgroundColor: badge.bg }]}>
+              <Text style={{ fontSize: TextScale.xs }}>{badge.emoji}</Text>
+              <Text style={[feedCardStyles.postKindBadgeText, { color: badge.fg }]} numberOfLines={1}>
+                {badge.text}
+              </Text>
+            </View>
+          ) : null;
+        })()}
         <View style={feedCardStyles.headerRow}>
           <View style={feedCardStyles.sharerInfo}>
             {!!item.shared_by && (
-              <View style={feedCardStyles.sharedByRow}>
+              <TouchableOpacity
+                style={feedCardStyles.sharedByRow}
+                onPress={() => item.shared_by_device_id && onOpenDeviceProfile(item.shared_by_device_id, item.shared_by!)}
+                hitSlop={6}
+                disabled={!item.shared_by_device_id}
+              >
                 <AppIcon androidName="person" iosName="person.fill" color={colors.primary} size={14} />
                 <Text style={[feedCardStyles.sharedByText, { color: colors.primary }]} numberOfLines={1}>
                   Shared by {item.shared_by}
                 </Text>
-              </View>
+              </TouchableOpacity>
             )}
             <Text style={[feedCardStyles.fileDate, { color: colors.textMuted }]}>
               {formatDate(item.created_at ?? item.modified_time)}
@@ -679,6 +780,7 @@ function SharedFeedCard({
             reactionCounts={item.reaction_counts}
             userReactions={item.user_reactions}
             onReact={(emoji) => onReact(item, emoji)}
+            onShowReactors={() => onShowReactors(item)}
             colors={colors}
           />
 
@@ -707,6 +809,8 @@ type CommentItem = {
   media_id: number;
   source_id: string;
   device_name?: string | null;
+  username?: string | null;
+  display_name?: string | null;
   text: string;
   created_at: number;
   is_own?: boolean;
@@ -832,7 +936,7 @@ function CommentsModal({
                   <View style={modalSheetStyles.commentBody}>
                     <View style={modalSheetStyles.commentMeta}>
                       <Text style={[modalSheetStyles.commentAuthor, { color: colors.text }]} numberOfLines={1}>
-                        {c.device_name || 'Unknown device'}
+                        {c.display_name || c.device_name || 'Unknown device'}
                       </Text>
                       <Text style={[modalSheetStyles.commentTime, { color: colors.textMuted }]}>
                         {formatTimeAgo(c.created_at)}
@@ -879,167 +983,6 @@ function CommentsModal({
   );
 }
 
-type ShareTargetDevice = { device_id: string; device_name: string; device_model: string };
-
-function ShareModal({
-  visible,
-  count,
-  colors,
-  onClose,
-  onSubmit,
-}: {
-  visible: boolean;
-  count: number;
-  colors: AppColors;
-  onClose: () => void;
-  onSubmit: (targetIds: string[], caption: string) => Promise<void>;
-}) {
-  const insets = useSafeAreaInsets();
-  const [devices, setDevices] = useState<ShareTargetDevice[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [caption, setCaption] = useState('');
-  const [sending, setSending] = useState(false);
-
-  useEffect(() => {
-    if (!visible) return;
-    let active = true;
-    // Reset the share sheet each time it opens, then load target devices. These
-    // synchronous resets are intentional — a clean sheet per open — and the fetch
-    // below is the external-sync work this effect exists for.
-    /* eslint-disable react-hooks/set-state-in-effect */
-    setLoading(true);
-    setSelected(new Set());
-    setCaption('');
-    /* eslint-enable react-hooks/set-state-in-effect */
-    listShareTargetDevices()
-      .then((res) => { if (active) setDevices(Array.isArray(res?.devices) ? res.devices : []); })
-      .catch(() => { if (active) setDevices([]); })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, [visible]);
-
-  const toggle = useCallback((id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-
-  const handleSend = useCallback(async () => {
-    if (selected.size === 0 || sending) return;
-    setSending(true);
-    try {
-      await onSubmit(Array.from(selected), caption.trim());
-    } finally {
-      setSending(false);
-    }
-  }, [selected, sending, caption, onSubmit]);
-
-  return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={modalSheetStyles.backdrop} onPress={onClose} />
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={modalSheetStyles.avoider}
-        pointerEvents="box-none"
-      >
-        <View style={[modalSheetStyles.sheet, { backgroundColor: colors.surface, paddingBottom: insets.bottom + Spacing.three }]}>
-          <View style={modalSheetStyles.handle} />
-          <View style={modalSheetStyles.header}>
-            <Text style={[modalSheetStyles.title, { color: colors.text }]}>
-              Share {count} {count === 1 ? 'file' : 'files'}
-            </Text>
-            <TouchableOpacity onPress={onClose} hitSlop={10}>
-              <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={20} />
-            </TouchableOpacity>
-          </View>
-
-          <TextInput
-            value={caption}
-            onChangeText={setCaption}
-            placeholder="Add a caption (optional)…"
-            placeholderTextColor={colors.textMuted}
-            style={[modalSheetStyles.captionInput, { backgroundColor: colors.surfaceSoft, color: colors.text, borderColor: colors.surfaceBorder }]}
-            multiline
-            maxLength={2000}
-          />
-
-          <Text style={[modalSheetStyles.sectionLabel, { color: colors.textSecondary }]}>
-            Send to devices
-          </Text>
-
-          {loading ? (
-            <View style={modalSheetStyles.centerPad}>
-              <ActivityIndicator color={colors.primary} />
-            </View>
-          ) : devices.length === 0 ? (
-            <View style={modalSheetStyles.centerPad}>
-              <Text style={[modalSheetStyles.emptyText, { color: colors.textMuted }]}>
-                No other devices are connected to share with.
-              </Text>
-            </View>
-          ) : (
-            <FlatList
-              data={devices}
-              keyExtractor={(d) => d.device_id}
-              style={modalSheetStyles.list}
-              contentContainerStyle={modalSheetStyles.listContent}
-              keyboardShouldPersistTaps="handled"
-              renderItem={({ item: d }) => {
-                const active = selected.has(d.device_id);
-                return (
-                  <TouchableOpacity
-                    onPress={() => toggle(d.device_id)}
-                    style={[
-                      modalSheetStyles.deviceRow,
-                      { borderColor: active ? colors.primary : colors.surfaceBorder, backgroundColor: active ? colors.primarySoft : colors.surfaceSoft },
-                    ]}
-                    activeOpacity={0.8}
-                  >
-                    <View style={modalSheetStyles.deviceInfo}>
-                      <Text style={[modalSheetStyles.deviceName, { color: colors.text }]} numberOfLines={1}>
-                        {d.device_name || 'Unknown device'}
-                      </Text>
-                      {!!d.device_model && (
-                        <Text style={[modalSheetStyles.deviceModel, { color: colors.textMuted }]} numberOfLines={1}>
-                          {d.device_model}
-                        </Text>
-                      )}
-                    </View>
-                    <AppIcon
-                      androidName={active ? 'check_circle' : 'radio_button_unchecked'}
-                      iosName={active ? 'checkmark.circle.fill' : 'circle'}
-                      color={active ? colors.primary : colors.textMuted}
-                      size={22}
-                    />
-                  </TouchableOpacity>
-                );
-              }}
-            />
-          )}
-
-          <TouchableOpacity
-            onPress={handleSend}
-            disabled={selected.size === 0 || sending}
-            style={[modalSheetStyles.primaryBtn, { backgroundColor: selected.size > 0 && !sending ? colors.primary : colors.surfaceSoft }]}
-            activeOpacity={0.85}
-          >
-            {sending ? (
-              <ActivityIndicator color="#fff" />
-            ) : (
-              <Text style={[modalSheetStyles.primaryBtnText, { color: selected.size > 0 ? '#fff' : colors.textMuted }]}>
-                {selected.size > 0 ? `Share with ${selected.size} ${selected.size === 1 ? 'device' : 'devices'}` : 'Select devices'}
-              </Text>
-            )}
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
-  );
-}
-
 function ManageShareModal({
   visible,
   groupId,
@@ -1054,7 +997,7 @@ function ManageShareModal({
   onDeleted: () => void;
 }) {
   const insets = useSafeAreaInsets();
-  const [targets, setTargets] = useState<{ target_device_id: string; device_name: string; device_model?: string }[]>([]);
+  const [targets, setTargets] = useState<{ target_device_id: string; device_name: string; device_model?: string; username?: string; display_name?: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [removingId, setRemovingId] = useState<string | null>(null);
@@ -1167,7 +1110,7 @@ function ManageShareModal({
                 <View style={[modalSheetStyles.deviceRow, { borderColor: colors.surfaceBorder, backgroundColor: colors.surfaceSoft }]}>
                   <View style={modalSheetStyles.deviceInfo}>
                     <Text style={[modalSheetStyles.deviceName, { color: colors.text }]} numberOfLines={1}>
-                      {t.device_name || 'Unknown device'}
+                      {t.display_name || t.device_name || 'Unknown device'}
                     </Text>
                     {!!t.device_model && (
                       <Text style={[modalSheetStyles.deviceModel, { color: colors.textMuted }]} numberOfLines={1}>
@@ -1176,7 +1119,7 @@ function ManageShareModal({
                     )}
                   </View>
                   <TouchableOpacity
-                    onPress={() => handleRemoveTarget(t.target_device_id, t.device_name || 'this device')}
+                    onPress={() => handleRemoveTarget(t.target_device_id, t.display_name || t.device_name || 'this device')}
                     disabled={removingId === t.target_device_id}
                     style={[modalSheetStyles.removeTargetBtn, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}
                     activeOpacity={0.75}
@@ -1419,6 +1362,15 @@ const reactionStyles = StyleSheet.create({
     fontSize: TextScale.xs,
     fontWeight: '700',
   },
+  totalBtn: {
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 5,
+  },
+  totalText: {
+    fontSize: TextScale.xs,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
+  },
 });
 
 const feedCardStyles = StyleSheet.create({
@@ -1431,11 +1383,9 @@ const feedCardStyles = StyleSheet.create({
   mediaContainer: {
     position: 'relative',
     width: '100%',
-    height: 260,
     backgroundColor: '#000',
   },
   mediaWrap: {
-    height: 260,
     backgroundColor: '#000',
     position: 'relative',
   },
@@ -1453,6 +1403,15 @@ const feedCardStyles = StyleSheet.create({
     height: 40,
     borderRadius: 20,
     backgroundColor: 'rgba(0,0,0,0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heartOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1513,6 +1472,20 @@ const feedCardStyles = StyleSheet.create({
   },
   fileDate: {
     fontSize: TextScale.xs,
+  },
+  postKindBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: Radius.full,
+    marginBottom: 4,
+  },
+  postKindBadgeText: {
+    fontSize: TextScale.xs,
+    fontWeight: '800',
   },
   menuBtn: {
     padding: 4,
@@ -3431,6 +3404,26 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const [feedHasMore, setFeedHasMore] = useState(false);
   const [feedLoadingMore, setFeedLoadingMore] = useState(false);
   const [manageGroupItem, setManageGroupItem] = useState<RemoteFile | null>(null);
+  const [feedDeviceFilter, setFeedDeviceFilter] = useState<{ id: string; name: string } | null>(null);
+
+  const openDeviceFeed = useCallback((deviceId: string, deviceName: string) => {
+    if (!deviceId) return;
+    setFeedDeviceFilter({ id: deviceId, name: deviceName });
+  }, []);
+
+  const closeDeviceFeed = useCallback(() => setFeedDeviceFilter(null), []);
+
+  useFocusEffect(useCallback(() => {
+    if (!isFeedMode) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (feedDeviceFilter) {
+        setFeedDeviceFilter(null);
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [isFeedMode, feedDeviceFilter]));
 
   // Server Config cache
   const [serverConfig, setServerConfig] = useState<ServerConfig>(null);
@@ -3505,6 +3498,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   // Feed interaction / sharing modals
   const [commentsItem, setCommentsItem] = useState<RemoteFile | null>(null);
+  const [reactorsItem, setReactorsItem] = useState<RemoteFile | null>(null);
   const [shareModalVisible, setShareModalVisible] = useState(false);
   const [singleShareFile, setSingleShareFile] = useState<RemoteFile | null>(null);
 
@@ -3695,11 +3689,16 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   const isFiltering = searchQuery.trim().length > 0;
 
+  const baseFeedFiles = useMemo(() => {
+    if (!isFeedMode || !feedDeviceFilter) return files;
+    return files.filter(f => (f.shared_by_device_id || '') === feedDeviceFilter.id);
+  }, [isFeedMode, files, feedDeviceFilter]);
+
   const filteredFiles = useMemo(() => {
-    if (!isFiltering) return files;
+    if (!isFiltering) return baseFeedFiles;
     if (isFeedMode) {
       const q = searchQuery.trim().toLowerCase();
-      const matched = files.filter(f => {
+      const matched = baseFeedFiles.filter(f => {
         // 1. Device name & ID
         const deviceName = (f.shared_by || '').toLowerCase();
         const deviceId = (f.shared_by_device_id || '').toLowerCase();
@@ -3723,7 +3722,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       return matched.sort((a, b) => compareRemoteFiles(a, b, sortField, sortDir));
     }
     return [...searchResults].sort((a, b) => compareRemoteFiles(a, b, sortField, sortDir));
-  }, [isFiltering, isFeedMode, searchQuery, files, sortField, sortDir, searchResults]);
+  }, [isFiltering, isFeedMode, searchQuery, baseFeedFiles, sortField, sortDir, searchResults]);
 
   const runSearch = useCallback((query: string) => {
     if (isFeedMode) return;
@@ -4398,7 +4397,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           };
 
           if (isMedia && canSaveToGallery) {
-            const tmpUri = FileSystem.cacheDirectory + 'restore_tmp_' + Date.now() + '_' + displayName;
+            const tmpUri = FileSystem.cacheDirectory + 'restore_tmp_' + getCurrentTimestamp() + '_' + displayName;
             if (fileInfo?.share_id != null) {
               await downloadShareFile(fileInfo.share_id, tmpUri, onFileProgress);
             } else if (sourceMode === 'shared' && selectedSourceId) {
@@ -4567,20 +4566,31 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           <View style={styles.pageHeaderTopRow}>
           <View>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-              <Text style={styles.pageTitle}>{variant === 'feed' ? 'Feed' : 'Library'}</Text>
-              <AnimatedPressable
-                onPress={() => router.push('/memories')}
-                style={styles.memoriesHeaderBtn}
-                scaleDown={0.88}
-                accessibilityLabel="Open Memories"
-              >
-                <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={18} />
-                {hasMemories && <View style={styles.memoriesBadgeDot} />}
-              </AnimatedPressable>
+              {isFeedMode && feedDeviceFilter && (
+                <TouchableOpacity onPress={closeDeviceFeed} hitSlop={10}>
+                  <AppIcon androidName="arrow_back" iosName="chevron.left" color={colors.text} size={22} />
+                </TouchableOpacity>
+              )}
+              <Text style={styles.pageTitle}>
+                {variant === 'feed' ? (feedDeviceFilter ? feedDeviceFilter.name : 'Feed') : 'Library'}
+              </Text>
+              {!feedDeviceFilter && (
+                <AnimatedPressable
+                  onPress={() => router.push('/memories')}
+                  style={styles.memoriesHeaderBtn}
+                  scaleDown={0.88}
+                  accessibilityLabel="Open Memories"
+                >
+                  <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={18} />
+                  {hasMemories && <View style={styles.memoriesBadgeDot} />}
+                </AnimatedPressable>
+              )}
             </View>
             <Text style={styles.pageSubtitle}>
               {isFeedMode
-                ? 'Your feed'
+                ? feedDeviceFilter
+                  ? `${baseFeedFiles.length} ${baseFeedFiles.length === 1 ? 'post' : 'posts'} shared by ${feedDeviceFilter.name}`
+                  : 'Your feed'
                 : files.length > 0
                   ? isFiltering
                     ? `${filteredFiles.length.toLocaleString()} matching of ${files.length.toLocaleString()} files`
@@ -4633,6 +4643,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             />
           )}
 
+          {!feedDeviceFilter && (
           <LibraryFilterBar
             query={searchQuery}
             onQueryChange={(q) => { setSearchQuery(q); runSearch(q); }}
@@ -4644,6 +4655,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             onSortChange={handleSortChange}
             colors={colors}
           />
+          )}
           {/* Hint Bar */}
           {files.length > 0 && selectedPaths.size === 0 && !selectionMode && !isDownloading && (
             <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
@@ -4684,7 +4696,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       {/* File Tree or Shared Feed List */}
       <FlatList
         style={{ flex: 1 }}
-        data={isFeedMode ? (isFiltering ? filteredFiles : files) : (listRows as any)}
+        data={isFeedMode ? (isFiltering ? filteredFiles : baseFeedFiles) : (listRows as any)}
         keyExtractor={(item: any) =>
           isFeedMode
             ? (item.group_id != null
@@ -4703,8 +4715,10 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
               onPreview={handlePreview}
               onReact={handleToggleReaction}
               onOpenComments={setCommentsItem}
+              onShowReactors={setReactorsItem}
               onManage={setManageGroupItem}
               onHide={handleHidePost}
+              onOpenDeviceProfile={openDeviceFeed}
               colors={colors}
             />
           ) : (
@@ -4799,19 +4813,33 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
                 />
               </View>
               <Text style={styles.emptyTitle}>
-                {isFiltering
-                  ? isFeedMode ? 'No matching posts' : 'No matching files'
-                  : isFeedMode ? 'Your feed is empty' : 'No files fetched'}
+                {feedDeviceFilter
+                  ? 'No posts yet'
+                  : isFiltering
+                    ? isFeedMode ? 'No matching posts' : 'No matching files'
+                    : isFeedMode ? 'Your feed is empty' : 'No files fetched'}
               </Text>
               <Text style={styles.emptySubtitle}>
-                {isFiltering
-                  ? 'Try a different search term.'
-                  : isFeedMode
-                    ? 'Shared photos and videos from connected devices will appear here.'
-                    : sourceMode === 'shared' && !selectedSourceId
-                      ? 'Select a shared folder above, then tap Fetch.'
-                      : 'Tap Fetch to see files available on the server.'}
+                {feedDeviceFilter
+                  ? `${feedDeviceFilter.name} hasn't shared anything with you yet.`
+                  : isFiltering
+                    ? 'Try a different search term.'
+                    : isFeedMode
+                      ? 'Shared photos and videos from connected devices will appear here.'
+                      : sourceMode === 'shared' && !selectedSourceId
+                        ? 'Select a shared folder above, then tap Fetch.'
+                        : 'Tap Fetch to see files available on the server.'}
               </Text>
+              {isFeedMode && !isFiltering && !feedDeviceFilter && (
+                <TouchableOpacity
+                  style={[styles.emptyCtaBtn, { backgroundColor: colors.primary }]}
+                  onPress={() => router.push('/restore')}
+                  activeOpacity={0.85}
+                >
+                  <AppIcon androidName="post_add" iosName="square.and.arrow.up.on.square" color="#fff" size={16} />
+                  <Text style={styles.emptyCtaBtnText}>Share something</Text>
+                </TouchableOpacity>
+              )}
             </View>
           ) : null
         }
@@ -4882,6 +4910,14 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         colors={colors}
         onClose={() => setCommentsItem(null)}
         onCountChange={handleCommentCountChange}
+      />
+
+      {/* Reactors list on a feed item */}
+      <ReactorsListSheet
+        visible={reactorsItem !== null}
+        mediaId={reactorsItem?.media_id}
+        colors={colors}
+        onClose={() => setReactorsItem(null)}
       />
     </View>
   );
@@ -5007,6 +5043,16 @@ const createStyles = (colors: AppColors) =>
     emptyIconWrap: { width: 88, height: 88, borderRadius: Radius.xxl, alignItems: 'center', justifyContent: 'center' },
     emptyTitle: { fontSize: TextScale.md, fontWeight: '800', color: colors.text, textAlign: 'center' },
     emptySubtitle: { fontSize: TextScale.sm, color: colors.textSecondary, textAlign: 'center', lineHeight: 22, fontWeight: '500' },
+    emptyCtaBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      marginTop: Spacing.four,
+      paddingHorizontal: Spacing.five,
+      paddingVertical: Spacing.three,
+      borderRadius: Radius.full,
+    },
+    emptyCtaBtnText: { fontSize: TextScale.sm, fontWeight: '800', color: '#fff' },
 
     progressContainer: {
       backgroundColor: colors.surface, paddingHorizontal: Spacing.five,

@@ -62,7 +62,16 @@ try:
 except Exception:
     pystray = None
     _PILImage = None
-from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessions, init_db, remove_device, create_device_share, get_device_shares_by_sharer, get_share_targets_for_group, delete_device_share_group, remove_share_group_target, add_share_group_targets, edit_device_share_group_caption
+from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessions, init_db, remove_device, create_device_share, get_device_shares_by_sharer, get_share_targets_for_group, delete_device_share_group, remove_share_group_target, add_share_group_targets, edit_device_share_group_caption, set_device_username
+
+
+def format_display_name(dev: dict) -> str:
+    username = (dev.get("username") or "").strip()
+    device_name = (dev.get("device_name") or "").strip()
+    if username and device_name:
+        return f"{username} ({device_name})"
+    return username or device_name or "Unknown device"
+
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
 ctk.set_default_color_theme("blue")
@@ -1016,6 +1025,25 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         return frame
 
+    def _edit_device_username(self, dev: dict):
+        device_id = dev.get("device_id")
+        if not device_id:
+            return
+        dialog = ctk.CTkInputDialog(
+            text=f"Set a display name for \"{dev.get('device_name', 'this device')}\":",
+            title="Set Username",
+        )
+        result = dialog.get_input()
+        if result is None:
+            return
+        set_device_username(device_id, result.strip())
+        add_log(f"✏️ Username updated for {dev.get('device_name')}: {result.strip() or '(cleared)'}")
+        did = str(dev.get("id"))
+        if did in self._device_card_widgets:
+            self._device_card_widgets[did]["outer"].destroy()
+            del self._device_card_widgets[did]
+        self._refresh_devices()
+
     def _refresh_devices(self):
         devices = get_devices()
 
@@ -1116,10 +1144,18 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         name_row.grid(row=0, column=1, sticky="sw", padx=4, pady=(18, 2))
 
         ctk.CTkLabel(
-            name_row, text=dev["device_name"],
+            name_row, text=format_display_name(dev),
             font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
             text_color=C_TEXT,
         ).pack(side="left")
+
+        edit_name_btn = ctk.CTkButton(
+            name_row, text="✎", width=22, height=22, corner_radius=6,
+            fg_color=C_ELEVATED, hover_color=C_SOFT_BLUE, text_color=C_MUTED,
+            font=ctk.CTkFont(size=12),
+            command=lambda d=dev: self._edit_device_username(d),
+        )
+        edit_name_btn.pack(side="left", padx=(8, 0))
 
         # Last-seen pill badge
         last_seen_text = fmt_rel(dev["last_seen"])
@@ -1192,7 +1228,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # ── Remove button ─────────────────────────────────────────────────
         dev_id   = dev["id"]
-        dev_name = dev["device_name"]
+        dev_name = format_display_name(dev)
 
         def do_remove(did=dev_id, dname=dev_name):
             if confirm_dialog(
@@ -1797,7 +1833,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             did = dev.get("device_id")
             var = tk.BooleanVar(value=False)
             ctk.CTkCheckBox(
-                self._post_devices_frame, text=dev.get("device_name") or did,
+                self._post_devices_frame, text=format_display_name(dev) if dev.get("device_name") else did,
                 variable=var, font=FONT_SMALL, text_color=C_TEXT,
                 border_color=C_BORDER, fg_color=C_ACCENT,
             ).pack(anchor="w", padx=8, pady=4)
@@ -1877,7 +1913,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ctk.CTkLabel(top, text=fmt_rel(head.get("created_at")), font=FONT_CAPTION, text_color=C_MUTED, anchor="e").pack(side="right")
 
             targets = get_share_targets_for_group(gid, DESKTOP_SHARE_DEVICE_ID)
-            target_names = ", ".join(t.get("device_name") or t["target_device_id"] for t in targets) or "No devices"
+            target_names = ", ".join(format_display_name(t) if t.get("device_name") else t["target_device_id"] for t in targets) or "No devices"
             ctk.CTkLabel(
                 card, text=f"{len(items)} file(s)   •   Shared with: {target_names}",
                 font=FONT_SMALL, text_color=C_MUTED, anchor="w",
@@ -1945,7 +1981,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             did = dev.get("device_id")
             var = tk.BooleanVar(value=did in current)
             ctk.CTkCheckBox(
-                scroll, text=dev.get("device_name") or did, variable=var,
+                scroll, text=format_display_name(dev) if dev.get("device_name") else did, variable=var,
                 font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
             ).pack(anchor="w", padx=8, pady=4)
             vars_map[did] = var
@@ -2313,7 +2349,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     self._shared_dirs[i]["device_ids"] = list(ids)
                     self._save_shared_dirs_to_config()
                 ctk.CTkCheckBox(
-                    dev_row, text=dev.get("device_name", did),
+                    dev_row, text=format_display_name(dev) if dev.get("device_name") else did,
                     variable=dvar, font=FONT_SMALL,
                     command=_on_toggle,
                     width=0, checkbox_width=16, checkbox_height=16,
@@ -2635,7 +2671,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
     @staticmethod
     def _history_device_options(devices: list[dict]) -> tuple[list[str], dict[str, str | None]]:
         """Build unambiguous filter labels even when two phones share a name."""
-        names = [d.get("device_name") or d.get("device_id") or "Unknown device" for d in devices]
+        names = [format_display_name(d) if d.get("device_name") else (d.get("device_id") or "Unknown device") for d in devices]
         duplicate_counts = {name: names.count(name) for name in set(names)}
         values = ["All Devices"]
         device_id_map: dict[str, str | None] = {}

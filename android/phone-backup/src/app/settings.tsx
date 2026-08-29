@@ -26,6 +26,8 @@ import {
   setApiKey,
   getServerName,
   setServerName,
+  getUsername,
+  setUsername,
   getSyncInterval,
   setSyncInterval,
   getSyncPaused,
@@ -45,6 +47,7 @@ import { hapticMedium, hapticLight } from '@/utils/haptics';
 import { registerBackgroundTask, runSync, getCurrentSyncState } from '../../backgroundTask';
 import { connectToServer } from '../../connectToServer';
 import { checkDeviceConnection } from '../../uploader';
+import { updateUsernameOnServer } from '../../downloader';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
 import { AppIcon } from '@/components/AppIcon';
@@ -87,6 +90,8 @@ export default function SettingsScreen() {
   const [serverIp, setServerIpState] = useState('');
   const [serverPort, setServerPortState] = useState('8000');
   const [serverName, setServerNameState] = useState('');
+  const [username, setUsernameState] = useState('');
+  const [savingUsername, setSavingUsername] = useState(false);
   const [apiKey, setApiKeyState] = useState('');
   const [syncInterval, setSyncIntervalState] = useState(60);
   const [syncPaused, setSyncPausedState] = useState(false);
@@ -147,7 +152,7 @@ export default function SettingsScreen() {
   const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
 
   const loadSettings = useCallback(async () => {
-    const [ip, port, key, interval, paused, saved, name] = await Promise.all([
+    const [ip, port, key, interval, paused, saved, name, savedUsername] = await Promise.all([
       getServerIp(),
       getServerPort(),
       getApiKey(),
@@ -155,6 +160,7 @@ export default function SettingsScreen() {
       getSyncPaused(),
       getSavedServers(),
       getServerName(),
+      getUsername(),
     ]);
     setServerIpState(ip);
     setServerPortState(String(port));
@@ -163,6 +169,7 @@ export default function SettingsScreen() {
     setSyncPausedState(paused);
     setSavedServers(saved);
     setServerNameState(name || '');
+    setUsernameState(savedUsername || '');
 
     // If server name is not set or equals the IP, attempt to resolve friendly name from server
     if (ip && (!name || name === ip)) {
@@ -203,6 +210,20 @@ export default function SettingsScreen() {
       checkServer();
     }, [loadSettings, checkServer])
   );
+
+  const handleSaveUsername = async () => {
+    setSavingUsername(true);
+    try {
+      const trimmed = username.trim();
+      await setUsername(trimmed);
+      setUsernameState(trimmed);
+      try {
+        await updateUsernameOnServer(trimmed);
+      } catch {}
+    } finally {
+      setSavingUsername(false);
+    }
+  };
 
   const handleSaveServer = async () => {
     if (!serverIp.trim()) {
@@ -460,6 +481,36 @@ export default function SettingsScreen() {
         }
       >
         <Animated.View entering={FadeInDown.duration(300).delay(100)}>
+          <SectionHeader title="Your profile" styles={styles} />
+          <SettingsCard styles={styles}>
+            <FieldLabel text="Your name" styles={styles} />
+            <TextInput
+              id="username-input"
+              style={styles.textInput}
+              value={username}
+              onChangeText={setUsernameState}
+              placeholder="e.g. Alex"
+              placeholderTextColor={colors.textMuted}
+              autoCapitalize="words"
+              autoCorrect={false}
+              returnKeyType="done"
+              onSubmitEditing={handleSaveUsername}
+            />
+            <AnimatedPressable
+              id="save-username-button"
+              style={[styles.primaryBtn, savingUsername && { opacity: 0.65 }]}
+              onPress={handleSaveUsername}
+              disabled={savingUsername}
+              scaleDown={0.95}
+              accessibilityLabel="Save your name"
+            >
+              <AppIcon androidName="check" iosName="checkmark" color={colors.white} size={18} fallback="OK" />
+              <Text style={styles.primaryBtnText}>{savingUsername ? 'Saving' : 'Save'}</Text>
+            </AnimatedPressable>
+          </SettingsCard>
+        </Animated.View>
+
+        <Animated.View entering={FadeInDown.duration(300).delay(150)}>
           <SectionHeader title="Server connection" styles={styles} />
           <SettingsCard styles={styles}>
             {savedServers.length > 0 && (

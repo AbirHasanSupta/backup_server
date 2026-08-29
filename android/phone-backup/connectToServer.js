@@ -1,4 +1,4 @@
-import { getDeviceId, setDeviceToken, saveServerProfile } from './settings';
+import { getDeviceId, getUsername, setDeviceToken, saveServerProfile } from './settings';
 
 /**
  * connectToServer.js
@@ -53,6 +53,7 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
 
   try {
     const deviceId = await getDeviceId();
+    const username = await getUsername();
     const res = await fetch(`http://${serverIp}:${serverPort}/connect`, {
       method: 'POST',
       headers: {
@@ -63,6 +64,7 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
         device_name: deviceName,
         device_id: deviceId,
         device_model: deviceModel,
+        username: username || null,
       }),
       signal: controller.signal,
     });

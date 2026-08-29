@@ -176,6 +176,8 @@ def init_db():
             folder_name
             TEXT,
             device_model
+            TEXT,
+            username
             TEXT
         )
         """
@@ -190,6 +192,8 @@ def init_db():
         conn.execute("ALTER TABLE devices ADD COLUMN device_model TEXT")
     if 'token' not in existing_cols:
         conn.execute("ALTER TABLE devices ADD COLUMN token TEXT")
+    if 'username' not in existing_cols:
+        conn.execute("ALTER TABLE devices ADD COLUMN username TEXT")
 
     # 2c. Back-fill folder_name for any pre-existing devices that have NULL there.
     #     We derive it the same way _make_folder_name() does so existing uploads
@@ -663,6 +667,7 @@ def init_db():
         (
             share_id         INTEGER NOT NULL,
             target_device_id TEXT    NOT NULL,
+            seen             INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (share_id, target_device_id),
             FOREIGN KEY (share_id) REFERENCES device_shares(id) ON DELETE CASCADE
         )
@@ -672,6 +677,11 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_share_targets_device ON device_share_targets(target_device_id)"
     )
 
+    # Migration: add seen to device_share_targets if not present
+    existing_target_cols = {row[1] for row in conn.execute("PRAGMA table_info(device_share_targets)").fetchall()}
+    if "seen" not in existing_target_cols:
+        conn.execute("ALTER TABLE device_share_targets ADD COLUMN seen INTEGER NOT NULL DEFAULT 0")
+
     # 16. device_share_groups: one row per share call, groups multi-file posts together
     conn.execute(
         """
@@ -680,7 +690,9 @@ def init_db():
             id                  TEXT    PRIMARY KEY,
             caption             TEXT,
             shared_by_device_id TEXT    NOT NULL,
-            created_at          INTEGER NOT NULL
+            created_at          INTEGER NOT NULL,
+            post_kind           TEXT,
+            post_title          TEXT
         )
         """
     )
@@ -695,6 +707,13 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_device_shares_group ON device_shares(share_group_id)"
         )
+
+    # Migration: add post_kind/post_title to device_share_groups if not present
+    existing_group_cols = {row[1] for row in conn.execute("PRAGMA table_info(device_share_groups)").fetchall()}
+    if "post_kind" not in existing_group_cols:
+        conn.execute("ALTER TABLE device_share_groups ADD COLUMN post_kind TEXT")
+    if "post_title" not in existing_group_cols:
+        conn.execute("ALTER TABLE device_share_groups ADD COLUMN post_title TEXT")
 
     conn.commit()
     conn.close()
@@ -940,6 +959,7 @@ def upsert_device(
         device_ip: str,
         device_id: str | None = None,
         device_model: str | None = None,
+        username: str | None = None,
 ) -> None:
     """Insert a new device or update its name/last_seen.
 
@@ -959,17 +979,18 @@ def upsert_device(
         conn.execute(
             """
             INSERT INTO devices (device_id, device_name, device_ip, status, first_seen, last_seen, folder_name,
-                                 device_model)
-            VALUES (?, ?, ?, 'accepted', ?, ?, ?, ?) ON CONFLICT(device_id) DO
+                                 device_model, username)
+            VALUES (?, ?, ?, 'accepted', ?, ?, ?, ?, ?) ON CONFLICT(device_id) DO
             UPDATE SET
                 device_name = excluded.device_name,
                 device_ip = excluded.device_ip,
                 last_seen = excluded.last_seen,
                 status = 'accepted',
                 device_model = COALESCE (devices.device_model, excluded.device_model),
-                folder_name = COALESCE (devices.folder_name, excluded.folder_name)
+                folder_name = COALESCE (devices.folder_name, excluded.folder_name),
+                username = COALESCE (excluded.username, devices.username)
             """,
-            (device_id, device_name, device_ip, now, now, folder_name, device_model),
+            (device_id, device_name, device_ip, now, now, folder_name, device_model, username),
         )
     else:
         # Legacy fallback: try to update by IP if device_id is missing
@@ -981,10 +1002,10 @@ def upsert_device(
             folder_name = _make_folder_name(device_name)
             conn.execute(
                 """
-                INSERT INTO devices (device_name, device_ip, status, first_seen, last_seen, folder_name, device_model)
-                VALUES (?, ?, 'accepted', ?, ?, ?, ?)
+                INSERT INTO devices (device_name, device_ip, status, first_seen, last_seen, folder_name, device_model, username)
+                VALUES (?, ?, 'accepted', ?, ?, ?, ?, ?)
                 """,
-                (device_name, device_ip, now, now, folder_name, device_model),
+                (device_name, device_ip, now, now, folder_name, device_model, username),
             )
     conn.commit()
     conn.close()
@@ -994,6 +1015,16 @@ def upsert_device(
 
     # Recalculate file count immediately
     touch_device(device_ip, device_id)
+
+
+def set_device_username(device_id: str, username: str | None) -> None:
+    conn = get_conn()
+    conn.execute(
+        "UPDATE devices SET username = ? WHERE device_id = ?",
+        ((username or "").strip() or None, device_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def _generate_device_token() -> str:
@@ -2238,10 +2269,17 @@ def toggle_reaction(media_id: int, source_id: str, emoji: str) -> dict:
 
 
 def get_media_reactions(media_id: int) -> dict:
-    """Return full reaction list and counts for a media item."""
+    """Return full reaction list and counts for a media item, with reactor display names."""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT id, media_id, source_id, emoji, created_at FROM reactions WHERE media_id = ? ORDER BY created_at ASC",
+        """
+        SELECT r.id, r.media_id, r.source_id, r.emoji, r.created_at,
+               d.device_name AS device_name, d.username AS username
+        FROM reactions r
+        LEFT JOIN devices d ON d.device_id = r.source_id
+        WHERE r.media_id = ?
+        ORDER BY r.created_at ASC
+        """,
         (media_id,),
     ).fetchall()
     conn.close()
@@ -2400,7 +2438,7 @@ def get_comments_for_media(media_id: int) -> list[dict]:
     rows = conn.execute(
         """
         SELECT c.id, c.media_id, c.source_id, c.text, c.created_at,
-               d.device_name AS device_name
+               d.device_name AS device_name, d.username AS username
         FROM comments c
         LEFT JOIN devices d ON d.device_id = c.source_id
         WHERE c.media_id = ?
@@ -2490,7 +2528,7 @@ def get_share_target_devices(exclude_device_id: str | None = None) -> list[dict]
     if exclude_device_id:
         rows = conn.execute(
             """
-            SELECT device_id, device_name, device_model
+            SELECT device_id, device_name, device_model, username
             FROM devices
             WHERE status = 'accepted' AND device_id IS NOT NULL AND device_id != ?
             ORDER BY last_seen DESC
@@ -2500,7 +2538,7 @@ def get_share_target_devices(exclude_device_id: str | None = None) -> list[dict]
     else:
         rows = conn.execute(
             """
-            SELECT device_id, device_name, device_model
+            SELECT device_id, device_name, device_model, username
             FROM devices
             WHERE status = 'accepted' AND device_id IS NOT NULL
             ORDER BY last_seen DESC
@@ -2515,6 +2553,8 @@ def create_device_share(
     target_device_ids: list[str],
     caption: str | None,
     items: list[dict],
+    post_kind: str | None = None,
+    post_title: str | None = None,
 ) -> dict:
     """Create one share row per item, grouped under a single share_group_id.
 
@@ -2538,9 +2578,11 @@ def create_device_share(
 
     # One group per share call
     group_id = str(_uuid.uuid4())
+    kind = (post_kind or "").strip() or None
+    title = (post_title or "").strip() or None
     conn.execute(
-        "INSERT INTO device_share_groups (id, caption, shared_by_device_id, created_at) VALUES (?, ?, ?, ?)",
-        (group_id, cap, shared_by_device_id, now_ts),
+        "INSERT INTO device_share_groups (id, caption, shared_by_device_id, created_at, post_kind, post_title) VALUES (?, ?, ?, ?, ?, ?)",
+        (group_id, cap, shared_by_device_id, now_ts, kind, title),
     )
 
     count = 0
@@ -2551,18 +2593,18 @@ def create_device_share(
         size = int(it.get("size") or 0)
         modified_time = int(it.get("modified_time") or 0)
 
+        media_id = get_or_create_media_id(source_type, source_key, relative_path, size, modified_time)
         cur = conn.execute(
             """
             INSERT INTO device_shares
                 (media_id, source_type, source_key, relative_path, size, modified_time,
                  caption, shared_by_device_id, created_at, share_group_id)
-            VALUES (0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (source_type, source_key, relative_path, size, modified_time,
+            (media_id, source_type, source_key, relative_path, size, modified_time,
              cap, shared_by_device_id, now_ts, group_id),
         )
         share_id = cur.lastrowid
-        conn.execute("UPDATE device_shares SET media_id = ? WHERE id = ?", (share_id, share_id))
         conn.executemany(
             "INSERT OR IGNORE INTO device_share_targets (share_id, target_device_id) VALUES (?, ?)",
             [(share_id, t) for t in targets],
@@ -2598,8 +2640,9 @@ def get_device_shares_for_target(target_device_id: str) -> list[dict]:
         SELECT ds.id AS share_id, ds.media_id, ds.source_type, ds.source_key,
                ds.relative_path, ds.size, ds.modified_time, ds.caption,
                ds.shared_by_device_id, ds.created_at, ds.share_group_id,
-               d.device_name AS shared_by_name,
-               COALESCE(dsg.caption, ds.caption) AS group_caption
+               d.device_name AS shared_by_name, d.username AS shared_by_username,
+               COALESCE(dsg.caption, ds.caption) AS group_caption,
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title
         FROM device_share_targets t
         JOIN device_shares ds ON ds.id = t.share_id
         LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
@@ -2621,8 +2664,9 @@ def get_device_shares_by_sharer(sharer_device_id: str) -> list[dict]:
         SELECT ds.id AS share_id, ds.media_id, ds.source_type, ds.source_key,
                ds.relative_path, ds.size, ds.modified_time, ds.caption,
                ds.shared_by_device_id, ds.created_at, ds.share_group_id,
-               d.device_name AS shared_by_name,
-               COALESCE(dsg.caption, ds.caption) AS group_caption
+               d.device_name AS shared_by_name, d.username AS shared_by_username,
+               COALESCE(dsg.caption, ds.caption) AS group_caption,
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title
         FROM device_shares ds
         LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
@@ -2633,6 +2677,51 @@ def get_device_shares_by_sharer(sharer_device_id: str) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_unseen_share_notifications(target_device_id: str) -> list[dict]:
+    """Return post groups shared TO this device that it has not yet been notified about."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT dsg.id AS group_id, dsg.caption, dsg.post_kind, dsg.post_title,
+               dsg.created_at, dsg.shared_by_device_id,
+               d.device_name AS shared_by_name, d.username AS shared_by_username,
+               COUNT(DISTINCT ds.id) AS item_count
+        FROM device_share_targets t
+        JOIN device_shares ds ON ds.id = t.share_id
+        JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        LEFT JOIN devices d ON d.device_id = dsg.shared_by_device_id
+        WHERE t.target_device_id = ? AND t.seen = 0
+        GROUP BY dsg.id
+        ORDER BY dsg.created_at DESC
+        """,
+        (target_device_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_share_notifications_seen(target_device_id: str, group_ids: list[str]) -> None:
+    """Mark the given post groups as seen/notified for this target device."""
+    group_ids = [g for g in (group_ids or []) if g]
+    if not group_ids:
+        return
+    conn = get_conn()
+    placeholders = ",".join("?" for _ in group_ids)
+    conn.execute(
+        f"""
+        UPDATE device_share_targets
+        SET seen = 1
+        WHERE target_device_id = ?
+          AND share_id IN (
+              SELECT ds.id FROM device_shares ds WHERE ds.share_group_id IN ({placeholders})
+          )
+        """,
+        (target_device_id, *group_ids),
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_share_targets_for_group(group_id: str, requesting_device_id: str = None) -> list[dict]:
@@ -2648,7 +2737,7 @@ def get_share_targets_for_group(group_id: str, requesting_device_id: str = None)
             return []
     rows = conn.execute(
         """
-        SELECT DISTINCT dst.target_device_id, d.device_name, d.device_model
+        SELECT DISTINCT dst.target_device_id, d.device_name, d.device_model, d.username
         FROM device_shares ds
         JOIN device_share_targets dst ON dst.share_id = ds.id
         LEFT JOIN devices d ON d.device_id = dst.target_device_id
