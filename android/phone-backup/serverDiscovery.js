@@ -48,19 +48,24 @@ async function fetchWithTimeout(url, timeoutMs) {
   }
 }
 
+function isNumericIp(str) {
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(str || '') || /^\[?[a-fA-F0-9:]+\]?$/.test(str || '');
+}
+
 async function probeServer(ip, port, timeoutMs = TIMEOUT_MS) {
   const data = await fetchWithTimeout(`http://${ip}:${port}/ping`, timeoutMs);
   if (data && data.status === 'ok') {
     const allIps = Array.isArray(data.all_ips) && data.all_ips.length > 0 ? data.all_ips : [ip];
     return {
+      serverId: data.server_id || '',
       ip,
       port,
-      name: data.name || ip,
+      name: (data.name && String(data.name).trim()) || ip,
       hostname: data.hostname || '',
       version: data.version || '?',
       certFingerprint: data.cert_fingerprint || '',
       all_ips: allIps,
-      candidateIps: Array.from(new Set([ip, ...allIps])),
+      candidateIps: Array.from(new Set([ip, ...allIps].filter(Boolean))),
     };
   }
   return null;
@@ -70,10 +75,12 @@ export function buildMultiSubnetIps(deviceIp, savedServers = []) {
   const ipList = [];
   const seen = new Set();
 
-  const addIp = (ip) => {
-    if (ip && !seen.has(ip)) {
-      seen.add(ip);
-      ipList.push(ip);
+  const addIp = (rawIp) => {
+    if (!rawIp) return;
+    const cleanIp = String(rawIp).replace(/^https?:\/\//i, '').replace(/:\d+$/, '').trim();
+    if (cleanIp && !seen.has(cleanIp)) {
+      seen.add(cleanIp);
+      ipList.push(cleanIp);
     }
   };
 
@@ -117,7 +124,7 @@ export function buildMultiSubnetIps(deviceIp, savedServers = []) {
  *
  * @param {(progress: number, found: Array) => void} onProgress
  * @param {{ shouldStop?: () => boolean, signal?: AbortSignal, maxSubnets?: number }} [options]
- * @returns {Promise<Array<{ip, port, name, version, all_ips, candidateIps}>>}
+ * @returns {Promise<Array<{serverId, ip, port, name, version, all_ips, candidateIps}>>}
  */
 export async function discoverServers(onProgress, options = {}) {
   if (!Network) {
@@ -141,7 +148,7 @@ export async function discoverServers(onProgress, options = {}) {
   ]);
 
   const ips = buildMultiSubnetIps(deviceIp, savedServers);
-  const foundMap = new Map(); // key by server name or ip:port
+  const foundMap = new Map();
   let scanned = 0;
   const total = ips.length;
 
@@ -153,15 +160,52 @@ export async function discoverServers(onProgress, options = {}) {
 
     results.forEach((r) => {
       if (r) {
-        const key = r.name && r.name !== r.ip ? r.name : `${r.ip}:${r.port}`;
-        if (foundMap.has(key)) {
-          const existing = foundMap.get(key);
+        let existingKey = null;
+        for (const [k, existing] of foundMap.entries()) {
+          const sameServerId = r.serverId && existing.serverId && r.serverId === existing.serverId;
+          const sameHostname = r.hostname && existing.hostname && r.hostname.toLowerCase() === existing.hostname.toLowerCase() && r.port === existing.port;
+          const sameName = r.name && existing.name && r.name.toLowerCase() === existing.name.toLowerCase() && r.port === existing.port;
+          const overlappingIps = (r.candidateIps || []).some(
+            (cip) => cip && (existing.ip === cip || (existing.candidateIps || []).includes(cip))
+          ) && r.port === existing.port;
+
+          if (sameServerId || sameHostname || sameName || overlappingIps) {
+            existingKey = k;
+            break;
+          }
+        }
+
+        if (existingKey) {
+          const existing = foundMap.get(existingKey);
           const mergedCandidates = Array.from(new Set([
             ...(existing.candidateIps || [existing.ip]),
             ...(r.candidateIps || [r.ip]),
-          ]));
-          foundMap.set(key, { ...existing, candidateIps: mergedCandidates });
+          ].filter(Boolean)));
+
+          let chosenIp = existing.ip;
+          if (!isNumericIp(chosenIp) && isNumericIp(r.ip)) {
+            chosenIp = r.ip;
+          } else if (!isNumericIp(chosenIp)) {
+            const numericCandidate = mergedCandidates.find(isNumericIp);
+            if (numericCandidate) chosenIp = numericCandidate;
+          }
+
+          const resolvedName = (existing.name && !isNumericIp(existing.name) && existing.name !== existing.ip)
+            ? existing.name
+            : (r.name && !isNumericIp(r.name) && r.name !== r.ip ? r.name : (existing.name || r.name));
+
+          const updated = {
+            ...existing,
+            ...r,
+            ip: chosenIp,
+            name: resolvedName,
+            serverId: existing.serverId || r.serverId || '',
+            hostname: existing.hostname || r.hostname || '',
+            candidateIps: mergedCandidates,
+          };
+          foundMap.set(existingKey, updated);
         } else {
+          const key = r.serverId ? `id:${r.serverId}:${r.port}` : (r.hostname ? `host:${r.hostname}:${r.port}` : `${r.name || r.ip}:${r.port}`);
           foundMap.set(key, r);
         }
       }

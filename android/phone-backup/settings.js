@@ -553,11 +553,12 @@ export async function saveServerProfile(server) {
   const id = `${server.ip}:${port}`;
   const now = Date.now();
 
-  // Match by: exact id, exact ip:port, or candidateIps overlap.
+  // Match by: serverId, exact id, exact ip:port, or candidateIps overlap.
   // The candidateIps overlap is critical for mesh roaming: after the phone switches
   // mesh nodes, resolveReachableServer may call saveServerProfile with a new primary IP
   // that doesn't match the saved id/ip — but it IS in the saved candidateIps list.
   const idx = servers.findIndex((s) =>
+    (server.serverId && s.serverId && s.serverId === server.serverId) ||
     s.id === id ||
     (s.ip === server.ip && (Number(s.port) || 8000) === port) ||
     (
@@ -583,6 +584,7 @@ export async function saveServerProfile(server) {
   const profile = {
     // If matching an existing profile via candidateIps, keep id consistent with new primary IP
     id,
+    serverId: server.serverId || existing?.serverId || '',
     ip: server.ip,
     candidateIps,
     hostname: server.hostname || existing?.hostname || '',

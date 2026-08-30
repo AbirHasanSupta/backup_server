@@ -36,6 +36,7 @@ const { height: SCREEN_H } = Dimensions.get('window');
 const DISMISS_THRESHOLD = 120;
 
 interface Server {
+  serverId?: string;
   ip: string;
   port: number;
   name: string;
@@ -316,7 +317,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
             {servers.length > 0 && (
               <FlatList
                 data={servers}
-                keyExtractor={(item) => `${item.ip}:${item.port}`}
+                keyExtractor={(item) => (item.serverId ? `${item.serverId}:${item.port}` : `${item.ip}:${item.port}`)}
                 style={styles.list}
                 keyboardShouldPersistTaps="handled"
                 renderItem={({ item }) => (

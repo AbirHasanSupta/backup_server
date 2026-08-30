@@ -173,6 +173,17 @@ def load_config() -> dict:
         if _IS_FROZEN:
             cfg["DB_PATH"] = DB_PATH
 
+        if not cfg.get("SERVER_ID"):
+            import uuid
+            cfg["SERVER_ID"] = str(uuid.uuid4())
+            try:
+                os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=2)
+                current_mtime = os.path.getmtime(CONFIG_FILE)
+            except Exception:
+                pass
+
         _config_cache = cfg
         _config_cache_mtime = current_mtime
         return cfg

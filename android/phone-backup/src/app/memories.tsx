@@ -134,6 +134,10 @@ function formatCaptureDate(captureTime: number | null | undefined): string {
   }
 }
 
+function flattenGroupItems(group: YearGroup): StoryItem[] {
+  return group.items.map(it => ({ ...it, year: group.year, years_ago: group.years_ago }));
+}
+
 function flattenDayItems(day: DayMemory): StoryItem[] {
   const flat: StoryItem[] = [];
   for (const g of day.groups) {
@@ -171,11 +175,14 @@ export default function MemoriesScreen() {
 
   // Story Viewer state
   const [activeDayIdx, setActiveDayIdx] = useState<number | null>(null);
+  const [activeGroupIdx, setActiveGroupIdx] = useState<number | null>(null);
   const [activeItemIdx, setActiveItemIdx] = useState<number>(0);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [savingItem, setSavingItem] = useState<boolean>(false);
   const [shareVisible, setShareVisible] = useState(false);
   const [shareItem, setShareItem] = useState<MemoryItem | null>(null);
+  // When sharing a full memory card (multiple files), shareItems overrides shareItem
+  const [shareItems, setShareItems] = useState<MemoryItem[]>([]);
   const [shareKind, setShareKind] = useState<string | null>(null);
   const [shareTitle, setShareTitle] = useState<string | null>(null);
 
@@ -290,12 +297,19 @@ export default function MemoriesScreen() {
   const totalItemsAcrossAllDays = data?.days ? data.days.reduce((sum, d) => sum + dayItemCount(d), 0) : 0;
 
   const activeDay = activeDayIdx !== null && data?.days ? data.days[activeDayIdx] : null;
-  const activeItems = useMemo(() => (activeDay ? flattenDayItems(activeDay) : []), [activeDay]);
+  const activeItems = useMemo<StoryItem[]>(() => {
+    if (!activeDay) return [];
+    if (activeGroupIdx !== null && activeDay.groups[activeGroupIdx]) {
+      return flattenGroupItems(activeDay.groups[activeGroupIdx]);
+    }
+    return flattenDayItems(activeDay);
+  }, [activeDay, activeGroupIdx]);
   const currentItem = activeItems[activeItemIdx] ?? null;
 
   const openDayStory = useCallback((dayIdx: number, startOffset: number = 0) => {
     hapticMedium();
     setActiveDayIdx(dayIdx);
+    setActiveGroupIdx(null);
     setActiveItemIdx(startOffset);
     setProgressRatio(0);
     setIsPaused(false);
@@ -303,15 +317,14 @@ export default function MemoriesScreen() {
 
   const openYearGroupStory = useCallback(
     (dayIdx: number, groupIdx: number) => {
-      const day = data?.days?.[dayIdx];
-      if (!day) return;
-      let offset = 0;
-      for (let i = 0; i < groupIdx; i++) {
-        offset += day.groups[i]?.items.length ?? 0;
-      }
-      openDayStory(dayIdx, offset);
+      hapticMedium();
+      setActiveDayIdx(dayIdx);
+      setActiveGroupIdx(groupIdx);
+      setActiveItemIdx(0);
+      setProgressRatio(0);
+      setIsPaused(false);
     },
-    [data, openDayStory],
+    [],
   );
 
   const advanceItem = useCallback(() => {
@@ -320,6 +333,7 @@ export default function MemoriesScreen() {
       setProgressRatio(0);
     } else {
       setActiveDayIdx(null);
+      setActiveGroupIdx(null);
       setActiveItemIdx(0);
     }
   }, [activeItemIdx, activeItems.length]);
@@ -580,6 +594,7 @@ export default function MemoriesScreen() {
   const stopAllPlayback = useCallback(() => {
     clearRewindPoll();
     setActiveDayIdx(null);
+    setActiveGroupIdx(null);
     setActiveItemIdx(0);
     setIsPaused(false);
     setFlashbackVisible(false);
@@ -649,6 +664,7 @@ export default function MemoriesScreen() {
         }
         if (activeDayIdxRef.current !== null) {
           setActiveDayIdx(null);
+          setActiveGroupIdx(null);
           return true;
         }
         if (routerRef.current.canGoBack()) {
@@ -758,26 +774,30 @@ export default function MemoriesScreen() {
   };
 
   const handleShareSubmit = useCallback(async (targetIds: string[], caption: string) => {
-    if (!shareItem || targetIds.length === 0) return;
-    const items = [{
-      source_type: shareItem.source_type,
-      source_key: shareItem.source_id,
-      relative_path: shareItem.relative_path,
-      size: shareItem.size || 0,
-      modified_time: shareItem.capture_time || 0,
-    }];
+    if (targetIds.length === 0) return;
+    // Use all items if sharing a full memory card; fall back to single shareItem
+    const itemsToShare = shareItems.length > 0 ? shareItems : (shareItem ? [shareItem] : []);
+    if (itemsToShare.length === 0) return;
+    const items = itemsToShare.map(i => ({
+      source_type: i.source_type,
+      source_key: i.source_id,
+      relative_path: i.relative_path,
+      size: i.size || 0,
+      modified_time: i.capture_time || 0,
+    }));
     try {
       await createDeviceShare(targetIds, caption, items, { postKind: shareKind, postTitle: shareTitle });
       hapticSuccess();
       setShareVisible(false);
       setShareItem(null);
+      setShareItems([]);
       setShareKind(null);
       setShareTitle(null);
     } catch (err: any) {
       hapticError();
       Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not share to feed.'));
     }
-  }, [shareItem, shareKind, shareTitle]);
+  }, [shareItem, shareItems, shareKind, shareTitle]);
 
   // PanResponder for swipe gestures in flashback:
   // Swipe right (dx > 50) -> next surprise
@@ -812,6 +832,7 @@ export default function MemoriesScreen() {
           if (gestureState.dy > 50) {
             hapticMedium();
             setActiveDayIdx(null);
+            setActiveGroupIdx(null);
           }
         },
       }),
@@ -1057,6 +1078,23 @@ export default function MemoriesScreen() {
                       <AppIcon androidName="movie" iosName="film" color="#fff" size={14} />
                       <Text style={styles.rewindBtnText}>Rewind</Text>
                     </TouchableOpacity>
+                    {group.items.length > 0 && (
+                      <TouchableOpacity
+                        style={styles.shareCardBtn}
+                        onPress={() => {
+                          hapticLight();
+                          setShareItems(group.items);
+                          setShareItem(null);
+                          setShareKind('memory');
+                          setShareTitle(`${group.years_ago} ${group.years_ago === 1 ? 'Year' : 'Years'} Ago · ${group.year}`);
+                          setShareVisible(true);
+                        }}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      >
+                        <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={14} />
+                        <Text style={styles.rewindBtnText}>Share</Text>
+                      </TouchableOpacity>
+                    )}
                   </View>
                 );
               })}
@@ -1085,32 +1123,49 @@ export default function MemoriesScreen() {
                   const coverUrl = getCoverUrl(coverItems);
 
                   return (
-                    <AnimatedPressable
-                      key={`${day.date.month}-${day.date.day}-${day.date.year}`}
-                      style={styles.dayCardContainer}
-                      onPress={() => openDayStory(dayIdx, 0)}
-                      scaleDown={0.95}
-                    >
-                      <View style={styles.dayCardMain}>
-                        {coverUrl ? (
-                          <Image source={{ uri: coverUrl }} style={styles.cardImage} contentFit="cover" transition={200} />
-                        ) : (
-                          <View style={styles.dayCardEmptyIconWrap}>
-                            <AppIcon androidName="videocam" iosName="video.fill" color={colors.textMuted} size={22} />
-                          </View>
-                        )}
+                    <View key={`${day.date.month}-${day.date.day}-${day.date.year}`} style={styles.dayCardContainer}>
+                      <AnimatedPressable
+                        style={StyleSheet.absoluteFill}
+                        onPress={() => openDayStory(dayIdx, 0)}
+                        scaleDown={0.95}
+                      >
+                        <View style={styles.dayCardMain}>
+                          {coverUrl ? (
+                            <Image source={{ uri: coverUrl }} style={styles.cardImage} contentFit="cover" transition={200} />
+                          ) : (
+                            <View style={styles.dayCardEmptyIconWrap}>
+                              <AppIcon androidName="videocam" iosName="video.fill" color={colors.textMuted} size={22} />
+                            </View>
+                          )}
 
-                        <View style={styles.dayCardGradientOverlay}>
-                          <View style={styles.dayCardCountBadge}>
-                            <Text style={styles.dayCardCountBadgeText}>{count}</Text>
-                          </View>
-                          <View>
-                            <Text style={styles.dayCardLabel}>{formatDayLabel(day)}</Text>
-                            <Text style={styles.dayCardDate}>{formatDayDate(day)}</Text>
+                          <View style={styles.dayCardGradientOverlay}>
+                            <View style={styles.dayCardCountBadge}>
+                              <Text style={styles.dayCardCountBadgeText}>{count}</Text>
+                            </View>
+                            <View>
+                              <Text style={styles.dayCardLabel}>{formatDayLabel(day)}</Text>
+                              <Text style={styles.dayCardDate}>{formatDayDate(day)}</Text>
+                            </View>
                           </View>
                         </View>
-                      </View>
-                    </AnimatedPressable>
+                      </AnimatedPressable>
+                      {coverItems.length > 0 && (
+                        <TouchableOpacity
+                          style={styles.dayCardShareBtn}
+                          onPress={() => {
+                            hapticLight();
+                            setShareItems(coverItems);
+                            setShareItem(null);
+                            setShareKind('memory');
+                            setShareTitle(formatDayLabel(day));
+                            setShareVisible(true);
+                          }}
+                          hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+                        >
+                          <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={15} />
+                        </TouchableOpacity>
+                      )}
+                    </View>
                   );
                 })}
               </ScrollView>
@@ -1125,7 +1180,7 @@ export default function MemoriesScreen() {
           visible={activeDayIdx !== null}
           transparent={false}
           animationType="fade"
-          onRequestClose={() => setActiveDayIdx(null)}
+          onRequestClose={() => { setActiveDayIdx(null); setActiveGroupIdx(null); }}
         >
           <View style={styles.storyContainer} {...panResponder.panHandlers}>
             <StatusBar barStyle="light-content" />
@@ -1206,6 +1261,7 @@ export default function MemoriesScreen() {
                   onPress={() => {
                     hapticLight();
                     setActiveDayIdx(null);
+                    setActiveGroupIdx(null);
                   }}
                   hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
                 >
@@ -1218,7 +1274,7 @@ export default function MemoriesScreen() {
             <View style={[styles.storyBottomBar, { paddingBottom: Math.max(insets.bottom, 20) }]}>
               <TouchableOpacity
                 style={styles.saveBtn}
-                onPress={() => { setShareItem(currentItem); setShareKind('memory'); setShareTitle(activeDay ? formatDayLabel(activeDay) : 'A memory'); setShareVisible(true); }}
+                onPress={() => { setShareItem(currentItem); setShareItems([]); setShareKind('memory'); setShareTitle(activeDay ? formatDayLabel(activeDay) : 'A memory'); setShareVisible(true); }}
               >
                 <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={20} />
                 <Text style={styles.saveBtnText}>Share</Text>
@@ -1343,7 +1399,7 @@ export default function MemoriesScreen() {
                 </TouchableOpacity>
                 <TouchableOpacity
                   style={styles.flashbackIconBtn}
-                  onPress={() => { setShareItem(flashbackItem); setShareKind('flashback'); setShareTitle(flashbackItem?.capture_time ? formatCaptureDate(flashbackItem.capture_time) : 'A flashback'); setShareVisible(true); }}
+                  onPress={() => { setShareItem(flashbackItem); setShareItems([]); setShareKind('flashback'); setShareTitle(flashbackItem?.capture_time ? formatCaptureDate(flashbackItem.capture_time) : 'A flashback'); setShareVisible(true); }}
                   accessibilityLabel="Share to feed"
                 >
                   <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={20} />
@@ -1458,6 +1514,7 @@ export default function MemoriesScreen() {
                 style={styles.saveBtnCompact}
                 onPress={() => {
                   if (!rewindYear) return;
+                  setShareItems([]);
                   setShareItem({
                     source_type: 'rewind',
                     source_id: serverConfig?.deviceId || '',
@@ -1674,9 +1731,9 @@ export default function MemoriesScreen() {
 
       <ShareModal
         visible={shareVisible}
-        count={1}
+        count={shareItems.length > 0 ? shareItems.length : 1}
         colors={colors}
-        onClose={() => { setShareVisible(false); setShareItem(null); setShareKind(null); setShareTitle(null); }}
+        onClose={() => { setShareVisible(false); setShareItem(null); setShareItems([]); setShareKind(null); setShareTitle(null); }}
         onSubmit={handleShareSubmit}
       />
     </View>
@@ -2002,6 +2059,22 @@ const createStyles = (colors: AppColors, insets: any) =>
       borderWidth: 1,
       borderColor: 'rgba(255,255,255,0.35)',
     },
+    shareCardBtn: {
+      position: 'absolute',
+      top: Spacing.three,
+      left: Spacing.four + Spacing.two,
+      zIndex: 10,
+      elevation: 10,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      paddingHorizontal: Spacing.three,
+      paddingVertical: 6,
+      borderRadius: Radius.full,
+      backgroundColor: 'rgba(0,0,0,0.55)',
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.35)',
+    },
     rewindBtnText: { color: '#fff', fontWeight: '700', fontSize: TextScale.xs },
     stackLayer: {
       position: 'absolute',
@@ -2059,6 +2132,16 @@ const createStyles = (colors: AppColors, insets: any) =>
 
     historyRow: { paddingHorizontal: Spacing.five, gap: DAY_CARD_GAP },
     dayCardContainer: { width: DAY_CARD_W, height: DAY_CARD_H },
+    dayCardShareBtn: {
+      position: 'absolute',
+      top: 8,
+      left: 8,
+      backgroundColor: 'rgba(0,0,0,0.45)',
+      borderRadius: Radius.full,
+      padding: 6,
+      zIndex: 10,
+      elevation: 4,
+    },
     dayCardMain: {
       flex: 1,
       borderRadius: Radius.lg,

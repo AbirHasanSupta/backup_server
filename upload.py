@@ -193,7 +193,8 @@ async def ping():
     cfg = load_config()
     return {
         "status": "ok",
-        "name": hostname,
+        "server_id": cfg.get("SERVER_ID", ""),
+        "name": cfg.get("DESKTOP_NAME") or hostname,
         "hostname": f"{hostname}.local",
         "version": APP_VERSION,
         "all_ips": local_ips,
@@ -250,8 +251,10 @@ async def connect_device(
     def accepted_response() -> dict:
         local_ips = get_all_local_ips()
         hostname = socket.gethostname()
+        cfg = load_config()
         resp = {
             "status": "accepted",
+            "server_id": cfg.get("SERVER_ID", ""),
             "all_ips": local_ips,
             "hostname": hostname,
         }

@@ -321,6 +321,39 @@ function buildRootFromBrowse(data: { folders: any[]; files: RemoteFile[] }): Tre
   return { name: '__root__', key: '__root__', isFolder: true, children, totalSize: 0, fileCount: 0, filePaths: [], loaded: true };
 }
 
+function mergeTreeRoots(oldTree: TreeNode | null, newRoot: TreeNode): TreeNode {
+  if (!oldTree) return newRoot;
+  const oldMap = new Map<string, TreeNode>();
+  for (const c of oldTree.children) {
+    oldMap.set(c.key, c);
+  }
+
+  const mergedChildren: TreeNode[] = newRoot.children.map(newChild => {
+    const oldChild = oldMap.get(newChild.key);
+    if (!oldChild || !oldChild.isFolder) {
+      return newChild;
+    }
+    if (oldChild.loaded) {
+      const mergedSub = mergeTreeRoots(oldChild, { ...newChild, children: oldChild.children });
+      return {
+        ...newChild,
+        loaded: true,
+        loading: false,
+        children: mergedSub.children,
+        fileCount: oldChild.fileCount || newChild.fileCount,
+        totalSize: oldChild.totalSize || newChild.totalSize,
+        filePaths: oldChild.filePaths || newChild.filePaths,
+      };
+    }
+    return newChild;
+  });
+
+  return {
+    ...newRoot,
+    children: mergedChildren,
+  };
+}
+
 function replaceNodeChildren(node: TreeNode, targetKey: string, children: TreeNode[]): TreeNode {
   if (node.key === targetKey) return { ...node, children, loaded: true, loading: false };
   if (!node.children.length) return node;
@@ -386,8 +419,23 @@ function folderSelectionState(node: TreeNode, selectedPaths: Set<string>): 'none
 function flattenVisibleRows(nodes: TreeNode[], depth: number, expandedKeys: Set<string>, out: FlatRow[]): void {
   for (const node of nodes) {
     out.push({ node, depth });
-    if (node.isFolder && node.children.length > 0 && expandedKeys.has(node.key)) {
-      flattenVisibleRows(node.children, depth + 1, expandedKeys, out);
+    if (node.isFolder && expandedKeys.has(node.key)) {
+      if (node.loading) {
+        // Insert a synthetic loading placeholder node so the spinner is visible
+        const loadingPlaceholder: TreeNode = {
+          name: '__loading__',
+          key: `__loading__:${node.key}`,
+          isFolder: false,
+          children: [],
+          totalSize: 0,
+          fileCount: 0,
+          filePaths: [],
+          loading: true,
+        };
+        out.push({ node: loadingPlaceholder, depth: depth + 1 });
+      } else if (node.children.length > 0) {
+        flattenVisibleRows(node.children, depth + 1, expandedKeys, out);
+      }
     }
   }
 }
@@ -3663,6 +3711,15 @@ const TreeNodeView = React.memo(function TreeNodeView({
 }: TreeNodeViewProps) {
   const indent = depth * 16;
 
+  // Loading placeholder inserted by flattenVisibleRows while fetching folder contents
+  if (!node.isFolder && node.loading && node.name === '__loading__') {
+    return (
+      <View style={[{ paddingLeft: indent + Spacing.four, paddingVertical: Spacing.three, flexDirection: 'row', alignItems: 'center', gap: Spacing.two }]}>
+        <ActivityIndicator size="small" color={colors.primary} />
+      </View>
+    );
+  }
+
   if (!node.isFolder) {
     const isSelected = selectedPaths.has(node.key);
     const category = getFileCategory(node.name);
@@ -4436,8 +4493,18 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           user_reactions: f.user_reactions,
           is_video: f.is_video,
         }));
-        setFiles(rootFiles);
-        setTree(buildRootFromBrowse(data));
+        const newRoot = buildRootFromBrowse(data);
+        if (opts?.preserveSelection) {
+          setTree(prev => mergeTreeRoots(prev, newRoot));
+          setFiles(prev => {
+            const rootPaths = new Set(rootFiles.map(f => f.path));
+            const extraFiles = prev.filter(f => !rootPaths.has(f.path));
+            return [...rootFiles, ...extraFiles];
+          });
+        } else {
+          setTree(newRoot);
+          setFiles(rootFiles);
+        }
       }
 
       if (opts?.preserveSelection) {
@@ -4628,6 +4695,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     setFeedPreviewItems(null);
   }, []);
 
+  const expandingFoldersRef = useRef<Set<string>>(new Set());
+
   const handleToggleExpand = useCallback(async (nodeKey: string) => {
     const isExpanding = !expandedKeys.has(nodeKey);
     if (!isExpanding) {
@@ -4638,6 +4707,9 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       });
       return;
     }
+
+    // Prevent duplicate concurrent fetches for the same folder key
+    if (expandingFoldersRef.current.has(nodeKey)) return;
 
     let targetNode: TreeNode | null = null;
     function findNode(nodes: TreeNode[]): TreeNode | null {
@@ -4651,7 +4723,14 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     if (tree) targetNode = findNode(tree.children);
 
     if (targetNode && !targetNode.loaded && !targetNode.loading) {
+      expandingFoldersRef.current.add(nodeKey);
+      // Mark loading AND expand key immediately so the loading indicator row is visible
       setTree(prev => prev ? markNodeLoading(prev, nodeKey, true) : prev);
+      setExpandedKeys(prev => {
+        const next = new Set(prev);
+        next.add(nodeKey);
+        return next;
+      });
       try {
         const data = sourceMode === 'shared'
           ? await browseSharedFiles(selectedSourceId!, nodeKey)
@@ -4670,12 +4749,22 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           return additions.length ? [...prev, ...additions] : prev;
         });
       } catch (err: any) {
+        // On failure: clear loading state and collapse the folder (revert the early expand)
         setTree(prev => prev ? markNodeLoading(prev, nodeKey, false) : prev);
+        setExpandedKeys(prev => {
+          const next = new Set(prev);
+          next.delete(nodeKey);
+          return next;
+        });
         Alert.alert('Load Failed', sanitizeErrorMessage(err, 'Could not load this folder.'));
         return;
+      } finally {
+        expandingFoldersRef.current.delete(nodeKey);
       }
+      return;
     }
 
+    // Already loaded (or already loading from a previous attempt) — just expand the key
     setExpandedKeys(prev => {
       const next = new Set(prev);
       next.add(nodeKey);
@@ -5267,7 +5356,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         scrollEventThrottle={16}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
-        extraData={selectedPaths}
+        extraData={isFeedMode ? undefined : [selectedPaths, expandedKeys]}
         refreshControl={
           isDownloading ? undefined : (
             <RefreshControl

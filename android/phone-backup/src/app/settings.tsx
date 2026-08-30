@@ -310,6 +310,7 @@ export default function SettingsScreen() {
   };
 
   const handleServerSelected = async (server: {
+    serverId?: string;
     ip: string;
     port: number;
     name: string;
@@ -330,6 +331,7 @@ export default function SettingsScreen() {
       setApiKey(key),
       setDeviceToken(''),
       saveServerProfile({
+        serverId: server.serverId || '',
         ip: cleanIp,
         port: server.port,
         name: server.name || cleanIp,

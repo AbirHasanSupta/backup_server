@@ -89,6 +89,7 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
         await setRecoverySyncPending(false);
       }
       await saveServerProfile({
+        serverId: result.server_id || '',
         ip: serverIp,
         port: serverPort,
         apiKey,
