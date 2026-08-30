@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 import shutil
 import sys
 import threading
@@ -55,6 +56,9 @@ _DEFAULTS = {
     "SHARED_DIRS": [],
     "START_WITH_WINDOWS": False,
     "MINIMIZE_TO_TRAY": True,
+    # Display name shown on feed cards for posts sent from this desktop server.
+    # Defaults to the machine's hostname; can be changed in Settings.
+    "DESKTOP_NAME": platform.node() or "Desktop Server",
 }
 
 _AUTOSTART_KEY_NAME = APP_NAME

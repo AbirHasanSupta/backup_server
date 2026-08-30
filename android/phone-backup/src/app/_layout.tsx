@@ -1,6 +1,7 @@
 import { Tabs, useRouter } from 'expo-router';
 import { useEffect, useMemo } from 'react';
 import { Platform, View, StyleSheet } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import * as MediaLibrary from 'expo-media-library';
@@ -225,6 +226,7 @@ function RootLayoutContent() {
       const isSharedPost = await getInitialSharedPostTap();
       if (!active) return;
       if (isSharedPost) {
+        void AsyncStorage.setItem('feed_force_refresh', '1');
         router.push('/feed');
         return;
       }
@@ -249,7 +251,10 @@ function RootLayoutContent() {
     const unsubscribeRecap = addRecapTapListener((target: { year: number; month: number | null }) =>
       router.push(`/memories?recap=1&recapYear=${target.year}&recapMonth=${target.month ?? ''}`)
     );
-    const unsubscribeSharedPost = addSharedPostTapListener(() => router.push('/feed'));
+    const unsubscribeSharedPost = addSharedPostTapListener(() => {
+      void AsyncStorage.setItem('feed_force_refresh', '1');
+      router.push('/feed');
+    });
     return () => {
       active = false;
       unsubscribeMemories();

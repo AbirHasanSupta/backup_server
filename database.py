@@ -2457,7 +2457,7 @@ MAX_COMMENT_LENGTH = 2000
 
 
 def add_comment(media_id: int, source_id: str, text: str) -> dict:
-    """Insert a comment on a media item and return it with the commenter's device_name."""
+    """Insert a comment on a media item and return it with the commenter's device_name and display_name."""
     now_ts = int(_time.time())
     conn = get_conn()
     cur = conn.execute(
@@ -2467,15 +2467,24 @@ def add_comment(media_id: int, source_id: str, text: str) -> dict:
     conn.commit()
     cid = cur.lastrowid
     row = conn.execute(
-        "SELECT device_name FROM devices WHERE device_id = ? LIMIT 1",
+        "SELECT device_name, username FROM devices WHERE device_id = ? LIMIT 1",
         (source_id,),
     ).fetchone()
     conn.close()
+    device_name = row["device_name"] if row else None
+    username = row["username"] if row else None
+    # Compute display_name: "username (device_name)" or whichever is available
+    if username and device_name:
+        display_name = f"{username} ({device_name})"
+    else:
+        display_name = username or device_name or source_id or "Unknown device"
     return {
         "id": cid,
         "media_id": media_id,
         "source_id": source_id,
-        "device_name": row["device_name"] if row else None,
+        "device_name": device_name,
+        "username": username,
+        "display_name": display_name,
         "text": text,
         "created_at": now_ts,
     }

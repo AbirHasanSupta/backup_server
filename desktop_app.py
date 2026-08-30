@@ -62,7 +62,7 @@ try:
 except Exception:
     pystray = None
     _PILImage = None
-from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessions, init_db, remove_device, create_device_share, get_device_shares_by_sharer, get_share_targets_for_group, delete_device_share_group, remove_share_group_target, add_share_group_targets, edit_device_share_group_caption, set_device_username
+from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessions, init_db, remove_device, create_device_share, get_device_shares_by_sharer, get_share_targets_for_group, delete_device_share_group, remove_share_group_target, add_share_group_targets, edit_device_share_group_caption, set_device_username, upsert_device
 
 
 def format_display_name(dev: dict) -> str:
@@ -72,6 +72,21 @@ def format_display_name(dev: dict) -> str:
     if username and device_name:
         return f"{username} ({device_name})"
     return username or device_name or device_id or "Unknown device"
+
+
+def _ensure_desktop_device(name: str | None = None) -> None:
+    """Register (or update) the desktop server as a known device so its posts
+    show a proper display name in the phone feed instead of the raw device ID."""
+    try:
+        cfg = load_config()
+        display_name = (name or cfg.get("DESKTOP_NAME") or "").strip() or "Desktop Server"
+        upsert_device(
+            device_name=display_name,
+            device_ip="127.0.0.1",
+            device_id=DESKTOP_SHARE_DEVICE_ID,
+        )
+    except Exception:
+        pass  # Non-fatal: posting still works, name just falls back to device ID
 
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
@@ -539,6 +554,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Auto-start server
         self._start_server()
+        # Register desktop server as a named device (for feed display name)
+        self.after(3000, _ensure_desktop_device)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -1366,6 +1383,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                                      cfg.get("HOST", "0.0.0.0"), "0.0.0.0")
         self._e_port = labeled_entry(srv_card, "Port",
                                      str(cfg.get("PORT", 8000)), "8000")
+        self._e_desktop_name = labeled_entry(
+            srv_card, "Server Display Name  (shown in phone feed as post author)",
+            cfg.get("DESKTOP_NAME", "") or "",
+            "e.g. My PC",
+        )
 
         # ── STORAGE ───────────────────────────────────────────────────────
         stor_card = settings_card("Storage")
@@ -1853,6 +1875,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._post_btn.configure(state="disabled", text="Posting...")
 
         def _run():
+            _ensure_desktop_device()
             items = []
             for path in files:
                 try:
@@ -2443,8 +2466,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             "SHARED_DIRS":      list(self._shared_dirs),
             "START_WITH_WINDOWS": bool(self._sw_autostart.get()),
             "MINIMIZE_TO_TRAY": bool(self._sw_tray.get()),
+            "DESKTOP_NAME":     self._e_desktop_name.get().strip() or "",
         }
         save_config(cfg)
+        # Re-register desktop server device with the (possibly new) display name
+        _ensure_desktop_device(cfg["DESKTOP_NAME"])
         if not set_autostart_enabled(cfg["START_WITH_WINDOWS"]):
             self._sw_autostart.deselect() if not cfg["START_WITH_WINDOWS"] else None
             messagebox.showwarning(

@@ -66,6 +66,8 @@ from database import (
     is_share_target,
     get_unseen_share_notifications,
     mark_share_notifications_seen,
+    add_share_group_targets,
+    edit_device_share_group_caption,
     MAX_COMMENT_LENGTH,
 )
 from trips import cluster_source_media, trigger_background_clustering
@@ -1828,6 +1830,12 @@ async def add_media_comment(
         text = text[:MAX_COMMENT_LENGTH]
     comment = await asyncio.to_thread(add_comment, media_id, body.source_id, text)
     comment["is_own"] = True
+    comment["can_delete"] = True
+    # Ensure display_name is present (add_comment now returns it, but guard for safety)
+    if "display_name" not in comment:
+        comment["display_name"] = format_display_name(
+            comment.get("username"), comment.get("device_name")
+        ) or comment.get("device_name") or body.source_id
     return comment
 
 
@@ -2222,6 +2230,75 @@ async def remove_share_target_by_id_endpoint(
     return {"ok": True}
 
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Device list endpoint (for recipient management)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.get("/api/devices")
+@router.get("/devices")
+async def list_all_devices(
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Return all accepted devices (safe fields only). Used for recipient management."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    devices = await asyncio.to_thread(get_share_target_devices, device_id)
+    for d in devices:
+        d["display_name"] = format_display_name(d.get("username"), d.get("device_name")) or d.get("device_name") or d.get("device_id", "")
+    return {"devices": devices}
+
+
+class AddShareTargetRequest(BaseModel):
+    device_id: str  # the device to add as recipient
+
+
+@router.post("/api/share/group/{group_id}/add_target")
+@router.post("/share/group/{group_id}/add_target")
+async def add_share_group_target_endpoint(
+    group_id: str,
+    body: AddShareTargetRequest,
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Add a device as a recipient of a share group. Only the group owner may call this."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    ok = await asyncio.to_thread(
+        add_share_group_targets, group_id, [body.device_id], device_id
+    )
+    if not ok:
+        raise HTTPException(status_code=403, detail="Not authorized or group not found")
+    return {"ok": True}
+
+
+class EditCaptionRequest(BaseModel):
+    caption: str | None = None
+
+
+@router.post("/api/share/group/{group_id}/edit_caption")
+@router.post("/share/group/{group_id}/edit_caption")
+async def edit_share_group_caption_endpoint(
+    group_id: str,
+    body: EditCaptionRequest,
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Edit the caption of a share group. Only the group owner may call this."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+    caption = (body.caption or "").strip() or None
+    ok = await asyncio.to_thread(
+        edit_device_share_group_caption, group_id, device_id, caption
+    )
+    if not ok:
+        raise HTTPException(status_code=403, detail="Not authorized or group not found")
+    return {"ok": True, "caption": caption}
 
 
 def _authorize_share_access(share_id: int, device_id: str) -> dict:

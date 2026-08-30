@@ -704,6 +704,58 @@ export async function getShareGroupTargets(groupId) {
 }
 
 /**
+ * Fetch all accepted devices (for recipient management in Manage Post).
+ * @returns {Promise<{devices: {device_id: string, device_name: string, display_name: string}[]}>}
+ */
+export async function getAllDevices() {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/devices?device_id=${encodeURIComponent(deviceId)}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch devices (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Add a device as a recipient of a share group (owner only).
+ * @param {string} groupId
+ * @param {string} targetDeviceId
+ */
+export async function addShareGroupTarget(groupId, targetDeviceId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/add_target?device_id=${encodeURIComponent(deviceId)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ device_id: targetDeviceId }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to add share target (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Edit the caption of a share group (owner only).
+ * @param {string} groupId
+ * @param {string|null} caption
+ */
+export async function editShareGroupCaption(groupId, caption) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/edit_caption?device_id=${encodeURIComponent(deviceId)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ caption: caption ?? null }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to edit caption (${res.status})`);
+  return await res.json();
+}
+
+/**
  * Delete a share group (owner only — removes post from all recipients' feeds).
  * @param {string} groupId
  */

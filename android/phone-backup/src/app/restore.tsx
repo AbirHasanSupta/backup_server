@@ -20,6 +20,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   BackHandler,
+  ScrollView,
 } from 'react-native';
 import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
@@ -27,6 +28,7 @@ import { useEvent } from 'expo';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { addSharedPostTapListener } from '../../notificationService';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
@@ -61,6 +63,10 @@ import {
   deleteShareGroup,
   removeShareTarget,
   getShareGroupTargets,
+  getAllDevices,
+  addShareGroupTarget,
+  editShareGroupCaption,
+  deleteShare,
   buildShareThumbnailUrl,
   buildSharePreviewUrl,
   buildShareDownloadUrl,
@@ -706,6 +712,18 @@ function SharedFeedCard({
         </TouchableOpacity>
       </View>
 
+      {/* Caption: shown above media, below author info — like Facebook */}
+      {!!(item.group_caption || item.caption) && (
+        <Text style={[feedCardStyles.caption, feedCardStyles.captionTop, { color: colors.text }]}>
+          {!!item.shared_by && (
+            <Text style={{ fontWeight: '700', color: colors.text }}>
+              {item.shared_by}{' '}
+            </Text>
+          )}
+          {item.group_caption || item.caption}
+        </Text>
+      )}
+
       <View style={[feedCardStyles.mediaContainer, { width: cardWidth, height: mediaHeight }]}>
         <FlatList
           data={items}
@@ -826,17 +844,6 @@ function SharedFeedCard({
             </View>
           ) : null;
         })()}
-
-        {!!(item.group_caption || item.caption) && (
-          <Text style={[feedCardStyles.caption, { color: colors.text }]}>
-            {!!item.shared_by && (
-              <Text style={{ fontWeight: '700', color: colors.text }}>
-                {item.shared_by}{' '}
-              </Text>
-            )}
-            {item.group_caption || item.caption}
-          </Text>
-        )}
 
         {commentCount > 0 && (
           <TouchableOpacity
@@ -1039,68 +1046,146 @@ function CommentsModal({
 
 function ManageShareModal({
   visible,
-  groupId,
+  item,
+  serverConfig,
   colors,
   onClose,
   onDeleted,
+  onUpdated,
 }: {
   visible: boolean;
-  groupId: string | null;
+  item: RemoteFile | null;
+  serverConfig?: ServerConfig;
   colors: AppColors;
   onClose: () => void;
   onDeleted: () => void;
+  onUpdated?: (updated: { caption?: string; removedShareId?: number }) => void;
 }) {
   const insets = useSafeAreaInsets();
+  const groupId = item?.group_id || null;
+  const initialCaption = item?.group_caption || item?.caption || '';
+
+  const [caption, setCaption] = useState(initialCaption);
+  const [savingCaption, setSavingCaption] = useState(false);
+  const [allDevices, setAllDevices] = useState<{ device_id: string; device_name: string; display_name?: string; device_model?: string; username?: string }[]>([]);
   const [targets, setTargets] = useState<{ target_device_id: string; device_name: string; device_model?: string; username?: string; display_name?: string }[]>([]);
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [removingId, setRemovingId] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+  const [removingFileId, setRemovingFileId] = useState<number | null>(null);
+  const [files, setFiles] = useState<RemoteFile[]>([]);
 
   useEffect(() => {
-    if (!visible || !groupId) return;
+    if (!visible || !item) return;
     let active = true;
     /* eslint-disable react-hooks/set-state-in-effect */
     setLoading(true);
     setDeleting(false);
-    setRemovingId(null);
-    setTargets([]);
+    setTogglingId(null);
+    setRemovingFileId(null);
+    setSavingCaption(false);
+    setCaption(item.group_caption || item.caption || '');
+    setFiles(item.group_items && item.group_items.length > 0 ? item.group_items : [item]);
     /* eslint-enable react-hooks/set-state-in-effect */
-    getShareGroupTargets(groupId)
-      .then((res) => { if (active) setTargets(Array.isArray(res?.targets) ? res.targets : []); })
-      .catch(() => { if (active) setTargets([]); })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, [visible, groupId]);
 
-  const handleRemoveTarget = useCallback((targetDeviceId: string, deviceName: string) => {
+    Promise.all([
+      getAllDevices().catch(() => ({ devices: [] })),
+      groupId ? getShareGroupTargets(groupId).catch(() => ({ targets: [] })) : Promise.resolve({ targets: [] }),
+    ])
+      .then(([devRes, tgtRes]) => {
+        if (!active) return;
+        setAllDevices(Array.isArray(devRes?.devices) ? devRes.devices : []);
+        setTargets(Array.isArray(tgtRes?.targets) ? tgtRes.targets : []);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => { active = false; };
+  }, [visible, item, groupId]);
+
+  const handleSaveCaption = useCallback(async () => {
     if (!groupId) return;
+    setSavingCaption(true);
+    try {
+      await editShareGroupCaption(groupId, caption.trim() || null);
+      hapticSuccess();
+      onUpdated?.({ caption: caption.trim() });
+      Alert.alert('Saved', 'Post caption updated successfully.');
+    } catch {
+      hapticError();
+      Alert.alert('Error', 'Could not update caption. Please try again.');
+    } finally {
+      setSavingCaption(false);
+    }
+  }, [groupId, caption, onUpdated]);
+
+  const handleToggleRecipient = useCallback(async (dev: { device_id: string; device_name: string; display_name?: string }) => {
+    if (!groupId) return;
+    const isCurrent = targets.some((t) => t.target_device_id === dev.device_id);
+    setTogglingId(dev.device_id);
+    try {
+      if (isCurrent) {
+        await removeShareTarget(groupId, dev.device_id);
+        setTargets((prev) => prev.filter((t) => t.target_device_id !== dev.device_id));
+      } else {
+        await addShareGroupTarget(groupId, dev.device_id);
+        setTargets((prev) => [
+          ...prev,
+          {
+            target_device_id: dev.device_id,
+            device_name: dev.device_name,
+            display_name: dev.display_name,
+          },
+        ]);
+      }
+      hapticSuccess();
+    } catch {
+      hapticError();
+      Alert.alert('Error', `Could not ${isCurrent ? 'remove' : 'add'} recipient. Please try again.`);
+    } finally {
+      setTogglingId(null);
+    }
+  }, [groupId, targets]);
+
+  const handleRemoveFile = useCallback((file: RemoteFile) => {
+    if (file.share_id == null) return;
+    const fileName = (file.path ? file.path.split(/[\\/]/).pop() : '') || 'this file';
     Alert.alert(
-      'Remove device',
-      `Remove "${deviceName}" from this share? They will no longer see it in their feed.`,
+      'Remove File',
+      `Remove "${fileName}" from this post?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Remove',
           style: 'destructive',
           onPress: async () => {
-            setRemovingId(targetDeviceId);
+            setRemovingFileId(file.share_id!);
             try {
-              await removeShareTarget(groupId, targetDeviceId);
-              setTargets((prev) => prev.filter((t) => t.target_device_id !== targetDeviceId));
+              await deleteShare(file.share_id!);
               hapticSuccess();
+              if (files.length <= 1) {
+                // Last file in the post removed — delete the whole post
+                onClose();
+                onDeleted();
+              } else {
+                setFiles((prev) => prev.filter((f) => f.share_id !== file.share_id));
+                onUpdated?.({ removedShareId: file.share_id! });
+              }
             } catch {
-              Alert.alert('Error', 'Could not remove device. Please try again.');
+              hapticError();
+              Alert.alert('Error', 'Could not remove file. Please try again.');
             } finally {
-              setRemovingId(null);
+              setRemovingFileId(null);
             }
           },
         },
       ]
     );
-  }, [groupId]);
+  }, [files.length, onClose, onDeleted, onUpdated]);
 
   const handleDeletePost = useCallback(() => {
-    if (!groupId || deleting) return;
+    if (deleting) return;
     Alert.alert(
       'Delete post',
       'Are you sure you want to delete this shared post? It will be removed for all recipients.',
@@ -1112,11 +1197,16 @@ function ManageShareModal({
           onPress: async () => {
             setDeleting(true);
             try {
-              await deleteShareGroup(groupId);
+              if (groupId) {
+                await deleteShareGroup(groupId);
+              } else if (item?.share_id != null) {
+                await deleteShare(item.share_id);
+              }
               hapticSuccess();
               onClose();
               onDeleted();
             } catch {
+              hapticError();
               Alert.alert('Error', 'Could not delete the post.');
             } finally {
               setDeleting(false);
@@ -1125,7 +1215,7 @@ function ManageShareModal({
         },
       ]
     );
-  }, [groupId, deleting, onClose, onDeleted]);
+  }, [groupId, item, deleting, onClose, onDeleted]);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -1140,73 +1230,244 @@ function ManageShareModal({
             </TouchableOpacity>
           </View>
 
-          <Text style={[modalSheetStyles.sectionLabel, { color: colors.textSecondary }]}>
-            Recipients ({targets.length})
-          </Text>
-
-          {loading ? (
-            <View style={modalSheetStyles.centerPad}>
-              <ActivityIndicator color={colors.primary} />
-            </View>
-          ) : targets.length === 0 ? (
-            <View style={modalSheetStyles.centerPad}>
-              <Text style={[modalSheetStyles.emptyText, { color: colors.textMuted }]}>
-                No devices have access to this share.
-              </Text>
-            </View>
-          ) : (
-            <FlatList
-              data={targets}
-              keyExtractor={(t) => t.target_device_id}
-              style={modalSheetStyles.list}
-              contentContainerStyle={modalSheetStyles.listContent}
-              renderItem={({ item: t }) => (
-                <View style={[modalSheetStyles.deviceRow, { borderColor: colors.surfaceBorder, backgroundColor: colors.surfaceSoft }]}>
-                  <View style={modalSheetStyles.deviceInfo}>
-                    <Text style={[modalSheetStyles.deviceName, { color: colors.text }]} numberOfLines={1}>
-                      {t.display_name || t.device_name || 'Unknown device'}
-                    </Text>
-                    {!!t.device_model && (
-                      <Text style={[modalSheetStyles.deviceModel, { color: colors.textMuted }]} numberOfLines={1}>
-                        {t.device_model}
-                      </Text>
-                    )}
-                  </View>
+          <ScrollView
+            style={modalSheetStyles.scrollArea}
+            contentContainerStyle={modalSheetStyles.scrollContent}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+          >
+            {/* Caption Section */}
+            {groupId ? (
+              <View style={modalSheetStyles.sectionContainer}>
+                <Text style={[modalSheetStyles.sectionLabel, { color: colors.textSecondary }]}>Edit Caption</Text>
+                <View style={modalSheetStyles.captionEditBox}>
+                  <TextInput
+                    style={[
+                      modalSheetStyles.captionInput,
+                      {
+                        backgroundColor: colors.surfaceSoft,
+                        borderColor: colors.surfaceBorder,
+                        color: colors.text,
+                      },
+                    ]}
+                    value={caption}
+                    onChangeText={setCaption}
+                    placeholder="Write a caption..."
+                    placeholderTextColor={colors.textMuted}
+                    multiline
+                    maxLength={1000}
+                  />
                   <TouchableOpacity
-                    onPress={() => handleRemoveTarget(t.target_device_id, t.display_name || t.device_name || 'this device')}
-                    disabled={removingId === t.target_device_id}
-                    style={[modalSheetStyles.removeTargetBtn, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}
+                    onPress={handleSaveCaption}
+                    disabled={savingCaption || caption === initialCaption}
+                    style={[
+                      modalSheetStyles.captionSaveBtn,
+                      {
+                        backgroundColor: caption !== initialCaption ? colors.primary : colors.surfaceSoft,
+                        borderColor: colors.surfaceBorder,
+                      },
+                    ]}
                     activeOpacity={0.75}
                   >
-                    {removingId === t.target_device_id ? (
-                      <ActivityIndicator size="small" color={colors.primary} />
+                    {savingCaption ? (
+                      <ActivityIndicator size="small" color="#fff" />
                     ) : (
                       <>
-                        <AppIcon androidName="person_remove" iosName="person.badge.minus" color="#e53935" size={16} />
-                        <Text style={[modalSheetStyles.removeTargetBtnText, { color: '#e53935' }]}>Remove</Text>
+                        <AppIcon
+                          androidName="check"
+                          iosName="checkmark"
+                          color={caption !== initialCaption ? '#fff' : colors.textMuted}
+                          size={16}
+                        />
+                        <Text
+                          style={[
+                            modalSheetStyles.captionSaveBtnText,
+                            { color: caption !== initialCaption ? '#fff' : colors.textMuted },
+                          ]}
+                        >
+                          Save Caption
+                        </Text>
                       </>
                     )}
                   </TouchableOpacity>
                 </View>
-              )}
-            />
-          )}
+              </View>
+            ) : null}
 
-          <TouchableOpacity
-            onPress={handleDeletePost}
-            disabled={deleting}
-            style={[modalSheetStyles.deletePostBtn, { backgroundColor: 'rgba(229, 57, 53, 0.12)', borderColor: 'rgba(229, 57, 53, 0.3)' }]}
-            activeOpacity={0.8}
-          >
-            {deleting ? (
-              <ActivityIndicator color="#e53935" />
-            ) : (
-              <>
-                <AppIcon androidName="delete_forever" iosName="trash.fill" color="#e53935" size={18} />
-                <Text style={[modalSheetStyles.deletePostBtnText, { color: '#e53935' }]}>Delete post for everyone</Text>
-              </>
+            {/* Recipients Section */}
+            <View style={modalSheetStyles.sectionContainer}>
+              <View style={modalSheetStyles.sectionHeaderRow}>
+                <Text style={[modalSheetStyles.sectionLabel, { color: colors.textSecondary }]}>
+                  Recipients ({targets.length} / {allDevices.length})
+                </Text>
+              </View>
+
+              {loading ? (
+                <View style={modalSheetStyles.centerPad}>
+                  <ActivityIndicator color={colors.primary} />
+                </View>
+              ) : allDevices.length === 0 ? (
+                <View style={modalSheetStyles.centerPad}>
+                  <Text style={[modalSheetStyles.emptyText, { color: colors.textMuted }]}>
+                    No other devices discovered yet.
+                  </Text>
+                </View>
+              ) : (
+                <View style={modalSheetStyles.deviceListContainer}>
+                  {allDevices.map((dev) => {
+                    const isRecipient = targets.some((t) => t.target_device_id === dev.device_id);
+                    const isToggling = togglingId === dev.device_id;
+                    const displayName = dev.display_name || dev.device_name || dev.device_id;
+                    const initial = displayName.trim().charAt(0).toUpperCase();
+
+                    return (
+                      <View
+                        key={dev.device_id}
+                        style={[
+                          modalSheetStyles.deviceRow,
+                          {
+                            borderColor: isRecipient ? colors.primarySoft : colors.surfaceBorder,
+                            backgroundColor: isRecipient ? colors.surfaceSoft : colors.surface,
+                          },
+                        ]}
+                      >
+                        <View style={[modalSheetStyles.avatarCircleSmall, { backgroundColor: isRecipient ? colors.primarySoft : colors.surfaceSoft }]}>
+                          <Text style={[modalSheetStyles.avatarInitialSmall, { color: isRecipient ? colors.primary : colors.textSecondary }]}>
+                            {initial || 'D'}
+                          </Text>
+                        </View>
+                        <View style={modalSheetStyles.deviceInfo}>
+                          <Text style={[modalSheetStyles.deviceName, { color: colors.text }]} numberOfLines={1}>
+                            {displayName}
+                          </Text>
+                          {!!dev.device_model && (
+                            <Text style={[modalSheetStyles.deviceModel, { color: colors.textMuted }]} numberOfLines={1}>
+                              {dev.device_model}
+                            </Text>
+                          )}
+                        </View>
+                        <TouchableOpacity
+                          onPress={() => handleToggleRecipient(dev)}
+                          disabled={isToggling}
+                          style={[
+                            modalSheetStyles.recipientToggleBtn,
+                            isRecipient
+                              ? { backgroundColor: 'rgba(229, 57, 53, 0.1)', borderColor: 'rgba(229, 57, 53, 0.25)' }
+                              : { backgroundColor: colors.primarySoft, borderColor: colors.primary },
+                          ]}
+                          activeOpacity={0.75}
+                        >
+                          {isToggling ? (
+                            <ActivityIndicator size="small" color={isRecipient ? '#e53935' : colors.primary} />
+                          ) : isRecipient ? (
+                            <>
+                              <AppIcon androidName="person_remove" iosName="person.badge.minus" color="#e53935" size={15} />
+                              <Text style={[modalSheetStyles.recipientToggleBtnText, { color: '#e53935' }]}>Remove</Text>
+                            </>
+                          ) : (
+                            <>
+                              <AppIcon androidName="person_add" iosName="person.badge.plus" color={colors.primary} size={15} />
+                              <Text style={[modalSheetStyles.recipientToggleBtnText, { color: colors.primary }]}>+ Add</Text>
+                            </>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    );
+                  })}
+                </View>
+              )}
+            </View>
+
+            {/* Files in Post Section */}
+            {files.length > 0 && (
+              <View style={modalSheetStyles.sectionContainer}>
+                <Text style={[modalSheetStyles.sectionLabel, { color: colors.textSecondary }]}>
+                  Files in Post ({files.length})
+                </Text>
+                <View style={modalSheetStyles.fileListContainer}>
+                  {files.map((file, idx) => {
+                    const thumbUrl = file.share_id != null && serverConfig
+                      ? buildShareThumbnailUrl(serverConfig, file.share_id)
+                      : null;
+                    const fileName = (file.path ? file.path.split(/[\\/]/).pop() : '') || `File ${idx + 1}`;
+                    const isRemoving = removingFileId === file.share_id;
+                    const category = getFileCategory(file.path);
+                    const isVideo = file.is_video ?? category === 'video';
+
+                    return (
+                      <View
+                        key={file.share_id != null ? String(file.share_id) : `${file.path}_${idx}`}
+                        style={[modalSheetStyles.fileRow, { borderColor: colors.surfaceBorder, backgroundColor: colors.surfaceSoft }]}
+                      >
+                        {thumbUrl && (category === 'image' || isVideo) ? (
+                          <Image
+                            source={{ uri: thumbUrl }}
+                            style={modalSheetStyles.fileThumb}
+                            contentFit="cover"
+                            transition={150}
+                          />
+                        ) : (
+                          <View style={[modalSheetStyles.fileThumbPlaceholder, { backgroundColor: colors.surfaceElevated }]}>
+                            <AppIcon
+                              androidName={isVideo ? 'videocam' : 'image'}
+                              iosName={isVideo ? 'video' : 'photo'}
+                              color={colors.textSecondary}
+                              size={20}
+                            />
+                          </View>
+                        )}
+                        <View style={modalSheetStyles.fileInfo}>
+                          <Text style={[modalSheetStyles.fileName, { color: colors.text }]} numberOfLines={1}>
+                            {fileName}
+                          </Text>
+                          {file.size != null && (
+                            <Text style={[modalSheetStyles.fileSize, { color: colors.textMuted }]}>
+                              {formatSize(file.size)}
+                            </Text>
+                          )}
+                        </View>
+                        {file.share_id != null && (
+                          <TouchableOpacity
+                            onPress={() => handleRemoveFile(file)}
+                            disabled={isRemoving}
+                            style={[modalSheetStyles.removeFileBtn, { backgroundColor: 'rgba(229, 57, 53, 0.1)', borderColor: 'rgba(229, 57, 53, 0.25)' }]}
+                            hitSlop={6}
+                            activeOpacity={0.75}
+                          >
+                            {isRemoving ? (
+                              <ActivityIndicator size="small" color="#e53935" />
+                            ) : (
+                              <AppIcon androidName="delete_outline" iosName="trash" color="#e53935" size={16} />
+                            )}
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    );
+                  })}
+                </View>
+              </View>
             )}
-          </TouchableOpacity>
+
+            {/* Delete Post Button */}
+            <TouchableOpacity
+              onPress={handleDeletePost}
+              disabled={deleting}
+              style={[
+                modalSheetStyles.deletePostBtn,
+                { backgroundColor: 'rgba(229, 57, 53, 0.12)', borderColor: 'rgba(229, 57, 53, 0.3)' },
+              ]}
+              activeOpacity={0.8}
+            >
+              {deleting ? (
+                <ActivityIndicator color="#e53935" />
+              ) : (
+                <>
+                  <AppIcon androidName="delete_forever" iosName="trash.fill" color="#e53935" size={18} />
+                  <Text style={[modalSheetStyles.deletePostBtnText, { color: '#e53935' }]}>Delete post for everyone</Text>
+                </>
+              )}
+            </TouchableOpacity>
+          </ScrollView>
         </View>
       </View>
     </Modal>
@@ -1229,6 +1490,12 @@ const modalSheetStyles = StyleSheet.create({
     paddingTop: Spacing.two,
     maxHeight: SCREEN_H * 0.85,
   },
+  scrollArea: {
+    maxHeight: SCREEN_H * 0.72,
+  },
+  scrollContent: {
+    paddingBottom: Spacing.four,
+  },
   handle: {
     alignSelf: 'center',
     width: 40,
@@ -1247,8 +1514,17 @@ const modalSheetStyles = StyleSheet.create({
     fontSize: TextScale.lg,
     fontWeight: '800',
   },
+  sectionContainer: {
+    marginBottom: Spacing.four,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: Spacing.two,
+  },
   centerPad: {
-    paddingVertical: Spacing.six,
+    paddingVertical: Spacing.four,
     alignItems: 'center',
   },
   emptyText: {
@@ -1316,15 +1592,31 @@ const modalSheetStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  captionEditBox: {
+    gap: Spacing.two,
+  },
   captionInput: {
     borderWidth: 1,
     borderRadius: Radius.lg,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two + 2,
     fontSize: TextScale.sm,
-    minHeight: 44,
+    minHeight: 56,
     maxHeight: 120,
-    marginBottom: Spacing.three,
+    textAlignVertical: 'top',
+  },
+  captionSaveBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: Spacing.two + 2,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+  },
+  captionSaveBtnText: {
+    fontSize: TextScale.sm,
+    fontWeight: '700',
   },
   sectionLabel: {
     fontSize: TextScale.xs,
@@ -1333,26 +1625,53 @@ const modalSheetStyles = StyleSheet.create({
     letterSpacing: 0.5,
     marginBottom: Spacing.two,
   },
+  deviceListContainer: {
+    gap: Spacing.two,
+  },
   deviceRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: Spacing.two,
     paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.three,
+    paddingVertical: Spacing.two + 2,
     borderRadius: Radius.lg,
-    borderWidth: 1.5,
+    borderWidth: 1,
+  },
+  avatarCircleSmall: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarInitialSmall: {
+    fontSize: TextScale.sm,
+    fontWeight: '700',
   },
   deviceInfo: {
     flex: 1,
   },
   deviceName: {
-    fontSize: TextScale.base,
+    fontSize: TextScale.sm,
     fontWeight: '700',
   },
   deviceModel: {
     fontSize: TextScale.xs,
     marginTop: 1,
+  },
+  recipientToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: Spacing.two + 2,
+    paddingVertical: 6,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+  },
+  recipientToggleBtnText: {
+    fontSize: TextScale.xs,
+    fontWeight: '700',
   },
   removeTargetBtn: {
     flexDirection: 'row',
@@ -1366,6 +1685,46 @@ const modalSheetStyles = StyleSheet.create({
   removeTargetBtnText: {
     fontSize: TextScale.xs,
     fontWeight: '700',
+  },
+  fileListContainer: {
+    gap: Spacing.two,
+  },
+  fileRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingHorizontal: Spacing.two + 2,
+    paddingVertical: Spacing.two,
+    borderRadius: Radius.lg,
+    borderWidth: 1,
+  },
+  fileThumb: {
+    width: 42,
+    height: 42,
+    borderRadius: Radius.md,
+  },
+  fileThumbPlaceholder: {
+    width: 42,
+    height: 42,
+    borderRadius: Radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fileInfo: {
+    flex: 1,
+  },
+  fileName: {
+    fontSize: TextScale.sm,
+    fontWeight: '600',
+  },
+  fileSize: {
+    fontSize: TextScale.xs,
+    marginTop: 2,
+  },
+  removeFileBtn: {
+    padding: Spacing.two,
+    borderRadius: Radius.md,
+    borderWidth: 1,
   },
   primaryBtn: {
     marginTop: Spacing.three,
@@ -1588,6 +1947,12 @@ const feedCardStyles = StyleSheet.create({
     fontSize: TextScale.sm,
     marginTop: Spacing.two,
     lineHeight: 18,
+  },
+  captionTop: {
+    marginTop: 0,
+    paddingHorizontal: Spacing.three,
+    paddingTop: Spacing.two,
+    paddingBottom: Spacing.two,
   },
   actionRow: {
     flexDirection: 'row',
@@ -3931,6 +4296,36 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     );
   }, []);
 
+  // Silently refresh reaction counts and comment counts from the server without
+  // disrupting scroll position. Called every 30 s while the Feed tab is focused.
+  const handleSilentFeedUpdate = useCallback(async () => {
+    if (!isFeedMode || fetchingRef.current || isOffline) return;
+    try {
+      const feedData = await getFeed(0, 50);
+      if (!restoreMountedRef.current) return;
+      const fresh = (feedData.items || []).map(mapFeedItem);
+      setFiles(prev => {
+        if (!prev.length) return prev;
+        return prev.map(existing => {
+          const updated = fresh.find(f =>
+            existing.group_id
+              ? f.group_id === existing.group_id
+              : existing.media_id != null && f.media_id === existing.media_id,
+          );
+          if (!updated) return existing;
+          return {
+            ...existing,
+            reaction_counts: updated.reaction_counts ?? existing.reaction_counts,
+            user_reactions: updated.user_reactions ?? existing.user_reactions,
+            comment_count: updated.comment_count ?? existing.comment_count,
+          };
+        });
+      });
+    } catch {
+      // Silent errors — polling is best-effort
+    }
+  }, [isFeedMode, isOffline]);
+
   // Device-to-device share: build items from the current selection (or single previewed file)
   // and post them. source_type/source_key are derived from the active Library section
   // (phone-backup vs a specific shared folder) so both sections can share.
@@ -4122,8 +4517,41 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   useFocusEffect(useCallback(() => {
     if (isOffline || isDownloading) return;
     if (!isFeedMode && sourceMode === 'shared' && !selectedSourceId) return;
+
+    // If a notification tap flagged a forced refresh, bypass any in-flight guard
+    // so the newest post is always visible when the feed screen opens.
+    if (isFeedMode) {
+      void AsyncStorage.getItem('feed_force_refresh').then((flag) => {
+        if (flag === '1') {
+          void AsyncStorage.removeItem('feed_force_refresh');
+          fetchingRef.current = false; // reset guard so handleFetch won't be skipped
+        }
+        void handleFetch({ quiet: true, preserveSelection: true });
+      });
+      return;
+    }
+
     void handleFetch({ quiet: true, preserveSelection: true });
   }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]));
+
+  // Poll reactions/comments every 30 s while Feed tab is in focus (Fix 4).
+  useFocusEffect(useCallback(() => {
+    if (!isFeedMode) return;
+    const id = setInterval(() => {
+      void handleSilentFeedUpdate();
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [isFeedMode, handleSilentFeedUpdate]));
+
+  // Live notification tap listener (Fix 1 edge case: user taps notification while already on feed)
+  useEffect(() => {
+    if (!isFeedMode) return;
+    const unsub = addSharedPostTapListener(() => {
+      fetchingRef.current = false;
+      void handleFetch({ quiet: false, ignoreOffline: true, preserveSelection: true });
+    });
+    return unsub;
+  }, [isFeedMode, handleFetch]);
 
   const onRefreshLibrary = useCallback(async () => {
     if (isDownloading) return;
@@ -4972,10 +5400,11 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         onSubmit={handleShareSubmit}
       />
 
-      {/* Manage Post Modal (owner manage/delete) */}
+      {/* Manage Post Modal (owner manage/delete/recipients/caption/files) */}
       <ManageShareModal
         visible={manageGroupItem !== null}
-        groupId={manageGroupItem?.group_id || null}
+        item={manageGroupItem}
+        serverConfig={serverConfig}
         colors={colors}
         onClose={() => setManageGroupItem(null)}
         onDeleted={() => {
@@ -4985,6 +5414,26 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             setFiles(prev => prev.filter(f => f.share_id !== manageGroupItem.share_id));
           }
           setManageGroupItem(null);
+        }}
+        onUpdated={({ caption, removedShareId }) => {
+          if (!manageGroupItem) return;
+          setFiles(prev =>
+            prev.map(f => {
+              const matches = manageGroupItem.group_id
+                ? f.group_id === manageGroupItem.group_id
+                : f.share_id != null && f.share_id === manageGroupItem.share_id;
+              if (!matches) return f;
+              const updated = { ...f };
+              if (caption !== undefined) {
+                updated.group_caption = caption;
+                updated.caption = caption;
+              }
+              if (removedShareId !== undefined && updated.group_items) {
+                updated.group_items = updated.group_items.filter(gi => gi.share_id !== removedShareId);
+              }
+              return updated;
+            })
+          );
         }}
       />
 
