@@ -40,6 +40,7 @@ from database import (
     ensure_device_token,
     verify_device_token, get_files_browse,
     get_cleanup_candidates,
+    get_upload_cache,
     log_cleanup_deletions,
     get_trips,
     get_trip_media,
@@ -279,7 +280,11 @@ async def connect_device(
             merge_device_id(old_id, device_id, device_ip)
             # Update the name/ip/model in case they changed slightly
             upsert_device(device_name, device_ip, device_id, device_model, username)
-            return accepted_response()
+            stats = get_device_stats(device_ip, device_id=device_id)
+            resp = accepted_response()
+            resp["recovery_available"] = True
+            resp["files_backed_up"] = stats["total_files"]
+            return resp
 
     add_log(f"📱 New connection request: {device_name} ({device_id or device_ip})")
 
@@ -1122,6 +1127,20 @@ class SyncSessionRequest(BaseModel):
     skipped: int = 0
     errors: int = 0
     total_files: int = 0
+
+
+@router.get("/sync/upload-cache")
+async def sync_upload_cache(
+    device_id: str,
+    request: Request,
+    authorization: str = Header(None),
+):
+    """Return the server's upload index for a device so the phone can rebuild its
+    local upload cache after a reinstall without re-uploading every file."""
+    verify_auth(authorization, device_id)
+    verify_known_device_by_id(device_id)
+    cache = await asyncio.to_thread(get_upload_cache, device_id, request.client.host)
+    return cache
 
 
 @router.post("/sync/session")

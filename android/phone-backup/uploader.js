@@ -252,6 +252,57 @@ export async function checkServerFiles(files, options = {}) {
 }
 
 /**
+ * Download the server's upload index for this device.
+ * Used after reinstall to rebuild the local upload cache without re-uploading files.
+ */
+let uploadCachePromise = null;
+
+function createFetchTimeoutSignal(ms) {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
+
+export async function fetchServerUploadCache() {
+  if (!uploadCachePromise) {
+    uploadCachePromise = withAutoFailover(async () => {
+      const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
+      const params = new URLSearchParams({ device_id: deviceId });
+      const res = await fetch(`http://${serverIp}:${serverPort}/sync/upload-cache?${params.toString()}`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: createFetchTimeoutSignal(120000),
+      });
+
+      if (res.status === 401) throw new Error('Invalid API key');
+      if (res.status === 403) throw removedDeviceError();
+      if (!res.ok) throw new Error(`Server upload cache failed (${res.status})`);
+
+      const body = await readJsonResponse(res, 'Server upload cache failed');
+      const files = Array.isArray(body.files) ? body.files : [];
+      return {
+        files,
+        count: body.count ?? files.length,
+        totalSize: body.total_size || 0,
+      };
+    }).finally(() => {
+      uploadCachePromise = null;
+    });
+  }
+  return uploadCachePromise;
+}
+
+/** Best-effort prefetch after reinstall connect; sync retries on failure. */
+export function prefetchServerUploadCache() {
+  return fetchServerUploadCache()
+    .then(() => undefined)
+    .catch(() => undefined);
+}
+
+/**
  * Uploads a single file to the backup server.
  *
  * @param {{ uri: string, relativePath: string, modifiedTime: number, size: number, name: string }} item

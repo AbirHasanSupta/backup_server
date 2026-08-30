@@ -3,11 +3,10 @@ import { DeviceEventEmitter } from 'react-native';
 import {
   scanIncrementalBackup,
   enrichFilesBatch,
-  pendingFileKey,
   enrichFileMetadata,
 } from './scanner';
 import { uploadFile } from './uploader';
-import { loadScanSnapshot, saveScanSnapshot, isUploadedBatch, markUploadedBatch, getSyncRuntimeState } from './settings';
+import { loadScanSnapshot, saveScanSnapshot, isUploadedBatch, markUploadedBatch, getSyncRuntimeState, getFileCacheMatchKey } from './settings';
 
 const SNAPSHOT_KEY = 'pending_backup_snapshot_v1';
 const UPLOAD_CONCURRENCY = 2;
@@ -78,7 +77,7 @@ export function setPendingBackupFromSync(pendingFiles) {
 async function filterPendingFiles(files) {
   if (!files.length) return [];
   const trusted = await isUploadedBatch(files);
-  return files.filter((file) => !trusted.has(pendingFileKey(file)));
+  return files.filter((file) => !trusted.has(getFileCacheMatchKey(file)));
 }
 
 /**

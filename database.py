@@ -1876,6 +1876,54 @@ def get_cleaned_paths(source_id: str) -> set[str]:
     return {r["path"] for r in rows}
 
 
+def get_upload_cache(device_id: str, device_ip: str | None = None) -> dict:
+    """Return the server's upload index for a device (path + metadata only, no disk I/O).
+
+    Used by the phone after a reinstall to rebuild its local upload cache in one
+    round-trip instead of attempting to upload every already-backed-up file.
+    """
+    conn = get_conn()
+    if device_ip:
+        rows = conn.execute(
+            "SELECT path, modified_time, size, device_id FROM files "
+            "WHERE device_id = ? OR (device_id IS NULL AND device_ip = ?)",
+            (device_id, device_ip),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT path, modified_time, size, device_id FROM files WHERE device_id = ?",
+            (device_id,),
+        ).fetchall()
+    conn.close()
+
+    by_path: dict[str, dict] = {}
+    for row in rows:
+        path = (row["path"] or "").replace("\\", "/")
+        if not path:
+            continue
+        size = row["size"] or 0
+        entry = {
+            "path": path,
+            "modified_time": row["modified_time"] or 0,
+            "size": size,
+            "_has_device_id": bool(row["device_id"]),
+        }
+        existing = by_path.get(path)
+        if existing is None or (entry["_has_device_id"] and not existing["_has_device_id"]):
+            by_path[path] = entry
+
+    files = []
+    total_size = 0
+    for entry in by_path.values():
+        total_size += entry["size"]
+        files.append({
+            "path": entry["path"],
+            "modified_time": entry["modified_time"],
+            "size": entry["size"],
+        })
+    return {"files": files, "count": len(files), "total_size": total_size}
+
+
 def get_cleanup_candidates(source_id: str) -> list[dict]:
     """Return backed-up files verified on disk that have not been cleaned yet."""
     from storage import file_exists

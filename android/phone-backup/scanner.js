@@ -142,7 +142,8 @@ export async function enrichFileMetadata(file) {
 function addFile(uri, relativePath, name, result, shouldInclude, reportActivity, counters, metadataScheduler, snapshotCache, options = {}) {
   if (!shouldInclude(name)) return;
 
-  const cached = snapshotCache ? snapshotCache.get(relativePath) : null;
+  const normalizedPath = normalizeRelativePath(relativePath);
+  const cached = snapshotCache ? snapshotCache.get(normalizedPath) : null;
 
   if (options.incremental && cached) {
     counters.skippedFromSnapshot = (counters.skippedFromSnapshot || 0) + 1;
@@ -199,8 +200,9 @@ async function walk(uri, base, result, shouldInclude, reportActivity, counters, 
 
     const name = getSafName(itemUri);
     const newBase = `${base}/${name}`;
+    const normalizedBase = normalizeRelativePath(newBase);
 
-    if (options.incremental && snapshotCache?.has(newBase) && shouldInclude(name)) {
+    if (options.incremental && snapshotCache?.has(normalizedBase) && shouldInclude(name)) {
       counters.skippedFromSnapshot = (counters.skippedFromSnapshot || 0) + 1;
       reportActivity({
         phase: 'scanning',
@@ -281,8 +283,12 @@ export async function scan(onActivity, targetFolderUri, snapshotCache = null, op
 }
 
 /** Key used by upload cache + pending detection. */
+export function normalizeRelativePath(path) {
+  return (path || '').replace(/\\/g, '/');
+}
+
 export function pendingFileKey(file) {
-  return `${file.relativePath}|${file.modifiedTime}|${file.size || 0}`;
+  return `${normalizeRelativePath(file.relativePath)}|${file.modifiedTime}|${file.size || 0}`;
 }
 
 /**

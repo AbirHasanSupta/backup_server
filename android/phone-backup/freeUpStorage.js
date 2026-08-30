@@ -33,6 +33,7 @@ import {
   loadScanSnapshot,
   removePathsFromScanSnapshot,
   markUploadedBatch,
+  getUploadCacheStorageKey,
 } from './settings';
 
 // ─── Persistence keys ─────────────────────────────────────────────────────────
@@ -238,7 +239,7 @@ export async function computeCleanupCandidates(options = {}) {
 
   // Check local upload cache in batches of 500
   const CHUNK = 500;
-  const uploadKeys = scannedFiles.map((f) => `uploaded_${f.relativePath}`);
+  const uploadKeys = scannedFiles.map((f) => getUploadCacheStorageKey(f.relativePath));
   const chunks = [];
   for (let i = 0; i < uploadKeys.length; i += CHUNK) {
     chunks.push(uploadKeys.slice(i, i + CHUNK));
@@ -253,7 +254,7 @@ export async function computeCleanupCandidates(options = {}) {
     if (cleanedPaths.has(file.relativePath)) return false;
 
     // 2. Check local upload cache
-    const localUploaded = localUploadMap.get(`uploaded_${file.relativePath}`);
+    const localUploaded = localUploadMap.get(getUploadCacheStorageKey(file.relativePath));
     const isLocalBackedUp = localUploaded != null;
 
     // 3. Check server candidates (if server was reachable)

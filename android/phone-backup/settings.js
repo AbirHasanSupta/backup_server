@@ -27,6 +27,8 @@ const KEYS = {
   LAST_RECAP_NOTIFIED_MONTH: 'last_recap_notified_month',
   SAVED_SERVERS: 'saved_servers_v1',
   USERNAME: 'username',
+  RECOVERY_SYNC_PENDING: 'recovery_sync_pending',
+  UPLOAD_CACHE_INITIALIZED: 'upload_cache_initialized',
 };
 
 export async function getLastMemoryNotifiedDate() { return (await AsyncStorage.getItem(KEYS.LAST_MEMORY_NOTIFIED_DATE)) || ''; }
@@ -200,27 +202,53 @@ export async function setFileTypes(types) {
 // ─── Upload dedup cache ───────────────────────────────────────────────────────
 // Key: "uploaded_<relativePath>", value: "<modifiedTime>"
 
+function uploadCacheStorageKey(relativePath) {
+  return `uploaded_${(relativePath || '').replace(/\\/g, '/')}`;
+}
+
+export function getUploadCacheStorageKey(relativePath) {
+  return uploadCacheStorageKey(relativePath);
+}
+
+function uploadCacheMatchKey(file) {
+  const path = (file.relativePath || '').replace(/\\/g, '/');
+  return `${path}|${file.modifiedTime}|${file.size || 0}`;
+}
+
+/** Canonical match key shared by isUploadedBatch and sync pending checks. */
+export function getFileCacheMatchKey(file) {
+  return uploadCacheMatchKey(file);
+}
+
+function normalizeSnapshotPath(path) {
+  return (path || '').replace(/\\/g, '/');
+}
+
 export async function isUploaded(relativePath, modifiedTime) {
-  const val = await AsyncStorage.getItem(`uploaded_${relativePath}`);
+  const val = await AsyncStorage.getItem(uploadCacheStorageKey(relativePath));
   return val === String(modifiedTime);
 }
 
 export async function markUploaded(relativePath, modifiedTime) {
-  await AsyncStorage.setItem(`uploaded_${relativePath}`, String(modifiedTime));
+  await AsyncStorage.setItem(uploadCacheStorageKey(relativePath), String(modifiedTime));
 }
 
 export async function markUploadedBatch(files) {
   if (!files.length) return;
-  await AsyncStorage.multiSet(
-    files.map((file) => [`uploaded_${file.relativePath}`, String(file.modifiedTime)])
-  );
+  const CHUNK_SIZE = 500;
+  for (let i = 0; i < files.length; i += CHUNK_SIZE) {
+    const chunk = files.slice(i, i + CHUNK_SIZE);
+    await AsyncStorage.multiSet(
+      chunk.map((file) => [uploadCacheStorageKey(file.relativePath), String(file.modifiedTime)])
+    );
+  }
 }
 
 export async function isUploadedBatch(files) {
   const trusted = new Set();
   if (!files.length) return trusted;
   const CHUNK_SIZE = 500;
-  const keys = files.map((file) => `uploaded_${file.relativePath}`);
+  const keys = files.map((file) => uploadCacheStorageKey(file.relativePath));
   const chunks = [];
   for (let i = 0; i < keys.length; i += CHUNK_SIZE) {
     chunks.push(keys.slice(i, i + CHUNK_SIZE));
@@ -229,9 +257,10 @@ export async function isUploadedBatch(files) {
   const pairs = chunkResults.flat();
   const valueByKey = new Map(pairs);
   for (const file of files) {
-    const val = valueByKey.get(`uploaded_${file.relativePath}`);
+    const storageKey = uploadCacheStorageKey(file.relativePath);
+    const val = valueByKey.get(storageKey);
     if (val != null && file.metadataLoaded && val === String(file.modifiedTime)) {
-      trusted.add(`${file.relativePath}|${file.modifiedTime}|${file.size || 0}`);
+      trusted.add(getFileCacheMatchKey(file));
     }
   }
   return trusted;
@@ -379,6 +408,58 @@ export async function clearAllUploads() {
   return match.length;
 }
 
+export async function isUploadCacheInitialized() {
+  return (await AsyncStorage.getItem(KEYS.UPLOAD_CACHE_INITIALIZED)) === 'true';
+}
+
+export async function setUploadCacheInitialized(initialized = true) {
+  if (initialized) {
+    await AsyncStorage.setItem(KEYS.UPLOAD_CACHE_INITIALIZED, 'true');
+  } else {
+    await AsyncStorage.removeItem(KEYS.UPLOAD_CACHE_INITIALIZED);
+  }
+}
+
+/** Set when the server detects a reinstall and has an existing backup to restore. */
+export async function setRecoverySyncPending(pending) {
+  if (pending) {
+    await AsyncStorage.setItem(KEYS.RECOVERY_SYNC_PENDING, 'true');
+  } else {
+    await AsyncStorage.removeItem(KEYS.RECOVERY_SYNC_PENDING);
+  }
+}
+
+export async function getRecoverySyncPending() {
+  return (await AsyncStorage.getItem(KEYS.RECOVERY_SYNC_PENDING)) === 'true';
+}
+
+export async function clearRecoverySyncPending() {
+  await AsyncStorage.removeItem(KEYS.RECOVERY_SYNC_PENDING);
+}
+
+/**
+ * Fast check for whether we should download the server upload index.
+ * Uses a sentinel flag instead of scanning all AsyncStorage keys on every sync.
+ */
+export async function shouldAttemptRecoverySync() {
+  const [recoveryPending, initialized] = await Promise.all([
+    getRecoverySyncPending(),
+    isUploadCacheInitialized(),
+  ]);
+  if (recoveryPending) return true;
+  if (initialized) return false;
+
+  // One-time migration for installs that already had a populated upload cache
+  // before the initialized sentinel was introduced.
+  const keys = await AsyncStorage.getAllKeys();
+  if (keys.some((key) => key.startsWith('uploaded_'))) {
+    await setUploadCacheInitialized(true);
+    return false;
+  }
+
+  return true;
+}
+
 // ─── Scan snapshot cache ───────────────────────────────────────────────────────
 // Key: "scan_snapshot_v1", value: { "<relativePath>": "<mtime>:<size>", ... }
 
@@ -389,7 +470,7 @@ export async function loadScanSnapshot() {
   if (!obj || typeof obj !== 'object') return map;
   for (const [path, val] of Object.entries(obj)) {
     const [mtime, size] = String(val).split(':');
-    map.set(path, { mtime: Number(mtime) || 0, size: Number(size) || 0 });
+    map.set(normalizeSnapshotPath(path), { mtime: Number(mtime) || 0, size: Number(size) || 0 });
   }
   return map;
 }
@@ -400,11 +481,13 @@ export async function saveScanSnapshot(files, options = {}) {
     const raw = await AsyncStorage.getItem(KEYS.SCAN_SNAPSHOT);
     const existing = safeJsonParse(raw, null);
     if (existing && typeof existing === 'object') {
-      obj = existing;
+      for (const [path, val] of Object.entries(existing)) {
+        obj[normalizeSnapshotPath(path)] = val;
+      }
     }
   }
   for (const file of files) {
-    obj[file.relativePath] = `${file.modifiedTime}:${file.size || 0}`;
+    obj[normalizeSnapshotPath(file.relativePath)] = `${file.modifiedTime}:${file.size || 0}`;
   }
   await AsyncStorage.setItem(KEYS.SCAN_SNAPSHOT, JSON.stringify(obj));
 }
@@ -419,7 +502,8 @@ export async function clearScanSnapshotForFolder(folderName) {
   if (!obj || typeof obj !== 'object') return;
   let changed = false;
   for (const path of Object.keys(obj)) {
-    if (path === folderName || path.startsWith(`${folderName}/`)) {
+    const normalized = normalizeSnapshotPath(path);
+    if (normalized === folderName || normalized.startsWith(`${folderName}/`)) {
       delete obj[path];
       changed = true;
     }

@@ -1,4 +1,5 @@
-import { getDeviceId, getUsername, setDeviceToken, saveServerProfile } from './settings';
+import { getDeviceId, getUsername, setDeviceToken, saveServerProfile, setRecoverySyncPending } from './settings';
+import { prefetchServerUploadCache } from './uploader';
 
 /**
  * connectToServer.js
@@ -80,6 +81,12 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
     if (result.status === 'accepted') {
       if (result.token) {
         await setDeviceToken(result.token);
+      }
+      if (result.recovery_available) {
+        await setRecoverySyncPending(true);
+        void prefetchServerUploadCache();
+      } else {
+        await setRecoverySyncPending(false);
       }
       await saveServerProfile({
         ip: serverIp,

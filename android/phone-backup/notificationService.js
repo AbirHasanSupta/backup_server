@@ -155,6 +155,13 @@ function buildSyncProgressText(current, total, detail) {
   if (detail?.phase === 'checking') {
     const checked = detail.checked || 0;
     const subTotal = detail.total || 0;
+    if (detail.recovery) {
+      if (subTotal > 0) {
+        const pct = Math.round((checked / subTotal) * 100);
+        return `${pct}% · Recovering ${checked.toLocaleString()}/${subTotal.toLocaleString()} backed-up files`;
+      }
+      return 'Recovering backed-up files from server…';
+    }
     if (subTotal > 0) {
       const pct = Math.round((checked / subTotal) * 100);
       const remaining = subTotal - checked;
