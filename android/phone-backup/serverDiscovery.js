@@ -162,6 +162,11 @@ export async function discoverServers(onProgress, options = {}) {
       if (r) {
         let existingKey = null;
         for (const [k, existing] of foundMap.entries()) {
+          // If both have serverIds and they differ, they are definitely different machines
+          if (r.serverId && existing.serverId && r.serverId !== existing.serverId) {
+            continue;
+          }
+
           const sameServerId = r.serverId && existing.serverId && r.serverId === existing.serverId;
           const sameHostname = r.hostname && existing.hostname && r.hostname.toLowerCase() === existing.hostname.toLowerCase() && r.port === existing.port;
           const sameName = r.name && existing.name && r.name.toLowerCase() === existing.name.toLowerCase() && r.port === existing.port;

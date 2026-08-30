@@ -548,6 +548,10 @@ const MAX_CANDIDATE_IPS = 20;
 
 export async function saveServerProfile(server) {
   if (!server?.ip) return await getSavedServers();
+  if (!ipv4Octets(server.ip)) {
+    const numeric = (server.all_ips || server.candidateIps || []).find((ip) => ipv4Octets(ip));
+    if (numeric) server = { ...server, ip: numeric };
+  }
   const servers = await getSavedServers();
   const port = Number(server.port) || 8000;
   const id = `${server.ip}:${port}`;
@@ -557,16 +561,21 @@ export async function saveServerProfile(server) {
   // The candidateIps overlap is critical for mesh roaming: after the phone switches
   // mesh nodes, resolveReachableServer may call saveServerProfile with a new primary IP
   // that doesn't match the saved id/ip — but it IS in the saved candidateIps list.
-  const idx = servers.findIndex((s) =>
-    (server.serverId && s.serverId && s.serverId === server.serverId) ||
-    s.id === id ||
-    (s.ip === server.ip && (Number(s.port) || 8000) === port) ||
-    (
-      Array.isArray(s.candidateIps) &&
-      s.candidateIps.includes(server.ip) &&
-      (Number(s.port) || 8000) === port
-    )
-  );
+  const idx = servers.findIndex((s) => {
+    if (server.serverId && s.serverId && server.serverId !== s.serverId) {
+      return false;
+    }
+    return (
+      (server.serverId && s.serverId && s.serverId === server.serverId) ||
+      s.id === id ||
+      (s.ip === server.ip && (Number(s.port) || 8000) === port) ||
+      (
+        Array.isArray(s.candidateIps) &&
+        s.candidateIps.includes(server.ip) &&
+        (Number(s.port) || 8000) === port
+      )
+    );
+  });
   const existing = idx >= 0 ? servers[idx] : null;
 
   const resolvedName = (server.name && server.name !== server.ip)
@@ -749,6 +758,7 @@ export async function resolveReachableServer(options = {}) {
           saveServerProfile({
             ip: currentIp,
             port,
+            serverId: currentProbe.data.server_id || '',
             name: currentProbe.data.name || serverName || currentIp,
             all_ips: currentProbe.data.all_ips,
             hostname: currentProbe.data.hostname || '',
@@ -781,7 +791,10 @@ export async function resolveReachableServer(options = {}) {
 
         const found = probeResults.find((r) => r.probe.ok);
         if (found) {
-          const newIp = found.target;
+          const numericAllIp = Array.isArray(found.probe.data?.all_ips)
+            ? found.probe.data.all_ips.find((ip) => ipv4Octets(ip))
+            : null;
+          const newIp = ipv4Octets(found.target) ? found.target : (numericAllIp || found.target);
           console.log(`[Mesh Roaming] Found server at candidate address: ${newIp} (was ${currentIp})`);
           await AsyncStorage.setItem(KEYS.SERVER_IP, newIp);
 
@@ -789,6 +802,7 @@ export async function resolveReachableServer(options = {}) {
           await saveServerProfile({
             ip: newIp,
             port,
+            serverId: found.probe.data?.server_id || '',
             name: found.probe.data?.name || serverName || newIp,
             all_ips: found.probe.data?.all_ips || candidateList,
             hostname: found.probe.data?.hostname || '',
@@ -826,6 +840,7 @@ export async function resolveReachableServer(options = {}) {
             await saveServerProfile({
               ip: newIp,
               port,
+              serverId: swept.probe.data?.server_id || '',
               name: swept.probe.data?.name || serverName || newIp,
               all_ips: swept.probe.data?.all_ips || [newIp],
               hostname: swept.probe.data?.hostname || '',

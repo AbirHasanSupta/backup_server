@@ -26,7 +26,7 @@ import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, useRouter, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { addSharedPostTapListener } from '../../notificationService';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -77,7 +77,7 @@ import { getServerIp } from '../../settings';
 import { getCurrentSyncState } from '../../backgroundTask';
 import { prunePreviewCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
-import { hapticSelection, hapticLongPress, hapticSuccess, hapticError } from '@/utils/haptics';
+import { hapticSelection, hapticLongPress, hapticSuccess, hapticError, hapticLight } from '@/utils/haptics';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
@@ -3962,6 +3962,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const [downloadProgress, setDownloadProgress] = useState<{ current: number; total: number; fileName: string; bytesWritten: number; bytesTotal: number } | null>(null);
   const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
   const downloadActiveRef = useRef(false);
+  const navigation = useNavigation();
+  const listRef = useRef<FlatList<any>>(null);
   const fetchingRef = useRef(false);
   const downloadSingleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restoreMountedRef = useRef(true);
@@ -4613,11 +4615,10 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   // Live notification tap listener (Fix 1 edge case: user taps notification while already on feed)
   useEffect(() => {
     if (!isFeedMode) return;
-    const unsub = addSharedPostTapListener(() => {
+    return addSharedPostTapListener(() => {
       fetchingRef.current = false;
       void handleFetch({ quiet: false, ignoreOffline: true, preserveSelection: true });
     });
-    return unsub;
   }, [isFeedMode, handleFetch]);
 
   const onRefreshLibrary = useCallback(async () => {
@@ -4630,6 +4631,21 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       if (restoreMountedRef.current) setRefreshing(false);
     }
   }, [checkServer, handleFetch, isDownloading]);
+
+  // Tab press listener: when the user is already on the Feed tab and taps the Feed tab icon again,
+  // scroll smoothly to top and refresh the feed with the newest posts.
+  useEffect(() => {
+    if (!isFeedMode) return;
+    return (navigation as any)?.addListener?.('tabPress', () => {
+      const isFocused = navigation.isFocused();
+      if (isFocused) {
+        hapticLight();
+        expandHeader();
+        listRef.current?.scrollToOffset({ offset: 0, animated: true });
+        void onRefreshLibrary();
+      }
+    });
+  }, [isFeedMode, navigation, expandHeader, onRefreshLibrary]);
 
   // Sort handler
   const handleSortChange = useCallback((field: SortField, dir: SortDir) => {
@@ -5297,6 +5313,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       <View style={{ flex: 1 }}>
       {/* File Tree or Shared Feed List */}
       <FlatList
+        ref={listRef}
         style={{ flex: 1 }}
         data={isFeedMode ? (isFiltering ? filteredFiles : baseFeedFiles) : (listRows as any)}
         keyExtractor={(item: any) =>
@@ -5368,7 +5385,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             />
           )
         }
-        removeClippedSubviews
+        removeClippedSubviews={isFeedMode}
         initialNumToRender={24}
         maxToRenderPerBatch={24}
         updateCellsBatchingPeriod={50}

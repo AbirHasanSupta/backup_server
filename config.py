@@ -191,7 +191,10 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     global _config_cache, _config_cache_mtime
+    existing_server_id = (_config_cache or {}).get("SERVER_ID")
     merged = {**_DEFAULTS, **cfg}
+    if existing_server_id and not merged.get("SERVER_ID"):
+        merged["SERVER_ID"] = existing_server_id
     if _IS_FROZEN:
         merged["DB_PATH"] = DB_PATH
 
