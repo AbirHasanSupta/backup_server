@@ -3,6 +3,7 @@ from email.utils import formatdate
 from mimetypes import guess_type
 import json
 import os
+import random
 import re
 import shutil
 import socket
@@ -2272,6 +2273,75 @@ async def get_unified_feed(
 
     page, has_more, total = await asyncio.to_thread(_build)
     return {"items": page, "has_more": has_more, "total": total}
+
+
+@router.get("/api/reels")
+@router.get("/reels")
+async def get_reels_feed(
+    device_id: str,
+    offset: int = 0,
+    limit: int = 30,
+    seed: int = 0,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Every video shared with/by this device, flattened out of its post group and
+    served in randomized order, independent of the feed's chronological/user sort."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+
+    def _build():
+        video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
+
+        received = get_device_shares_for_target(device_id)
+        sent = get_device_shares_by_sharer(device_id)
+
+        seen_share_ids: set[int] = set()
+        all_shares: list[dict] = []
+        for s in received:
+            if s["share_id"] not in seen_share_ids:
+                seen_share_ids.add(s["share_id"])
+                all_shares.append({**s, "is_own_post": s["shared_by_device_id"] == device_id})
+        for s in sent:
+            if s["share_id"] not in seen_share_ids:
+                seen_share_ids.add(s["share_id"])
+                all_shares.append({**s, "is_own_post": True})
+
+        def _is_video(s):
+            ext = os.path.splitext(s["relative_path"])[1].lower()
+            return s["source_type"] in ("rewind", "rewind_shared") or ext in video_exts
+
+        reel_shares = [s for s in all_shares if _is_video(s)]
+        media_ids = [s["media_id"] for s in reel_shares]
+
+        counts_map, user_map = get_reactions_for_media_ids(media_ids, current_source_id=device_id)
+        comment_counts = get_comment_counts_for_media_ids(media_ids)
+
+        reels = [{
+            "reel_id": str(s["share_id"]),
+            "share_id": s["share_id"],
+            "media_id": s["media_id"],
+            "path": s["relative_path"],
+            "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
+            "shared_by_device_id": s["shared_by_device_id"],
+            "caption": s.get("group_caption") or s.get("caption"),
+            "created_at": s["created_at"],
+            "reaction_counts": counts_map.get(s["media_id"], {}),
+            "user_reactions": user_map.get(s["media_id"], []),
+            "comment_count": comment_counts.get(s["media_id"], 0),
+            "is_own_post": s["is_own_post"],
+            "group_id": s.get("share_group_id"),
+        } for s in reel_shares]
+
+        random.Random(seed).shuffle(reels)
+
+        total = len(reels)
+        page = reels[offset: offset + limit]
+        has_more = (offset + limit) < total
+        return page, has_more, total
+
+    page, has_more, total = await asyncio.to_thread(_build)
+    return {"reels": page, "has_more": has_more, "total": total}
 
 
 @router.get("/api/notifications/pending")

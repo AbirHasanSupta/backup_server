@@ -706,6 +706,22 @@ export async function getFeed(offset = 0, limit = 50) {
 }
 
 /**
+ * Fetch randomized reels feed (every shared video, flattened out of its post group).
+ * @param {number} [offset=0]
+ * @param {number} [limit=30]
+ * @returns {Promise<{reels: Array<any>, has_more: boolean, total: number}>}
+ */
+export async function getReelsFeed(offset = 0, limit = 30, seed = 0) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const res = await fetch(
+    `http://${ip}:${port}/api/reels?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}&seed=${seed}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to fetch reels (${res.status})`);
+  return await res.json();
+}
+
+/**
  * Post groups shared to this device that it hasn't been notified about yet.
  * @returns {Promise<{posts: Array<{group_id: string, shared_by: string, caption?: string, post_title?: string, item_count: number, created_at: number}>}>}
  */
