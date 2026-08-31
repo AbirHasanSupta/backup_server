@@ -2362,6 +2362,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 did = dev.get("device_id")
                 if not did:
                     continue
+                if did == DESKTOP_SHARE_DEVICE_ID:
+                    continue
                 dvar = tk.BooleanVar(value=did in tagged or "all" in tagged)
                 def _on_toggle(i=idx, d=did, v=dvar):
                     if i >= len(self._shared_dirs):
