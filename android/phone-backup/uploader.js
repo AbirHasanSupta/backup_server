@@ -6,6 +6,7 @@ import {
   getDeviceId,
   getDeviceToken,
   resolveReachableServer,
+  applyServerUploadCacheRecovery,
 } from './settings';
 import { getPendingShareNotifications, markShareNotificationsSeen } from './downloader';
 import { showNewSharePostNotification } from './notificationService';
@@ -295,10 +296,10 @@ export async function fetchServerUploadCache() {
   return uploadCachePromise;
 }
 
-/** Best-effort prefetch after reinstall connect; sync retries on failure. */
+/** Best-effort prefetch after reinstall connect; rebuilds local cache so the first sync is fast. */
 export function prefetchServerUploadCache() {
   return fetchServerUploadCache()
-    .then(() => undefined)
+    .then((cache) => applyServerUploadCacheRecovery(cache))
     .catch(() => undefined);
 }
 

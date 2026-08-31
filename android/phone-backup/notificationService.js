@@ -147,8 +147,15 @@ function buildSyncProgressText(current, total, detail) {
   }
 
   if (detail?.phase === 'scanning') {
-    return detail.files
-      ? `Scanning… ${detail.files.toLocaleString()} files found`
+    const found = detail.files || 0;
+    const skipped = detail.skipped || 0;
+    if (skipped > 0) {
+      return found > 0
+        ? `Scanning… ${skipped.toLocaleString()} checked, ${found} new`
+        : `Scanning… ${skipped.toLocaleString()} checked`;
+    }
+    return found
+      ? `Scanning… ${found.toLocaleString()} files found`
       : 'Scanning your folders…';
   }
 
@@ -161,6 +168,13 @@ function buildSyncProgressText(current, total, detail) {
         return `${pct}% · Recovering ${checked.toLocaleString()}/${subTotal.toLocaleString()} backed-up files`;
       }
       return 'Recovering backed-up files from server…';
+    }
+    if (detail.localCheck) {
+      if (subTotal > 0) {
+        const pct = Math.round((checked / subTotal) * 100);
+        return `${pct}% · Checking local cache ${checked}/${subTotal}`;
+      }
+      return 'Checking local cache…';
     }
     if (subTotal > 0) {
       const pct = Math.round((checked / subTotal) * 100);

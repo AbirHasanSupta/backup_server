@@ -1,4 +1,4 @@
-import { getDeviceId, getUsername, setDeviceToken, saveServerProfile, setRecoverySyncPending } from './settings';
+import { getDeviceId, getUsername, setDeviceToken, saveServerProfile, setRecoverySyncPending, isUploadCacheInitialized, clearRecoverySyncPending } from './settings';
 import { prefetchServerUploadCache } from './uploader';
 
 /**
@@ -85,8 +85,9 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
       if (result.recovery_available) {
         await setRecoverySyncPending(true);
         void prefetchServerUploadCache();
-      } else {
-        await setRecoverySyncPending(false);
+      } else if (await isUploadCacheInitialized()) {
+        // Only clear a stale recovery flag once the local cache is already populated.
+        await clearRecoverySyncPending();
       }
       await saveServerProfile({
         serverId: result.server_id || '',

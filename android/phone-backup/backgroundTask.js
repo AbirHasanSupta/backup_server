@@ -1,5 +1,5 @@
 import { DeviceEventEmitter, Platform, NativeModules } from 'react-native';
-import { enrichFileMetadata, scanIncrementalBackup, pendingFileKey, normalizeRelativePath } from './scanner';
+import { enrichFileMetadata, scanIncrementalBackup } from './scanner';
 import { checkDeviceConnection, checkServerFiles, fetchServerUploadCache, postSyncSession, uploadFile } from './uploader';
 import { acquireSyncWakeLock, releaseSyncWakeLock } from './wakeLock';
 import {
@@ -27,9 +27,12 @@ import {
   getAutoSyncSuppressedUntil,
   setAutoSyncSuppressedUntil,
   resolveReachableServer,
-  shouldAttemptRecoverySync,
   setUploadCacheInitialized,
+  getRecoverySyncPending,
   clearRecoverySyncPending,
+  isUploadCacheInitialized,
+  applyServerUploadCacheRecovery,
+  ensureUploadCacheInitialized,
   getFileCacheMatchKey,
 } from './settings';
 import {
@@ -190,25 +193,6 @@ function chunk(items, size) {
     chunks.push(items.slice(i, i + size));
   }
   return chunks;
-}
-
-function buildServerCacheMap(files) {
-  return new Map(
-    files.map((entry) => [
-      normalizeRelativePath(entry.path),
-      {
-        modifiedTime: entry.modified_time || 0,
-        size: entry.size || 0,
-      },
-    ])
-  );
-}
-
-function isFilePendingAfterCheck(file, { isRecoverySync, serverCacheByPath, present }) {
-  if (isRecoverySync && serverCacheByPath) {
-    return !serverCacheByPath.has(normalizeRelativePath(file.relativePath));
-  }
-  return !present.has(getFileCacheMatchKey(file));
 }
 
 function getUploadConcurrency(files) {
@@ -698,15 +682,20 @@ export async function performActualSync(onProgress, runOptions = {}) {
     await clearScanSnapshotForFolder(forceRefreshFolder);
   }
 
+  const recoveryPendingAtStart = !isTwoWay && (await getRecoverySyncPending());
   let serverCachePromise = null;
-  let attemptedRecoveryFetch = false;
-  let recoveryFetchSucceeded = false;
-  if (!isTwoWay && await shouldAttemptRecoverySync()) {
-    attemptedRecoveryFetch = true;
-    serverCachePromise = fetchServerUploadCache().catch((err) => {
-      console.warn('[BackupTask] Server upload cache prefetch failed:', err?.message);
-      return null;
-    });
+  if (recoveryPendingAtStart) {
+    if (await isUploadCacheInitialized()) {
+      // Prefetch already rebuilt the cache between connect and sync start.
+      await clearRecoverySyncPending();
+    } else {
+      serverCachePromise = fetchServerUploadCache().catch((err) => {
+        console.warn('[BackupTask] Server upload cache prefetch failed:', err?.message);
+        return null;
+      });
+    }
+  } else {
+    await ensureUploadCacheInitialized();
   }
 
   if (onProgress) await onProgress(0, 0, { phase: 'scanning' });
@@ -743,67 +732,42 @@ export async function performActualSync(onProgress, runOptions = {}) {
   let serverDeviceTotalFiles = 0;
   let serverDeviceTotalSize = 0;
   let stoppedDuringCheck = false;
-  let isRecoverySync = false;
-  let serverCacheByPath = null;
 
-  if (!isTwoWay && serverCachePromise) {
+  const recoveryPending = !isTwoWay && (await getRecoverySyncPending());
+  if (recoveryPending && serverCachePromise) {
     const serverCache = await serverCachePromise;
     if (serverCache) {
-      recoveryFetchSucceeded = true;
-      serverDeviceTotalFiles = serverCache.count || 0;
-      serverDeviceTotalSize = serverCache.totalSize || 0;
-      if (serverCache.count > 0) {
-        if (!Array.isArray(serverCache.files) || serverCache.files.length === 0) {
-          console.warn('[BackupTask] Server upload cache count/files mismatch; skipping recovery index');
-        } else {
-          isRecoverySync = true;
-          serverCacheByPath = buildServerCacheMap(serverCache.files);
-          reportServerActivity('Recovering sync state from server');
-        }
+      reportServerActivity('Recovering sync state from server');
+      if (onProgress) {
+        await onProgress(0, 0, { phase: 'checking', checked: 0, total: files.length, recovery: true });
+      }
+      const applied = await applyServerUploadCacheRecovery(serverCache, files);
+      if (applied) {
+        serverDeviceTotalFiles = serverCache.count || 0;
+        serverDeviceTotalSize = serverCache.totalSize || 0;
       }
     }
   }
 
   if (!isTwoWay) {
-    if (isRecoverySync && serverCacheByPath) {
-      // Reinstall recovery: match scanned files against the server index by path.
-      // Avoids per-file upload HTTP calls for files already backed up on the server.
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const serverEntry = serverCacheByPath.get(normalizeRelativePath(file.relativePath));
-        if (serverEntry) {
-          const recovered = {
-            ...file,
-            modifiedTime: serverEntry.modifiedTime,
-            size: serverEntry.size,
-            metadataLoaded: true,
-          };
-          present.add(getFileCacheMatchKey(recovered));
-          presentFiles.push(recovered);
-        }
-        checked = i + 1;
-        if ((checked % CHECK_BATCH_SIZE === 0 || checked === files.length)) {
-          if (await shouldAbortSync()) { stoppedDuringCheck = true; break; }
-          if (onProgress) {
-            await onProgress(0, 0, { phase: 'checking', checked, total: files.length, recovery: true });
-          }
-        }
+    // Pure client-side check against cached upload keys (no HTTP request)
+    const trusted = await isUploadedBatch(files);
+    for (const file of files) {
+      const key = getFileCacheMatchKey(file);
+      if (trusted.has(key)) {
+        present.add(key);
+        trustedFiles.push(file);
       }
-      if (presentFiles.length > 0) {
-        await markUploadedBatch(presentFiles);
-      }
-    } else {
-      // Pure client-side check against cached upload keys (no HTTP request)
-      const trusted = await isUploadedBatch(files);
-      for (const file of files) {
-        const key = getFileCacheMatchKey(file);
-        if (trusted.has(key)) {
-          present.add(key);
-          trustedFiles.push(file);
-        }
-      }
-      checked = files.length;
-      if (onProgress) await onProgress(0, 0, { phase: 'checking', checked, total: files.length });
+    }
+    checked = files.length;
+    if (onProgress) {
+      await onProgress(0, 0, {
+        phase: 'checking',
+        checked,
+        total: files.length,
+        recovery: recoveryPending && recoveryPendingAtStart,
+        localCheck: true,
+      });
     }
   } else {
     // Two-way server-side check for Refresh Folder / Refresh All Backups
@@ -843,7 +807,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   }
 
   if (stoppedDuringCheck) {
-    const stoppedPending = files.filter((file) => isFilePendingAfterCheck(file, { isRecoverySync, serverCacheByPath, present }));
+    const stoppedPending = files.filter((file) => !present.has(getFileCacheMatchKey(file)));
     return {
       uploaded: 0,
       skipped: present.size + snapshotSkipped,
@@ -856,7 +820,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
     };
   }
 
-  const pending = files.filter((file) => isFilePendingAfterCheck(file, { isRecoverySync, serverCacheByPath, present }));
+  const pending = files.filter((file) => !present.has(getFileCacheMatchKey(file)));
 
   const totalUploads = pending.length;
   let uploaded = 0;
@@ -945,21 +909,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
     const scannedSuccessfully = [...trustedFiles, ...presentFiles, ...uploadedFiles];
     await saveScanSnapshot(scannedSuccessfully, { merge: !forceRefreshAll }).catch(() => {});
 
-    const madeCacheProgress =
-      uploadedFiles.length > 0 ||
-      presentFiles.length > 0 ||
-      trustedFiles.length > 0;
-
-    if (!attemptedRecoveryFetch || recoveryFetchSucceeded) {
-      await setUploadCacheInitialized(true);
-      if (attemptedRecoveryFetch || isRecoverySync) {
-        await clearRecoverySyncPending();
-      }
-    } else if (madeCacheProgress) {
-      // Recovery fetch failed but uploads/cache writes succeeded via fallback path.
-      await setUploadCacheInitialized(true);
-      await clearRecoverySyncPending();
-    }
+    await setUploadCacheInitialized(true);
   }
 
   if (totalUploads > 0 && uploaded === 0 && errors === totalUploads && present.size === 0) {

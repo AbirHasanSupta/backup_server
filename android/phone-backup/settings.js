@@ -259,9 +259,21 @@ export async function isUploadedBatch(files) {
   for (const file of files) {
     const storageKey = uploadCacheStorageKey(file.relativePath);
     const val = valueByKey.get(storageKey);
-    if (val != null && file.metadataLoaded && val === String(file.modifiedTime)) {
-      trusted.add(getFileCacheMatchKey(file));
+    if (val == null) continue;
+
+    if (file.metadataLoaded) {
+      if (val === String(file.modifiedTime)) {
+        trusted.add(getFileCacheMatchKey(file));
+      }
+      continue;
     }
+
+    // noMetadata scan: path is in the local upload cache — hydrate mtime from storage
+    // so trusted keys, snapshot writes, and pending checks stay consistent.
+    const cachedMtime = Number(val) || 0;
+    file.modifiedTime = cachedMtime;
+    file.metadataLoaded = true;
+    trusted.add(getFileCacheMatchKey(file));
   }
   return trusted;
 }
@@ -405,6 +417,7 @@ export async function clearAllUploads() {
   const keys = await AsyncStorage.getAllKeys();
   const match = keys.filter((k) => k.startsWith('uploaded_'));
   if (match.length > 0) await AsyncStorage.multiRemove(match);
+  await setUploadCacheInitialized(false);
   return match.length;
 }
 
@@ -438,25 +451,82 @@ export async function clearRecoverySyncPending() {
 }
 
 /**
- * Fast check for whether we should download the server upload index.
- * Uses a sentinel flag instead of scanning all AsyncStorage keys on every sync.
+ * One-time migration for installs that already had a populated upload cache
+ * before the initialized sentinel was introduced.
  */
-export async function shouldAttemptRecoverySync() {
-  const [recoveryPending, initialized] = await Promise.all([
-    getRecoverySyncPending(),
-    isUploadCacheInitialized(),
-  ]);
-  if (recoveryPending) return true;
-  if (initialized) return false;
-
-  // One-time migration for installs that already had a populated upload cache
-  // before the initialized sentinel was introduced.
+export async function ensureUploadCacheInitialized() {
+  if (await isUploadCacheInitialized()) return;
   const keys = await AsyncStorage.getAllKeys();
   if (keys.some((key) => key.startsWith('uploaded_'))) {
     await setUploadCacheInitialized(true);
+  }
+}
+
+/**
+ * True only after an explicit reinstall (server sets recovery_available on connect).
+ * Normal Sync Now / background sync never downloads the server upload index.
+ */
+export async function shouldAttemptRecoverySync() {
+  if (await getRecoverySyncPending()) return true;
+  await ensureUploadCacheInitialized();
+  return false;
+}
+
+/** Rebuild the local upload cache from a one-time server index fetch after reinstall. */
+export async function rebuildLocalCacheFromServer(serverFiles) {
+  if (!Array.isArray(serverFiles) || !serverFiles.length) return 0;
+  const CHUNK_SIZE = 500;
+  let written = 0;
+  for (let i = 0; i < serverFiles.length; i += CHUNK_SIZE) {
+    const chunk = serverFiles.slice(i, i + CHUNK_SIZE).map((entry) => ({
+      relativePath: (entry.path || '').replace(/\\/g, '/'),
+      modifiedTime: entry.modified_time || 0,
+      size: entry.size || 0,
+    }));
+    await markUploadedBatch(chunk);
+    written += chunk.length;
+  }
+  return written;
+}
+
+/**
+ * Apply a server upload index after reinstall: rebuild local cache, optionally
+ * hydrate scanned files, and clear the recovery flag.
+ * Returns false when the payload is unusable (recovery will retry on next sync).
+ */
+export async function applyServerUploadCacheRecovery(serverCache, scannedFiles = null) {
+  if (!serverCache) return false;
+
+  const serverFiles = Array.isArray(serverCache.files) ? serverCache.files : [];
+  if (serverCache.count > 0 && serverFiles.length === 0) {
+    console.warn('[Settings] Server upload cache count/files mismatch; skipping recovery rebuild');
     return false;
   }
 
+  await rebuildLocalCacheFromServer(serverFiles);
+
+  if (Array.isArray(scannedFiles) && scannedFiles.length > 0 && serverFiles.length > 0) {
+    const byPath = new Map(
+      serverFiles.map((entry) => [
+        (entry.path || '').replace(/\\/g, '/'),
+        {
+          modifiedTime: entry.modified_time || 0,
+          size: entry.size || 0,
+        },
+      ])
+    );
+    for (const file of scannedFiles) {
+      const entry = byPath.get((file.relativePath || '').replace(/\\/g, '/'));
+      if (entry) {
+        file.modifiedTime = entry.modifiedTime;
+        file.size = entry.size;
+        file.metadataLoaded = true;
+      }
+    }
+  }
+
+  await setUploadCacheInitialized(true);
+  await clearRecoverySyncPending();
   return true;
 }
 

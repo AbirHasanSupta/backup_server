@@ -89,15 +89,24 @@ function applyProgressUpdate(
 
   if (detail?.phase === 'scanning') {
     const scannedFiles = detail.files || 0;
+    const skipped = detail.skipped || 0;
     setters.setPhase('scanning');
     setters.setProgress(0);
     setters.setUploaded(0);
     setters.setTotal(0);
-    setters.setStatusMessage(
-      scannedFiles
-        ? `Scanning files: ${scannedFiles.toLocaleString()} found`
-        : 'Scanning your selected folders'
-    );
+    if (skipped > 0) {
+      setters.setStatusMessage(
+        scannedFiles > 0
+          ? `Scanning: ${skipped.toLocaleString()} checked, ${scannedFiles} new`
+          : `Scanning: ${skipped.toLocaleString()} checked`
+      );
+    } else {
+      setters.setStatusMessage(
+        scannedFiles
+          ? `Scanning files: ${scannedFiles.toLocaleString()} found`
+          : 'Scanning your selected folders'
+      );
+    }
     return;
   }
 
@@ -110,11 +119,25 @@ function applyProgressUpdate(
     setters.setProgress(count > 0 ? Math.round((checked / count) * 100) : 0);
     setters.setUploaded(0);
     setters.setTotal(0);
-    setters.setStatusMessage(
-      count > 0
-        ? `Checking server: ${checked.toLocaleString()} / ${count.toLocaleString()}`
-        : 'Checking server'
-    );
+    if (detail.recovery) {
+      setters.setStatusMessage(
+        count > 0
+          ? `Recovering cache: ${checked.toLocaleString()} / ${count.toLocaleString()}`
+          : 'Recovering backed-up files from server…'
+      );
+    } else if (detail.localCheck) {
+      setters.setStatusMessage(
+        count > 0
+          ? `Checking local cache: ${checked.toLocaleString()} / ${count.toLocaleString()}`
+          : 'Checking local cache'
+      );
+    } else {
+      setters.setStatusMessage(
+        count > 0
+          ? `Checking server: ${checked.toLocaleString()} / ${count.toLocaleString()}`
+          : 'Checking server'
+      );
+    }
     return;
   }
 
