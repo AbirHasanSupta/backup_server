@@ -997,7 +997,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
     def _refresh_dashboard(self):
         try:
             stats   = get_stats()
-            devices = get_devices()
+            devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
 
             self._s_files.configure(text=f"{stats['total_files']:,}")
             self._s_devices.configure(text=str(len(devices)))
@@ -1063,7 +1063,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._refresh_devices()
 
     def _refresh_devices(self):
-        devices = get_devices()
+        devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
 
         # Clear empty state if it was showing
         if hasattr(self, "_devices_empty_widget") and self._devices_empty_widget:
@@ -1834,7 +1834,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         for w in self._post_devices_frame.winfo_children():
             w.destroy()
         self._post_device_vars.clear()
-        devices = get_devices()
+        devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
         if not devices:
             ctk.CTkLabel(self._post_devices_frame, text="No connected devices", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
             return
@@ -2003,6 +2003,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         vars_map: dict[str, tk.BooleanVar] = {}
         for dev in get_devices():
             did = dev.get("device_id")
+            if did == DESKTOP_SHARE_DEVICE_ID:
+                continue
             var = tk.BooleanVar(value=did in current)
             ctk.CTkCheckBox(
                 scroll, text=format_display_name(dev), variable=var,
