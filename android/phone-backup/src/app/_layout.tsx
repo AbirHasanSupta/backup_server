@@ -50,8 +50,10 @@ import Animated, {
 } from 'react-native-reanimated';
 
 type TabIconProps = {
-  /** Android Material icon name — same glyph used for both states; weight conveys focus */
+  /** Android Material icon name for inactive state */
   androidName: string;
+  /** Optional Android Material icon name for active/focused state */
+  androidNameFocused?: string;
   /** iOS SF Symbol name for the inactive (outline) state */
   iosName: string;
   /** iOS SF Symbol name for the active (filled) state — typically the `.fill` variant */
@@ -61,7 +63,7 @@ type TabIconProps = {
   styles: ReturnType<typeof createStyles>;
 };
 
-function TabIcon({ androidName, iosName, iosNameFocused, focused, colors, styles }: TabIconProps) {
+function TabIcon({ androidName, androidNameFocused, iosName, iosNameFocused, focused, colors, styles }: TabIconProps) {
   const scale = useSharedValue(focused ? 1 : 0);
 
   useEffect(() => {
@@ -73,15 +75,14 @@ function TabIcon({ androidName, iosName, iosNameFocused, focused, colors, styles
     backgroundColor: interpolateColor(scale.value, [0, 1], ['transparent', colors.primarySoft]),
   }));
 
-  // Filled when active: on iOS swap to the .fill SF Symbol; on Android use bold weight
-  // to visually thicken/fill the icon glyph (Material icons don't have _filled variants
-  // for these names, but bold weight achieves a heavier, more prominent look).
+  // Filled when active: on iOS swap to the .fill SF Symbol; on Android swap glyph if provided, and use bold weight
+  const resolvedAndroidName = focused && androidNameFocused ? androidNameFocused : androidName;
   const resolvedIosName = focused && iosNameFocused ? iosNameFocused : iosName;
 
   return (
     <Animated.View style={[styles.iconWrapper, iconAnimStyle]}>
       <AppIcon
-        androidName={androidName}
+        androidName={resolvedAndroidName}
         iosName={resolvedIosName}
         size={22}
         color={focused ? colors.primary : colors.textSecondary}

@@ -327,16 +327,24 @@ export async function uploadFile(item, onProgress, options = {}) {
   // Some SAF URIs (system files, recently-deleted files, restricted paths) can
   // not be read. Treat those as graceful skips rather than hard failures.
   try {
-    await FileSystem.StorageAccessFramework.copyAsync({ from: item.uri, to: cacheUri });
+    if (item.uri && item.uri.startsWith('content://')) {
+      await FileSystem.StorageAccessFramework.copyAsync({ from: item.uri, to: cacheUri });
+    } else {
+      await FileSystem.copyAsync({ from: item.uri, to: cacheUri });
+    }
   } catch (copyErr) {
-    // Log the raw technical detail to the Expo console / dev tools only.
-    console.warn(
-      '[Uploader] Could not read file for upload (skipped):',
-      item.relativePath,
-      copyErr?.message
-    );
-    // Translate to a user-friendly error and re-throw so the worker counts it.
-    throw new Error(toUserFriendlyError(copyErr));
+    try {
+      await FileSystem.copyAsync({ from: item.uri, to: cacheUri });
+    } catch {
+      // Log the raw technical detail to the Expo console / dev tools only.
+      console.warn(
+        '[Uploader] Could not read file for upload (skipped):',
+        item.relativePath,
+        copyErr?.message
+      );
+      // Translate to a user-friendly error and re-throw so the worker counts it.
+      throw new Error(toUserFriendlyError(copyErr));
+    }
   }
 
   // ── Step 2: Upload via HTTP (with mesh auto-failover) ───────────────────────

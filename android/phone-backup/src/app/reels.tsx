@@ -657,8 +657,9 @@ function CommentsSheet({
             <FlatList
               data={comments}
               keyExtractor={c => String(c.id)}
-              style={cs.list}
+              style={[cs.list, { maxHeight: keyboardHeight > 0 ? SCREEN_H * 0.25 : SCREEN_H * 0.42 }]}
               contentContainerStyle={{ paddingBottom: Spacing.two }}
+              keyboardShouldPersistTaps="handled"
               renderItem={({ item: c }) => (
                 <View style={cs.row}>
                   <View style={cs.rowInfo}>

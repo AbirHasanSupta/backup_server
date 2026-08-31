@@ -4638,7 +4638,12 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   // Upload selected files and create feed post
   const handleDirectPostSubmit = useCallback(
-    async (selectedFiles: DeviceFileItem[], targetIds: string[], caption: string) => {
+    async (
+      selectedFiles: DeviceFileItem[],
+      targetIds: string[],
+      caption: string,
+      onProgress?: (statusText: string) => void
+    ) => {
       const cfg = await getConfig();
       const deviceId = cfg?.deviceId;
       if (!deviceId) {
@@ -4654,7 +4659,11 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         modified_time: number;
       }[] = [];
 
-      for (const f of selectedFiles) {
+      for (let i = 0; i < selectedFiles.length; i++) {
+        const f = selectedFiles[i];
+        if (onProgress) {
+          onProgress(`Uploading file ${i + 1} of ${selectedFiles.length}…`);
+        }
         const relativePath = `${folderName}/${f.name}`;
         // Upload the file to server
         await uploadFile({
@@ -4672,6 +4681,10 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           size: f.size,
           modified_time: f.modifiedTime,
         });
+      }
+
+      if (onProgress) {
+        onProgress('Creating feed post…');
       }
 
       // Create the device share post on the server
