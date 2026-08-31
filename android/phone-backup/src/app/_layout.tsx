@@ -50,14 +50,18 @@ import Animated, {
 } from 'react-native-reanimated';
 
 type TabIconProps = {
+  /** Android Material icon name — same glyph used for both states; weight conveys focus */
   androidName: string;
+  /** iOS SF Symbol name for the inactive (outline) state */
   iosName: string;
+  /** iOS SF Symbol name for the active (filled) state — typically the `.fill` variant */
+  iosNameFocused?: string;
   focused: boolean;
   colors: AppColors;
   styles: ReturnType<typeof createStyles>;
 };
 
-function TabIcon({ androidName, iosName, focused, colors, styles }: TabIconProps) {
+function TabIcon({ androidName, iosName, iosNameFocused, focused, colors, styles }: TabIconProps) {
   const scale = useSharedValue(focused ? 1 : 0);
 
   useEffect(() => {
@@ -69,13 +73,19 @@ function TabIcon({ androidName, iosName, focused, colors, styles }: TabIconProps
     backgroundColor: interpolateColor(scale.value, [0, 1], ['transparent', colors.primarySoft]),
   }));
 
+  // Filled when active: on iOS swap to the .fill SF Symbol; on Android use bold weight
+  // to visually thicken/fill the icon glyph (Material icons don't have _filled variants
+  // for these names, but bold weight achieves a heavier, more prominent look).
+  const resolvedIosName = focused && iosNameFocused ? iosNameFocused : iosName;
+
   return (
     <Animated.View style={[styles.iconWrapper, iconAnimStyle]}>
       <AppIcon
         androidName={androidName}
-        iosName={iosName}
+        iosName={resolvedIosName}
         size={22}
         color={focused ? colors.primary : colors.textSecondary}
+        weight={focused ? 'bold' : 'regular'}
         fallback="*"
       />
     </Animated.View>
@@ -284,7 +294,14 @@ function RootLayoutContent() {
           options={{
             title: 'Backup',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="cloud_upload" iosName="icloud.and.arrow.up" focused={focused} colors={colors} styles={styles} />
+              <TabIcon
+                androidName="cloud_upload"
+                iosName="icloud.and.arrow.up"
+                iosNameFocused="icloud.and.arrow.up.fill"
+                focused={focused}
+                colors={colors}
+                styles={styles}
+              />
             ),
           }}
         />
@@ -293,7 +310,14 @@ function RootLayoutContent() {
           options={{
             title: 'Library',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="cloud_download" iosName="icloud.and.arrow.down" focused={focused} colors={colors} styles={styles} />
+              <TabIcon
+                androidName="cloud_download"
+                iosName="icloud.and.arrow.down"
+                iosNameFocused="icloud.and.arrow.down.fill"
+                focused={focused}
+                colors={colors}
+                styles={styles}
+              />
             ),
           }}
         />
@@ -302,7 +326,14 @@ function RootLayoutContent() {
           options={{
             title: 'Reels',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="movie" iosName="play.rectangle.fill" focused={focused} colors={colors} styles={styles} />
+              <TabIcon
+                androidName="movie"
+                iosName="play.rectangle"
+                iosNameFocused="play.rectangle.fill"
+                focused={focused}
+                colors={colors}
+                styles={styles}
+              />
             ),
             freezeOnBlur: true,
           }}
@@ -312,7 +343,14 @@ function RootLayoutContent() {
           options={{
             title: 'Feed',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="dynamic_feed" iosName="heart.text.square" focused={focused} colors={colors} styles={styles} />
+              <TabIcon
+                androidName="dynamic_feed"
+                iosName="heart.text.square"
+                iosNameFocused="heart.text.square.fill"
+                focused={focused}
+                colors={colors}
+                styles={styles}
+              />
             ),
           }}
         />
@@ -321,7 +359,14 @@ function RootLayoutContent() {
           options={{
             title: 'Settings',
             tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="settings" iosName="gearshape" focused={focused} colors={colors} styles={styles} />
+              <TabIcon
+                androidName="settings"
+                iosName="gearshape"
+                iosNameFocused="gearshape.fill"
+                focused={focused}
+                colors={colors}
+                styles={styles}
+              />
             ),
           }}
         />

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Platform, StyleSheet, Text, View } from 'react-native';
 import { SymbolView } from 'expo-symbols';
+import type { SymbolWeight } from 'expo-symbols';
 import { useAppTheme } from '@/hooks/use-app-theme';
 
 type AppIconProps = {
@@ -9,6 +10,8 @@ type AppIconProps = {
   size?: number;
   color?: string;
   fallback?: string;
+  /** Symbol weight — use 'bold' for active tab icons to simulate a filled look on Android */
+  weight?: SymbolWeight;
 };
 
 export function AppIcon({
@@ -17,6 +20,7 @@ export function AppIcon({
   size = 20,
   color,
   fallback,
+  weight,
 }: AppIconProps) {
   const { colors } = useAppTheme();
   const iconColor = color ?? colors.text;
@@ -40,6 +44,7 @@ export function AppIcon({
       }}
       size={size}
       tintColor={iconColor}
+      weight={weight}
       fallback={fallback ? <Text style={[styles.fallbackText, { color: iconColor }]}>{fallback}</Text> : null}
     />
   );
