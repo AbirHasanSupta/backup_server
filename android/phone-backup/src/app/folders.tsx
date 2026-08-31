@@ -46,8 +46,10 @@ export default function FoldersScreen() {
     onMomentumScrollEnd,
     headerAnimatedStyle,
     contentInsetStyle,
+    statusBarFillStyle,
     onHeaderLayout,
     containerPaddingTop,
+    expandHeader,
   } = useCollapsibleHeader({
     headerHeight: HEADER_HEIGHT,
     topInset: insets.top,
@@ -85,13 +87,14 @@ export default function FoldersScreen() {
   }, []);
 
   const handlePullRefresh = useCallback(async () => {
+    expandHeader(0);
     setPullRefreshing(true);
     try {
       await Promise.all([loadData(), checkServer()]);
     } finally {
       setPullRefreshing(false);
     }
-  }, [loadData, checkServer]);
+  }, [loadData, checkServer, expandHeader]);
 
   useFocusEffect(
     useCallback(() => {
@@ -171,6 +174,7 @@ export default function FoldersScreen() {
   return (
     <View style={styles.screen}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
+      <View style={[statusBarFillStyle, { backgroundColor: colors.bg }]} />
 
       <Animated.View
         onLayout={onHeaderLayout}

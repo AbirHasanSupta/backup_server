@@ -64,14 +64,24 @@ export function useCollapsibleHeader({
       setMeasuredHeight(h);
       if (wasCollapsed) {
         headerTranslateY.value = -h;
+      } else if (lastScrollY.current < 4 && headerTranslateY.value < 0) {
+        // Layout changed while pinned at the top — keep the header visible.
+        headerTranslateY.value = 0;
       }
     },
     [headerTranslateY, heightSV]
   );
 
-  const expandHeader = useCallback(() => {
+  const expandHeader = useCallback((scrollY?: number) => {
+    if (scrollY !== undefined) {
+      lastScrollY.current = Math.max(0, scrollY);
+    }
     headerTranslateY.value = withTiming(0, { duration: 200 });
   }, [headerTranslateY]);
+
+  const syncScrollY = useCallback((scrollY: number) => {
+    lastScrollY.current = Math.max(0, scrollY);
+  }, []);
 
   // Tracks the finger 1:1 during the drag.
   // snapHeader settles to fully open/closed once the drag ends.
@@ -121,22 +131,36 @@ export function useCollapsibleHeader({
     };
   });
 
-  /** Static flex wrapper style (zero layout reflow on scroll) */
-  const contentInsetStyle: StyleProp<ViewStyle> = {
+  /** Static flex wrapper — sits below the status bar so scroll content never overlaps it */
+  const scrollAreaStyle: StyleProp<ViewStyle> = {
     flex: 1,
+    marginTop: safeTopInset,
+  };
+
+  /** Fixed fill behind the system status bar */
+  const statusBarFillStyle: StyleProp<ViewStyle> = {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: safeTopInset,
+    zIndex: 20,
   };
 
   return {
     headerHeight: measuredHeight,
-    containerPaddingTop: safeTopInset + measuredHeight,
-    progressViewOffset: safeTopInset + measuredHeight,
+    containerPaddingTop: measuredHeight,
+    progressViewOffset: measuredHeight,
     headerTranslateY,
     headerAnimatedStyle,
-    contentInsetStyle,
+    scrollAreaStyle,
+    statusBarFillStyle,
+    contentInsetStyle: scrollAreaStyle,
     onScroll,
     onScrollEndDrag: snapHeader,
     onMomentumScrollEnd: snapHeader,
     onHeaderLayout,
     expandHeader,
+    syncScrollY,
   };
 }

@@ -133,8 +133,10 @@ export default function HistoryScreen() {
     onMomentumScrollEnd,
     headerAnimatedStyle,
     contentInsetStyle,
+    statusBarFillStyle,
     onHeaderLayout,
     containerPaddingTop,
+    expandHeader,
   } = useCollapsibleHeader({
     headerHeight,
     topInset: insets.top,
@@ -152,10 +154,11 @@ export default function HistoryScreen() {
   );
 
   const onRefresh = useCallback(async () => {
+    expandHeader(0);
     setRefreshing(true);
     await load();
     setRefreshing(false);
-  }, [load]);
+  }, [load, expandHeader]);
 
   const handleClear = useCallback(() => {
     Alert.alert(
@@ -186,6 +189,7 @@ export default function HistoryScreen() {
   return (
     <View style={[styles.root, { backgroundColor: colors.bg }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
+      <View style={[statusBarFillStyle, { backgroundColor: colors.bg }]} />
 
       <Animated.View
         onLayout={onHeaderLayout}

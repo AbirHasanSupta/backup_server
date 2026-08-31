@@ -109,8 +109,10 @@ export default function SettingsScreen() {
     onMomentumScrollEnd,
     headerAnimatedStyle,
     contentInsetStyle,
+    statusBarFillStyle,
     onHeaderLayout,
     containerPaddingTop,
+    expandHeader,
   } = useCollapsibleHeader({
     headerHeight: HEADER_HEIGHT,
     topInset: insets.top,
@@ -196,13 +198,14 @@ export default function SettingsScreen() {
   }, []);
 
   const handlePullRefresh = useCallback(async () => {
+    expandHeader(0);
     setPullRefreshing(true);
     try {
       await Promise.all([loadSettings(), checkServer()]);
     } finally {
       setPullRefreshing(false);
     }
-  }, [loadSettings, checkServer]);
+  }, [loadSettings, checkServer, expandHeader]);
 
   useFocusEffect(
     useCallback(() => {
@@ -447,6 +450,7 @@ export default function SettingsScreen() {
   return (
     <View style={styles.screen}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
+      <View style={[statusBarFillStyle, { backgroundColor: colors.bg }]} />
 
       <Animated.View
         onLayout={onHeaderLayout}

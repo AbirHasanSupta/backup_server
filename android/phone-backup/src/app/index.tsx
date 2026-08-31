@@ -186,8 +186,10 @@ export default function HomeScreen() {
     onMomentumScrollEnd,
     headerAnimatedStyle,
     contentInsetStyle,
+    statusBarFillStyle,
     onHeaderLayout,
     containerPaddingTop,
+    expandHeader,
   } = useCollapsibleHeader({
     headerHeight: HEADER_HEIGHT,
     topInset: insets.top,
@@ -582,13 +584,14 @@ export default function HomeScreen() {
   };
 
   const onRefresh = useCallback(async () => {
+    expandHeader(0);
     setRefreshing(true);
     try {
       await loadAll();
     } finally {
       setRefreshing(false);
     }
-  }, [loadAll]);
+  }, [loadAll, expandHeader]);
 
   const statusColors: Record<ServerStatus, string> = {
     connected: colors.success,
@@ -615,6 +618,7 @@ export default function HomeScreen() {
   return (
     <View style={styles.screen}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.bg} />
+      <View style={[statusBarFillStyle, { backgroundColor: colors.bg }]} />
 
       <Animated.View
         onLayout={onHeaderLayout}

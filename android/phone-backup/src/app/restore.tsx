@@ -760,18 +760,6 @@ function SharedFeedCard({
         </TouchableOpacity>
       </View>
 
-      {/* Caption: shown above media, below author info — like Facebook */}
-      {!!(item.group_caption || item.caption) && (
-        <Text style={[feedCardStyles.caption, feedCardStyles.captionTop, { color: colors.text }]}>
-          {!!item.shared_by && (
-            <Text style={{ fontWeight: '700', color: colors.text }}>
-              {item.shared_by}{' '}
-            </Text>
-          )}
-          {item.group_caption || item.caption}
-        </Text>
-      )}
-
       <View style={[feedCardStyles.mediaContainer, { width: cardWidth, height: mediaHeight }]}>
         <FlatList
           data={items}
@@ -892,6 +880,17 @@ function SharedFeedCard({
             </View>
           ) : null;
         })()}
+
+        {!!(item.group_caption || item.caption) && (
+          <Text style={[feedCardStyles.caption, { color: colors.text }]}>
+            {!!item.shared_by && (
+              <Text style={{ fontWeight: '700', color: colors.text }}>
+                {item.shared_by}{' '}
+              </Text>
+            )}
+            {item.group_caption || item.caption}
+          </Text>
+        )}
 
         {commentCount > 0 && (
           <TouchableOpacity
@@ -1208,12 +1207,12 @@ function ManageShareModal({
           text: 'Remove',
           style: 'destructive',
           onPress: async () => {
+            const isLastFile = files.length <= 1;
             setRemovingFileId(file.share_id!);
             try {
               await deleteShare(file.share_id!);
               hapticSuccess();
-              if (files.length <= 1) {
-                // Last file in the post removed — delete the whole post
+              if (isLastFile) {
                 onClose();
                 onDeleted();
               } else {
@@ -1995,12 +1994,6 @@ const feedCardStyles = StyleSheet.create({
     fontSize: TextScale.sm,
     marginTop: Spacing.two,
     lineHeight: 18,
-  },
-  captionTop: {
-    marginTop: 0,
-    paddingHorizontal: Spacing.three,
-    paddingTop: Spacing.two,
-    paddingBottom: Spacing.two,
   },
   actionRow: {
     flexDirection: 'row',
@@ -4024,6 +4017,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     onScrollEndDrag: onListScrollEndDrag,
     onMomentumScrollEnd: onListMomentumScrollEnd,
     headerAnimatedStyle,
+    scrollAreaStyle,
+    statusBarFillStyle,
     onHeaderLayout,
     expandHeader,
   } = useCollapsibleHeader({
@@ -4623,6 +4618,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   const onRefreshLibrary = useCallback(async () => {
     if (isDownloading) return;
+    expandHeader(0);
     setRefreshing(true);
     try {
       await checkServer();
@@ -4630,7 +4626,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     } finally {
       if (restoreMountedRef.current) setRefreshing(false);
     }
-  }, [checkServer, handleFetch, isDownloading]);
+  }, [checkServer, handleFetch, isDownloading, expandHeader]);
 
   // Tab press listener: when the user is already on the Feed tab and taps the Feed tab icon again,
   // scroll smoothly to top and refresh the feed with the newest posts.
@@ -5151,6 +5147,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   return (
     <View style={[styles.root, { backgroundColor: colors.bg }]}>
       <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
+      <View style={[statusBarFillStyle, { backgroundColor: colors.bg }]} />
 
       {/* Download progress banner — replaces page header while restoring */}
       {isDownloading && downloadProgress ? (
@@ -5310,7 +5307,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         </ReAnimated.View>
       )}
 
-      <View style={{ flex: 1 }}>
+      <View style={scrollAreaStyle}>
       {/* File Tree or Shared Feed List */}
       <FlatList
         ref={listRef}
@@ -5523,23 +5520,34 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         }}
         onUpdated={({ caption, removedShareId }) => {
           if (!manageGroupItem) return;
-          setFiles(prev =>
-            prev.map(f => {
-              const matches = manageGroupItem.group_id
-                ? f.group_id === manageGroupItem.group_id
-                : f.share_id != null && f.share_id === manageGroupItem.share_id;
-              if (!matches) return f;
-              const updated = { ...f };
-              if (caption !== undefined) {
-                updated.group_caption = caption;
-                updated.caption = caption;
-              }
-              if (removedShareId !== undefined && updated.group_items) {
-                updated.group_items = updated.group_items.filter(gi => gi.share_id !== removedShareId);
-              }
-              return updated;
-            })
-          );
+          const updateItem = (f: RemoteFile): RemoteFile | null => {
+            const matches = manageGroupItem.group_id
+              ? f.group_id === manageGroupItem.group_id
+              : f.share_id != null && f.share_id === manageGroupItem.share_id;
+            if (!matches) return f;
+            const updated = { ...f };
+            if (caption !== undefined) {
+              updated.group_caption = caption;
+              updated.caption = caption;
+            }
+            if (removedShareId !== undefined && updated.group_items) {
+              updated.group_items = updated.group_items.filter(gi => gi.share_id !== removedShareId);
+              if (updated.group_items.length === 0) return null;
+              const first = updated.group_items[0];
+              updated.path = first.path;
+              updated.share_id = first.share_id;
+              updated.is_video = first.is_video;
+              updated.size = updated.group_items.reduce((acc, it) => acc + (it.size || 0), 0);
+              updated.modified_time = first.modified_time;
+            }
+            return updated;
+          };
+          setFiles(prev => prev.map(updateItem).filter((f): f is RemoteFile => f != null));
+          setManageGroupItem(prev => {
+            if (!prev) return prev;
+            const next = updateItem(prev);
+            return next ?? null;
+          });
         }}
       />
 

@@ -57,7 +57,11 @@ export function ShareModal({
     setCaption('');
     /* eslint-enable react-hooks/set-state-in-effect */
     listShareTargetDevices()
-      .then((res) => { if (active) setDevices(Array.isArray(res?.devices) ? res.devices : []); })
+      .then((res) => {
+        if (!active) return;
+        const list = Array.isArray(res?.devices) ? res.devices : [];
+        setDevices(list.filter((d) => d.device_id !== 'desktop-server'));
+      })
       .catch(() => { if (active) setDevices([]); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };

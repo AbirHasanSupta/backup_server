@@ -1070,17 +1070,9 @@ export default function MemoriesScreen() {
                       </View>
                     </AnimatedPressable>
 
-                    <TouchableOpacity
-                      style={styles.rewindBtn}
-                      onPress={() => openRewind(group.year)}
-                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    >
-                      <AppIcon androidName="movie" iosName="film" color="#fff" size={14} />
-                      <Text style={styles.rewindBtnText}>Rewind</Text>
-                    </TouchableOpacity>
                     {group.items.length > 0 && (
                       <TouchableOpacity
-                        style={styles.shareCardBtn}
+                        style={styles.rewindBtn}
                         onPress={() => {
                           hapticLight();
                           setShareItems(group.items);
@@ -1189,7 +1181,7 @@ export default function MemoriesScreen() {
             {currentItem.is_video ? (
               <StoryVideoPlayer
                 uri={getMediaUrl(currentItem)}
-                isPaused={isPaused}
+                isPaused={isPaused || shareVisible}
                 onEnded={advanceItem}
                 onProgressRatio={setProgressRatio}
                 styles={styles}
@@ -2047,22 +2039,6 @@ const createStyles = (colors: AppColors, insets: any) =>
       position: 'absolute',
       top: Spacing.three,
       right: Spacing.four + Spacing.two,
-      zIndex: 10,
-      elevation: 10,
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 5,
-      paddingHorizontal: Spacing.three,
-      paddingVertical: 6,
-      borderRadius: Radius.full,
-      backgroundColor: 'rgba(0,0,0,0.55)',
-      borderWidth: 1,
-      borderColor: 'rgba(255,255,255,0.35)',
-    },
-    shareCardBtn: {
-      position: 'absolute',
-      top: Spacing.three,
-      left: Spacing.four + Spacing.two,
       zIndex: 10,
       elevation: 10,
       flexDirection: 'row',

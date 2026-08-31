@@ -2580,6 +2580,9 @@ def delete_comment(comment_id: int, source_id: str) -> bool:
 
 # ─── Device-to-device sharing helpers ──────────────────────────────────────────
 
+DESKTOP_SHARE_DEVICE_ID = "desktop-server"
+
+
 def get_share_target_devices(exclude_device_id: str | None = None) -> list[dict]:
     """Return accepted devices as share targets. SAFE FIELDS ONLY — never expose token."""
     conn = get_conn()
@@ -2588,10 +2591,11 @@ def get_share_target_devices(exclude_device_id: str | None = None) -> list[dict]
             """
             SELECT device_id, device_name, device_model, username
             FROM devices
-            WHERE status = 'accepted' AND device_id IS NOT NULL AND device_id != ?
+            WHERE status = 'accepted' AND device_id IS NOT NULL
+              AND device_id != ? AND device_id != ?
             ORDER BY last_seen DESC
             """,
-            (exclude_device_id,),
+            (exclude_device_id, DESKTOP_SHARE_DEVICE_ID),
         ).fetchall()
     else:
         rows = conn.execute(
@@ -2599,8 +2603,10 @@ def get_share_target_devices(exclude_device_id: str | None = None) -> list[dict]
             SELECT device_id, device_name, device_model, username
             FROM devices
             WHERE status = 'accepted' AND device_id IS NOT NULL
+              AND device_id != ?
             ORDER BY last_seen DESC
-            """
+            """,
+            (DESKTOP_SHARE_DEVICE_ID,),
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -2891,20 +2897,25 @@ def delete_device_share_group(group_id: str, requesting_device_id: str) -> bool:
 
 
 def delete_device_share(share_id: int, requesting_device_id: str) -> bool:
-    """Delete a share (or its entire group if grouped). Owner-only."""
+    """Delete a single share. If it is the last share in a group, delete the group too."""
     conn = get_conn()
     row = conn.execute(
-        "SELECT shared_by_device_id, share_group_id FROM device_shares WHERE id = ?",
+        "SELECT shared_by_device_id, share_group_id, media_id FROM device_shares WHERE id = ?",
         (share_id,),
     ).fetchone()
     if not row or row["shared_by_device_id"] != requesting_device_id:
         conn.close()
         return False
     group_id = row["share_group_id"]
-    if group_id:
-        conn.close()
-        return delete_device_share_group(group_id, requesting_device_id)
     media_id = row["media_id"]
+    if group_id:
+        remaining = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM device_shares WHERE share_group_id = ?",
+            (group_id,),
+        ).fetchone()["cnt"]
+        if remaining <= 1:
+            conn.close()
+            return delete_device_share_group(group_id, requesting_device_id)
     conn.execute("DELETE FROM device_share_targets WHERE share_id = ?", (share_id,))
     _cleanup_rewind_shared_files([share_id])
     conn.execute("DELETE FROM device_shares WHERE id = ?", (share_id,))
