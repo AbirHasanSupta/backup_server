@@ -1,6 +1,7 @@
 import asyncio
 from email.utils import formatdate
 from mimetypes import guess_type
+import json
 import os
 import re
 import shutil
@@ -12,11 +13,11 @@ import uuid
 
 import memories
 import rewind
-from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header
+from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header, File
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 
-from config import load_config, APP_DATA_DIR
+from config import load_config, APP_DATA_DIR, SHARED_QUIZ_DIR
 from database import (
     batch_check_files,
     find_device_by_name_model,
@@ -1863,6 +1864,42 @@ async def delete_media_comment(
 
 SHARED_REWIND_DIR = os.path.join(APP_DATA_DIR, "shared_rewind_reels")
 os.makedirs(SHARED_REWIND_DIR, exist_ok=True)
+os.makedirs(SHARED_QUIZ_DIR, exist_ok=True)
+
+QUIZ_SHARE_MAX_TOTAL = 30
+QUIZ_SHARE_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _validate_quiz_share_payload(score: int, total: int, quiz_items: list) -> None:
+    """Validate quiz metadata before persisting a feed post."""
+    if total < 1 or total > QUIZ_SHARE_MAX_TOTAL:
+        raise HTTPException(status_code=400, detail="Invalid quiz total")
+    if score < 0 or score > total:
+        raise HTTPException(status_code=400, detail="Invalid quiz score")
+    if len(quiz_items) != total:
+        raise HTTPException(status_code=400, detail="quiz_data item count does not match total")
+
+    computed_score = 0
+    for idx, item in enumerate(quiz_items):
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail=f"Invalid quiz item at index {idx}")
+        for field in ("source_type", "source_id", "relative_path", "correct_year", "options", "chosen_year"):
+            if field not in item:
+                raise HTTPException(status_code=400, detail=f"Missing {field} in quiz item {idx}")
+        options = item.get("options")
+        if not isinstance(options, list) or len(options) < 2:
+            raise HTTPException(status_code=400, detail=f"Invalid options in quiz item {idx}")
+        chosen = item.get("chosen_year")
+        correct = item.get("correct_year")
+        if not isinstance(chosen, int) or chosen not in options:
+            raise HTTPException(status_code=400, detail=f"Invalid chosen_year in quiz item {idx}")
+        if not isinstance(correct, int):
+            raise HTTPException(status_code=400, detail=f"Invalid correct_year in quiz item {idx}")
+        if chosen == correct:
+            computed_score += 1
+
+    if computed_score != score:
+        raise HTTPException(status_code=400, detail="Quiz score does not match answers")
 
 
 def _persist_shared_rewind_reel(source_key: str, relative_path: str) -> str:
@@ -1993,6 +2030,140 @@ async def create_share(
     return result
 
 
+@router.post("/api/share/quiz/create")
+@router.post("/share/quiz/create")
+async def create_quiz_share(
+    shared_by_device_id: str = Form(...),
+    target_device_ids: str = Form(...),
+    caption: str = Form(""),
+    score: int = Form(...),
+    total: int = Form(...),
+    quiz_data: str = Form(...),
+    images: list[UploadFile] = File(...),
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Create a Guess-the-Year feed post from pre-rendered result cards.
+
+    Images must be ordered: score card first, then one card per question.
+    Quiz metadata is persisted alongside the images and removed when the post
+    is deleted.
+    """
+    verify_auth(authorization or (f"Bearer {token}" if token else None), shared_by_device_id)
+    verify_known_device_by_id(shared_by_device_id)
+
+    if not images:
+        raise HTTPException(status_code=400, detail="No quiz images provided")
+    try:
+        targets = json.loads(target_device_ids)
+        if not isinstance(targets, list):
+            raise ValueError("target_device_ids must be a JSON array")
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid target_device_ids") from exc
+    if not targets:
+        raise HTTPException(status_code=400, detail="No target devices")
+
+    try:
+        quiz_payload = json.loads(quiz_data)
+        if not isinstance(quiz_payload, dict):
+            raise ValueError("quiz_data must be a JSON object")
+        quiz_items = quiz_payload.get("items") or []
+        if not isinstance(quiz_items, list):
+            raise ValueError("quiz_data.items must be a JSON array")
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid quiz_data") from exc
+
+    _validate_quiz_share_payload(score, total, quiz_items)
+    if len(images) != total + 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expected {total + 1} quiz images (score + questions), got {len(images)}",
+        )
+
+    known_ids = {
+        d["device_id"]
+        for d in await asyncio.to_thread(get_share_target_devices, shared_by_device_id)
+    }
+    valid_targets = [t for t in targets if t in known_ids]
+    if not valid_targets:
+        raise HTTPException(status_code=400, detail="No valid target devices")
+
+    import uuid as _uuid
+
+    group_id = str(_uuid.uuid4())
+    persisted_paths: list[str] = []
+    try:
+        meta_path = os.path.join(SHARED_QUIZ_DIR, f"{group_id}.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "score": score,
+                    "total": total,
+                    "items": quiz_items,
+                },
+                f,
+            )
+
+        share_items: list[dict] = []
+        for idx, upload in enumerate(images):
+            ext = ".png"
+            filename = f"{_uuid.uuid4().hex}{ext}"
+            dest_path = os.path.join(SHARED_QUIZ_DIR, filename)
+            content = await upload.read()
+            if not content:
+                raise HTTPException(status_code=400, detail=f"Empty image at index {idx}")
+            if len(content) > QUIZ_SHARE_MAX_IMAGE_BYTES:
+                raise HTTPException(status_code=400, detail=f"Image at index {idx} is too large")
+            with open(dest_path, "wb") as out:
+                out.write(content)
+            persisted_paths.append(dest_path)
+            share_items.append(
+                {
+                    "source_type": "quiz_shared",
+                    "source_key": shared_by_device_id,
+                    "relative_path": dest_path,
+                    "size": len(content),
+                    "modified_time": int(time.time()),
+                }
+            )
+
+        result = await asyncio.to_thread(
+            create_device_share,
+            shared_by_device_id,
+            valid_targets,
+            (caption or "").strip() or None,
+            share_items,
+            "quiz",
+            f"{score}/{total}",
+            group_id,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=500, detail="Failed to create quiz share")
+        return result
+    except HTTPException:
+        for p in persisted_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        try:
+            os.remove(os.path.join(SHARED_QUIZ_DIR, f"{group_id}.json"))
+        except OSError:
+            pass
+        raise
+    except Exception:
+        for p in persisted_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        try:
+            os.remove(os.path.join(SHARED_QUIZ_DIR, f"{group_id}.json"))
+        except OSError:
+            pass
+        raise
+
+
 @router.get("/api/feed")
 @router.get("/feed")
 async def get_unified_feed(
@@ -2061,6 +2232,9 @@ async def get_unified_feed(
 
         # Sort groups newest-first by created_at
         sorted_groups = sorted(groups.values(), key=lambda g: g["created_at"], reverse=True)
+        for g in sorted_groups:
+            # Preserve carousel order (score card first, then questions) by share insert order.
+            g["items"].sort(key=lambda it: it["share_id"])
 
         # Collect all share_ids and media_ids for bulk reaction/comment fetch
         all_share_ids = [item["share_id"] for g in sorted_groups for item in g["items"]]
@@ -2345,6 +2519,11 @@ def _resolve_share_path(share: dict) -> str:
     if source_type == "rewind_shared":
         full_path = os.path.abspath(relative_path)
         if os.path.commonpath([SHARED_REWIND_DIR, full_path]) != SHARED_REWIND_DIR:
+            raise HTTPException(status_code=400, detail="Invalid path")
+        return full_path
+    if source_type == "quiz_shared":
+        full_path = os.path.abspath(relative_path)
+        if os.path.commonpath([SHARED_QUIZ_DIR, full_path]) != SHARED_QUIZ_DIR:
             raise HTTPException(status_code=400, detail="Invalid path")
         return full_path
     raise HTTPException(status_code=400, detail="Unknown share source type")

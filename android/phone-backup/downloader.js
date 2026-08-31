@@ -641,6 +641,55 @@ export async function createDeviceShare(targetDeviceIds, caption, items, options
 }
 
 /**
+ * Share a completed Guess-the-Year round to the device feed.
+ * @param {string[]} targetDeviceIds
+ * @param {string} caption
+ * @param {number} score
+ * @param {number} total
+ * @param {{items: Array<any>}} quizData
+ * @param {string[]} imageUris local file URIs (score card first, then each question)
+ */
+export async function createQuizShare(targetDeviceIds, caption, score, total, quizData, imageUris) {
+  const { ip, port, key, deviceId } = await getConfig();
+  const formData = new FormData();
+  formData.append('shared_by_device_id', deviceId);
+  formData.append('target_device_ids', JSON.stringify(targetDeviceIds));
+  formData.append('caption', caption || '');
+  formData.append('score', String(score));
+  formData.append('total', String(total));
+  formData.append('quiz_data', JSON.stringify(quizData));
+  imageUris.forEach((uri, index) => {
+    const normalizedUri = uri.startsWith('file://') ? uri : `file://${uri}`;
+    formData.append('images', {
+      uri: normalizedUri,
+      name: `quiz_${index}.png`,
+      type: 'image/png',
+    });
+  });
+  const res = await fetch(
+    `http://${ip}:${port}/api/share/quiz/create`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}` },
+      body: formData,
+    },
+  );
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body = await res.json();
+      if (body?.detail) {
+        detail = typeof body.detail === 'string' ? `: ${body.detail}` : `: ${JSON.stringify(body.detail)}`;
+      }
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(`Failed to share quiz result (${res.status})${detail}`);
+  }
+  return await res.json();
+}
+
+/**
  * Fetch the unified feed: device-to-device shares (received + own sent), grouped by post.
  * @param {number} [offset=0] - Pagination offset
  * @param {number} [limit=50] - Max posts per page

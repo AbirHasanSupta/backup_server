@@ -541,6 +541,7 @@ const POST_KIND_BADGES: Record<string, { emoji: string; label: string; bg: strin
   flashback: { emoji: '⚡', label: 'Flashback', bg: 'rgba(245, 158, 11, 0.15)', fg: '#F59E0B' },
   rewind: { emoji: '🎬', label: 'Rewind Reel', bg: 'rgba(236, 72, 153, 0.15)', fg: '#EC4899' },
   roulette: { emoji: '🎲', label: 'Roulette', bg: 'rgba(99, 102, 241, 0.15)', fg: '#6366F1' },
+  quiz: { emoji: '🧠', label: 'Guess the Year', bg: 'rgba(168, 85, 247, 0.15)', fg: '#A855F7' },
   trip: { emoji: '🧭', label: 'Trip', bg: 'rgba(16, 185, 129, 0.15)', fg: '#10B981' },
   place: { emoji: '📍', label: 'Place', bg: 'rgba(59, 130, 246, 0.15)', fg: '#3B82F6' },
 };

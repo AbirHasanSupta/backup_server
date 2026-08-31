@@ -374,8 +374,13 @@ export async function showNewSharePostNotification(post) {
   try {
     const sharer = post.shared_by || 'Someone';
     const count = post.item_count || 1;
-    const body = post.caption || post.post_title
-      || `Shared ${count} ${count === 1 ? 'file' : 'files'} with you`;
+    let body = post.caption || null;
+    if (!body && post.post_kind === 'quiz' && post.post_title) {
+      body = `Guess the Year · ${post.post_title}`;
+    }
+    if (!body) {
+      body = post.post_title || `Shared ${count} ${count === 1 ? 'file' : 'files'} with you`;
+    }
     await N.scheduleNotificationAsync({
       content: {
         title: `📸 New post from ${sharer}`,

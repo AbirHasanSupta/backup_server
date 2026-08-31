@@ -28,6 +28,10 @@ def _get_app_data_dir() -> str:
 APP_DATA_DIR = _get_app_data_dir()
 os.makedirs(APP_DATA_DIR, exist_ok=True)
 
+# Persisted quiz-result cards shared to the device feed (deleted with the post).
+SHARED_QUIZ_DIR = os.path.join(APP_DATA_DIR, "shared_quiz_cards")
+os.makedirs(SHARED_QUIZ_DIR, exist_ok=True)
+
 CONFIG_FILE = os.path.join(APP_DATA_DIR, "server_config.json")
 DB_PATH = os.path.join(APP_DATA_DIR, "backup.db")
 

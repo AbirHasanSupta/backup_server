@@ -1,14 +1,22 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { GestureResponderHandlers, View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, BackHandler, PanResponder } from 'react-native';
+import { GestureResponderHandlers, View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, StatusBar, BackHandler, PanResponder, Alert } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as FileSystem from 'expo-file-system';
 
 import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
+import { ShareModal } from '@/components/ShareModal';
+import {
+  QuizShareCaptureView,
+  QuizCaptureSpec,
+  useQuizCardCapture,
+  isQuizCaptureCancelled,
+} from '@/components/QuizShareCards';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
-import { getQuizRound, getConfig, buildPreviewUrl } from '../../downloader';
+import { getQuizRound, getConfig, buildPreviewUrl, createQuizShare } from '../../downloader';
 
 interface QuizItem {
   source_type: string;
@@ -38,6 +46,12 @@ function formatCaptureDate(captureTime: number | null | undefined): string {
   }
 }
 
+function getScoreMessage(score: number, total: number): string {
+  if (score === total) return 'Perfect memory!';
+  if (score >= total / 2) return 'Nice work!';
+  return 'Keep playing to sharpen those memories!';
+}
+
 export default function QuizScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -50,16 +64,32 @@ export default function QuizScreen() {
   const [items, setItems] = useState<QuizItem[]>([]);
   const [roundIdx, setRoundIdx] = useState(0);
   const [score, setScore] = useState(0);
+  const [answers, setAnswers] = useState<(number | null)[]>([]);
   const [selectedYear, setSelectedYear] = useState<number | null>(null);
   const [answerState, setAnswerState] = useState<AnswerState>('unanswered');
   const [finished, setFinished] = useState(false);
+  const [feedShareVisible, setFeedShareVisible] = useState(false);
+  const [sharing, setSharing] = useState(false);
+
+  const { shotRef, spec: captureSpec, captureCards, cancelCapture, onQuestionImageLoad } = useQuizCardCapture();
+  const skipNextFocusLoadRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const loadRound = useCallback(async () => {
+    cancelCapture();
     setLoading(true);
     setError(null);
     setFinished(false);
     setRoundIdx(0);
     setScore(0);
+    setAnswers([]);
     setSelectedYear(null);
     setAnswerState('unanswered');
     try {
@@ -77,27 +107,40 @@ export default function QuizScreen() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [cancelCapture]);
+
+  const startNewRound = useCallback(() => {
+    skipNextFocusLoadRef.current = true;
+    void loadRound();
+  }, [loadRound]);
 
   useFocusEffect(
     useCallback(() => {
-      // Fresh round every time this screen gains focus, not just on first mount.
-      loadRound();
-    }, [loadRound]),
+      // Keep a completed round intact so the user can share after switching tabs.
+      if (finished || sharing) return undefined;
+      if (skipNextFocusLoadRef.current) {
+        skipNextFocusLoadRef.current = false;
+        return undefined;
+      }
+      void loadRound();
+      return undefined;
+    }, [loadRound, finished, sharing]),
   );
 
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (sharing) return true;
       router.replace('/memories');
       return true;
     });
     return () => sub.remove();
-  }, [router]);
+  }, [router, sharing]);
 
   const currentItem = items[roundIdx] ?? null;
   const imageUrl = currentItem && serverConfig
     ? buildPreviewUrl(serverConfig, currentItem.relative_path, currentItem.source_type, currentItem.source_id)
     : '';
+  const scoreMessage = getScoreMessage(score, items.length);
 
   const handleSelect = (year: number) => {
     if (answerState !== 'unanswered' || !currentItem) return;
@@ -105,6 +148,11 @@ export default function QuizScreen() {
     const isCorrect = year === currentItem.correct_year;
     setAnswerState(isCorrect ? 'correct' : 'wrong');
     if (isCorrect) setScore(s => s + 1);
+    setAnswers(prev => {
+      const next = [...prev];
+      next[roundIdx] = year;
+      return next;
+    });
   };
 
   const handleNext = useCallback(() => {
@@ -141,14 +189,102 @@ export default function QuizScreen() {
       },
     });
     setSwipePanHandlers(responder.panHandlers);
-  }, []); // intentionally empty — callbacks always read from refs
+  }, []);
+
+  const buildCaptureSpecs = useCallback((): QuizCaptureSpec[] => {
+    if (!serverConfig) return [];
+    const specs: QuizCaptureSpec[] = [{ kind: 'score' }];
+    items.forEach((item, index) => {
+      specs.push({
+        kind: 'question',
+        questionIndex: index,
+        item,
+        chosenYear: answers[index] ?? null,
+        imageUrl: buildPreviewUrl(serverConfig, item.relative_path, item.source_type, item.source_id),
+      });
+    });
+    return specs;
+  }, [answers, items, serverConfig]);
+
+  const handleFeedShareSubmit = async (targetIds: string[], caption: string) => {
+    if (!serverConfig || sharing || !items.length) return;
+    setSharing(true);
+    const capturedUris: string[] = [];
+    try {
+      const specs = buildCaptureSpecs();
+      const expectedCards = items.length + 1;
+      if (specs.length !== expectedCards) {
+        throw new Error('Quiz result is incomplete — please play the round again.');
+      }
+      const unanswered = items.findIndex((_, index) => answers[index] == null);
+      if (unanswered !== -1) {
+        throw new Error('Please answer every question before sharing.');
+      }
+      const computedScore = items.reduce(
+        (acc, item, index) => acc + (answers[index] === item.correct_year ? 1 : 0),
+        0,
+      );
+      if (computedScore !== score) {
+        throw new Error('Score mismatch — please play the round again.');
+      }
+      const uris = await captureCards(specs);
+      if (uris.length !== expectedCards) {
+        throw new Error('Could not render all result cards.');
+      }
+      capturedUris.push(...uris);
+      const quizData = {
+        items: items.map((item, index) => ({
+          source_type: item.source_type,
+          source_id: item.source_id,
+          relative_path: item.relative_path,
+          options: item.options,
+          correct_year: item.correct_year,
+          chosen_year: answers[index] ?? null,
+          capture_time: item.capture_time ?? null,
+        })),
+      };
+      await createQuizShare(targetIds, caption, score, items.length, quizData, uris);
+      if (!mountedRef.current) return;
+      setFeedShareVisible(false);
+      Alert.alert('Shared!', 'Your Guess the Year result was posted to the feed.');
+    } catch (err: any) {
+      if (!mountedRef.current || isQuizCaptureCancelled(err)) return;
+      Alert.alert('Share Failed', sanitizeErrorMessage(err, 'Could not share your quiz result.'));
+    } finally {
+      for (const uri of capturedUris) {
+        await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      }
+      if (mountedRef.current) {
+        setSharing(false);
+      }
+    }
+  };
+
+  useEffect(() => () => {
+    cancelCapture();
+  }, [cancelCapture]);
 
   return (
     <View style={styles.root}>
       <StatusBar barStyle="light-content" />
 
+      <QuizShareCaptureView
+        shotRef={shotRef}
+        spec={captureSpec}
+        score={score}
+        total={items.length}
+        scoreMessage={scoreMessage}
+        primaryColor={colors.primary}
+        onQuestionImageLoad={onQuestionImageLoad}
+      />
+
       <View style={styles.header}>
-        <TouchableOpacity style={styles.closeBtn} onPress={() => router.replace('/memories')} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+        <TouchableOpacity
+          style={styles.closeBtn}
+          onPress={() => { if (!sharing) router.replace('/memories'); }}
+          disabled={sharing}
+          hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+        >
           <AppIcon androidName="close" iosName="xmark" color="#fff" size={22} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Guess the Year</Text>
@@ -177,10 +313,23 @@ export default function QuizScreen() {
         <View style={styles.centered}>
           <AppIcon androidName="emoji_events" iosName="trophy.fill" color={colors.primary} size={56} />
           <Text style={styles.finishedScore}>{score} / {items.length}</Text>
-          <Text style={styles.finishedLabel}>
-            {score === items.length ? 'Perfect memory!' : score >= items.length / 2 ? 'Nice work!' : 'Keep playing to sharpen those memories!'}
-          </Text>
-          <TouchableOpacity style={styles.playAgainBtn} onPress={loadRound}>
+          <Text style={styles.finishedLabel}>{scoreMessage}</Text>
+          <TouchableOpacity
+            style={styles.shareFeedBtn}
+            onPress={() => setFeedShareVisible(true)}
+            disabled={sharing}
+            activeOpacity={0.85}
+          >
+            {sharing ? (
+              <ActivityIndicator color="#fff" size="small" />
+            ) : (
+              <>
+                <AppIcon androidName="share" iosName="square.and.arrow.up" color="#fff" size={18} />
+                <Text style={styles.playAgainText}>Share to Feed</Text>
+              </>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.playAgainBtn} onPress={startNewRound} disabled={sharing}>
             <AppIcon androidName="replay" iosName="arrow.clockwise" color="#fff" size={18} />
             <Text style={styles.playAgainText}>Play Again</Text>
           </TouchableOpacity>
@@ -207,7 +356,7 @@ export default function QuizScreen() {
           <Text style={styles.prompt}>What year was this taken?</Text>
 
           <View style={styles.optionsGrid}>
-            {currentItem.options.map((year) => {
+            {currentItem.options.map((year, optionIndex) => {
               const isSelected = selectedYear === year;
               const isCorrectOption = year === currentItem.correct_year;
               let optionStyle = styles.optionBtn;
@@ -217,7 +366,7 @@ export default function QuizScreen() {
               }
               return (
                 <TouchableOpacity
-                  key={year}
+                  key={`${year}-${optionIndex}`}
                   style={optionStyle}
                   onPress={() => handleSelect(year)}
                   disabled={answerState !== 'unanswered'}
@@ -248,6 +397,21 @@ export default function QuizScreen() {
           })()}
         </View>
       ) : null}
+
+      {sharing ? (
+        <View style={styles.sharingOverlay}>
+          <ActivityIndicator size="large" color="#fff" />
+          <Text style={styles.sharingText}>Preparing your result cards…</Text>
+        </View>
+      ) : null}
+
+      <ShareModal
+        visible={feedShareVisible}
+        count={items.length + 1}
+        colors={colors}
+        onClose={() => { if (!sharing) setFeedShareVisible(false); }}
+        onSubmit={handleFeedShareSubmit}
+      />
     </View>
   );
 }
@@ -283,14 +447,38 @@ const createStyles = (colors: AppColors, insets: any) =>
 
     finishedScore: { fontSize: 48, fontWeight: '900', color: '#fff', marginTop: Spacing.four },
     finishedLabel: { fontSize: TextScale.base, color: 'rgba(255,255,255,0.75)', marginTop: Spacing.two, textAlign: 'center' },
+    shareFeedBtn: {
+      flexDirection: 'row', alignItems: 'center', gap: Spacing.two,
+      backgroundColor: 'rgba(255,255,255,0.14)',
+      borderWidth: 1,
+      borderColor: 'rgba(255,255,255,0.25)',
+      paddingHorizontal: Spacing.six, paddingVertical: Spacing.three,
+      borderRadius: Radius.full,
+      marginTop: Spacing.six,
+      minWidth: 180,
+      justifyContent: 'center',
+    },
     playAgainBtn: {
       flexDirection: 'row', alignItems: 'center', gap: Spacing.two,
       backgroundColor: colors.primary,
       paddingHorizontal: Spacing.six, paddingVertical: Spacing.three,
       borderRadius: Radius.full,
-      marginTop: Spacing.six,
+      marginTop: Spacing.three,
     },
     playAgainText: { color: '#fff', fontWeight: '700', fontSize: TextScale.sm },
+
+    sharingOverlay: {
+      ...StyleSheet.absoluteFill,
+      backgroundColor: 'rgba(0,0,0,0.72)',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: Spacing.three,
+    },
+    sharingText: {
+      color: 'rgba(255,255,255,0.9)',
+      fontSize: TextScale.sm,
+      fontWeight: '600',
+    },
 
     gameArea: { flex: 1, paddingHorizontal: Spacing.five, paddingBottom: Math.max(insets.bottom, 20) + Spacing.two },
     progressRow: { flexDirection: 'row', gap: 6, marginBottom: Spacing.four },

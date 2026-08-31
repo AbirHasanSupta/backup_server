@@ -2612,14 +2612,14 @@ def get_share_target_devices(exclude_device_id: str | None = None) -> list[dict]
     return [dict(r) for r in rows]
 
 
-def _cleanup_rewind_shared_files(share_ids: list[int]) -> None:
-    """Delete persisted rewind-reel copies for the given share ids (best-effort)."""
+def _cleanup_persisted_share_files(share_ids: list[int]) -> None:
+    """Delete on-disk copies for persisted share types (rewind reels, quiz cards)."""
     if not share_ids:
         return
     conn = get_conn()
     placeholders = ",".join("?" * len(share_ids))
     rows = conn.execute(
-        f"SELECT relative_path FROM device_shares WHERE id IN ({placeholders}) AND source_type = 'rewind_shared'",
+        f"SELECT relative_path FROM device_shares WHERE id IN ({placeholders}) AND source_type IN ('rewind_shared', 'quiz_shared')",
         share_ids,
     ).fetchall()
     conn.close()
@@ -2628,6 +2628,22 @@ def _cleanup_rewind_shared_files(share_ids: list[int]) -> None:
             os.remove(r["relative_path"])
         except OSError:
             pass
+
+
+def _cleanup_rewind_shared_files(share_ids: list[int]) -> None:
+    """Backward-compatible alias for persisted share file cleanup."""
+    _cleanup_persisted_share_files(share_ids)
+
+
+def _cleanup_quiz_group_metadata(group_id: str) -> None:
+    """Delete stored quiz-result JSON for a share group (best-effort)."""
+    from config import SHARED_QUIZ_DIR
+
+    meta_path = os.path.join(SHARED_QUIZ_DIR, f"{group_id}.json")
+    try:
+        os.remove(meta_path)
+    except OSError:
+        pass
 
 
 def _cleanup_orphaned_media(media_ids: list[int]) -> None:
@@ -2664,6 +2680,7 @@ def create_device_share(
     items: list[dict],
     post_kind: str | None = None,
     post_title: str | None = None,
+    group_id: str | None = None,
 ) -> dict:
     """Create one share row per item, grouped under a single share_group_id.
 
@@ -2685,8 +2702,9 @@ def create_device_share(
     now_ts = int(_time.time())
     cap = (caption or "").strip() or None
 
-    # One group per share call
-    group_id = str(_uuid.uuid4())
+    # One group per share call (caller may supply a pre-generated id).
+    if not group_id:
+        group_id = str(_uuid.uuid4())
     kind = (post_kind or "").strip() or None
     title = (post_title or "").strip() or None
     conn.execute(
@@ -2866,12 +2884,13 @@ def delete_device_share_group(group_id: str, requesting_device_id: str) -> bool:
     """
     conn = get_conn()
     row = conn.execute(
-        "SELECT shared_by_device_id FROM device_share_groups WHERE id = ?",
+        "SELECT shared_by_device_id, post_kind FROM device_share_groups WHERE id = ?",
         (group_id,),
     ).fetchone()
     if not row or row["shared_by_device_id"] != requesting_device_id:
         conn.close()
         return False
+    post_kind = row["post_kind"]
     share_ids = [
         r["id"]
         for r in conn.execute(
@@ -2887,11 +2906,13 @@ def delete_device_share_group(group_id: str, requesting_device_id: str) -> bool:
     if share_ids:
         placeholders = ",".join("?" * len(share_ids))
         conn.execute(f"DELETE FROM device_share_targets WHERE share_id IN ({placeholders})", share_ids)
-    _cleanup_rewind_shared_files(share_ids)
+    _cleanup_persisted_share_files(share_ids)
     conn.execute("DELETE FROM device_shares WHERE share_group_id = ?", (group_id,))
     conn.execute("DELETE FROM device_share_groups WHERE id = ?", (group_id,))
     conn.commit()
     conn.close()
+    if post_kind == "quiz":
+        _cleanup_quiz_group_metadata(group_id)
     _cleanup_orphaned_media(media_ids)
     return True
 
@@ -2917,7 +2938,7 @@ def delete_device_share(share_id: int, requesting_device_id: str) -> bool:
             conn.close()
             return delete_device_share_group(group_id, requesting_device_id)
     conn.execute("DELETE FROM device_share_targets WHERE share_id = ?", (share_id,))
-    _cleanup_rewind_shared_files([share_id])
+    _cleanup_persisted_share_files([share_id])
     conn.execute("DELETE FROM device_shares WHERE id = ?", (share_id,))
     conn.commit()
     conn.close()
