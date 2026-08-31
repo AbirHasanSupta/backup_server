@@ -29,6 +29,7 @@ import { discoverServers } from '../../serverDiscovery';
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { setServerCertFingerprint } from '../../settings';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
@@ -102,6 +103,7 @@ function parseManualAddress(rawInput: string): { ip: string; port: number } | nu
 export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
+  const { keyboardHeight } = useKeyboardHeight();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -241,7 +243,6 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={handleRequestClose} statusBarTranslucent>
-      {/* RNGH gestures do not work inside RN Modal unless re-rooted here. */}
       <GestureHandlerRootView style={styles.modalRoot}>
         <KeyboardAvoidingView
           style={styles.modalRoot}
@@ -260,7 +261,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
             style={[
               styles.sheet,
               sheetAnimStyle,
-              { paddingBottom: Math.max(insets.bottom, Spacing.five) + Spacing.two },
+              { paddingBottom: Math.max(insets.bottom, Spacing.five) + Spacing.two + (Platform.OS === 'android' ? keyboardHeight : 0) },
             ]}
           >
             <GestureDetector gesture={panGesture}>

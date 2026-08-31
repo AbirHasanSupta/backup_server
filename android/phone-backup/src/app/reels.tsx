@@ -23,6 +23,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   getReelsFeed,
   getConfig,
@@ -107,19 +108,20 @@ async function persistWatched(watched: Set<string>): Promise<void> {
 //    freshness  0.35 – unwatched reels get a flat +0.35 bonus
 //    noise      0.25 – pure random factor for variety and anti-filter-bubble
 
-function scoreReel(item: ReelItem, watched: Set<string>): number {
+function scoreReel(item: ReelItem, watched: Set<string>, now: number): number {
   const reactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
-  const ageDays = Math.max(0, Date.now() / 1000 - (item.created_at || 0)) / 86400;
+  const ageDays = Math.max(0, now / 1000 - (item.created_at || 0)) / 86400;
   const recency = Math.exp(-ageDays / 14);
   const engagement = Math.min(Math.log1p(reactions) / Math.log1p(10), 1);
   const freshBonus = watched.has(item.reel_id) ? 0 : 0.35;
-  const noise = Math.random() * 0.25;
+  const noise = (Math.sin(now + (item.created_at || 0)) + 1) * 0.125;
   return recency * 0.25 + engagement * 0.15 + freshBonus * 0.35 + noise * 0.25;
 }
 
 function rankReels(items: ReelItem[], watched: Set<string>): ReelItem[] {
+  const now = Date.now();
   return [...items]
-    .map(item => ({ item, score: scoreReel(item, watched) }))
+    .map(item => ({ item, score: scoreReel(item, watched, now) }))
     .sort((a, b) => b.score - a.score)
     .map(({ item }) => item);
 }
@@ -244,7 +246,7 @@ function ReelCard({ item, isActive, serverConfig, muted, onToggleMute, onReact, 
   const [show2x, setShow2x] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showHeart, setShowHeart] = useState(false);
-  const heartScale = useRef(new Animated.Value(0)).current;
+  const heartScale = useMemo(() => new Animated.Value(0), []);
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const singleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTapRef = useRef(0);
@@ -301,6 +303,7 @@ function ReelCard({ item, isActive, serverConfig, muted, onToggleMute, onReact, 
   }, []);
 
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
     if (isActive) {
       setIsPlaying(true);
       setProgress(0);
@@ -313,6 +316,7 @@ function ReelCard({ item, isActive, serverConfig, muted, onToggleMute, onReact, 
       if (controlsTimer.current) clearTimeout(controlsTimer.current);
       setShowControls(false);
     }
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [isActive]);
 
   useEffect(() => () => {
@@ -455,13 +459,14 @@ function CommentsSheet({
   onCommentDeleted,
 }: {
   visible: boolean;
-  mediaId: number | null | undefined;
+  mediaId?: number | null;
   colors: AppColors;
   onClose: () => void;
   onCommentAdded: () => void;
   onCommentDeleted: () => void;
 }) {
   const insets = useSafeAreaInsets();
+  const { keyboardHeight } = useKeyboardHeight();
   const [comments, setComments] = useState<Comment[]>([]);
   const [loading, setLoading] = useState(false);
   const [text, setText] = useState('');
@@ -512,8 +517,16 @@ function CommentsSheet({
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={cs.backdrop} onPress={onClose} />
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={cs.kav}>
-        <View style={[cs.sheet, { backgroundColor: colors.surface, paddingBottom: insets.bottom + Spacing.two }]}>
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={cs.kav}>
+        <View
+          style={[
+            cs.sheet,
+            {
+              backgroundColor: colors.surface,
+              paddingBottom: insets.bottom + Spacing.two + (Platform.OS === 'android' ? keyboardHeight : 0),
+            },
+          ]}
+        >
           <View style={cs.handle} />
           <View style={[cs.header, { borderBottomColor: colors.surfaceBorder }]}>
             <Text style={[cs.title, { color: colors.text }]}>Comments</Text>
@@ -648,7 +661,11 @@ export default function ReelsScreen() {
     }
   }, []);
 
-  useEffect(() => { loadReels(true); }, [loadReels]);
+  useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
+    void loadReels(true);
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, [loadReels]);
 
   useFocusEffect(useCallback(() => {
     setScreenFocused(true);
@@ -667,7 +684,7 @@ export default function ReelsScreen() {
     });
   }, []);
 
-  const onViewableItemsChanged = useRef(({ viewableItems }: { viewableItems: Array<{ index: number | null }> }) => {
+  const onViewableItemsChanged = useMemo(() => ({ viewableItems }: { viewableItems: { index: number | null }[] }) => {
     if (viewableItems.length === 0) return;
     const idx = viewableItems[0].index ?? 0;
     setActiveIndex(idx);
@@ -676,9 +693,9 @@ export default function ReelsScreen() {
       watchedRef.current.add(reel.reel_id);
       persistWatched(watchedRef.current).catch(() => {});
     }
-  }).current;
+  }, []);
 
-  const viewabilityConfig = useRef({ itemVisiblePercentThreshold: 75, minimumViewTime: 150 }).current;
+  const viewabilityConfig = useMemo(() => ({ itemVisiblePercentThreshold: 75, minimumViewTime: 150 }), []);
 
   const handleReact = useCallback(async (item: ReelItem, emoji: string) => {
     if (item.media_id == null) return;

@@ -10,6 +10,7 @@ import {
   Switch,
   TouchableOpacity,
   RefreshControl,
+  Platform,
 } from 'react-native';
 import Constants from 'expo-constants';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -54,6 +55,7 @@ import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { clearAllDiskCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
@@ -84,6 +86,7 @@ const HEADER_HEIGHT = 100;
 
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
+  const { keyboardHeight } = useKeyboardHeight();
   const { colors, isDark, mode, setMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const router = useRouter();
@@ -468,11 +471,12 @@ export default function SettingsScreen() {
           styles.scrollContent,
           {
             paddingTop: containerPaddingTop + Spacing.two,
-            paddingBottom: BottomTabInset + insets.bottom + 34,
+            paddingBottom: BottomTabInset + insets.bottom + 34 + (Platform.OS === 'android' ? keyboardHeight : 0),
           },
         ]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        automaticallyAdjustKeyboardInsets={true}
         onScroll={onScroll}
         onScrollEndDrag={onScrollEndDrag}
         onMomentumScrollEnd={onMomentumScrollEnd}

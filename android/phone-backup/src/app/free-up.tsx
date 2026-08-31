@@ -898,6 +898,8 @@ export default function FreeUpScreen() {
           />
         }
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        automaticallyAdjustKeyboardInsets={true}
         removeClippedSubviews
         maxToRenderPerBatch={20}
         windowSize={10}

@@ -17,6 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { listShareTargetDevices } from '../../downloader';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 const { height: SCREEN_H } = Dimensions.get('window');
 
@@ -42,6 +43,7 @@ export function ShareModal({
   onSubmit: (targetIds: string[], caption: string) => Promise<void>;
 }) {
   const insets = useSafeAreaInsets();
+  const { keyboardHeight } = useKeyboardHeight();
   const [devices, setDevices] = useState<ShareTargetDevice[]>([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -102,7 +104,15 @@ export function ShareModal({
         style={styles.avoider}
         pointerEvents="box-none"
       >
-        <View style={[styles.sheet, { backgroundColor: colors.surface, paddingBottom: insets.bottom + Spacing.three }]}>
+        <View
+          style={[
+            styles.sheet,
+            {
+              backgroundColor: colors.surface,
+              paddingBottom: insets.bottom + Spacing.three + (Platform.OS === 'android' ? keyboardHeight : 0),
+            },
+          ]}
+        >
           <View style={styles.handle} />
           <View style={styles.header}>
             <Text style={[styles.title, { color: colors.text }]}>

@@ -35,9 +35,11 @@ import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '
 import { AppIcon } from '@/components/AppIcon';
 import { ShareModal } from '@/components/ShareModal';
 import { ReactorsListSheet } from '@/components/ReactorsListSheet';
+import { DirectPostModal, DeviceFileItem } from '@/components/DirectPostModal';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   downloadFile,
   listSharedSources,
@@ -72,7 +74,7 @@ import {
   buildShareDownloadUrl,
   downloadShareFile,
 } from '../../downloader';
-import { checkDeviceConnection } from '../../uploader';
+import { checkDeviceConnection, uploadFile } from '../../uploader';
 import { getServerIp } from '../../settings';
 import { getCurrentSyncState } from '../../backgroundTask';
 import { prunePreviewCache } from '@/utils/previewCacheManager';
@@ -942,6 +944,7 @@ function CommentsModal({
   onCountChange: (mediaId: number, delta: number) => void;
 }) {
   const insets = useSafeAreaInsets();
+  const { keyboardHeight } = useKeyboardHeight();
   const [comments, setComments] = useState<CommentItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState('');
@@ -1014,7 +1017,15 @@ function CommentsModal({
         style={modalSheetStyles.avoider}
         pointerEvents="box-none"
       >
-        <View style={[modalSheetStyles.sheet, { backgroundColor: colors.surface, paddingBottom: insets.bottom + Spacing.three }]}>
+        <View
+          style={[
+            modalSheetStyles.sheet,
+            {
+              backgroundColor: colors.surface,
+              paddingBottom: insets.bottom + Spacing.three + (Platform.OS === 'android' ? keyboardHeight : 0),
+            },
+          ]}
+        >
           <View style={modalSheetStyles.handle} />
           <View style={modalSheetStyles.header}>
             <Text style={[modalSheetStyles.title, { color: colors.text }]}>Comments</Text>
@@ -1110,6 +1121,7 @@ function ManageShareModal({
   onUpdated?: (updated: { caption?: string; removedShareId?: number }) => void;
 }) {
   const insets = useSafeAreaInsets();
+  const { keyboardHeight } = useKeyboardHeight();
   const groupId = item?.group_id || null;
   const initialCaption = item?.group_caption || item?.caption || '';
 
@@ -1269,7 +1281,15 @@ function ManageShareModal({
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={modalSheetStyles.backdrop} onPress={onClose} />
       <View style={modalSheetStyles.avoider} pointerEvents="box-none">
-        <View style={[modalSheetStyles.sheet, { backgroundColor: colors.surface, paddingBottom: insets.bottom + Spacing.three }]}>
+        <View
+          style={[
+            modalSheetStyles.sheet,
+            {
+              backgroundColor: colors.surface,
+              paddingBottom: insets.bottom + Spacing.three + (Platform.OS === 'android' ? keyboardHeight : 0),
+            },
+          ]}
+        >
           <View style={modalSheetStyles.handle} />
           <View style={modalSheetStyles.header}>
             <Text style={[modalSheetStyles.title, { color: colors.text }]}>Manage Post</Text>
@@ -4005,6 +4025,12 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const [shareModalVisible, setShareModalVisible] = useState(false);
   const [singleShareFile, setSingleShareFile] = useState<RemoteFile | null>(null);
 
+  // Direct post from phone storage (Feed-only)
+  const [directPostVisible, setDirectPostVisible] = useState(false);
+  const [directPostFolderName, setDirectPostFolderName] = useState('');
+  const [directPostFiles, setDirectPostFiles] = useState<DeviceFileItem[]>([]);
+  const [isOpeningFolder, setIsOpeningFolder] = useState(false);
+
   // Preview state
   const [previewFile, setPreviewFile] = useState<RemoteFile | null>(null);
   const [previewIndex, setPreviewIndex] = useState<number>(0);
@@ -4542,6 +4568,122 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       if (restoreMountedRef.current) setFeedLoadingMore(false);
     }
   }, [feedLoadingMore, feedHasMore, isFetching, isOffline, isDownloading, feedOffset]);
+
+  // Open device file manager, pick directory and scan files for Direct Post
+  const handleOpenDirectPost = useCallback(async () => {
+    if (isOffline) {
+      Alert.alert('Server Offline', 'Please connect to the backup server first before sharing a post.');
+      return;
+    }
+    setIsOpeningFolder(true);
+    try {
+      const perm = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+      if (!perm.granted) return;
+
+      const raw = perm.directoryUri.split('/').pop() as string;
+      const folderName = decodeURIComponent(raw || 'Device Folder');
+      setDirectPostFolderName(folderName);
+
+      // Read files in the selected directory
+      const rawUris = await FileSystem.StorageAccessFramework.readDirectoryAsync(perm.directoryUri);
+      if (!rawUris || rawUris.length === 0) {
+        Alert.alert('Empty Folder', 'No files were found in the selected folder.');
+        return;
+      }
+
+      const items: DeviceFileItem[] = [];
+      for (const uri of rawUris) {
+        const decodedPart = decodeURIComponent(uri.split('/').pop() || '');
+        const fileName = decodedPart.substring(Math.max(decodedPart.lastIndexOf('/'), decodedPart.lastIndexOf(':')) + 1);
+        // Skip hidden/system files
+        if (!fileName || fileName.startsWith('.')) continue;
+
+        let size = 0;
+        let modifiedTime = Math.floor(Date.now() / 1000);
+        try {
+          const info = await FileSystem.getInfoAsync(uri);
+          if (info.exists && !info.isDirectory) {
+            size = info.size || 0;
+            if (info.modificationTime) {
+              modifiedTime = Math.floor(info.modificationTime);
+            }
+          }
+        } catch {}
+
+        items.push({
+          uri,
+          name: fileName,
+          size,
+          modifiedTime,
+          selected: true,
+        });
+      }
+
+      if (items.length === 0) {
+        Alert.alert('No Supported Files', 'No valid files found in this folder to share.');
+        return;
+      }
+
+      setDirectPostFiles(items);
+      setDirectPostVisible(true);
+    } catch (err: any) {
+      Alert.alert('Error', sanitizeErrorMessage(err, 'Could not access the selected folder.'));
+    } finally {
+      setIsOpeningFolder(false);
+    }
+  }, [isOffline]);
+
+  // Upload selected files and create feed post
+  const handleDirectPostSubmit = useCallback(
+    async (selectedFiles: DeviceFileItem[], targetIds: string[], caption: string) => {
+      const cfg = await getConfig();
+      const deviceId = cfg?.deviceId;
+      if (!deviceId) {
+        throw new Error('Device configuration not available');
+      }
+
+      const folderName = directPostFolderName || 'Shared';
+      const items: {
+        source_type: string;
+        source_key: string;
+        relative_path: string;
+        size: number;
+        modified_time: number;
+      }[] = [];
+
+      for (const f of selectedFiles) {
+        const relativePath = `${folderName}/${f.name}`;
+        // Upload the file to server
+        await uploadFile({
+          uri: f.uri,
+          relativePath,
+          name: f.name,
+          size: f.size,
+          modifiedTime: f.modifiedTime,
+        });
+
+        items.push({
+          source_type: 'phone',
+          source_key: deviceId,
+          relative_path: relativePath,
+          size: f.size,
+          modified_time: f.modifiedTime,
+        });
+      }
+
+      // Create the device share post on the server
+      await createDeviceShare(targetIds, caption, items);
+      hapticSuccess();
+
+      // Refresh feed
+      void handleFetch({ quiet: false, ignoreOffline: true, preserveSelection: true });
+      Alert.alert(
+        'Post Published!',
+        `Successfully shared ${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'} to the feed.`
+      );
+    },
+    [directPostFolderName, handleFetch]
+  );
 
   const handleHidePost = useCallback((file: RemoteFile) => {
     Alert.alert(
@@ -5215,6 +5357,25 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             </Text>
           </View>
           <View style={styles.headerButtons}>
+            {isFeedMode && (
+              <AnimatedPressable
+                onPress={handleOpenDirectPost}
+                style={[styles.actionBtn, (isOpeningFolder || isOffline) && styles.disabledBtn]}
+                disabled={isOpeningFolder || isOffline}
+                scaleDown={0.92}
+                haptic
+                accessibilityLabel="Add post from device files"
+              >
+                {isOpeningFolder ? (
+                  <ActivityIndicator size="small" color={colors.primary} />
+                ) : (
+                  <>
+                    <AppIcon androidName="add" iosName="plus" color={isOffline ? colors.textMuted : colors.primary} size={17} fallback="+" />
+                    <Text style={[styles.actionBtnText, { color: isOffline ? colors.textMuted : colors.primary }]}>Post</Text>
+                  </>
+                )}
+              </AnimatedPressable>
+            )}
             <AnimatedPressable
               onPress={handleFetch}
               style={[styles.actionBtn, fetchDisabled && styles.disabledBtn]}
@@ -5371,6 +5532,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         scrollEventThrottle={16}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
+        automaticallyAdjustKeyboardInsets={true}
         extraData={isFeedMode ? undefined : [selectedPaths, expandedKeys]}
         refreshControl={
           isDownloading ? undefined : (
@@ -5560,6 +5722,17 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         colors={colors}
         onClose={() => setCommentsItem(null)}
         onCountChange={handleCommentCountChange}
+      />
+
+      {/* Direct Post from Device File Manager (Feed-only) */}
+      <DirectPostModal
+        visible={directPostVisible}
+        folderName={directPostFolderName}
+        files={directPostFiles}
+        colors={colors}
+        onClose={() => setDirectPostVisible(false)}
+        onChangeFolder={handleOpenDirectPost}
+        onSubmit={handleDirectPostSubmit}
       />
 
       {/* Reactors list on a feed item */}
