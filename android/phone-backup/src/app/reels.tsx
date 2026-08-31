@@ -14,13 +14,14 @@ import {
   Platform,
   Pressable,
   Animated,
+  LayoutChangeEvent,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
+import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
@@ -38,12 +39,18 @@ import { hapticLight, hapticSuccess, hapticError, hapticLongPress, hapticSelecti
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
+// Tab bar height matching _layout.tsx
+const TAB_BAR_HEIGHT = Platform.OS === 'android' ? 82 : 88;
+const TAB_BAR_BOTTOM_OFFSET = 10;
+const TAB_BAR_TOTAL_CLEARANCE = TAB_BAR_HEIGHT + TAB_BAR_BOTTOM_OFFSET + 4;
+
 // ─── Optional expo-video (same lazy-require pattern as restore.tsx) ───────────
 
 type ExpoVideoModule = typeof import('expo-video');
 type VideoSource = import('expo-video').VideoSource;
 let expoVideoModule: ExpoVideoModule | null = null;
 try {
+  /* eslint-disable-next-line @typescript-eslint/no-require-imports */
   expoVideoModule = require('expo-video') as ExpoVideoModule;
 } catch {
   console.warn('[Reels] expo-video unavailable – falling back to thumbnail-only view');
@@ -101,12 +108,6 @@ async function persistWatched(watched: Set<string>): Promise<void> {
 }
 
 // ─── Reel ranking algorithm ───────────────────────────────────────────────────
-//
-//  Score breakdown (weights always sum to 1.0):
-//    recency    0.25 – exponential half-life of 14 days
-//    engagement 0.15 – log-scaled reaction count (≥10 reactions ≈ max score)
-//    freshness  0.35 – unwatched reels get a flat +0.35 bonus
-//    noise      0.25 – pure random factor for variety and anti-filter-bubble
 
 function scoreReel(item: ReelItem, watched: Set<string>, now: number): number {
   const reactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
@@ -126,7 +127,7 @@ function rankReels(items: ReelItem[], watched: Set<string>): ReelItem[] {
     .map(({ item }) => item);
 }
 
-// ─── Progress bar ─────────────────────────────────────────────────────────────
+// ─── Bottom Progress bar (Instagram-style) ────────────────────────────────────
 
 function ReelProgressBar({ progress }: { progress: number }) {
   const pct = `${Math.min(100, Math.max(0, progress * 100))}%` as const;
@@ -138,8 +139,15 @@ function ReelProgressBar({ progress }: { progress: number }) {
 }
 
 const progressStyles = StyleSheet.create({
-  track: { height: 2.5, backgroundColor: 'rgba(255,255,255,0.28)', borderRadius: 2 },
-  fill: { height: '100%', borderRadius: 2, backgroundColor: '#fff' },
+  track: {
+    height: 2.5,
+    width: '100%',
+    backgroundColor: 'rgba(255, 255, 255, 0.22)',
+  },
+  fill: {
+    height: '100%',
+    backgroundColor: '#FFFFFF',
+  },
 });
 
 // ─── Video player (only rendered when expo-video is available) ────────────────
@@ -178,8 +186,11 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
   const readyFiredRef = useRef(false);
   const onReadyRef = useRef(onReady);
   const onProgressRef = useRef(onProgress);
-  onReadyRef.current = onReady;
-  onProgressRef.current = onProgress;
+
+  useEffect(() => {
+    onReadyRef.current = onReady;
+    onProgressRef.current = onProgress;
+  }, [onReady, onProgress]);
 
   useEffect(() => {
     if (status === 'readyToPlay' && !readyFiredRef.current) {
@@ -200,15 +211,25 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
   }, [player, isActive]);
 
   useEffect(() => {
-    try { isActive && isPlaying ? player.play() : player.pause(); } catch {}
+    try {
+      if (isActive && isPlaying) {
+        player.play();
+      } else {
+        player.pause();
+      }
+    } catch {}
   }, [isActive, isPlaying, player]);
 
   useEffect(() => {
+    /* eslint-disable react-hooks/immutability */
     try { player.playbackRate = speed; } catch {}
+    /* eslint-enable react-hooks/immutability */
   }, [speed, player]);
 
   useEffect(() => {
+    /* eslint-disable react-hooks/immutability */
     try { player.muted = muted; } catch {}
+    /* eslint-enable react-hooks/immutability */
   }, [muted, player]);
 
   return (
@@ -223,11 +244,13 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
 
 // ─── Single reel card ─────────────────────────────────────────────────────────
 
-const REACTION_EMOJIS = ['❤️', '😂', '😮', '👍'] as const;
+const REACTION_EMOJIS = ['❤️', '😂', '😮', '👍', '🔥', '👏'] as const;
 
 type ReelCardProps = {
   item: ReelItem;
   isActive: boolean;
+  cardWidth: number;
+  cardHeight: number;
   serverConfig: ServerConfig;
   muted: boolean;
   onToggleMute: () => void;
@@ -236,8 +259,17 @@ type ReelCardProps = {
   colors: AppColors;
 };
 
-function ReelCard({ item, isActive, serverConfig, muted, onToggleMute, onReact, onOpenComments, colors }: ReelCardProps) {
-  const insets = useSafeAreaInsets();
+function ReelCard({
+  item,
+  isActive,
+  cardWidth,
+  cardHeight,
+  serverConfig,
+  muted,
+  onToggleMute,
+  onReact,
+  onOpenComments,
+}: ReelCardProps) {
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(1.0);
   const [progress, setProgress] = useState(0);
@@ -257,6 +289,7 @@ function ReelCard({ item, isActive, serverConfig, muted, onToggleMute, onReact, 
   const thumbUrl = serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
   const totalReactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
   const myReaction = item.user_reactions?.[0];
+  const isLiked = !!myReaction;
   const initial = (item.shared_by || '').trim().charAt(0).toUpperCase();
 
   const flashControls = useCallback(() => {
@@ -328,12 +361,33 @@ function ReelCard({ item, isActive, serverConfig, muted, onToggleMute, onReact, 
     setProgress(dur > 0 ? cur / dur : 0);
   }, []);
 
-  const handleReady = useCallback(() => { readyOnceRef.current = true; setIsLoading(false); }, []);
+  const handleReady = useCallback(() => {
+    readyOnceRef.current = true;
+    setIsLoading(false);
+  }, []);
+
+  const toggleHeartLike = useCallback(() => {
+    hapticLight();
+    if (isLiked) {
+      onReact(item, myReaction || '❤️');
+    } else {
+      onReact(item, '❤️');
+    }
+  }, [isLiked, myReaction, item, onReact]);
 
   return (
-    <View style={[s.reel, { width: SCREEN_W, height: SCREEN_H }]}>
-      <Image source={{ uri: thumbUrl }} style={StyleSheet.absoluteFill} contentFit="cover" />
+    <View style={[s.reel, { width: cardWidth, height: cardHeight }]}>
+      {/* Solid Black letterbox background with contain thumbnail placeholder */}
+      {(!expoVideoModule || !videoUrl || isLoading) && thumbUrl ? (
+        <Image
+          source={{ uri: thumbUrl }}
+          style={StyleSheet.absoluteFill}
+          contentFit="contain"
+          transition={150}
+        />
+      ) : null}
 
+      {/* Video View with contain fit and solid black letterboxing */}
       {expoVideoModule && videoUrl ? (
         <VideoReelPlayer
           uri={videoUrl}
@@ -346,9 +400,7 @@ function ReelCard({ item, isActive, serverConfig, muted, onToggleMute, onReact, 
         />
       ) : null}
 
-      <View style={s.gradientTop} pointerEvents="none" />
-      <View style={s.gradientBottom} pointerEvents="none" />
-
+      {/* Full transparent touch receiver overlay */}
       <Pressable
         style={StyleSheet.absoluteFill}
         onPress={handlePress}
@@ -357,65 +409,109 @@ function ReelCard({ item, isActive, serverConfig, muted, onToggleMute, onReact, 
         delayLongPress={350}
       />
 
-      <View style={[s.progressWrap, { top: insets.top + 52 }]} pointerEvents="none">
-        <ReelProgressBar progress={progress} />
-      </View>
-
+      {/* 2x speed pill indicator */}
       {show2x && (
         <View style={s.speedBadge} pointerEvents="none">
+          <AppIcon androidName="bolt" iosName="bolt.fill" color="#FFD700" size={18} />
           <Text style={s.speedText}>2×</Text>
         </View>
       )}
 
+      {/* Play/Pause flash indicator */}
       {showControls && (
         <View style={s.playPauseBadge} pointerEvents="none">
           <AppIcon
             androidName={isPlaying ? 'pause' : 'play_arrow'}
             iosName={isPlaying ? 'pause.fill' : 'play.fill'}
-            color="rgba(255,255,255,0.92)"
-            size={46}
+            color="rgba(255,255,255,0.95)"
+            size={42}
           />
         </View>
       )}
 
+      {/* Double tap heart animation */}
       {showHeart && (
         <Animated.View
           pointerEvents="none"
           style={[s.heartOverlay, { transform: [{ scale: heartScale }], opacity: heartScale }]}
         >
-          <AppIcon androidName="favorite" iosName="heart.fill" color="#fff" size={80} />
+          <AppIcon androidName="favorite" iosName="heart.fill" color="#FF2D55" size={88} />
         </Animated.View>
       )}
 
+      {/* Loading spinner */}
       {isLoading && isActive && (
         <View style={s.loadingOverlay} pointerEvents="none">
           <ActivityIndicator color="#fff" size="large" />
         </View>
       )}
 
-      <View style={[s.rightActions, { bottom: insets.bottom + 90 }]} pointerEvents="box-none">
-        <TouchableOpacity style={s.actionBtn} onPress={() => { hapticLight(); setShowEmojiPicker(p => !p); }} activeOpacity={0.8}>
-          <Text style={s.actionEmoji}>{myReaction || '❤️'}</Text>
-          {totalReactions > 0 && <Text style={s.actionCount}>{totalReactions}</Text>}
+      {/* Right Action Bar (Instagram-style modern polished buttons) */}
+      <View style={s.rightActions} pointerEvents="box-none">
+        {/* Like / Reaction Button */}
+        <TouchableOpacity
+          style={s.actionBtn}
+          onPress={toggleHeartLike}
+          onLongPress={() => { hapticLongPress(); setShowEmojiPicker(p => !p); }}
+          activeOpacity={0.75}
+        >
+          <View style={s.actionIconWrap}>
+            {myReaction && myReaction !== '❤️' ? (
+              <Text style={s.actionEmojiText}>{myReaction}</Text>
+            ) : (
+              <AppIcon
+                androidName={isLiked ? 'favorite' : 'favorite_border'}
+                iosName={isLiked ? 'heart.fill' : 'heart'}
+                color={isLiked ? '#FF2D55' : '#FFFFFF'}
+                size={30}
+              />
+            )}
+          </View>
+          <Text style={s.actionCount}>
+            {totalReactions > 0 ? totalReactions : 'Like'}
+          </Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={s.actionBtn} onPress={() => { hapticLight(); onOpenComments(item); }} activeOpacity={0.8}>
-          <AppIcon androidName="chat_bubble" iosName="bubble.left.fill" color="#fff" size={28} />
-          {item.comment_count > 0 && <Text style={s.actionCount}>{item.comment_count}</Text>}
+        {/* Comments Button */}
+        <TouchableOpacity
+          style={s.actionBtn}
+          onPress={() => { hapticLight(); onOpenComments(item); }}
+          activeOpacity={0.75}
+        >
+          <View style={s.actionIconWrap}>
+            <AppIcon
+              androidName="chat_bubble_outline"
+              iosName="bubble.right.fill"
+              color="#FFFFFF"
+              size={28}
+            />
+          </View>
+          <Text style={s.actionCount}>
+            {item.comment_count > 0 ? item.comment_count : 'Comment'}
+          </Text>
         </TouchableOpacity>
 
-        <TouchableOpacity style={s.actionBtn} onPress={() => { hapticSelection(); onToggleMute(); }} activeOpacity={0.8}>
-          <AppIcon
-            androidName={muted ? 'volume_off' : 'volume_up'}
-            iosName={muted ? 'speaker.slash.fill' : 'speaker.wave.2.fill'}
-            color="#fff"
-            size={26}
-          />
+        {/* Mute / Audio Button */}
+        <TouchableOpacity
+          style={s.actionBtn}
+          onPress={() => { hapticSelection(); onToggleMute(); }}
+          activeOpacity={0.75}
+        >
+          <View style={s.actionIconWrap}>
+            <AppIcon
+              androidName={muted ? 'volume_off' : 'volume_up'}
+              iosName={muted ? 'speaker.slash.fill' : 'speaker.wave.2.fill'}
+              color="#FFFFFF"
+              size={26}
+            />
+          </View>
+          <Text style={s.actionCount}>{muted ? 'Muted' : 'Sound'}</Text>
         </TouchableOpacity>
       </View>
 
+      {/* Floating Emoji Picker */}
       {showEmojiPicker && (
-        <View style={[s.emojiPicker, { bottom: insets.bottom + 200 }]}>
+        <View style={s.emojiPicker}>
           {REACTION_EMOJIS.map(emoji => {
             const active = item.user_reactions?.includes(emoji);
             return (
@@ -432,23 +528,44 @@ function ReelCard({ item, isActive, serverConfig, muted, onToggleMute, onReact, 
         </View>
       )}
 
-      <View style={[s.authorInfo, { bottom: insets.bottom + 20 }]} pointerEvents="none">
+      {/* Author & Caption Info (Bottom Left) */}
+      <View style={s.authorInfo} pointerEvents="none">
         <View style={s.authorRow}>
           <View style={s.avatar}>
-            {initial
-              ? <Text style={s.avatarInitial}>{initial}</Text>
-              : <AppIcon androidName="person" iosName="person.fill" color="#fff" size={14} />
-            }
+            {initial ? (
+              <Text style={s.avatarInitial}>{initial}</Text>
+            ) : (
+              <AppIcon androidName="person" iosName="person.fill" color="#fff" size={14} />
+            )}
           </View>
-          <Text style={s.authorName} numberOfLines={1}>{item.shared_by || 'Unknown'}</Text>
+          <Text style={s.authorName} numberOfLines={1}>
+            {item.shared_by || 'Unknown'}
+          </Text>
         </View>
-        {!!item.caption && <Text style={s.caption} numberOfLines={2}>{item.caption}</Text>}
+        {!!item.caption && (
+          <Text style={s.caption} numberOfLines={3}>
+            {item.caption}
+          </Text>
+        )}
+      </View>
+
+      {/* Bottom Progress Bar (Instagram style) */}
+      <View style={s.progressWrap} pointerEvents="none">
+        <ReelProgressBar progress={progress} />
       </View>
     </View>
   );
 }
 
 // ─── Comments sheet ───────────────────────────────────────────────────────────
+
+function formatTimeAgo(ts: number): string {
+  const d = Math.floor(Date.now() / 1000) - ts;
+  if (d < 60) return 'just now';
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+}
 
 function CommentsSheet({
   visible,
@@ -473,6 +590,7 @@ function CommentsSheet({
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect */
     if (!visible || mediaId == null) return;
     let active = true;
     setLoading(true);
@@ -482,6 +600,7 @@ function CommentsSheet({
       .catch(() => { if (active) setComments([]); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [visible, mediaId]);
 
   const handleSubmit = async () => {
@@ -505,14 +624,6 @@ function CommentsSheet({
       onCommentDeleted();
     } catch { hapticError(); }
   };
-
-  function ago(ts: number) {
-    const d = Math.floor(Date.now() / 1000) - ts;
-    if (d < 60) return 'just now';
-    if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-    if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-    return `${Math.floor(d / 86400)}d ago`;
-  }
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -554,7 +665,7 @@ function CommentsSheet({
                       {c.display_name || c.source_id}{c.is_own ? ' (You)' : ''}
                     </Text>
                     <Text style={[cs.cText, { color: colors.text }]}>{c.text}</Text>
-                    <Text style={[cs.cTime, { color: colors.textMuted }]}>{ago(c.created_at)}</Text>
+                    <Text style={[cs.cTime, { color: colors.textMuted }]}>{formatTimeAgo(c.created_at)}</Text>
                   </View>
                   {c.is_own && (
                     <TouchableOpacity onPress={() => handleDelete(c.id)} hitSlop={10}>
@@ -613,7 +724,6 @@ const cs = StyleSheet.create({
 
 export default function ReelsScreen() {
   const { colors } = useAppTheme();
-  const router = useRouter();
   const insets = useSafeAreaInsets();
 
   const [reels, setReels] = useState<ReelItem[]>([]);
@@ -625,14 +735,29 @@ export default function ReelsScreen() {
   const [commentsTarget, setCommentsTarget] = useState<ReelItem | null>(null);
   const [muted, setMuted] = useState(false);
 
+  // Dynamic layout measurement to cleanly fit between status bar and floating bottom tab bar
+  const defaultCardHeight = Math.max(300, SCREEN_H - insets.top - TAB_BAR_TOTAL_CLEARANCE);
+  const [viewportHeight, setViewportHeight] = useState(defaultCardHeight);
+  const [viewportWidth, setViewportWidth] = useState(SCREEN_W);
+
   const listRef = useRef<FlatList<ReelItem>>(null);
   const watchedRef = useRef<Set<string>>(new Set());
   const reelsRef = useRef<ReelItem[]>([]);
-  reelsRef.current = reels;
+  useEffect(() => {
+    reelsRef.current = reels;
+  }, [reels]);
   const hasMoreRef = useRef(false);
   const offsetRef = useRef(0);
   const loadingMoreRef = useRef(false);
-  const seedRef = useRef(Date.now());
+  const seedRef = useRef(0);
+
+  const handleContainerLayout = useCallback((e: LayoutChangeEvent) => {
+    const { width, height } = e.nativeEvent.layout;
+    if (height > 0) {
+      setViewportHeight(height);
+      setViewportWidth(width);
+    }
+  }, []);
 
   const loadReels = useCallback(async (reset = true) => {
     try {
@@ -727,18 +852,26 @@ export default function ReelsScreen() {
     loadReels(false).finally(() => { loadingMoreRef.current = false; });
   }, [loadReels]);
 
-  const extraData = useMemo(() => ({ activeIndex, screenFocused, muted }), [activeIndex, screenFocused, muted]);
+  const extraData = useMemo(() => ({
+    activeIndex,
+    screenFocused,
+    muted,
+    viewportHeight,
+    viewportWidth,
+  }), [activeIndex, screenFocused, muted, viewportHeight, viewportWidth]);
 
   const getItemLayout = useCallback((_: unknown, index: number) => ({
-    length: SCREEN_H,
-    offset: SCREEN_H * index,
+    length: viewportHeight,
+    offset: viewportHeight * index,
     index,
-  }), []);
+  }), [viewportHeight]);
 
   const renderItem = useCallback(({ item, index }: { item: ReelItem; index: number }) => (
     <ReelCard
       item={item}
       isActive={index === activeIndex && screenFocused}
+      cardWidth={viewportWidth}
+      cardHeight={viewportHeight}
       serverConfig={serverConfig}
       muted={muted}
       onToggleMute={handleToggleMute}
@@ -746,81 +879,77 @@ export default function ReelsScreen() {
       onOpenComments={setCommentsTarget}
       colors={colors}
     />
-  ), [activeIndex, screenFocused, serverConfig, muted, handleToggleMute, handleReact, colors]);
-
-  const handleClose = useCallback(() => {
-    if (router.canGoBack()) router.back();
-    else router.replace('/');
-  }, [router]);
-
-  if (loading) {
-    return (
-      <View style={[s.screen, s.center]}>
-        <StatusBar hidden />
-        <ActivityIndicator color="#fff" size="large" />
-        <Text style={s.loadingText}>Loading Reels…</Text>
-      </View>
-    );
-  }
-
-  if (reels.length === 0) {
-    return (
-      <View style={[s.screen, s.center]}>
-        <StatusBar hidden />
-        <TouchableOpacity style={[s.headerBtn, { position: 'absolute', top: insets.top + 8, left: Spacing.three }]} onPress={handleClose} hitSlop={12}>
-          <AppIcon androidName="arrow_back" iosName="chevron.left" color="#fff" size={22} />
-        </TouchableOpacity>
-        <AppIcon androidName="videocam_off" iosName="video.slash" color="rgba(255,255,255,0.55)" size={52} />
-        <Text style={s.emptyTitle}>No Reels Yet</Text>
-        <Text style={s.emptyBody}>
-          {error || 'Post a video to the feed and it will appear here as a reel.'}
-        </Text>
-        <TouchableOpacity style={s.retryBtn} onPress={() => loadReels(true)}>
-          <Text style={s.retryText}>Retry</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
+  ), [activeIndex, screenFocused, viewportWidth, viewportHeight, serverConfig, muted, handleToggleMute, handleReact, colors]);
 
   return (
-    <View style={s.screen}>
-      <StatusBar hidden />
+    <View
+      style={[
+        s.screen,
+        {
+          paddingTop: insets.top,
+          paddingBottom: TAB_BAR_TOTAL_CLEARANCE,
+        },
+      ]}
+    >
+      <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
 
-      <FlatList
-        ref={listRef}
-        data={reels}
-        keyExtractor={item => item.reel_id}
-        renderItem={renderItem}
-        getItemLayout={getItemLayout}
-        extraData={extraData}
-        pagingEnabled
-        showsVerticalScrollIndicator={false}
-        onViewableItemsChanged={onViewableItemsChanged}
-        viewabilityConfig={viewabilityConfig}
-        onEndReached={handleLoadMore}
-        onEndReachedThreshold={3}
-        windowSize={3}
-        initialNumToRender={1}
-        maxToRenderPerBatch={2}
-        removeClippedSubviews={false}
-        scrollEventThrottle={16}
-      />
-
-      {/* Top header bar */}
-      <View style={[s.topBar, { top: insets.top + 8 }]} pointerEvents="box-none">
-        <TouchableOpacity style={s.headerBtn} onPress={handleClose} hitSlop={12}>
-          <AppIcon androidName="close" iosName="xmark" color="#fff" size={21} />
-        </TouchableOpacity>
-
+      {/* Top Header Bar */}
+      <View style={s.topBar} pointerEvents="box-none">
         <Text style={s.headerTitle}>Reels</Text>
 
-        <TouchableOpacity
-          style={s.headerBtn}
-          onPress={() => { hapticSelection(); loadReels(true); }}
-          hitSlop={12}
-        >
-          <AppIcon androidName="shuffle" iosName="shuffle" color="#fff" size={19} />
-        </TouchableOpacity>
+        <View style={s.headerRightActions}>
+          <TouchableOpacity
+            style={s.headerBtn}
+            onPress={() => { hapticSelection(); loadReels(true); }}
+            hitSlop={12}
+          >
+            <AppIcon androidName="shuffle" iosName="shuffle" color="#fff" size={18} />
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Main Reels Viewport Container */}
+      <View style={s.listContainer} onLayout={handleContainerLayout}>
+        {loading ? (
+          <View style={s.center}>
+            <ActivityIndicator color="#fff" size="large" />
+            <Text style={s.loadingText}>Loading Reels…</Text>
+          </View>
+        ) : reels.length === 0 ? (
+          <View style={s.center}>
+            <AppIcon androidName="videocam_off" iosName="video.slash" color="rgba(255,255,255,0.55)" size={52} />
+            <Text style={s.emptyTitle}>No Reels Yet</Text>
+            <Text style={s.emptyBody}>
+              {error || 'Post a video to the feed and it will appear here as a reel.'}
+            </Text>
+            <TouchableOpacity style={s.retryBtn} onPress={() => loadReels(true)}>
+              <Text style={s.retryText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <FlatList
+            ref={listRef}
+            data={reels}
+            keyExtractor={item => item.reel_id}
+            renderItem={renderItem}
+            getItemLayout={getItemLayout}
+            extraData={extraData}
+            pagingEnabled
+            snapToInterval={viewportHeight}
+            snapToAlignment="start"
+            decelerationRate="fast"
+            showsVerticalScrollIndicator={false}
+            onViewableItemsChanged={onViewableItemsChanged}
+            viewabilityConfig={viewabilityConfig}
+            onEndReached={handleLoadMore}
+            onEndReachedThreshold={3}
+            windowSize={3}
+            initialNumToRender={1}
+            maxToRenderPerBatch={2}
+            removeClippedSubviews={false}
+            scrollEventThrottle={16}
+          />
+        )}
       </View>
 
       <CommentsSheet
@@ -838,88 +967,285 @@ export default function ReelsScreen() {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#000' },
-  center: { justifyContent: 'center', alignItems: 'center', gap: Spacing.three },
-  loadingText: { color: 'rgba(255,255,255,0.7)', fontSize: TextScale.sm, marginTop: Spacing.two },
-  emptyTitle: { color: '#fff', fontSize: TextScale.lg, fontWeight: '800', marginTop: Spacing.two },
-  emptyBody: { color: 'rgba(255,255,255,0.65)', fontSize: TextScale.sm, textAlign: 'center', paddingHorizontal: Spacing.eight, lineHeight: 20 },
-  retryBtn: { marginTop: Spacing.two, paddingHorizontal: Spacing.five, paddingVertical: Spacing.two + 2, borderRadius: Radius.full, backgroundColor: 'rgba(255,255,255,0.15)' },
-  retryText: { color: '#fff', fontWeight: '700', fontSize: TextScale.sm },
+  screen: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  listContainer: {
+    flex: 1,
+    backgroundColor: '#000000',
+    overflow: 'hidden',
+  },
+  center: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: Spacing.three,
+    backgroundColor: '#000000',
+  },
+  loadingText: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: TextScale.sm,
+    marginTop: Spacing.two,
+    fontWeight: '600',
+  },
+  emptyTitle: {
+    color: '#fff',
+    fontSize: TextScale.lg,
+    fontWeight: '800',
+    marginTop: Spacing.two,
+  },
+  emptyBody: {
+    color: 'rgba(255,255,255,0.65)',
+    fontSize: TextScale.sm,
+    textAlign: 'center',
+    paddingHorizontal: Spacing.eight,
+    lineHeight: 20,
+  },
+  retryBtn: {
+    marginTop: Spacing.two,
+    paddingHorizontal: Spacing.five,
+    paddingVertical: Spacing.two + 2,
+    borderRadius: Radius.full,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
+  },
+  retryText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: TextScale.sm,
+  },
 
   topBar: {
-    position: 'absolute', left: 0, right: 0,
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: Spacing.three,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.two,
     zIndex: 20,
+    backgroundColor: 'transparent',
   },
-  headerTitle: { color: '#fff', fontSize: TextScale.base, fontWeight: '800' },
+  headerTitle: {
+    color: '#FFFFFF',
+    fontSize: TextScale.xl,
+    fontWeight: '900',
+    letterSpacing: -0.5,
+    textShadowColor: 'rgba(0, 0, 0, 0.75)',
+    textShadowOffset: { width: 0, height: 1.5 },
+    textShadowRadius: 4,
+  },
+  headerRightActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
   headerBtn: {
-    width: 36, height: 36, borderRadius: 18,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    alignItems: 'center', justifyContent: 'center',
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 
-  reel: { backgroundColor: '#000', overflow: 'hidden' },
-  gradientTop: {
-    position: 'absolute', top: 0, left: 0, right: 0, height: 130,
-    backgroundColor: 'rgba(0,0,0,0.38)',
+  reel: {
+    backgroundColor: '#000000',
+    overflow: 'hidden',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  gradientBottom: {
-    position: 'absolute', bottom: 0, left: 0, right: 0, height: 300,
-    backgroundColor: 'rgba(0,0,0,0.52)',
+
+  progressWrap: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 2.5,
+    zIndex: 15,
   },
-  progressWrap: { position: 'absolute', left: Spacing.three, right: Spacing.three },
+
   speedBadge: {
-    position: 'absolute', alignSelf: 'center', top: '38%',
-    backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: Radius.md,
-    paddingHorizontal: Spacing.four, paddingVertical: Spacing.two,
+    position: 'absolute',
+    alignSelf: 'center',
+    top: '35%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: Radius.full,
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.two,
+    zIndex: 12,
   },
-  speedText: { color: '#fff', fontSize: TextScale.xl, fontWeight: '900', letterSpacing: 1 },
+  speedText: {
+    color: '#fff',
+    fontSize: TextScale.base,
+    fontWeight: '900',
+    letterSpacing: 0.5,
+  },
+
   playPauseBadge: {
-    position: 'absolute', alignSelf: 'center', top: '50%', marginTop: -33,
-    width: 64, height: 64, borderRadius: 32,
-    backgroundColor: 'rgba(0,0,0,0.42)',
-    alignItems: 'center', justifyContent: 'center',
+    position: 'absolute',
+    alignSelf: 'center',
+    top: '50%',
+    marginTop: -32,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 12,
   },
+
   heartOverlay: {
-    position: 'absolute', alignSelf: 'center', top: '50%', marginTop: -40,
+    position: 'absolute',
+    alignSelf: 'center',
+    top: '50%',
+    marginTop: -44,
+    zIndex: 14,
+    shadowColor: '#FF2D55',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.8,
+    shadowRadius: 16,
+    elevation: 10,
   },
+
   loadingOverlay: {
     ...StyleSheet.absoluteFill,
-    justifyContent: 'center', alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.35)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'transparent',
+    zIndex: 11,
   },
 
   rightActions: {
-    position: 'absolute', right: Spacing.three,
-    alignItems: 'center', gap: Spacing.five,
+    position: 'absolute',
+    right: Spacing.three,
+    bottom: Spacing.four,
+    alignItems: 'center',
+    gap: Spacing.four,
+    zIndex: 12,
   },
-  actionBtn: { alignItems: 'center', gap: 4 },
-  actionEmoji: { fontSize: 30 },
-  actionCount: { color: '#fff', fontSize: TextScale.xs, fontWeight: '700' },
+  actionBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+  },
+  actionIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0, 0, 0, 0.35)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.6,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  actionEmojiText: {
+    fontSize: 24,
+  },
+  actionCount: {
+    color: '#FFFFFF',
+    fontSize: TextScale.xs,
+    fontWeight: '700',
+    textShadowColor: 'rgba(0, 0, 0, 0.9)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
 
   emojiPicker: {
-    position: 'absolute', right: Spacing.three,
-    alignItems: 'center', gap: Spacing.two,
+    position: 'absolute',
+    right: Spacing.three,
+    bottom: 140,
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: Spacing.two,
+    backgroundColor: 'rgba(20, 20, 20, 0.85)',
+    padding: Spacing.two,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    zIndex: 25,
+    ...Shadows.card,
   },
   emojiBtn: {
-    width: 46, height: 46, borderRadius: 23,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.18)',
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  emojiBtnActive: { backgroundColor: 'rgba(255,255,255,0.28)', borderColor: 'rgba(255,255,255,0.6)' },
-  emojiText: { fontSize: 24 },
+  emojiBtnActive: {
+    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+  },
+  emojiText: {
+    fontSize: 22,
+  },
 
-  authorInfo: { position: 'absolute', left: Spacing.three, right: 80 },
-  authorRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, marginBottom: 4 },
-  avatar: {
-    width: 32, height: 32, borderRadius: 16,
-    backgroundColor: 'rgba(255,255,255,0.22)',
-    alignItems: 'center', justifyContent: 'center',
-    borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.55)',
+  authorInfo: {
+    position: 'absolute',
+    left: Spacing.four,
+    right: 80,
+    bottom: Spacing.three,
+    zIndex: 12,
   },
-  avatarInitial: { color: '#fff', fontSize: TextScale.sm, fontWeight: '700' },
-  authorName: { color: '#fff', fontSize: TextScale.sm, fontWeight: '700', flex: 1 },
-  caption: { color: 'rgba(255,255,255,0.88)', fontSize: TextScale.sm, lineHeight: 18 },
+  authorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    marginBottom: 6,
+  },
+  avatar: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.25)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: '#FFFFFF',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.5,
+    shadowRadius: 3,
+  },
+  avatarInitial: {
+    color: '#FFFFFF',
+    fontSize: TextScale.sm,
+    fontWeight: '800',
+  },
+  authorName: {
+    color: '#FFFFFF',
+    fontSize: TextScale.sm,
+    fontWeight: '800',
+    flex: 1,
+    textShadowColor: 'rgba(0, 0, 0, 0.9)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  caption: {
+    color: 'rgba(255, 255, 255, 0.95)',
+    fontSize: TextScale.sm,
+    lineHeight: 18,
+    fontWeight: '500',
+    textShadowColor: 'rgba(0, 0, 0, 0.9)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
 });

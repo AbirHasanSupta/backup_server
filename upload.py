@@ -1,4 +1,5 @@
 import asyncio
+import base64
 from email.utils import formatdate
 from mimetypes import guess_type
 import json
@@ -2034,51 +2035,126 @@ async def create_share(
 @router.post("/api/share/quiz/create")
 @router.post("/share/quiz/create")
 async def create_quiz_share(
-    shared_by_device_id: str = Form(...),
-    target_device_ids: str = Form(...),
-    caption: str = Form(""),
-    score: int = Form(...),
-    total: int = Form(...),
-    quiz_data: str = Form(...),
-    images: list[UploadFile] = File(...),
+    request: Request,
     authorization: str = Header(None),
     token: str = None,
 ):
     """Create a Guess-the-Year feed post from pre-rendered result cards.
 
+    Supports both application/json (with base64 images) and multipart/form-data.
     Images must be ordered: score card first, then one card per question.
     Quiz metadata is persisted alongside the images and removed when the post
     is deleted.
     """
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    shared_by_device_id: str = ""
+    target_device_ids_raw: str | list = []
+    caption: str = ""
+    score: int = 0
+    total: int = 0
+    quiz_data_raw: str | dict = {}
+    image_bytes_list: list[bytes] = []
+
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+        shared_by_device_id = str(body.get("shared_by_device_id") or "")
+        target_device_ids_raw = body.get("target_device_ids")
+        caption = str(body.get("caption") or "")
+        try:
+            score = int(body.get("score"))
+            total = int(body.get("total"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid score or total") from exc
+        quiz_data_raw = body.get("quiz_data")
+        images_b64 = body.get("images_base64") or []
+        if not isinstance(images_b64, list) or not images_b64:
+            raise HTTPException(status_code=400, detail="No quiz images provided")
+        for idx, img_str in enumerate(images_b64):
+            if not isinstance(img_str, str) or not img_str.strip():
+                raise HTTPException(status_code=400, detail=f"Empty image at index {idx}")
+            if "," in img_str:
+                img_str = img_str.split(",", 1)[1]
+            try:
+                decoded = base64.b64decode(img_str)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid base64 image at index {idx}") from exc
+            image_bytes_list.append(decoded)
+    else:
+        # Multipart / form data fallback
+        form = await request.form()
+        shared_by_device_id = str(form.get("shared_by_device_id") or "")
+        target_device_ids_raw = form.get("target_device_ids")
+        caption = str(form.get("caption") or "")
+        try:
+            score = int(form.get("score"))
+            total = int(form.get("total"))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid score or total") from exc
+        quiz_data_raw = form.get("quiz_data")
+        raw_images = form.getlist("images")
+        if not raw_images:
+            raise HTTPException(status_code=400, detail="No quiz images provided")
+        for upload in raw_images:
+            if hasattr(upload, "read"):
+                content = await upload.read()
+                image_bytes_list.append(content)
+            elif isinstance(upload, bytes):
+                image_bytes_list.append(upload)
+            elif isinstance(upload, str):
+                if "," in upload:
+                    upload = upload.split(",", 1)[1]
+                try:
+                    image_bytes_list.append(base64.b64decode(upload))
+                except Exception:
+                    image_bytes_list.append(upload.encode("utf-8"))
+
     verify_auth(authorization or (f"Bearer {token}" if token else None), shared_by_device_id)
     verify_known_device_by_id(shared_by_device_id)
 
-    if not images:
+    if not image_bytes_list:
         raise HTTPException(status_code=400, detail="No quiz images provided")
-    try:
-        targets = json.loads(target_device_ids)
-        if not isinstance(targets, list):
-            raise ValueError("target_device_ids must be a JSON array")
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="Invalid target_device_ids") from exc
+
+    if isinstance(target_device_ids_raw, list):
+        targets = target_device_ids_raw
+    elif isinstance(target_device_ids_raw, str):
+        try:
+            targets = json.loads(target_device_ids_raw)
+            if not isinstance(targets, list):
+                raise ValueError("target_device_ids must be a JSON array")
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid target_device_ids") from exc
+    else:
+        raise HTTPException(status_code=400, detail="Invalid target_device_ids")
+
     if not targets:
         raise HTTPException(status_code=400, detail="No target devices")
 
-    try:
-        quiz_payload = json.loads(quiz_data)
-        if not isinstance(quiz_payload, dict):
-            raise ValueError("quiz_data must be a JSON object")
-        quiz_items = quiz_payload.get("items") or []
-        if not isinstance(quiz_items, list):
-            raise ValueError("quiz_data.items must be a JSON array")
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="Invalid quiz_data") from exc
+    if isinstance(quiz_data_raw, dict):
+        quiz_items = quiz_data_raw.get("items") or []
+    elif isinstance(quiz_data_raw, str):
+        try:
+            quiz_payload = json.loads(quiz_data_raw)
+            if not isinstance(quiz_payload, dict):
+                raise ValueError("quiz_data must be a JSON object")
+            quiz_items = quiz_payload.get("items") or []
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid quiz_data") from exc
+    else:
+        raise HTTPException(status_code=400, detail="Invalid quiz_data")
+
+    if not isinstance(quiz_items, list):
+        raise HTTPException(status_code=400, detail="quiz_data.items must be a JSON array")
 
     _validate_quiz_share_payload(score, total, quiz_items)
-    if len(images) != total + 1:
+    if len(image_bytes_list) != total + 1:
         raise HTTPException(
             status_code=400,
-            detail=f"Expected {total + 1} quiz images (score + questions), got {len(images)}",
+            detail=f"Expected {total + 1} quiz images (score + questions), got {len(image_bytes_list)}",
         )
 
     known_ids = {
@@ -2089,9 +2165,7 @@ async def create_quiz_share(
     if not valid_targets:
         raise HTTPException(status_code=400, detail="No valid target devices")
 
-    import uuid as _uuid
-
-    group_id = str(_uuid.uuid4())
+    group_id = str(uuid.uuid4())
     persisted_paths: list[str] = []
     try:
         meta_path = os.path.join(SHARED_QUIZ_DIR, f"{group_id}.json")
@@ -2106,11 +2180,10 @@ async def create_quiz_share(
             )
 
         share_items: list[dict] = []
-        for idx, upload in enumerate(images):
+        for idx, content in enumerate(image_bytes_list):
             ext = ".png"
-            filename = f"{_uuid.uuid4().hex}{ext}"
+            filename = f"{uuid.uuid4().hex}{ext}"
             dest_path = os.path.join(SHARED_QUIZ_DIR, filename)
-            content = await upload.read()
             if not content:
                 raise HTTPException(status_code=400, detail=f"Empty image at index {idx}")
             if len(content) > QUIZ_SHARE_MAX_IMAGE_BYTES:

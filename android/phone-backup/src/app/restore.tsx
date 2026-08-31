@@ -5434,11 +5434,11 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           />
           )}
           {/* Hint Bar */}
-          {files.length > 0 && selectedPaths.size === 0 && !selectionMode && !isDownloading && (
+          {files.length > 0 && selectedPaths.size === 0 && !selectionMode && !isDownloading && !isFeedMode && (
             <View style={[styles.hintBar, { borderColor: colors.surfaceBorder }]}>
               <AppIcon androidName="touch_app" iosName="hand.tap" color={colors.textMuted} size={13} />
               <Text style={[styles.hintText, { color: colors.textMuted }]}>
-                {isFeedMode ? 'Tap to preview · tap emoji to react' : 'Tap to preview · long press to select'}
+                Tap to preview · long press to select
               </Text>
             </View>
           )}
