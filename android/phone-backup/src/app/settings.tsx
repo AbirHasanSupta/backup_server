@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import Constants from 'expo-constants';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import Animated, {
   FadeInDown,
 } from 'react-native-reanimated';
@@ -86,6 +86,7 @@ export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const { colors, isDark, mode, setMode } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
+  const router = useRouter();
 
   const [serverIp, setServerIpState] = useState('');
   const [serverPort, setServerPortState] = useState('8000');
@@ -678,6 +679,43 @@ export default function SettingsScreen() {
           </SettingsCard>
         </Animated.View>
 
+        <Animated.View entering={FadeInDown.duration(300).delay(175)}>
+          <SectionHeader title="Manage" styles={styles} />
+          <SettingsCard styles={styles}>
+            <AnimatedPressable
+              style={styles.navRow}
+              onPress={() => router.push('/folders')}
+              scaleDown={0.98}
+              accessibilityLabel="Backup Folders"
+            >
+              <View style={styles.toggleIcon}>
+                <AppIcon androidName="folder" iosName="folder" color={colors.primary} size={20} fallback="F" />
+              </View>
+              <View style={styles.toggleInfo}>
+                <Text style={styles.toggleLabel}>Backup Folders</Text>
+                <Text style={styles.toggleSub}>Choose which folders sync</Text>
+              </View>
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} fallback=">" />
+            </AnimatedPressable>
+            <View style={styles.divider} />
+            <AnimatedPressable
+              style={styles.navRow}
+              onPress={() => router.push('/history')}
+              scaleDown={0.98}
+              accessibilityLabel="Sync History"
+            >
+              <View style={styles.toggleIcon}>
+                <AppIcon androidName="history" iosName="clock.arrow.circlepath" color={colors.primary} size={20} fallback="H" />
+              </View>
+              <View style={styles.toggleInfo}>
+                <Text style={styles.toggleLabel}>Sync History</Text>
+                <Text style={styles.toggleSub}>View past backup sessions</Text>
+              </View>
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} fallback=">" />
+            </AnimatedPressable>
+          </SettingsCard>
+        </Animated.View>
+
         <Animated.View entering={FadeInDown.duration(300).delay(200)}>
           <SectionHeader title="Your profile" styles={styles} />
           <SettingsCard styles={styles}>
@@ -917,6 +955,11 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     color: colors.white,
   },
   toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+  },
+  navRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.three,

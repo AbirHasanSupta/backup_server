@@ -5201,16 +5201,6 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
                   {hasMemories && <View style={styles.memoriesBadgeDot} />}
                 </AnimatedPressable>
               )}
-              {!feedDeviceFilter && (
-                <AnimatedPressable
-                  onPress={() => router.push('/reels')}
-                  style={styles.memoriesHeaderBtn}
-                  scaleDown={0.88}
-                  accessibilityLabel="Open Reels"
-                >
-                  <AppIcon androidName="movie_filter" iosName="play.rectangle.fill" color={colors.primary} size={18} />
-                </AnimatedPressable>
-              )}
             </View>
             <Text style={styles.pageSubtitle}>
               {isFeedMode

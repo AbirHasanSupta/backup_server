@@ -289,15 +289,6 @@ function RootLayoutContent() {
           }}
         />
         <Tabs.Screen
-          name="folders"
-          options={{
-            title: 'Folders',
-            tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="folder" iosName="folder" focused={focused} colors={colors} styles={styles} />
-            ),
-          }}
-        />
-        <Tabs.Screen
           name="restore"
           options={{
             title: 'Library',
@@ -307,20 +298,21 @@ function RootLayoutContent() {
           }}
         />
         <Tabs.Screen
+          name="reels"
+          options={{
+            title: 'Reels',
+            tabBarIcon: ({ focused }) => (
+              <TabIcon androidName="movie" iosName="play.rectangle.fill" focused={focused} colors={colors} styles={styles} />
+            ),
+            freezeOnBlur: true,
+          }}
+        />
+        <Tabs.Screen
           name="feed"
           options={{
             title: 'Feed',
             tabBarIcon: ({ focused }) => (
               <TabIcon androidName="dynamic_feed" iosName="heart.text.square" focused={focused} colors={colors} styles={styles} />
-            ),
-          }}
-        />
-        <Tabs.Screen
-          name="history"
-          options={{
-            title: 'History',
-            tabBarIcon: ({ focused }) => (
-              <TabIcon androidName="history" iosName="clock.arrow.circlepath" focused={focused} colors={colors} styles={styles} />
             ),
           }}
         />
@@ -334,12 +326,16 @@ function RootLayoutContent() {
           }}
         />
         <Tabs.Screen
-          name="memories"
+          name="folders"
           options={{ href: null, tabBarStyle: { display: 'none' } }}
         />
         <Tabs.Screen
-          name="reels"
-          options={{ href: null, tabBarStyle: { display: 'none' }, freezeOnBlur: true }}
+          name="history"
+          options={{ href: null, tabBarStyle: { display: 'none' } }}
+        />
+        <Tabs.Screen
+          name="memories"
+          options={{ href: null, tabBarStyle: { display: 'none' } }}
         />
         <Tabs.Screen
           name="wrapped"
