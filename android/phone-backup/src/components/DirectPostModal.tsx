@@ -13,13 +13,14 @@ import {
   Platform,
   Dimensions,
   Alert,
+  ScrollView,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { listShareTargetDevices } from '../../downloader';
-import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
+import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import type { ShareTargetDevice } from './ShareModal';
 
 const { height: SCREEN_H } = Dimensions.get('window');
@@ -70,10 +71,10 @@ export function DirectPostModal({
   colors: AppColors;
   onClose: () => void;
   onChangeFolder: () => void;
-  onSubmit: (selectedFiles: DeviceFileItem[], targetIds: string[], caption: string) => Promise<void>;
+  onSubmit: (selectedFiles: DeviceFileItem[], targetIds: string[], caption: string, onProgress?: (statusText: string) => void) => Promise<void>;
 }) {
   const insets = useSafeAreaInsets();
-  const { keyboardHeight } = useKeyboardHeight();
+  const { keyboardHeight } = useModalKeyboardHeight();
   const [fileList, setFileList] = useState<DeviceFileItem[]>([]);
   const [devices, setDevices] = useState<ShareTargetDevice[]>([]);
   const [loadingDevices, setLoadingDevices] = useState(false);
@@ -154,7 +155,7 @@ export function DirectPostModal({
       Alert.alert('No files selected', 'Please select at least one file to post.');
       return;
     }
-    if (selectedDevices.size === 0) {
+    if (devices.length > 0 && selectedDevices.size === 0) {
       Alert.alert('No devices selected', 'Please select at least one target device to share with.');
       return;
     }
@@ -162,14 +163,18 @@ export function DirectPostModal({
     setPosting(true);
     setPostProgressText(`Uploading ${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'}…`);
     try {
-      await onSubmit(selectedFiles, Array.from(selectedDevices), caption.trim());
+      await onSubmit(selectedFiles, Array.from(selectedDevices), caption.trim(), (statusText) => setPostProgressText(statusText));
       onClose();
     } catch (err: any) {
       Alert.alert('Post Failed', err?.message || 'Could not upload and create post.');
     } finally {
       setPosting(false);
     }
-  }, [selectedFiles, selectedDevices, caption, onSubmit, onClose]);
+  }, [selectedFiles, devices.length, selectedDevices, caption, onSubmit, onClose]);
+
+  // On Android, Modal windows are not subject to windowSoftInputMode="adjustResize",
+  // so we manually shift the sheet up by the keyboard height.
+  const androidKeyboardOffset = Platform.OS === 'android' ? keyboardHeight : 0;
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -184,7 +189,8 @@ export function DirectPostModal({
             styles.sheet,
             {
               backgroundColor: colors.surface,
-              paddingBottom: insets.bottom + Spacing.three + (Platform.OS === 'android' ? keyboardHeight : 0),
+              paddingBottom: insets.bottom + Spacing.three + androidKeyboardOffset,
+              maxHeight: SCREEN_H * 0.88 - (Platform.OS === 'android' ? keyboardHeight : 0),
             },
           ]}
         >
@@ -214,146 +220,153 @@ export function DirectPostModal({
             </TouchableOpacity>
           </View>
 
-          {/* Caption Input */}
-          <TextInput
-            value={caption}
-            onChangeText={setCaption}
-            placeholder="Write a caption for this post (optional)…"
-            placeholderTextColor={colors.textMuted}
-            style={[
-              styles.captionInput,
-              { backgroundColor: colors.surfaceSoft, color: colors.text, borderColor: colors.surfaceBorder },
-            ]}
-            multiline
-            maxLength={2000}
-            editable={!posting}
-          />
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            contentContainerStyle={styles.scrollContent}
+          >
+            {/* Caption Input */}
+            <TextInput
+              value={caption}
+              onChangeText={setCaption}
+              placeholder="Write a caption for this post (optional)…"
+              placeholderTextColor={colors.textMuted}
+              style={[
+                styles.captionInput,
+                { backgroundColor: colors.surfaceSoft, color: colors.text, borderColor: colors.surfaceBorder },
+              ]}
+              multiline
+              maxLength={2000}
+              editable={!posting}
+            />
 
-          {/* Files Selection Header */}
-          <View style={styles.sectionHeaderRow}>
-            <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>
-              Files to post ({selectedFiles.length}/{fileList.length})
-            </Text>
-            {fileList.length > 1 && (
-              <TouchableOpacity onPress={toggleAllFiles} hitSlop={6} disabled={posting}>
-                <Text style={[styles.toggleText, { color: colors.primary }]}>
-                  {allFilesSelected ? 'Deselect all' : 'Select all'}
-                </Text>
-              </TouchableOpacity>
-            )}
-          </View>
-
-          {/* Files Horizontal List */}
-          <FlatList
-            data={fileList}
-            keyExtractor={(f) => f.uri}
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.filesListContent}
-            style={styles.filesList}
-            renderItem={({ item: file }) => {
-              const isImg = isImageFile(file.name);
-              const icon = getFileIcon(file.name);
-              return (
-                <TouchableOpacity
-                  onPress={() => toggleFile(file.uri)}
-                  disabled={posting}
-                  style={[
-                    styles.fileCard,
-                    {
-                      borderColor: file.selected ? colors.primary : colors.surfaceBorder,
-                      backgroundColor: file.selected ? colors.primarySoft : colors.surfaceSoft,
-                    },
-                  ]}
-                  activeOpacity={0.8}
-                >
-                  <View style={styles.filePreviewWrap}>
-                    {isImg ? (
-                      <Image source={{ uri: file.uri }} style={styles.fileThumbnail} contentFit="cover" />
-                    ) : (
-                      <View style={[styles.fileIconPlaceholder, { backgroundColor: colors.surface }]}>
-                        <AppIcon androidName={icon.android} iosName={icon.ios} color={colors.primary} size={28} />
-                      </View>
-                    )}
-                    <View style={styles.fileCheckBadge}>
-                      <AppIcon
-                        androidName={file.selected ? 'check_circle' : 'radio_button_unchecked'}
-                        iosName={file.selected ? 'checkmark.circle.fill' : 'circle'}
-                        color={file.selected ? colors.primary : colors.textMuted}
-                        size={20}
-                      />
-                    </View>
-                  </View>
-                  <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={1}>
-                    {file.name}
-                  </Text>
-                  <Text style={[styles.fileSize, { color: colors.textMuted }]}>
-                    {formatFileSize(file.size)}
+            {/* Files Selection Header */}
+            <View style={styles.sectionHeaderRow}>
+              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>
+                Files to post ({selectedFiles.length}/{fileList.length})
+              </Text>
+              {fileList.length > 1 && (
+                <TouchableOpacity onPress={toggleAllFiles} hitSlop={6} disabled={posting}>
+                  <Text style={[styles.toggleText, { color: colors.primary }]}>
+                    {allFilesSelected ? 'Deselect all' : 'Select all'}
                   </Text>
                 </TouchableOpacity>
-              );
-            }}
-          />
-
-          {/* Target Devices Section */}
-          <View style={[styles.sectionHeaderRow, { marginTop: Spacing.two }]}>
-            <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>
-              Share with devices ({selectedDevices.size}/{devices.length})
-            </Text>
-            {devices.length > 1 && (
-              <TouchableOpacity onPress={toggleAllDevices} hitSlop={6} disabled={posting}>
-                <Text style={[styles.toggleText, { color: colors.primary }]}>
-                  {allDevicesSelected ? 'Deselect all' : 'Select all'}
-                </Text>
-              </TouchableOpacity>
-            )}
-          </View>
-
-          {loadingDevices ? (
-            <View style={styles.deviceLoading}>
-              <ActivityIndicator color={colors.primary} size="small" />
+              )}
             </View>
-          ) : devices.length === 0 ? (
-            <Text style={[styles.emptyDevicesText, { color: colors.textMuted }]}>
-              No other connected devices. Post will appear in your feed.
-            </Text>
-          ) : (
-            <View style={styles.devicesChipRow}>
-              {devices.map((d) => {
-                const active = selectedDevices.has(d.device_id);
+
+            {/* Files Horizontal List */}
+            <FlatList
+              data={fileList}
+              keyExtractor={(f) => f.uri}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.filesListContent}
+              style={[styles.filesList, keyboardHeight > 0 && { maxHeight: 110 }]}
+              scrollEnabled={!posting}
+              renderItem={({ item: file }) => {
+                const isImg = isImageFile(file.name);
+                const icon = getFileIcon(file.name);
                 return (
                   <TouchableOpacity
-                    key={d.device_id}
-                    onPress={() => toggleDevice(d.device_id)}
+                    onPress={() => toggleFile(file.uri)}
                     disabled={posting}
                     style={[
-                      styles.deviceChip,
+                      styles.fileCard,
                       {
-                        backgroundColor: active ? colors.primarySoft : colors.surfaceSoft,
-                        borderColor: active ? colors.primary : colors.surfaceBorder,
+                        borderColor: file.selected ? colors.primary : colors.surfaceBorder,
+                        backgroundColor: file.selected ? colors.primarySoft : colors.surfaceSoft,
                       },
                     ]}
+                    activeOpacity={0.8}
                   >
-                    <AppIcon
-                      androidName={active ? 'check' : 'phone_android'}
-                      iosName={active ? 'checkmark' : 'iphone'}
-                      color={active ? colors.primary : colors.textSecondary}
-                      size={14}
-                    />
-                    <Text
-                      style={[
-                        styles.deviceChipText,
-                        { color: active ? colors.primary : colors.text },
-                      ]}
-                      numberOfLines={1}
-                    >
-                      {d.display_name || d.device_name || d.device_id}
+                    <View style={styles.filePreviewWrap}>
+                      {isImg ? (
+                        <Image source={{ uri: file.uri }} style={styles.fileThumbnail} contentFit="cover" />
+                      ) : (
+                        <View style={[styles.fileIconPlaceholder, { backgroundColor: colors.surface }]}>
+                          <AppIcon androidName={icon.android} iosName={icon.ios} color={colors.primary} size={28} />
+                        </View>
+                      )}
+                      <View style={styles.fileCheckBadge}>
+                        <AppIcon
+                          androidName={file.selected ? 'check_circle' : 'radio_button_unchecked'}
+                          iosName={file.selected ? 'checkmark.circle.fill' : 'circle'}
+                          color={file.selected ? colors.primary : colors.textMuted}
+                          size={20}
+                        />
+                      </View>
+                    </View>
+                    <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={1}>
+                      {file.name}
+                    </Text>
+                    <Text style={[styles.fileSize, { color: colors.textMuted }]}>
+                      {formatFileSize(file.size)}
                     </Text>
                   </TouchableOpacity>
                 );
-              })}
+              }}
+            />
+
+            {/* Target Devices Section */}
+            <View style={[styles.sectionHeaderRow, { marginTop: Spacing.two }]}>
+              <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>
+                Share with devices ({selectedDevices.size}/{devices.length})
+              </Text>
+              {devices.length > 1 && (
+                <TouchableOpacity onPress={toggleAllDevices} hitSlop={6} disabled={posting}>
+                  <Text style={[styles.toggleText, { color: colors.primary }]}>
+                    {allDevicesSelected ? 'Deselect all' : 'Select all'}
+                  </Text>
+                </TouchableOpacity>
+              )}
             </View>
-          )}
+
+            {loadingDevices ? (
+              <View style={styles.deviceLoading}>
+                <ActivityIndicator color={colors.primary} size="small" />
+              </View>
+            ) : devices.length === 0 ? (
+              <Text style={[styles.emptyDevicesText, { color: colors.textMuted }]}>
+                No other connected devices. Post will appear in your feed.
+              </Text>
+            ) : (
+              <View style={styles.devicesChipRow}>
+                {devices.map((d) => {
+                  const active = selectedDevices.has(d.device_id);
+                  return (
+                    <TouchableOpacity
+                      key={d.device_id}
+                      onPress={() => toggleDevice(d.device_id)}
+                      disabled={posting}
+                      style={[
+                        styles.deviceChip,
+                        {
+                          backgroundColor: active ? colors.primarySoft : colors.surfaceSoft,
+                          borderColor: active ? colors.primary : colors.surfaceBorder,
+                        },
+                      ]}
+                    >
+                      <AppIcon
+                        androidName={active ? 'check' : 'phone_android'}
+                        iosName={active ? 'checkmark' : 'iphone'}
+                        color={active ? colors.primary : colors.textSecondary}
+                        size={14}
+                      />
+                      <Text
+                        style={[
+                          styles.deviceChipText,
+                          { color: active ? colors.primary : colors.text },
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {d.display_name || d.device_name || d.device_id}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+          </ScrollView>
 
           {/* Submit Button */}
           <TouchableOpacity
@@ -405,6 +418,9 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.two,
     maxHeight: SCREEN_H * 0.88,
     ...Shadows.card,
+  },
+  scrollContent: {
+    paddingBottom: Spacing.two,
   },
   handle: {
     alignSelf: 'center',
@@ -570,7 +586,7 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.three,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: Spacing.one,
+    marginTop: Spacing.two,
   },
   postingRow: {
     flexDirection: 'row',

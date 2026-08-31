@@ -39,7 +39,7 @@ import { DirectPostModal, DeviceFileItem } from '@/components/DirectPostModal';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
-import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
+import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   downloadFile,
   listSharedSources,
@@ -944,7 +944,7 @@ function CommentsModal({
   onCountChange: (mediaId: number, delta: number) => void;
 }) {
   const insets = useSafeAreaInsets();
-  const { keyboardHeight } = useKeyboardHeight();
+  const { keyboardHeight } = useModalKeyboardHeight();
   const [comments, setComments] = useState<CommentItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState('');
@@ -1023,6 +1023,7 @@ function CommentsModal({
             {
               backgroundColor: colors.surface,
               paddingBottom: insets.bottom + Spacing.three + (Platform.OS === 'android' ? keyboardHeight : 0),
+              maxHeight: SCREEN_H * 0.88 - (Platform.OS === 'android' ? keyboardHeight : 0),
             },
           ]}
         >
@@ -1048,7 +1049,7 @@ function CommentsModal({
             <FlatList
               data={comments}
               keyExtractor={(c) => String(c.id)}
-              style={modalSheetStyles.list}
+              style={[modalSheetStyles.list, { maxHeight: keyboardHeight > 0 ? SCREEN_H * 0.28 : SCREEN_H * 0.45 }]}
               contentContainerStyle={modalSheetStyles.listContent}
               keyboardShouldPersistTaps="handled"
               renderItem={({ item: c }) => (
@@ -1121,7 +1122,7 @@ function ManageShareModal({
   onUpdated?: (updated: { caption?: string; removedShareId?: number }) => void;
 }) {
   const insets = useSafeAreaInsets();
-  const { keyboardHeight } = useKeyboardHeight();
+  const { keyboardHeight } = useModalKeyboardHeight();
   const groupId = item?.group_id || null;
   const initialCaption = item?.group_caption || item?.caption || '';
 
@@ -1287,6 +1288,7 @@ function ManageShareModal({
             {
               backgroundColor: colors.surface,
               paddingBottom: insets.bottom + Spacing.three + (Platform.OS === 'android' ? keyboardHeight : 0),
+              maxHeight: SCREEN_H * 0.88 - (Platform.OS === 'android' ? keyboardHeight : 0),
             },
           ]}
         >
@@ -1299,7 +1301,7 @@ function ManageShareModal({
           </View>
 
           <ScrollView
-            style={modalSheetStyles.scrollArea}
+            style={[modalSheetStyles.scrollArea, { maxHeight: keyboardHeight > 0 ? SCREEN_H * 0.35 : SCREEN_H * 0.72 }]}
             contentContainerStyle={modalSheetStyles.scrollContent}
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled"
@@ -4580,8 +4582,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       const perm = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
       if (!perm.granted) return;
 
-      const raw = perm.directoryUri.split('/').pop() as string;
-      const folderName = decodeURIComponent(raw || 'Device Folder');
+      const rawDecoded = decodeURIComponent(perm.directoryUri.split('/').pop() || '');
+      const folderName = rawDecoded.split(/[/:]/).filter(Boolean).pop() || 'Device Folder';
       setDirectPostFolderName(folderName);
 
       // Read files in the selected directory
@@ -4602,13 +4604,14 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         let modifiedTime = Math.floor(Date.now() / 1000);
         try {
           const info = await FileSystem.getInfoAsync(uri);
-          if (info.exists && !info.isDirectory) {
-            size = info.size || 0;
-            if (info.modificationTime) {
-              modifiedTime = Math.floor(info.modificationTime);
-            }
+          if (!info.exists || info.isDirectory) continue;
+          size = info.size || 0;
+          if (info.modificationTime) {
+            modifiedTime = Math.floor(info.modificationTime);
           }
-        } catch {}
+        } catch {
+          continue;
+        }
 
         items.push({
           uri,

@@ -17,7 +17,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { listShareTargetDevices } from '../../downloader';
-import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
+import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 const { height: SCREEN_H } = Dimensions.get('window');
 
@@ -43,7 +43,7 @@ export function ShareModal({
   onSubmit: (targetIds: string[], caption: string) => Promise<void>;
 }) {
   const insets = useSafeAreaInsets();
-  const { keyboardHeight } = useKeyboardHeight();
+  const { keyboardHeight } = useModalKeyboardHeight();
   const [devices, setDevices] = useState<ShareTargetDevice[]>([]);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -96,6 +96,10 @@ export function ShareModal({
     }
   }, [selected, sending, caption, onSubmit]);
 
+  // On Android, Modal windows are not subject to windowSoftInputMode="adjustResize",
+  // so we manually shift the sheet up by the keyboard height.
+  const androidKeyboardOffset = Platform.OS === 'android' ? keyboardHeight : 0;
+
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={styles.backdrop} onPress={onClose} />
@@ -109,7 +113,8 @@ export function ShareModal({
             styles.sheet,
             {
               backgroundColor: colors.surface,
-              paddingBottom: insets.bottom + Spacing.three + (Platform.OS === 'android' ? keyboardHeight : 0),
+              paddingBottom: insets.bottom + Spacing.three + androidKeyboardOffset,
+              maxHeight: SCREEN_H * 0.88 - (Platform.OS === 'android' ? keyboardHeight : 0),
             },
           ]}
         >
@@ -160,7 +165,7 @@ export function ShareModal({
             <FlatList
               data={devices}
               keyExtractor={(d) => d.device_id}
-              style={styles.list}
+              style={[styles.list, { maxHeight: keyboardHeight > 0 ? SCREEN_H * 0.25 : SCREEN_H * 0.45 }]}
               contentContainerStyle={styles.listContent}
               keyboardShouldPersistTaps="handled"
               renderItem={({ item: d }) => {

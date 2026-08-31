@@ -24,7 +24,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
-import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
+import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   getReelsFeed,
   getConfig,
@@ -583,7 +583,7 @@ function CommentsSheet({
   onCommentDeleted: () => void;
 }) {
   const insets = useSafeAreaInsets();
-  const { keyboardHeight } = useKeyboardHeight();
+  const { keyboardHeight } = useModalKeyboardHeight();
   const [comments, setComments] = useState<Comment[]>([]);
   const [loading, setLoading] = useState(false);
   const [text, setText] = useState('');
@@ -635,6 +635,7 @@ function CommentsSheet({
             {
               backgroundColor: colors.surface,
               paddingBottom: insets.bottom + Spacing.two + (Platform.OS === 'android' ? keyboardHeight : 0),
+              maxHeight: SCREEN_H * 0.85 - (Platform.OS === 'android' ? keyboardHeight : 0),
             },
           ]}
         >
@@ -709,7 +710,7 @@ const cs = StyleSheet.create({
   title: { fontSize: TextScale.base, fontWeight: '700' },
   center: { paddingVertical: 48, alignItems: 'center' },
   empty: { fontSize: TextScale.sm },
-  list: { maxHeight: SCREEN_H * 0.42 },
+  list: { maxHeight: SCREEN_H * 0.42, flexShrink: 1 },
   row: { flexDirection: 'row', alignItems: 'flex-start', paddingHorizontal: Spacing.four, paddingVertical: Spacing.three, gap: Spacing.two },
   rowInfo: { flex: 1, gap: 2 },
   author: { fontSize: TextScale.sm, fontWeight: '700' },

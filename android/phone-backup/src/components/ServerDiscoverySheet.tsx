@@ -29,7 +29,7 @@ import { discoverServers } from '../../serverDiscovery';
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
-import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
+import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { setServerCertFingerprint } from '../../settings';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
@@ -103,7 +103,7 @@ function parseManualAddress(rawInput: string): { ip: string; port: number } | nu
 export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
-  const { keyboardHeight } = useKeyboardHeight();
+  const { keyboardHeight } = useModalKeyboardHeight();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -261,7 +261,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
             style={[
               styles.sheet,
               sheetAnimStyle,
-              { paddingBottom: Math.max(insets.bottom, Spacing.five) + Spacing.two + (Platform.OS === 'android' ? keyboardHeight : 0) },
+              { paddingBottom: Math.max(insets.bottom, Spacing.five) + Spacing.two + (Platform.OS === 'android' ? keyboardHeight : 0), maxHeight: SCREEN_H * 0.88 - (Platform.OS === 'android' ? keyboardHeight : 0) },
             ]}
           >
             <GestureDetector gesture={panGesture}>
@@ -319,7 +319,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
               <FlatList
                 data={servers}
                 keyExtractor={(item) => (item.serverId ? `${item.serverId}:${item.port}` : `${item.ip}:${item.port}`)}
-                style={styles.list}
+                style={[styles.list, { maxHeight: keyboardHeight > 0 ? SCREEN_H * 0.25 : SCREEN_H * 0.45 }]}
                 keyboardShouldPersistTaps="handled"
                 renderItem={({ item }) => (
                   <AnimatedPressable
