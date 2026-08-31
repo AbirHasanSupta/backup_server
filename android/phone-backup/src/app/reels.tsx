@@ -633,7 +633,7 @@ export default function ReelsScreen() {
 
       if (reset) seedRef.current = Date.now();
       const { reels: raw, has_more } = await getReelsFeed(reset ? 0 : offsetRef.current, 30, seedRef.current);
-      hasMoreRef.current = has_more;
+      hasMoreRef.current = has_more && raw.length > 0;
       offsetRef.current = reset ? raw.length : offsetRef.current + raw.length;
 
       const ranked = rankReels(raw, watched);
@@ -641,7 +641,8 @@ export default function ReelsScreen() {
       if (reset) listRef.current?.scrollToOffset({ offset: 0, animated: false });
       setError(null);
     } catch (e: any) {
-      setError(e?.message || 'Failed to load reels');
+      if (reset) setError(e?.message || 'Failed to load reels');
+      else hapticError();
     } finally {
       setLoading(false);
     }
@@ -730,6 +731,11 @@ export default function ReelsScreen() {
     />
   ), [activeIndex, screenFocused, serverConfig, muted, handleToggleMute, handleReact, colors]);
 
+  const handleClose = useCallback(() => {
+    if (router.canGoBack()) router.back();
+    else router.replace('/');
+  }, [router]);
+
   if (loading) {
     return (
       <View style={[s.screen, s.center]}>
@@ -744,7 +750,7 @@ export default function ReelsScreen() {
     return (
       <View style={[s.screen, s.center]}>
         <StatusBar hidden />
-        <TouchableOpacity style={[s.headerBtn, { top: insets.top + 12, left: Spacing.four }]} onPress={() => router.back()}>
+        <TouchableOpacity style={[s.headerBtn, { position: 'absolute', top: insets.top + 8, left: Spacing.three }]} onPress={handleClose} hitSlop={12}>
           <AppIcon androidName="arrow_back" iosName="chevron.left" color="#fff" size={22} />
         </TouchableOpacity>
         <AppIcon androidName="videocam_off" iosName="video.slash" color="rgba(255,255,255,0.55)" size={52} />
@@ -785,7 +791,7 @@ export default function ReelsScreen() {
 
       {/* Top header bar */}
       <View style={[s.topBar, { top: insets.top + 8 }]} pointerEvents="box-none">
-        <TouchableOpacity style={s.headerBtn} onPress={() => router.back()} hitSlop={12}>
+        <TouchableOpacity style={s.headerBtn} onPress={handleClose} hitSlop={12}>
           <AppIcon androidName="close" iosName="xmark" color="#fff" size={21} />
         </TouchableOpacity>
 

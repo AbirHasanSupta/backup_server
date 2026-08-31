@@ -72,6 +72,13 @@ export async function warmVideoPreviews(relativePaths, sourceMode, sourceId) {
 }
 
 
+function isNetworkFailure(err) {
+  const msg = String(err?.message || err || '').toLowerCase();
+  return msg.includes('network') || msg.includes('fetch failed') || msg.includes('failed to fetch')
+    || msg.includes('unknownhost') || msg.includes('econnrefused') || msg.includes('enotfound')
+    || msg.includes('connection abort');
+}
+
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 15000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -83,6 +90,7 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 15000) {
   } catch (err) {
     clearTimeout(timer);
     if (err?.name === 'AbortError') throw new Error('Request timed out — server is busy, try again.');
+    if (isNetworkFailure(err)) throw new Error("Can't reach the server. Check it's running and you're on the right network.");
     throw err;
   }
 }
@@ -713,12 +721,22 @@ export async function getFeed(offset = 0, limit = 50) {
  */
 export async function getReelsFeed(offset = 0, limit = 30, seed = 0) {
   const { ip, port, key, deviceId } = await getConfig();
-  const res = await fetch(
-    `http://${ip}:${port}/api/reels?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}&seed=${seed}`,
-    { headers: { Authorization: `Bearer ${key}` } },
-  );
-  if (!res.ok) throw new Error(`Failed to fetch reels (${res.status})`);
-  return await res.json();
+  if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
+  try {
+    return await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/reels?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}&seed=${seed}`,
+      { headers: { Authorization: `Bearer ${key}` } },
+    );
+  } catch (err) {
+    const match = String(err?.message || '').match(/Request failed \((\d+)\)/);
+    if (match) {
+      const status = Number(match[1]);
+      if (status === 401 || status === 403) throw new Error('Your device is not authorized. Re-pair it in Settings.');
+      if (status >= 500) throw new Error('Server had a problem loading reels. Try again shortly.');
+      throw new Error(`Couldn't load reels (${status}).`);
+    }
+    throw err;
+  }
 }
 
 /**
