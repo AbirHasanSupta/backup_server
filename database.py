@@ -3,11 +3,7 @@ import sqlite3
 import secrets
 import threading
 import time as _time
-import config as _config
-from config import replace_device_id_in_shared_dirs
-
-def _get_db_path() -> str:
-    return _config.load_config().get("DB_PATH") or _config.DB_PATH
+from config import DB_PATH, replace_device_id_in_shared_dirs
 
 _local = threading.local()
 
@@ -59,7 +55,7 @@ class _PooledConnection:
 
 
 def _create_raw_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(_get_db_path(), check_same_thread=False, timeout=30.0)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
