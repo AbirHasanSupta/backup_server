@@ -122,6 +122,7 @@ def main() -> None:
         "PIL",
         "PIL.Image",
         "pillow_heif",
+        "tkinterdnd2",
         "config",
         "database",
         "state",
@@ -162,6 +163,7 @@ def main() -> None:
         "--icon", str(ROOT / "assets" / "icon.ico"),
         "--add-data", f"{ROOT / 'assets'}{sep}assets",
         "--collect-all", "customtkinter",
+        "--collect-all", "tkinterdnd2",
     ]
 
     for imp in hidden_imports:

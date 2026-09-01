@@ -497,6 +497,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def __init__(self):
         super().__init__()
+        if getattr(sys, "frozen", False):
+            _meipass = getattr(sys, "_MEIPASS", "")
+            if _meipass:
+                import tkinterdnd2 as _tkdnd2_mod
+                _tkdnd2_mod.TkinterDnD.TKDND_LIBRARY = _meipass
         self.TkdndVersion = TkinterDnD._require(self)
 
         # Fonts
@@ -3627,19 +3632,20 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         except Exception:
             pass
 
-        for mod_name in (
-            "config",
-            "storage",
-            "database",
-            "ffmpeg_utils",
-            "video_preview",
-            "memories",
-            "rewind",
-            "upload",
-            "server",
-        ):
-            if mod_name in sys.modules:
-                importlib.reload(sys.modules[mod_name])
+        if not getattr(sys, "frozen", False):
+            for mod_name in (
+                "config",
+                "storage",
+                "database",
+                "ffmpeg_utils",
+                "video_preview",
+                "memories",
+                "rewind",
+                "upload",
+                "server",
+            ):
+                if mod_name in sys.modules:
+                    importlib.reload(sys.modules[mod_name])
 
         from server import app as fastapi_app
         from config import HOST, PORT
