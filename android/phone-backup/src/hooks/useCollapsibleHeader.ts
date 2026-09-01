@@ -14,7 +14,7 @@ import {
   ViewStyle,
 } from 'react-native';
 
-/* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
+ 
 interface CollapsibleHeaderConfig {
   /** Estimated header height used until onLayout measures the real one. */
   headerHeight: number;

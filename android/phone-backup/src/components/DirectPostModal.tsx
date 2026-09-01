@@ -25,6 +25,7 @@ import {
   DIRECT_POST_MAX_FILE_BYTES,
 } from '../../downloader';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
+import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import type { ShareTargetDevice } from './ShareModal';
 
 const { height: SCREEN_H } = Dimensions.get('window');
@@ -236,7 +237,7 @@ export function DirectPostModal({
       );
       onClose();
     } catch (err: any) {
-      Alert.alert('Post Failed', err?.message || 'Could not upload and create post.');
+      Alert.alert('Post Failed', sanitizeErrorMessage(err, 'Could not upload and create post.'));
     } finally {
       setPosting(false);
     }

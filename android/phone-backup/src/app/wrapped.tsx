@@ -74,7 +74,7 @@ export default function WrappedScreen() {
 
   useEffect(() => {
     // Year picker / first load.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     fetchWrapped(year);
   }, [year, fetchWrapped]);
 

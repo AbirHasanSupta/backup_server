@@ -12,11 +12,12 @@ import {
   KeyboardAvoidingView,
   Platform,
   Dimensions,
+  Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
-import { listShareTargetDevices } from '../../downloader';
+import { listShareTargetDevices, MAX_SHARE_POST_FILES } from '../../downloader';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 const { height: SCREEN_H } = Dimensions.get('window');
@@ -86,13 +87,20 @@ export function ShareModal({
 
   const handleSend = useCallback(async () => {
     if (selected.size === 0 || sending) return;
+    if (count > MAX_SHARE_POST_FILES) {
+      Alert.alert(
+        'Too many items',
+        `You can share up to ${MAX_SHARE_POST_FILES} items in a single post. Deselect some items and try again.`,
+      );
+      return;
+    }
     setSending(true);
     try {
       await onSubmit(Array.from(selected), caption.trim());
     } finally {
       setSending(false);
     }
-  }, [selected, sending, caption, onSubmit]);
+  }, [count, selected, sending, caption, onSubmit]);
 
   // On Android, Modal windows are not subject to windowSoftInputMode="adjustResize",
   // so we manually shift the sheet up by the keyboard height.
@@ -100,6 +108,8 @@ export function ShareModal({
   const sheetMaxHeight = keyboardHeight > 0
     ? Math.min(SCREEN_H * 0.88, SCREEN_H - keyboardHeight - 20)
     : SCREEN_H * 0.88;
+
+  const isOverLimit = count > MAX_SHARE_POST_FILES;
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -122,8 +132,9 @@ export function ShareModal({
         >
           <View style={styles.handle} />
           <View style={styles.header}>
-            <Text style={[styles.title, { color: colors.text }]}>
+            <Text style={[styles.title, { color: isOverLimit ? colors.error : colors.text }]}>
               Share {count} {count === 1 ? 'item' : 'items'}
+              {isOverLimit ? ` (max ${MAX_SHARE_POST_FILES})` : ''}
             </Text>
             <TouchableOpacity onPress={onClose} hitSlop={10}>
               <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={20} />
@@ -205,15 +216,19 @@ export function ShareModal({
 
           <TouchableOpacity
             onPress={handleSend}
-            disabled={selected.size === 0 || sending}
-            style={[styles.primaryBtn, { backgroundColor: selected.size > 0 && !sending ? colors.primary : colors.surfaceSoft }]}
+            disabled={selected.size === 0 || sending || isOverLimit}
+            style={[styles.primaryBtn, { backgroundColor: selected.size > 0 && !sending && !isOverLimit ? colors.primary : colors.surfaceSoft }]}
             activeOpacity={0.85}
           >
             {sending ? (
               <ActivityIndicator color="#fff" />
             ) : (
-              <Text style={[styles.primaryBtnText, { color: selected.size > 0 ? '#fff' : colors.textMuted }]}>
-                {selected.size > 0 ? `Share with ${selected.size} ${selected.size === 1 ? 'device' : 'devices'}` : 'Select devices'}
+              <Text style={[styles.primaryBtnText, { color: selected.size > 0 && !isOverLimit ? '#fff' : colors.textMuted }]}>
+                {isOverLimit
+                  ? `Limit exceeded (${count}/${MAX_SHARE_POST_FILES})`
+                  : selected.size > 0
+                    ? `Share with ${selected.size} ${selected.size === 1 ? 'device' : 'devices'}`
+                    : 'Select devices'}
               </Text>
             )}
           </TouchableOpacity>

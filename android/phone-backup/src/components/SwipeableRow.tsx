@@ -13,7 +13,7 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { AppIcon } from '@/components/AppIcon';
 import { hapticMedium } from '@/utils/haptics';
 
-/* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
+ 
 
 const ACTION_WIDTH = 80;
 const SNAP_THRESHOLD = ACTION_WIDTH * 0.6;

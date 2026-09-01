@@ -744,7 +744,8 @@ export async function createQuizShare(targetDeviceIds, caption, score, total, qu
   return await res.json();
 }
 
-export const DIRECT_POST_MAX_FILES = 20;
+export const DIRECT_POST_MAX_FILES = 300;
+export const MAX_SHARE_POST_FILES = 300;
 export const DIRECT_POST_MAX_FILE_BYTES = 100 * 1024 * 1024;
 
 /**
@@ -815,9 +816,29 @@ export async function createDirectPostShare(targetDeviceIds, caption, files, onP
     const cleanUri = file.uri?.startsWith('file://') || file.uri?.startsWith('content://')
       ? file.uri
       : `file://${file.uri}`;
-    const base64Data = await FileSystem.readAsStringAsync(cleanUri, {
-      encoding: FileSystem.EncodingType?.Base64 || 'base64',
-    });
+    let base64Data;
+    try {
+      base64Data = await FileSystem.readAsStringAsync(cleanUri, {
+        encoding: FileSystem.EncodingType?.Base64 || 'base64',
+      });
+    } catch (_readErr) {
+      // Fallback for tricky SAF content:// URIs: copy to temp cache first
+      const tempCacheUri = `${FileSystem.cacheDirectory}direct_post_${Date.now()}_${i}_${(file.name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      try {
+        if (cleanUri.startsWith('content://')) {
+          await FileSystem.StorageAccessFramework.copyAsync({ from: cleanUri, to: tempCacheUri });
+        } else {
+          await FileSystem.copyAsync({ from: cleanUri, to: tempCacheUri });
+        }
+        base64Data = await FileSystem.readAsStringAsync(tempCacheUri, {
+          encoding: FileSystem.EncodingType?.Base64 || 'base64',
+        });
+      } catch (_copyErr) {
+        throw new Error(`Could not read file "${file.name || `file_${i + 1}`}".`);
+      } finally {
+        await FileSystem.deleteAsync(tempCacheUri, { idempotent: true }).catch(() => {});
+      }
+    }
     filesPayload.push({
       name: file.name || `file_${i + 1}`,
       base64: base64Data,

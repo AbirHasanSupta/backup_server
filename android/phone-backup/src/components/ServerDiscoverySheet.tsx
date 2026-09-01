@@ -114,13 +114,23 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
   const scanGeneration = useRef(0);
   const mountedRef = useRef(true);
   const selectingRef = useRef(false);
+  const scrollViewRef = useRef<ScrollView>(null);
+
+  useEffect(() => {
+    if (keyboardHeight > 0) {
+      const timer = setTimeout(() => {
+        scrollViewRef.current?.scrollToEnd({ animated: true });
+      }, 60);
+      return () => clearTimeout(timer);
+    }
+  }, [keyboardHeight]);
 
   const translateY = useSharedValue(0);
   const dismiss = useCallback(() => {
     onClose();
   }, [onClose]);
 
-  /* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
+   
   useEffect(() => {
     mountedRef.current = true;
     selectingRef.current = false;
@@ -157,7 +167,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
         }),
     [dismiss, translateY, selecting]
   );
-  /* eslint-enable react-hooks/immutability */
+   
 
   const sheetAnimStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: translateY.value }],
@@ -297,9 +307,13 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
             </View>
 
             <ScrollView
+              ref={scrollViewRef}
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
-              contentContainerStyle={styles.scrollContent}
+              contentContainerStyle={[
+                styles.scrollContent,
+                keyboardHeight > 0 && { paddingBottom: Spacing.six + 10 },
+              ]}
             >
               {scanning && (
                 <View style={styles.progressTrack}>
@@ -367,6 +381,9 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
                     style={styles.manualInput}
                     value={manualUrl}
                     onChangeText={setManualUrl}
+                    onFocus={() => {
+                      setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
+                    }}
                     placeholder="http://192.168.1.100:8000"
                     placeholderTextColor={colors.textMuted}
                     keyboardType="url"

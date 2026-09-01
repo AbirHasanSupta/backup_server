@@ -110,20 +110,29 @@ async function persistWatched(watched: Set<string>): Promise<void> {
 
 // ─── Reel ranking algorithm ───────────────────────────────────────────────────
 
-function scoreReel(item: ReelItem, watched: Set<string>, now: number): number {
+function hashString(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = ((hash << 5) - hash) + str.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function scoreReel(item: ReelItem, watched: Set<string>, sessionSeed: number): number {
   const reactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
+  const now = sessionSeed > 0 ? sessionSeed : Date.now();
   const ageDays = Math.max(0, now / 1000 - (item.created_at || 0)) / 86400;
   const recency = Math.exp(-ageDays / 14);
   const engagement = Math.min(Math.log1p(reactions) / Math.log1p(10), 1);
   const freshBonus = watched.has(item.reel_id) ? 0 : 0.35;
-  const noise = (Math.sin(now + (item.created_at || 0)) + 1) * 0.125;
-  return recency * 0.25 + engagement * 0.15 + freshBonus * 0.35 + noise * 0.25;
+  const noise = ((hashString(item.reel_id + '_' + sessionSeed) % 1000) / 1000) * 0.25;
+  return recency * 0.25 + engagement * 0.15 + freshBonus * 0.35 + noise;
 }
 
-function rankReels(items: ReelItem[], watched: Set<string>): ReelItem[] {
-  const now = Date.now();
+function rankReels(items: ReelItem[], watched: Set<string>, sessionSeed: number): ReelItem[] {
   return [...items]
-    .map(item => ({ item, score: scoreReel(item, watched, now) }))
+    .map(item => ({ item, score: scoreReel(item, watched, sessionSeed) }))
     .sort((a, b) => b.score - a.score)
     .map(({ item }) => item);
 }
@@ -177,8 +186,8 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
     p.muted = muted;
     p.preservesPitch = true;
     p.bufferOptions = {
-      preferredForwardBufferDuration: 1.5,
-      minBufferForPlayback: 0.15,
+      preferredForwardBufferDuration: 6,
+      minBufferForPlayback: 0.25,
       prioritizeTimeOverSizeThreshold: true,
     };
   });
@@ -751,9 +760,9 @@ export default function ReelsScreen() {
   const [muted, setMuted] = useState(false);
 
   // Dynamic layout measurement to cleanly fit between status bar and floating bottom tab bar
-  const defaultCardHeight = Math.max(300, SCREEN_H - insets.top - TAB_BAR_TOTAL_CLEARANCE);
+  const defaultCardHeight = Math.round(Math.max(300, SCREEN_H - insets.top - TAB_BAR_TOTAL_CLEARANCE));
   const [viewportHeight, setViewportHeight] = useState(defaultCardHeight);
-  const [viewportWidth, setViewportWidth] = useState(SCREEN_W);
+  const [viewportWidth, setViewportWidth] = useState(Math.round(SCREEN_W));
 
   const listRef = useRef<FlatList<ReelItem>>(null);
   const watchedRef = useRef<Set<string>>(new Set());
@@ -770,8 +779,8 @@ export default function ReelsScreen() {
   const handleContainerLayout = useCallback((e: LayoutChangeEvent) => {
     const { width, height } = e.nativeEvent.layout;
     if (height > 0) {
-      setViewportHeight(height);
-      setViewportWidth(width);
+      setViewportHeight(Math.round(height));
+      setViewportWidth(Math.round(width));
     }
   }, []);
 
@@ -791,11 +800,12 @@ export default function ReelsScreen() {
       watchedRef.current = watched;
 
       if (reset) seedRef.current = Date.now();
-      const { reels: raw, has_more } = await getReelsFeed(reset ? 0 : offsetRef.current, 30, seedRef.current);
+      const currentSeed = seedRef.current;
+      const { reels: raw, has_more } = await getReelsFeed(reset ? 0 : offsetRef.current, 30, currentSeed);
       hasMoreRef.current = has_more && raw.length > 0;
       offsetRef.current = reset ? raw.length : offsetRef.current + raw.length;
 
-      const ranked = rankReels(raw, watched);
+      const ranked = rankReels(raw, watched, currentSeed);
       setReels(prev => {
         if (reset) return ranked;
         const existingIds = new Set(prev.map(r => r.reel_id));
@@ -907,11 +917,14 @@ export default function ReelsScreen() {
     viewportWidth,
   }), [activeIndex, screenFocused, muted, viewportHeight, viewportWidth]);
 
-  const getItemLayout = useCallback((_: unknown, index: number) => ({
-    length: viewportHeight,
-    offset: viewportHeight * index,
-    index,
-  }), [viewportHeight]);
+  const getItemLayout = useCallback((_: unknown, index: number) => {
+    const h = Math.round(viewportHeight);
+    return {
+      length: h,
+      offset: h * index,
+      index,
+    };
+  }, [viewportHeight]);
 
   const renderItem = useCallback(({ item, index }: { item: ReelItem; index: number }) => (
     <ReelCard
@@ -982,16 +995,18 @@ export default function ReelsScreen() {
             renderItem={renderItem}
             getItemLayout={getItemLayout}
             extraData={extraData}
-            pagingEnabled={Platform.OS === 'ios'}
-            snapToInterval={viewportHeight}
+            pagingEnabled={true}
+            snapToInterval={Platform.OS === 'ios' ? Math.round(viewportHeight) : undefined}
             snapToAlignment="start"
-            decelerationRate="fast"
+            decelerationRate={Platform.OS === 'ios' ? 'fast' : 'normal'}
             disableIntervalMomentum={true}
             showsVerticalScrollIndicator={false}
+            overScrollMode="never"
+            bounces={false}
             onViewableItemsChanged={onViewableItemsChanged}
             viewabilityConfig={viewabilityConfig}
             onEndReached={handleLoadMore}
-            onEndReachedThreshold={1}
+            onEndReachedThreshold={0.5}
             windowSize={5}
             initialNumToRender={2}
             maxToRenderPerBatch={3}

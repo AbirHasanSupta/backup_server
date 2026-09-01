@@ -428,13 +428,27 @@ def _terminate_active_ffmpeg() -> bool:
 _MP4_LIKE_EXTENSIONS = {".mp4", ".mov", ".m4v", ".3gp"}
 
 
+_probe_cache_lock = threading.Lock()
+_probe_cache: dict[tuple[str, int, int], list[dict[str, object]] | None] = {}
+_MAX_PROBE_CACHE_ENTRIES = 2048
+
+
 def _probe_streams(source_path: str) -> list[dict[str, object]] | None:
     """Read just enough stream metadata to decide whether Android can play it.
 
-    The result intentionally remains conservative.  A false negative merely
-    builds a compact fallback preview; a false positive could leave the client
-    with a video it cannot decode.
+    The result is cached in-memory by (path, mtime, size) to eliminate subprocess
+    overhead for repeat requests.
     """
+    try:
+        stat = os.stat(source_path)
+        cache_key = (os.path.abspath(source_path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+    with _probe_cache_lock:
+        if cache_key in _probe_cache:
+            return _probe_cache[cache_key]
+
     ffprobe_path = _ffprobe_path()
     if not ffprobe_path:
         return None
@@ -460,7 +474,13 @@ def _probe_streams(source_path: str) -> list[dict[str, object]] | None:
             **run_options,
         )
         streams = json.loads(result.stdout).get("streams", [])
-        return streams if isinstance(streams, list) else None
+        res = streams if isinstance(streams, list) else None
+        with _probe_cache_lock:
+            if len(_probe_cache) >= _MAX_PROBE_CACHE_ENTRIES:
+                for k in list(_probe_cache.keys())[:256]:
+                    _probe_cache.pop(k, None)
+            _probe_cache[cache_key] = res
+        return res
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
         return None
 

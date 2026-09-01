@@ -899,9 +899,7 @@ def _stream_cache_headers(path: str, file_size: int, cache_control: str | None =
     return {
         "Content-Length": str(file_size),
         "Accept-Ranges": "bytes",
-        # Let clients reuse recently streamed media segments unless the caller
-        # is serving a temporary source-file preview representation.
-        "Cache-Control": cache_control or "private, max-age=300",
+        "Cache-Control": cache_control or "private, max-age=86400, must-revalidate",
         "ETag": f'W/"{int(stat.st_mtime)}-{file_size}"',
         "Last-Modified": formatdate(stat.st_mtime, usegmt=True),
     }
@@ -1019,10 +1017,7 @@ async def preview_file(
     except subprocess.CalledProcessError:
         raise HTTPException(status_code=500, detail="Failed to generate video preview")
 
-    # This URL initially represents the original source, then the optimized
-    # cache once ready.  Revalidate only that temporary response so a later
-    # open can pick up the optimized representation at the same URL.
-    cache_control = "private, no-cache" if preview_path == path else None
+    cache_control = "public, max-age=604800, immutable" if preview_path != path else "private, max-age=86400, must-revalidate"
     return _file_range_response(preview_path, request, cache_control=cache_control)
 
 
@@ -1424,7 +1419,7 @@ async def preview_shared_file(
     except subprocess.CalledProcessError:
         raise HTTPException(status_code=500, detail="Failed to generate video preview")
 
-    cache_control = "private, no-cache" if preview_path == full_path else None
+    cache_control = "public, max-age=604800, immutable" if preview_path != full_path else "private, max-age=86400, must-revalidate"
     return _file_range_response(preview_path, request, cache_control=cache_control)
 
 
@@ -1879,7 +1874,8 @@ os.makedirs(SHARED_QUIZ_DIR, exist_ok=True)
 
 QUIZ_SHARE_MAX_TOTAL = 30
 QUIZ_SHARE_MAX_IMAGE_BYTES = 8 * 1024 * 1024
-DIRECT_POST_MAX_FILES = 20
+MAX_POST_FILES = 300
+DIRECT_POST_MAX_FILES = 300
 DIRECT_POST_MAX_FILE_BYTES = 100 * 1024 * 1024
 
 
@@ -1974,6 +1970,8 @@ async def create_share(
 
     if not body.items:
         raise HTTPException(status_code=400, detail="No items to share")
+    if len(body.items) > MAX_POST_FILES:
+        raise HTTPException(status_code=400, detail=f"Too many items to share (max {MAX_POST_FILES})")
     if not body.target_device_ids:
         raise HTTPException(status_code=400, detail="No target devices")
 
@@ -2520,18 +2518,13 @@ async def get_reels_feed(
         video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
 
         received = get_device_shares_for_target(device_id)
-        sent = get_device_shares_by_sharer(device_id)
 
         seen_share_ids: set[int] = set()
         all_shares: list[dict] = []
         for s in received:
-            if s["share_id"] not in seen_share_ids:
+            if s["shared_by_device_id"] != device_id and s["share_id"] not in seen_share_ids:
                 seen_share_ids.add(s["share_id"])
-                all_shares.append({**s, "is_own_post": s["shared_by_device_id"] == device_id})
-        for s in sent:
-            if s["share_id"] not in seen_share_ids:
-                seen_share_ids.add(s["share_id"])
-                all_shares.append({**s, "is_own_post": True})
+                all_shares.append({**s, "is_own_post": False})
 
         def _is_video(s):
             ext = os.path.splitext(s["relative_path"])[1].lower()
@@ -2874,7 +2867,7 @@ async def preview_device_share(
         raise HTTPException(status_code=404, detail="File not found")
     except subprocess.CalledProcessError:
         raise HTTPException(status_code=500, detail="Failed to generate video preview")
-    cache_control = "private, no-cache" if preview_path == path else None
+    cache_control = "public, max-age=604800, immutable" if preview_path != path else "private, max-age=86400, must-revalidate"
     return _file_range_response(preview_path, request, cache_control=cache_control)
 
 

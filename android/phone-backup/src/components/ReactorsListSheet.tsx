@@ -57,10 +57,10 @@ export function ReactorsListSheet({
   useEffect(() => {
     if (!visible || mediaId == null) return;
     let active = true;
-    /* eslint-disable react-hooks/set-state-in-effect */
+     
     setLoading(true);
     setFilter('all');
-    /* eslint-enable react-hooks/set-state-in-effect */
+     
     getMediaReactions(mediaId)
       .then((res) => {
         if (!active) return;

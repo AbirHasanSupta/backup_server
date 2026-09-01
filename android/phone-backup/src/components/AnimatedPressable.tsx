@@ -10,7 +10,7 @@ import Animated, {
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { hapticLight, hapticLongPress } from '@/utils/haptics';
 
-/* eslint-disable react-hooks/immutability -- Reanimated shared values are designed to be mutated */
+ 
 
 interface AnimatedPressableProps {
   children?: React.ReactNode;

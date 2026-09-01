@@ -61,6 +61,7 @@ import {
   createDeviceShare,
   createDirectPostShare,
   DIRECT_POST_MAX_FILES,
+  MAX_SHARE_POST_FILES,
   DIRECT_POST_MAX_FILE_BYTES,
   getComments,
   addComment,
@@ -2781,9 +2782,7 @@ const PreviewModal = React.memo(function PreviewModal({
   const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 
   // ── Memoized PanResponder ──────────────────
-  // PanResponder.create() handlers read stable refs — exhaustive-deps would
-  // incorrectly flag those refs as missing deps.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // PanResponder.create() handlers read stable refs.
   const panResponder = useMemo(() => PanResponder.create({
       onStartShouldSetPanResponder: () => !isVideoSeekingRef.current,
       onMoveShouldSetPanResponder: (evt, gs) => {
@@ -2880,7 +2879,7 @@ const PreviewModal = React.memo(function PreviewModal({
           Animated.spring(cur.slideAnim, { toValue: 0, useNativeDriver: true, speed: 22, bounciness: 4 }).start();
         }
       },
-  }), []);
+  }), [scheduleScaleDisplay]);
 
   if (!currentFile) return null;
 
@@ -3201,17 +3200,12 @@ const controlsPanelGuard = PanResponder.create({
 function NativeVideoPreviewPlayer({
   previewUri,
   originalUri,
-  fileSize,
+  fileSize: _fileSize,
   isActive = true,
   swipePanHandlers,
   onSeekingChange,
   videoModule,
 }: VideoPreviewPlayerProps & { videoModule: ExpoVideoModule }) {
-  const PREVIEW_TRANSCODE_MIN_BYTES = 40 * 1024 * 1024;
-  const shouldUpgrade = previewUri !== originalUri && fileSize >= PREVIEW_TRANSCODE_MIN_BYTES;
-  const upgradedRef = useRef(false);
-  const upgradeScheduledRef = useRef(false);
-  const upgradeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const videoViewRef = useRef<InstanceType<ExpoVideoModule['VideoView']> | null>(null);
 
   const enterFullscreen = useCallback(() => {
@@ -3232,15 +3226,10 @@ function NativeVideoPreviewPlayer({
 
   const player = videoModule.useVideoPlayer(source, p => {
     p.loop = true;
-    // Do NOT call p.play() here — the initializer runs before the source is
-    // loaded and the native decoder hasn't filled even a single frame yet.
-    // Calling play() at this point causes the "plays 1 s → stalls → resumes"
-    // buffering splash because the player starts rendering before minBuffer
-    // is satisfied.  play() is deferred to the statusChange effect below,
-    // which fires only after readyToPlay (i.e. the buffer gate is met).
+    // High-performance streaming configuration for low-latency, zero-stutter playback over local Wi-Fi.
     p.bufferOptions = {
-      preferredForwardBufferDuration: 4,
-      minBufferForPlayback: 0.15,
+      preferredForwardBufferDuration: 10,
+      minBufferForPlayback: 0.25,
       prioritizeTimeOverSizeThreshold: true,
     };
   });
@@ -3294,12 +3283,6 @@ function NativeVideoPreviewPlayer({
           uri: originalUri,
           useCaching: true,
           contentType: 'progressive',
-        }).then(() => {
-          upgradedRef.current = true;
-          // replaceAsync succeeded — player is now on the original URI.
-          // readyToPlay will fire next and set initialLoadDoneRef + call play.
-          // Do NOT set initialLoadDoneRef here; let readyToPlay do it so that
-          // the play gate is correctly guarded after source replacement too.
         }).catch(() => {
           initialLoadDoneRef.current = true;
           setShowBuffering(false);
@@ -3318,7 +3301,6 @@ function NativeVideoPreviewPlayer({
     if (!initialLoadDoneRef.current) {
       setShowBuffering(true);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- isActive read via ref to avoid stale-closure
   }, [status, previewUri, originalUri, player]);
 
   useEffect(() => {
@@ -3387,7 +3369,7 @@ function NativeVideoPreviewPlayer({
     });
   }, [player]);
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- PanResponder handlers read stable refs; player dep is correct
+   
   const seekPanResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
@@ -3430,22 +3412,8 @@ function NativeVideoPreviewPlayer({
   }), [player, onSeekingChange]);
 
   useEffect(() => {
-    upgradedRef.current = false;
-    upgradeScheduledRef.current = false;
-    if (upgradeTimerRef.current) {
-      clearTimeout(upgradeTimerRef.current);
-      upgradeTimerRef.current = null;
-    }
-  }, [previewUri, originalUri]);
-
-  useEffect(() => {
     // Never call pause/play from an unmount cleanup — tearing down the native
     // player while invoking controls races and can kill the whole app.
-    // Guard: only call play() once the buffer gate has been satisfied
-    // (initialLoadDoneRef set in the statusChange effect above).  Calling
-    // play() before readyToPlay causes the native decoder to start rendering
-    // immediately with an empty ring buffer — it plays for ~1 s then stalls
-    // to re-fill, which is the "buffering splash" reported for every video.
     if (isActive) {
       if (initialLoadDoneRef.current) {
         safeMediaCall(() => player.play());
@@ -3458,60 +3426,6 @@ function NativeVideoPreviewPlayer({
       safeMediaCall(() => player.pause());
     }
   }, [isActive, player]);
-
-  useEffect(() => {
-    if (
-      !shouldUpgrade ||
-      upgradedRef.current ||
-      upgradeScheduledRef.current ||
-      status !== 'readyToPlay' ||
-      !isActive
-    ) {
-      return;
-    }
-
-    let cancelled = false;
-    upgradeScheduledRef.current = true;
-    const timer = setTimeout(async () => {
-      if (cancelled || upgradedRef.current) return;
-      const position = player.currentTime;
-      const wasPlaying = player.playing;
-      isUpgradingRef.current = true;
-      try {
-        await player.replaceAsync({
-          uri: originalUri,
-          useCaching: true,
-          contentType: 'progressive',
-        });
-        if (cancelled) return;
-        upgradedRef.current = true;
-        upgradeScheduledRef.current = false;
-        pendingSeekRef.current = position;
-        safeMediaCall(() => { player.currentTime = position; });
-        if (wasPlaying) {
-          safeMediaCall(() => player.play());
-        }
-      } catch {
-        // Allow another attempt later.
-        upgradedRef.current = false;
-        upgradeScheduledRef.current = false;
-      } finally {
-        isUpgradingRef.current = false;
-      }
-    }, 4000);
-    upgradeTimerRef.current = timer;
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-      if (upgradeTimerRef.current === timer) {
-        upgradeTimerRef.current = null;
-      }
-      if (!upgradedRef.current) {
-        upgradeScheduledRef.current = false;
-      }
-    };
-  }, [shouldUpgrade, status, isActive, originalUri, player]);
 
   // Displayed position/progress: while dragging show the seek thumb position
   const displayProgress = isSeeking ? seekProgress : (durationSec > 0 ? positionSec / durationSec : 0);
@@ -3677,13 +3591,9 @@ function NativeVideoPreviewPreloader({ uri, videoModule }: { uri: string; videoM
 
   videoModule.useVideoPlayer(source, player => {
     player.loop = true;
-    // The preloader just warms the cache; it never calls play().
-    // A small minBufferForPlayback is fine here because we never call play()
-    // on the preloader — we only want the network bytes in the decoder's
-    // ring buffer so that when the real player mounts it starts from cache.
     player.bufferOptions = {
-      preferredForwardBufferDuration: 4,
-      minBufferForPlayback: 0.15,
+      preferredForwardBufferDuration: 6,
+      minBufferForPlayback: 0.25,
       prioritizeTimeOverSizeThreshold: true,
     };
   });
@@ -5689,7 +5599,13 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
                 {selectedPaths.size} {selectedPaths.size === 1 ? 'file' : 'files'} selected
               </Text>
               <TouchableOpacity
-                onPress={() => setShareModalVisible(true)}
+                onPress={() => {
+                  if (selectedPaths.size > MAX_SHARE_POST_FILES) {
+                    Alert.alert('Too many files', `You can share up to ${MAX_SHARE_POST_FILES} files in a single post.`);
+                    return;
+                  }
+                  setShareModalVisible(true);
+                }}
                 style={[styles.shareSelBtn, { backgroundColor: colors.primarySoft }, isOffline && styles.disabledBtn]}
                 disabled={isOffline}
               >
