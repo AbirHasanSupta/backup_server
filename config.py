@@ -151,7 +151,10 @@ def _migrate_frozen_files() -> None:
     _migrated = True
 
 
-_config_lock = threading.Lock()
+# Configuration can be updated by the desktop UI and request handlers in the
+# same process.  Some helpers intentionally call load_config()/save_config()
+# while holding this lock, so it must be re-entrant.
+_config_lock = threading.RLock()
 _config_cache: dict | None = None
 _config_cache_mtime: float | None = None
 
@@ -195,20 +198,58 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     global _config_cache, _config_cache_mtime
-    existing_server_id = (_config_cache or {}).get("SERVER_ID")
-    merged = {**_DEFAULTS, **cfg}
-    if existing_server_id and not merged.get("SERVER_ID"):
-        merged["SERVER_ID"] = existing_server_id
-    if _IS_FROZEN:
-        merged["DB_PATH"] = DB_PATH
-
-    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(merged, f, indent=2)
-
     with _config_lock:
+        existing_server_id = (_config_cache or {}).get("SERVER_ID")
+        merged = {**_DEFAULTS, **cfg}
+        if existing_server_id and not merged.get("SERVER_ID"):
+            merged["SERVER_ID"] = existing_server_id
+        if _IS_FROZEN:
+            merged["DB_PATH"] = DB_PATH
+
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(merged, f, indent=2)
         _config_cache = None
         _config_cache_mtime = None
+
+
+def replace_device_id_in_shared_dirs(old_device_id: str, new_device_id: str) -> int:
+    """Move shared-folder access tags from a replaced device ID to its new ID.
+
+    Android app reinstalls generate a new device ID.  Folder permissions live in
+    ``server_config.json`` rather than the database, so they must be migrated
+    alongside database records.  The replacement is idempotent and keeps the
+    ``all`` tag and any existing new-ID tag intact.
+    """
+    old_device_id = (old_device_id or "").strip()
+    new_device_id = (new_device_id or "").strip()
+    if not old_device_id or not new_device_id or old_device_id == new_device_id:
+        return 0
+
+    with _config_lock:
+        cfg = load_config()
+        changed = 0
+        shared_dirs = cfg.get("SHARED_DIRS", [])
+        if not isinstance(shared_dirs, list):
+            return 0
+
+        for entry in shared_dirs:
+            if not isinstance(entry, dict):
+                continue
+            tags = entry.get("device_ids", [])
+            if not isinstance(tags, list) or old_device_id not in tags:
+                continue
+            # dict.fromkeys preserves the user's tag order while preventing a
+            # duplicate if the new ID has already been granted access.
+            entry["device_ids"] = list(dict.fromkeys(
+                new_device_id if tag == old_device_id else tag
+                for tag in tags
+            ))
+            changed += 1
+
+        if changed:
+            save_config(cfg)
+        return changed
 
 
 _cfg = load_config()

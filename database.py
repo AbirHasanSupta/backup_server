@@ -3,7 +3,7 @@ import sqlite3
 import secrets
 import threading
 import time as _time
-from config import DB_PATH
+from config import DB_PATH, replace_device_id_in_shared_dirs
 
 _local = threading.local()
 
@@ -1162,25 +1162,232 @@ def find_device_by_name_model(
     return dict(row) if row else None
 
 
-def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) -> None:
-    """Reassign all file records from old_device_id to new_device_id and update the
-    devices row.  Called when a reinstalled app presents a new device_id but we
-    detect it belongs to the same physical device (by name + model match).
+def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) -> dict[str, int]:
+    """Transfer every device-owned record to an ID issued after an app reinstall.
+
+    A device ID is used for more than backup rows: it is also a share recipient,
+    post author, media source, reaction/comment author, and a shared-folder
+    permission tag.  Moving only ``files.device_id`` made a successfully
+    recovered device appear to lose its feed and folder access.  This function
+    moves those references together, while retaining the original device row
+    (and therefore its stable on-disk backup folder).
     """
+    old_device_id = (old_device_id or "").strip()
+    new_device_id = (new_device_id or "").strip()
+    if not old_device_id or not new_device_id or old_device_id == new_device_id:
+        return {"folder_tags": 0, "share_targets": 0, "shared_posts": 0}
+
     now = int(_time.time())
     conn = get_conn()
-    # Migrate file records
-    conn.execute(
-        "UPDATE files SET device_id = ? WHERE device_id = ?",
-        (new_device_id, old_device_id),
-    )
-    # Update the device row — keep folder_name intact
-    conn.execute(
-        "UPDATE devices SET device_id=?, device_ip=?, last_seen=? WHERE device_id=?",
-        (new_device_id, new_device_ip, now, old_device_id),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute("BEGIN")
+
+        # A partially completed reconnect can leave a few rows under the new
+        # ID.  Keep the older backup rows on collisions so recovery never loses
+        # files that existed before the reinstall.
+        conn.execute(
+            """
+            DELETE FROM files AS new_file
+            WHERE new_file.device_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM files AS old_file
+                  WHERE old_file.device_id = ? AND old_file.path = new_file.path
+              )
+            """,
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "UPDATE files SET device_id = ? WHERE device_id = ?",
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "UPDATE sync_sessions SET device_id = ? WHERE device_id = ?",
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "UPDATE cleanup_log SET source_id = ? WHERE source_id = ?",
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "UPDATE trips SET source_id = ? WHERE source_id = ?",
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            """
+            DELETE FROM reactions AS old_reaction
+            WHERE old_reaction.source_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM reactions AS new_reaction
+                  WHERE new_reaction.media_id = old_reaction.media_id
+                    AND new_reaction.emoji = old_reaction.emoji
+                    AND new_reaction.source_id = ?
+              )
+            """,
+            (old_device_id, new_device_id),
+        )
+        conn.execute(
+            "UPDATE reactions SET source_id = ? WHERE source_id = ?",
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "UPDATE comments SET source_id = ? WHERE source_id = ?",
+            (new_device_id, old_device_id),
+        )
+
+        # Preserve a single media identity where an interrupted reconnect has
+        # already indexed the same path under the new ID.  Feed reactions,
+        # comments, trip membership, and post rows are redirected to the old
+        # media ID before the duplicate row is removed.
+        duplicate_media = conn.execute(
+            """
+            SELECT old_media.id AS old_id, new_media.id AS new_id
+            FROM media_index AS old_media
+            JOIN media_index AS new_media
+              ON new_media.source_type = old_media.source_type
+             AND new_media.relative_path = old_media.relative_path
+            WHERE old_media.source_key = ?
+              AND new_media.source_key = ?
+              AND old_media.source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared', 'device')
+            """,
+            (old_device_id, new_device_id),
+        ).fetchall()
+        for media in duplicate_media:
+            old_id, new_id = media["old_id"], media["new_id"]
+            conn.execute("UPDATE device_shares SET media_id = ? WHERE media_id = ?", (old_id, new_id))
+            conn.execute(
+                "UPDATE trips SET cover_media_id = ? WHERE cover_media_id = ?",
+                (old_id, new_id),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO trip_media (trip_id, media_id) "
+                "SELECT trip_id, ? FROM trip_media WHERE media_id = ?",
+                (old_id, new_id),
+            )
+            conn.execute("DELETE FROM trip_media WHERE media_id = ?", (new_id,))
+            conn.execute(
+                "INSERT OR IGNORE INTO reactions (media_id, source_id, emoji, created_at) "
+                "SELECT ?, source_id, emoji, created_at FROM reactions WHERE media_id = ?",
+                (old_id, new_id),
+            )
+            conn.execute("DELETE FROM reactions WHERE media_id = ?", (new_id,))
+            conn.execute("UPDATE comments SET media_id = ? WHERE media_id = ?", (old_id, new_id))
+            conn.execute("DELETE FROM media_index WHERE id = ?", (new_id,))
+
+        # The backup/media caches use the device ID as their source key.  Their
+        # old entries remain valid because the device's folder_name is retained.
+        source_types = ("phone", "rewind", "rewind_shared", "quiz_shared", "device")
+        placeholders = ",".join("?" for _ in source_types)
+        conn.execute(
+            f"UPDATE media_index SET source_key = ? WHERE source_key = ? AND source_type IN ({placeholders})",
+            (new_device_id, old_device_id, *source_types),
+        )
+
+        # scan_dirs has a composite primary key, so merge the old cache into an
+        # existing new-ID cache before removing stale old-ID rows.
+        conn.execute(
+            """
+            UPDATE scan_dirs AS new_dir
+            SET dir_mtime_ns = MAX(new_dir.dir_mtime_ns, old_dir.dir_mtime_ns),
+                updated_at = MAX(new_dir.updated_at, old_dir.updated_at)
+            FROM scan_dirs AS old_dir
+            WHERE new_dir.source_type = old_dir.source_type
+              AND new_dir.dir_relpath = old_dir.dir_relpath
+              AND new_dir.source_type = 'phone'
+              AND new_dir.source_key = ? AND old_dir.source_key = ?
+            """,
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO scan_dirs
+                (source_type, source_key, dir_relpath, dir_mtime_ns, updated_at)
+            SELECT source_type, ?, dir_relpath, dir_mtime_ns, updated_at
+            FROM scan_dirs
+            WHERE source_type = 'phone' AND source_key = ?
+            """,
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "DELETE FROM scan_dirs WHERE source_type = 'phone' AND source_key = ?",
+            (old_device_id,),
+        )
+
+        # Move posts written by the old installation, including the source key
+        # needed to serve phone media after the reconnect.
+        shared_posts = conn.execute(
+            "SELECT COUNT(*) AS count FROM device_shares "
+            "WHERE shared_by_device_id = ? OR (source_key = ? AND source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared'))",
+            (old_device_id, old_device_id),
+        ).fetchone()["count"]
+        conn.execute(
+            "UPDATE device_shares SET shared_by_device_id = ? WHERE shared_by_device_id = ?",
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "UPDATE device_shares SET source_key = ? WHERE source_key = ? "
+            "AND source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared')",
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "UPDATE device_share_groups SET shared_by_device_id = ? WHERE shared_by_device_id = ?",
+            (new_device_id, old_device_id),
+        )
+
+        # A target pair is unique.  When both IDs exist for a share, retain an
+        # unread status if either record was unread, then remove the old target.
+        share_targets = conn.execute(
+            "SELECT COUNT(*) AS count FROM device_share_targets WHERE target_device_id = ?",
+            (old_device_id,),
+        ).fetchone()["count"]
+        conn.execute(
+            """
+            UPDATE device_share_targets AS new_target
+            SET seen = 0
+            WHERE new_target.target_device_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM device_share_targets AS old_target
+                  WHERE old_target.share_id = new_target.share_id
+                    AND old_target.target_device_id = ?
+                    AND old_target.seen = 0
+              )
+            """,
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO device_share_targets (share_id, target_device_id, seen)
+            SELECT share_id, ?, seen
+            FROM device_share_targets
+            WHERE target_device_id = ?
+            """,
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "DELETE FROM device_share_targets WHERE target_device_id = ?",
+            (old_device_id,),
+        )
+
+        # Update the device row last.  Its stable folder_name and token move
+        # intact to the new ID.
+        conn.execute(
+            "UPDATE devices SET device_id=?, device_ip=?, last_seen=? WHERE device_id=?",
+            (new_device_id, new_device_ip, now, old_device_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+    # Folder permission tags live outside SQLite.  Update them only once all
+    # database references have committed so a later reconnect can safely retry.
+    folder_tags = replace_device_id_in_shared_dirs(old_device_id, new_device_id)
+    return {
+        "folder_tags": folder_tags,
+        "share_targets": share_targets,
+        "shared_posts": shared_posts,
+    }
 
 
 def touch_device(device_ip: str, device_id: str | None = None, files_delta: int = 1) -> None:

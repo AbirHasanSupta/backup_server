@@ -285,7 +285,14 @@ async def connect_device(
                 f"🔄 Reinstall detected for '{device_name}' ({device_model or 'unknown model'}). "
                 f"Merging {old_id[:12]}… → {device_id[:12]}…"
             )
-            merge_device_id(old_id, device_id, device_ip)
+            merge_result = merge_device_id(old_id, device_id, device_ip)
+            if merge_result["share_targets"] or merge_result["shared_posts"] or merge_result["folder_tags"]:
+                add_log(
+                    "🔄 Reinstall sharing state restored: "
+                    f"{merge_result['share_targets']} received post item(s), "
+                    f"{merge_result['shared_posts']} authored post item(s), "
+                    f"{merge_result['folder_tags']} shared folder tag(s)."
+                )
             # Update the name/ip/model in case they changed slightly
             upsert_device(device_name, device_ip, device_id, device_model, username)
             stats = get_device_stats(device_ip, device_id=device_id)
