@@ -1,5 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { getServerIp, getServerPort, getApiKey, getDeviceId, getDeviceToken } from './settings';
+import { getServerIp, getServerPort, getApiKey, getDeviceId, getDeviceToken, resolveReachableServer } from './settings';
 
 export async function getConfig() {
   const [ip, port, apiKey, deviceId, deviceToken] = await Promise.all([
@@ -73,10 +73,12 @@ export async function warmVideoPreviews(relativePaths, sourceMode, sourceId) {
 
 
 function isNetworkFailure(err) {
+  // AbortError covers both explicit aborts and our timeout-triggered aborts.
+  if (err?.name === 'AbortError') return true;
   const msg = String(err?.message || err || '').toLowerCase();
   return msg.includes('network') || msg.includes('fetch failed') || msg.includes('failed to fetch')
     || msg.includes('unknownhost') || msg.includes('econnrefused') || msg.includes('enotfound')
-    || msg.includes('connection abort');
+    || msg.includes('connection abort') || msg.includes('timeout') || msg.includes('timed out');
 }
 
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 15000) {
@@ -92,6 +94,45 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 15000) {
     if (err?.name === 'AbortError') throw new Error('Request timed out — server is busy, try again.');
     if (isNetworkFailure(err)) throw new Error("Can't reach the server. Check it's running and you're on the right network.");
     throw err;
+  }
+}
+
+/**
+ * Mesh-aware fetch wrapper.
+ * On a network-level failure (not an HTTP error), attempts a fast-path mesh
+ * re-discovery (candidate-only, no full subnet sweep) and retries once with
+ * the newly resolved IP.
+ *
+ * @param {() => Promise<{url: string, options?: object}>} buildRequest
+ *   Async factory that reads the CURRENT config and returns { url, options }.
+ *   Called on each attempt so the URL always uses the most-recently committed IP.
+ * @param {number} [timeoutMs=15000]
+ * @returns {Promise<any>} — parsed JSON
+ */
+async function fetchJsonWithMeshRetry(buildRequest, timeoutMs = 15000) {
+  const attempt = async () => {
+    const { url, options = {} } = await buildRequest();
+    return fetchJsonWithTimeout(url, options, timeoutMs);
+  };
+
+  try {
+    return await attempt();
+  } catch (firstErr) {
+    // Only attempt re-discovery on network failures (not on 4xx / 5xx HTTP).
+    if (!isNetworkFailure(firstErr)) throw firstErr;
+
+    // Attempt a fast candidate-only re-discovery (~2 s max, no subnet sweep).
+    let resolved;
+    try {
+      resolved = await resolveReachableServer({ subnetSweep: false });
+    } catch {
+      throw firstErr; // re-discovery itself failed; surface the original error
+    }
+
+    if (!resolved.ok) throw firstErr;
+
+    // Retry once with the freshly resolved IP (buildRequest re-reads AsyncStorage).
+    return attempt();
   }
 }
 
@@ -609,16 +650,17 @@ export async function updateUsernameOnServer(username) {
 
 /**
  * List accepted devices this device can share to (safe fields only — never a token).
+ * Uses mesh-aware retry for resilience against mid-session mesh roaming.
  * @returns {Promise<{devices: {device_id: string, device_name: string, device_model: string}[]}>}
  */
 export async function listShareTargetDevices() {
-  const { ip, port, key, deviceId } = await getConfig();
-  const res = await fetch(
-    `http://${ip}:${port}/api/share/devices?device_id=${encodeURIComponent(deviceId)}`,
-    { headers: { Authorization: `Bearer ${key}` } },
-  );
-  if (!res.ok) throw new Error(`Failed to list devices (${res.status})`);
-  return await res.json();
+  return fetchJsonWithMeshRetry(async () => {
+    const { ip, port, key, deviceId } = await getConfig();
+    return {
+      url: `http://${ip}:${port}/api/share/devices?device_id=${encodeURIComponent(deviceId)}`,
+      options: { headers: { Authorization: `Bearer ${key}` } },
+    };
+  });
 }
 
 /**
@@ -702,20 +744,129 @@ export async function createQuizShare(targetDeviceIds, caption, score, total, qu
   return await res.json();
 }
 
+export const DIRECT_POST_MAX_FILES = 20;
+export const DIRECT_POST_MAX_FILE_BYTES = 100 * 1024 * 1024;
+
+/**
+ * Upload files from the device file manager and create a feed post.
+ * Files are stored in server app-data and deleted when the post is removed.
+ * @param {string[]} targetDeviceIds
+ * @param {string} caption
+ * @param {{uri: string, name: string, size?: number, modifiedTime?: number}[]} files
+ * @param {(statusText: string) => void} [onProgress]
+ */
+export async function createDirectPostShare(targetDeviceIds, caption, files, onProgress) {
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error('No files selected');
+  }
+  if (!Array.isArray(targetDeviceIds) || targetDeviceIds.length === 0) {
+    throw new Error('Select at least one target device');
+  }
+  if (files.length > DIRECT_POST_MAX_FILES) {
+    throw new Error(`Too many files (max ${DIRECT_POST_MAX_FILES})`);
+  }
+  for (const file of files) {
+    if ((file.size || 0) > DIRECT_POST_MAX_FILE_BYTES) {
+      throw new Error(`${file.name || 'File'} exceeds the 100 MB limit`);
+    }
+  }
+
+  // Pre-flight: ensure the current IP is reachable before building the FormData
+  // payload. If the device has roamed to a new mesh AP, resolve the new IP now
+  // so the upload goes to the correct address on the first attempt.
+  let config = await getConfig();
+  try {
+    const preflightController = new AbortController();
+    const preflightTimer = setTimeout(() => preflightController.abort(), 3000);
+    try {
+      const preflight = await fetch(`http://${config.ip}:${config.port}/ping`, {
+        method: 'GET',
+        signal: preflightController.signal,
+      });
+      clearTimeout(preflightTimer);
+      if (!preflight.ok) throw new Error(`Preflight ${preflight.status}`);
+    } catch (innerErr) {
+      clearTimeout(preflightTimer);
+      throw innerErr;
+    }
+  } catch (preflightErr) {
+    if (isNetworkFailure(preflightErr)) {
+      try {
+        const resolved = await resolveReachableServer({ subnetSweep: false });
+        if (resolved.ok) {
+          // Re-read config after mesh re-discovery committed the new IP.
+          config = await getConfig();
+        }
+      } catch {
+        // If re-discovery itself fails, proceed with the existing IP and let the
+        // actual upload surface a meaningful error to the user.
+      }
+    }
+  }
+
+  const { ip, port, key, deviceId } = config;
+  const formData = new FormData();
+  formData.append('shared_by_device_id', deviceId);
+  formData.append('target_device_ids', JSON.stringify(targetDeviceIds));
+  formData.append('caption', caption || '');
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (onProgress) {
+      onProgress(`Uploading file ${i + 1} of ${files.length}…`);
+    }
+    const uri = file.uri?.startsWith('file://') ? file.uri : `file://${file.uri}`;
+    formData.append('files', {
+      uri,
+      name: file.name || `file_${i + 1}`,
+      type: 'application/octet-stream',
+    });
+  }
+
+  if (onProgress) {
+    onProgress('Creating feed post…');
+  }
+
+  const res = await fetch(
+    `http://${ip}:${port}/api/share/direct-post/create`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+      },
+      body: formData,
+    },
+  );
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body = await res.json();
+      if (body?.detail) {
+        detail = typeof body.detail === 'string' ? `: ${body.detail}` : `: ${JSON.stringify(body.detail)}`;
+      }
+    } catch {
+      // ignore parse errors
+    }
+    throw new Error(`Failed to create post (${res.status})${detail}`);
+  }
+  return await res.json();
+}
+
 /**
  * Fetch the unified feed: device-to-device shares (received + own sent), grouped by post.
+ * Uses mesh-aware retry so a mid-session AP roam doesn't surface a hard error.
  * @param {number} [offset=0] - Pagination offset
  * @param {number} [limit=50] - Max posts per page
  * @returns {Promise<{items: Array<any>, has_more: boolean}>}
  */
 export async function getFeed(offset = 0, limit = 50) {
-  const { ip, port, key, deviceId } = await getConfig();
-  const res = await fetch(
-    `http://${ip}:${port}/api/feed?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
-    { headers: { Authorization: `Bearer ${key}` } },
-  );
-  if (!res.ok) throw new Error(`Failed to fetch feed (${res.status})`);
-  return await res.json();
+  return fetchJsonWithMeshRetry(async () => {
+    const { ip, port, key, deviceId } = await getConfig();
+    return {
+      url: `http://${ip}:${port}/api/feed?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
+      options: { headers: { Authorization: `Bearer ${key}` } },
+    };
+  }, 20000);
 }
 
 /**
@@ -920,16 +1071,17 @@ export async function removeShareTargetByShareId(shareId, targetDeviceId) {
 
 /**
  * Fetch comments for a media item.
+ * Uses mesh-aware retry for resilience against mid-session mesh roaming.
  * @param {number} mediaId
  */
 export async function getComments(mediaId) {
-  const { ip, port, key, deviceId } = await getConfig();
-  const res = await fetch(
-    `http://${ip}:${port}/api/media/${encodeURIComponent(mediaId)}/comments?device_id=${encodeURIComponent(deviceId)}`,
-    { headers: { Authorization: `Bearer ${key}` } },
-  );
-  if (!res.ok) throw new Error(`Failed to fetch comments (${res.status})`);
-  return await res.json();
+  return fetchJsonWithMeshRetry(async () => {
+    const { ip, port, key, deviceId } = await getConfig();
+    return {
+      url: `http://${ip}:${port}/api/media/${encodeURIComponent(mediaId)}/comments?device_id=${encodeURIComponent(deviceId)}`,
+      options: { headers: { Authorization: `Bearer ${key}` } },
+    };
+  });
 }
 
 /**

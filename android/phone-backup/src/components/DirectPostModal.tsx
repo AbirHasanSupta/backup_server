@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -19,7 +19,11 @@ import { Image } from 'expo-image';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
-import { listShareTargetDevices } from '../../downloader';
+import {
+  listShareTargetDevices,
+  DIRECT_POST_MAX_FILES,
+  DIRECT_POST_MAX_FILE_BYTES,
+} from '../../downloader';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import type { ShareTargetDevice } from './ShareModal';
 
@@ -58,19 +62,17 @@ function getFileIcon(name: string): { android: string; ios: string } {
 
 export function DirectPostModal({
   visible,
-  folderName,
   files,
   colors,
   onClose,
-  onChangeFolder,
+  onAddFiles,
   onSubmit,
 }: {
   visible: boolean;
-  folderName: string;
   files: DeviceFileItem[];
   colors: AppColors;
   onClose: () => void;
-  onChangeFolder: () => void;
+  onAddFiles: () => void;
   onSubmit: (selectedFiles: DeviceFileItem[], targetIds: string[], caption: string, onProgress?: (statusText: string) => void) => Promise<void>;
 }) {
   const insets = useSafeAreaInsets();
@@ -78,19 +80,29 @@ export function DirectPostModal({
   const [fileList, setFileList] = useState<DeviceFileItem[]>([]);
   const [devices, setDevices] = useState<ShareTargetDevice[]>([]);
   const [loadingDevices, setLoadingDevices] = useState(false);
+  const [devicesError, setDevicesError] = useState(false);
   const [selectedDevices, setSelectedDevices] = useState<Set<string>>(new Set());
   const [caption, setCaption] = useState('');
   const [posting, setPosting] = useState(false);
   const [postProgressText, setPostProgressText] = useState('');
+  const wasVisibleRef = useRef(false);
+  const filesRef = useRef(files);
+  filesRef.current = files;
 
+  // Initialize modal state only when opening (not when appending files).
   useEffect(() => {
-    if (!visible) return;
-    /* eslint-disable react-hooks/set-state-in-effect */
-    setFileList(files);
+    if (!visible) {
+      wasVisibleRef.current = false;
+      return;
+    }
+    if (wasVisibleRef.current) return;
+    wasVisibleRef.current = true;
+
+    setFileList(filesRef.current);
     setCaption('');
     setPosting(false);
     setPostProgressText('');
-    /* eslint-enable react-hooks/set-state-in-effect */
+    setDevicesError(false);
 
     let active = true;
     setLoadingDevices(true);
@@ -100,11 +112,12 @@ export function DirectPostModal({
         const list = Array.isArray(res?.devices) ? res.devices : [];
         const filtered = list.filter((d) => d.device_id !== 'desktop-server');
         setDevices(filtered);
-        // By default select all target devices
         setSelectedDevices(new Set(filtered.map((d) => d.device_id)));
       })
       .catch(() => {
-        if (active) setDevices([]);
+        if (!active) return;
+        setDevices([]);
+        setDevicesError(true);
       })
       .finally(() => {
         if (active) setLoadingDevices(false);
@@ -113,7 +126,26 @@ export function DirectPostModal({
     return () => {
       active = false;
     };
-  }, [visible, files]);
+  }, [visible]);
+
+  // Merge newly picked files while the modal stays open.
+  useEffect(() => {
+    if (!visible || !wasVisibleRef.current) return;
+    setFileList((prev) => {
+      const seen = new Set(prev.map((f) => f.uri));
+      const additions = files.filter((f) => !seen.has(f.uri));
+      if (!additions.length) return prev;
+      const merged = [...prev, ...additions];
+      if (merged.length > DIRECT_POST_MAX_FILES) {
+        Alert.alert(
+          'Too many files',
+          `You can post up to ${DIRECT_POST_MAX_FILES} files at once. Remove some files before adding more.`,
+        );
+        return prev;
+      }
+      return merged;
+    });
+  }, [files, visible]);
 
   const toggleFile = useCallback((uri: string) => {
     setFileList((prev) =>
@@ -123,6 +155,12 @@ export function DirectPostModal({
 
   const selectedFiles = fileList.filter((f) => f.selected);
   const allFilesSelected = fileList.length > 0 && selectedFiles.length === fileList.length;
+  const canPost = selectedFiles.length > 0
+    && !posting
+    && !loadingDevices
+    && !devicesError
+    && devices.length > 0
+    && selectedDevices.size > 0;
 
   const toggleAllFiles = useCallback(() => {
     if (allFilesSelected) {
@@ -150,35 +188,75 @@ export function DirectPostModal({
     }
   }, [allDevicesSelected, devices]);
 
+  const handleClose = useCallback(() => {
+    if (posting) return;
+    onClose();
+  }, [posting, onClose]);
+
   const handlePost = useCallback(async () => {
+    if (loadingDevices) {
+      Alert.alert('Please wait', 'Still loading target devices…');
+      return;
+    }
+    if (devicesError || devices.length === 0) {
+      Alert.alert(
+        'No target devices',
+        'At least one other connected device is required to publish a feed post.',
+      );
+      return;
+    }
     if (selectedFiles.length === 0) {
       Alert.alert('No files selected', 'Please select at least one file to post.');
       return;
     }
-    if (devices.length > 0 && selectedDevices.size === 0) {
+    if (selectedDevices.size === 0) {
       Alert.alert('No devices selected', 'Please select at least one target device to share with.');
+      return;
+    }
+    if (selectedFiles.length > DIRECT_POST_MAX_FILES) {
+      Alert.alert('Too many files', `You can post up to ${DIRECT_POST_MAX_FILES} files at once.`);
+      return;
+    }
+    const oversized = selectedFiles.find((f) => (f.size || 0) > DIRECT_POST_MAX_FILE_BYTES);
+    if (oversized) {
+      Alert.alert('File too large', `${oversized.name} exceeds the 100 MB limit.`);
       return;
     }
 
     setPosting(true);
     setPostProgressText(`Uploading ${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'}…`);
     try {
-      await onSubmit(selectedFiles, Array.from(selectedDevices), caption.trim(), (statusText) => setPostProgressText(statusText));
+      await onSubmit(
+        selectedFiles,
+        Array.from(selectedDevices),
+        caption.trim(),
+        (statusText) => setPostProgressText(statusText),
+      );
       onClose();
     } catch (err: any) {
       Alert.alert('Post Failed', err?.message || 'Could not upload and create post.');
     } finally {
       setPosting(false);
     }
-  }, [selectedFiles, devices.length, selectedDevices, caption, onSubmit, onClose]);
+  }, [
+    loadingDevices,
+    devicesError,
+    devices.length,
+    selectedFiles,
+    selectedDevices,
+    caption,
+    onSubmit,
+    onClose,
+  ]);
 
-  // On Android, Modal windows are not subject to windowSoftInputMode="adjustResize",
-  // so we manually shift the sheet up by the keyboard height.
   const androidKeyboardOffset = Platform.OS === 'android' ? keyboardHeight : 0;
+  const sheetMaxHeight = keyboardHeight > 0
+    ? Math.min(SCREEN_H * 0.88, SCREEN_H - keyboardHeight - 20)
+    : SCREEN_H * 0.88;
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose} />
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
+      <Pressable style={styles.backdrop} onPress={handleClose} />
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         style={styles.avoider}
@@ -189,8 +267,9 @@ export function DirectPostModal({
             styles.sheet,
             {
               backgroundColor: colors.surface,
-              paddingBottom: insets.bottom + Spacing.three + androidKeyboardOffset,
-              maxHeight: SCREEN_H * 0.88 - (Platform.OS === 'android' ? keyboardHeight : 0),
+              paddingBottom: insets.bottom + Spacing.three,
+              marginBottom: androidKeyboardOffset,
+              maxHeight: sheetMaxHeight,
             },
           ]}
         >
@@ -202,21 +281,25 @@ export function DirectPostModal({
                 Share files directly from device storage to feed
               </Text>
             </View>
-            <TouchableOpacity onPress={onClose} hitSlop={10} disabled={posting}>
+            <TouchableOpacity onPress={handleClose} hitSlop={10} disabled={posting}>
               <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={20} />
             </TouchableOpacity>
           </View>
 
-          {/* Folder Indicator & Change Folder */}
           <View style={[styles.folderBadge, { backgroundColor: colors.surfaceSoft, borderColor: colors.surfaceBorder }]}>
             <View style={styles.folderBadgeLeft}>
-              <AppIcon androidName="folder_open" iosName="folder" color={colors.primary} size={18} />
+              <AppIcon androidName="attach_file" iosName="paperclip" color={colors.primary} size={18} />
               <Text style={[styles.folderBadgeText, { color: colors.text }]} numberOfLines={1}>
-                {folderName || 'Selected Folder'}
+                {fileList.length === 1 ? '1 file selected' : `${fileList.length} files selected`}
+                {fileList.length >= DIRECT_POST_MAX_FILES ? ` (max ${DIRECT_POST_MAX_FILES})` : ''}
               </Text>
             </View>
-            <TouchableOpacity onPress={onChangeFolder} disabled={posting} style={styles.changeFolderBtn}>
-              <Text style={[styles.changeFolderText, { color: colors.primary }]}>Change</Text>
+            <TouchableOpacity
+              onPress={onAddFiles}
+              disabled={posting || fileList.length >= DIRECT_POST_MAX_FILES}
+              style={styles.changeFolderBtn}
+            >
+              <Text style={[styles.changeFolderText, { color: colors.primary }]}>Add files</Text>
             </TouchableOpacity>
           </View>
 
@@ -225,7 +308,6 @@ export function DirectPostModal({
             keyboardShouldPersistTaps="handled"
             contentContainerStyle={styles.scrollContent}
           >
-            {/* Caption Input */}
             <TextInput
               value={caption}
               onChangeText={setCaption}
@@ -240,7 +322,6 @@ export function DirectPostModal({
               editable={!posting}
             />
 
-            {/* Files Selection Header */}
             <View style={styles.sectionHeaderRow}>
               <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>
                 Files to post ({selectedFiles.length}/{fileList.length})
@@ -254,7 +335,6 @@ export function DirectPostModal({
               )}
             </View>
 
-            {/* Files Horizontal List */}
             <FlatList
               data={fileList}
               keyExtractor={(f) => f.uri}
@@ -266,6 +346,7 @@ export function DirectPostModal({
               renderItem={({ item: file }) => {
                 const isImg = isImageFile(file.name);
                 const icon = getFileIcon(file.name);
+                const tooLarge = (file.size || 0) > DIRECT_POST_MAX_FILE_BYTES;
                 return (
                   <TouchableOpacity
                     onPress={() => toggleFile(file.uri)}
@@ -299,15 +380,14 @@ export function DirectPostModal({
                     <Text style={[styles.fileName, { color: colors.text }]} numberOfLines={1}>
                       {file.name}
                     </Text>
-                    <Text style={[styles.fileSize, { color: colors.textMuted }]}>
-                      {formatFileSize(file.size)}
+                    <Text style={[styles.fileSize, { color: tooLarge ? '#EF4444' : colors.textMuted }]}>
+                      {formatFileSize(file.size)}{tooLarge ? ' · too large' : ''}
                     </Text>
                   </TouchableOpacity>
                 );
               }}
             />
 
-            {/* Target Devices Section */}
             <View style={[styles.sectionHeaderRow, { marginTop: Spacing.two }]}>
               <Text style={[styles.sectionLabel, { color: colors.textSecondary }]}>
                 Share with devices ({selectedDevices.size}/{devices.length})
@@ -325,9 +405,13 @@ export function DirectPostModal({
               <View style={styles.deviceLoading}>
                 <ActivityIndicator color={colors.primary} size="small" />
               </View>
+            ) : devicesError ? (
+              <Text style={[styles.emptyDevicesText, { color: '#EF4444' }]}>
+                Could not load target devices. Check your connection and try again.
+              </Text>
             ) : devices.length === 0 ? (
               <Text style={[styles.emptyDevicesText, { color: colors.textMuted }]}>
-                No other connected devices. Post will appear in your feed.
+                No other connected devices found. Pair another device before posting to the feed.
               </Text>
             ) : (
               <View style={styles.devicesChipRow}>
@@ -368,14 +452,13 @@ export function DirectPostModal({
             )}
           </ScrollView>
 
-          {/* Submit Button */}
           <TouchableOpacity
             onPress={handlePost}
-            disabled={selectedFiles.length === 0 || posting}
+            disabled={!canPost}
             style={[
               styles.submitBtn,
               {
-                backgroundColor: selectedFiles.length > 0 && !posting ? colors.primary : colors.surfaceSoft,
+                backgroundColor: canPost ? colors.primary : colors.surfaceSoft,
               },
             ]}
             activeOpacity={0.85}
@@ -389,9 +472,13 @@ export function DirectPostModal({
               <View style={styles.postingRow}>
                 <AppIcon androidName="send" iosName="paperplane.fill" color="#fff" size={18} />
                 <Text style={styles.submitBtnText}>
-                  {selectedFiles.length > 0
+                  {canPost
                     ? `Post ${selectedFiles.length} ${selectedFiles.length === 1 ? 'file' : 'files'} to Feed`
-                    : 'Select files to post'}
+                    : loadingDevices
+                      ? 'Loading devices…'
+                      : devices.length === 0
+                        ? 'No target devices available'
+                        : 'Select files and devices to post'}
                 </Text>
               </View>
             )}

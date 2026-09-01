@@ -53,11 +53,9 @@ export function ShareModal({
   useEffect(() => {
     if (!visible) return;
     let active = true;
-    /* eslint-disable react-hooks/set-state-in-effect */
     setLoading(true);
     setSelected(new Set());
     setCaption('');
-    /* eslint-enable react-hooks/set-state-in-effect */
     listShareTargetDevices()
       .then((res) => {
         if (!active) return;
@@ -99,6 +97,9 @@ export function ShareModal({
   // On Android, Modal windows are not subject to windowSoftInputMode="adjustResize",
   // so we manually shift the sheet up by the keyboard height.
   const androidKeyboardOffset = Platform.OS === 'android' ? keyboardHeight : 0;
+  const sheetMaxHeight = keyboardHeight > 0
+    ? Math.min(SCREEN_H * 0.88, SCREEN_H - keyboardHeight - 20)
+    : SCREEN_H * 0.88;
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -113,8 +114,9 @@ export function ShareModal({
             styles.sheet,
             {
               backgroundColor: colors.surface,
-              paddingBottom: insets.bottom + Spacing.three + androidKeyboardOffset,
-              maxHeight: SCREEN_H * 0.88 - (Platform.OS === 'android' ? keyboardHeight : 0),
+              paddingBottom: insets.bottom + Spacing.three,
+              marginBottom: androidKeyboardOffset,
+              maxHeight: sheetMaxHeight,
             },
           ]}
         >

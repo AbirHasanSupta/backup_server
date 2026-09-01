@@ -1,8 +1,8 @@
 import React, { useState, useCallback, useMemo } from 'react';
-import { View, Text, FlatList, StyleSheet, StatusBar, Alert, RefreshControl } from 'react-native';
+import { View, Text, FlatList, StyleSheet, StatusBar, Alert, RefreshControl, TouchableOpacity, BackHandler } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import Animated, {
   FadeInDown,
 } from 'react-native-reanimated';
@@ -14,6 +14,7 @@ import {
   setFileTypes,
   clearFolderUploads,
   getServerIp,
+  resolveReachableServer,
 } from '../../settings';
 import { runSync, getCurrentSyncState } from '../../backgroundTask';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
@@ -30,6 +31,7 @@ const HEADER_HEIGHT = 120;
 
 export default function FoldersScreen() {
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const { colors, isDark } = useAppTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -74,6 +76,15 @@ export default function FoldersScreen() {
       setServerStatus(result.connected ? 'connected' : 'disconnected');
     } catch {
       clearTimeout(timeout);
+      // Attempt mesh failover re-discovery before marking offline
+      const resolved = await resolveReachableServer().catch(() => ({ ok: false, reconnected: false }));
+      if (resolved.ok && resolved.reconnected) {
+        try {
+          const retry = await checkDeviceConnection();
+          setServerStatus(retry.connected ? 'connected' : 'disconnected');
+          return;
+        } catch {}
+      }
       setServerStatus('disconnected');
     }
   }, []);
@@ -108,6 +119,16 @@ export default function FoldersScreen() {
         alive = false;
       };
     }, [loadData, checkServer])
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+        router.replace('/settings');
+        return true;
+      });
+      return () => sub.remove();
+    }, [router])
   );
 
   const handleAddFolder = async () => {
@@ -180,6 +201,14 @@ export default function FoldersScreen() {
         onLayout={onHeaderLayout}
         style={[styles.header, headerAnimatedStyle, { backgroundColor: colors.bg }]}
       >
+        <TouchableOpacity
+          onPress={() => router.replace('/settings')}
+          style={styles.backBtn}
+          hitSlop={12}
+          accessibilityLabel="Back to settings"
+        >
+          <AppIcon androidName="arrow_back" iosName="chevron.left" color={colors.text} size={22} />
+        </TouchableOpacity>
         <View style={styles.titleBlock}>
           <Text style={styles.kicker}>Backup sources</Text>
           <Text style={styles.title}>Folders</Text>
@@ -254,11 +283,20 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    gap: Spacing.four,
+    gap: Spacing.three,
     paddingHorizontal: Spacing.six,
     paddingTop: Spacing.four,
     paddingBottom: Spacing.four,
     backgroundColor: colors.bg,
+  },
+  backBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+    backgroundColor: colors.surfaceSoft,
   },
   titleBlock: {
     flex: 1,

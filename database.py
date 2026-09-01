@@ -1247,7 +1247,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
              AND new_media.relative_path = old_media.relative_path
             WHERE old_media.source_key = ?
               AND new_media.source_key = ?
-              AND old_media.source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared', 'device')
+              AND old_media.source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared', 'direct_post_shared', 'device')
             """,
             (old_device_id, new_device_id),
         ).fetchall()
@@ -1275,7 +1275,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
 
         # The backup/media caches use the device ID as their source key.  Their
         # old entries remain valid because the device's folder_name is retained.
-        source_types = ("phone", "rewind", "rewind_shared", "quiz_shared", "device")
+        source_types = ("phone", "rewind", "rewind_shared", "quiz_shared", "direct_post_shared", "device")
         placeholders = ",".join("?" for _ in source_types)
         conn.execute(
             f"UPDATE media_index SET source_key = ? WHERE source_key = ? AND source_type IN ({placeholders})",
@@ -1316,7 +1316,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
         # needed to serve phone media after the reconnect.
         shared_posts = conn.execute(
             "SELECT COUNT(*) AS count FROM device_shares "
-            "WHERE shared_by_device_id = ? OR (source_key = ? AND source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared'))",
+            "WHERE shared_by_device_id = ? OR (source_key = ? AND source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared', 'direct_post_shared'))",
             (old_device_id, old_device_id),
         ).fetchone()["count"]
         conn.execute(
@@ -1325,7 +1325,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
         )
         conn.execute(
             "UPDATE device_shares SET source_key = ? WHERE source_key = ? "
-            "AND source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared')",
+            "AND source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared', 'direct_post_shared')",
             (new_device_id, old_device_id),
         )
         conn.execute(
@@ -2820,19 +2820,22 @@ def get_share_target_devices(exclude_device_id: str | None = None) -> list[dict]
 
 
 def _cleanup_persisted_share_files(share_ids: list[int]) -> None:
-    """Delete on-disk copies for persisted share types (rewind reels, quiz cards)."""
+    """Delete on-disk copies for persisted share types (rewind reels, quiz cards, direct posts)."""
     if not share_ids:
         return
     conn = get_conn()
     placeholders = ",".join("?" * len(share_ids))
     rows = conn.execute(
-        f"SELECT relative_path FROM device_shares WHERE id IN ({placeholders}) AND source_type IN ('rewind_shared', 'quiz_shared')",
+        f"SELECT relative_path FROM device_shares WHERE id IN ({placeholders}) AND source_type IN ('rewind_shared', 'quiz_shared', 'direct_post_shared')",
         share_ids,
     ).fetchall()
     conn.close()
     for r in rows:
+        path = r["relative_path"]
+        if not path or not os.path.isfile(path):
+            continue
         try:
-            os.remove(r["relative_path"])
+            os.remove(path)
         except OSError:
             pass
 

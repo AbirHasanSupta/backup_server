@@ -15,11 +15,12 @@ import {
   Pressable,
   Animated,
   LayoutChangeEvent,
+  RefreshControl,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
@@ -174,6 +175,7 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
   const player = mod.useVideoPlayer(source, (p) => {
     p.loop = true;
     p.muted = muted;
+    p.preservesPitch = true;
     p.bufferOptions = {
       preferredForwardBufferDuration: 1.5,
       minBufferForPlayback: 0.15,
@@ -199,6 +201,12 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
     }
   }, [status]);
 
+  // Reset ready flag per source so that swiping back to a cached reel fires
+  // onReady again if needed (e.g. the card was recycled while off-screen).
+  useEffect(() => {
+    readyFiredRef.current = false;
+  }, [uri]);
+
   useEffect(() => {
     const interval = setInterval(() => {
       if (!isActive) return;
@@ -221,15 +229,16 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
   }, [isActive, isPlaying, player]);
 
   useEffect(() => {
-    /* eslint-disable react-hooks/immutability */
-    try { player.playbackRate = speed; } catch {}
-    /* eslint-enable react-hooks/immutability */
+    // expo-video player properties are mutable refs, not state — assigning them
+    // directly is the documented pattern; no lint suppression needed.
+    try {
+      player.preservesPitch = true;
+      player.playbackRate = speed;
+    } catch {}
   }, [speed, player]);
 
   useEffect(() => {
-    /* eslint-disable react-hooks/immutability */
     try { player.muted = muted; } catch {}
-    /* eslint-enable react-hooks/immutability */
   }, [muted, player]);
 
   return (
@@ -323,6 +332,10 @@ function ReelCard({
   }, [showEmojiPicker, item, onReact, heartScale, flashControls]);
 
   const handleLongPress = useCallback(() => {
+    if (singleTapTimerRef.current) {
+      clearTimeout(singleTapTimerRef.current);
+      singleTapTimerRef.current = null;
+    }
     longPressRef.current = true;
     hapticLongPress();
     setSpeed(2.0);
@@ -336,7 +349,6 @@ function ReelCard({
   }, []);
 
   useEffect(() => {
-    /* eslint-disable react-hooks/set-state-in-effect */
     if (isActive) {
       setIsPlaying(true);
       setProgress(0);
@@ -349,7 +361,6 @@ function ReelCard({
       if (controlsTimer.current) clearTimeout(controlsTimer.current);
       setShowControls(false);
     }
-    /* eslint-enable react-hooks/set-state-in-effect */
   }, [isActive]);
 
   useEffect(() => () => {
@@ -409,11 +420,10 @@ function ReelCard({
         delayLongPress={350}
       />
 
-      {/* 2x speed pill indicator */}
+      {/* 2x speed indicator — above the bottom progress bar */}
       {show2x && (
         <View style={s.speedBadge} pointerEvents="none">
-          <AppIcon androidName="bolt" iosName="bolt.fill" color="#FFD700" size={18} />
-          <Text style={s.speedText}>2×</Text>
+          <Text style={s.speedText}>2x speed</Text>
         </View>
       )}
 
@@ -590,7 +600,6 @@ function CommentsSheet({
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    /* eslint-disable react-hooks/set-state-in-effect */
     if (!visible || mediaId == null) return;
     let active = true;
     setLoading(true);
@@ -600,7 +609,6 @@ function CommentsSheet({
       .catch(() => { if (active) setComments([]); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-    /* eslint-enable react-hooks/set-state-in-effect */
   }, [visible, mediaId]);
 
   const handleSubmit = async () => {
@@ -634,8 +642,11 @@ function CommentsSheet({
             cs.sheet,
             {
               backgroundColor: colors.surface,
-              paddingBottom: insets.bottom + Spacing.two + (Platform.OS === 'android' ? keyboardHeight : 0),
-              maxHeight: SCREEN_H * 0.85 - (Platform.OS === 'android' ? keyboardHeight : 0),
+              paddingBottom: insets.bottom + Spacing.two,
+              marginBottom: Platform.OS === 'android' ? keyboardHeight : 0,
+              maxHeight: keyboardHeight > 0
+                ? Math.min(SCREEN_H * 0.85, SCREEN_H - keyboardHeight - 20)
+                : SCREEN_H * 0.85,
             },
           ]}
         >
@@ -727,9 +738,11 @@ const cs = StyleSheet.create({
 export default function ReelsScreen() {
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
+  const navigation = useNavigation();
 
   const [reels, setReels] = useState<ReelItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const [screenFocused, setScreenFocused] = useState(false);
@@ -751,6 +764,7 @@ export default function ReelsScreen() {
   const hasMoreRef = useRef(false);
   const offsetRef = useRef(0);
   const loadingMoreRef = useRef(false);
+  const reloadInFlightRef = useRef(false);
   const seedRef = useRef(0);
 
   const handleContainerLayout = useCallback((e: LayoutChangeEvent) => {
@@ -761,10 +775,15 @@ export default function ReelsScreen() {
     }
   }, []);
 
-  const loadReels = useCallback(async (reset = true) => {
+  const loadReels = useCallback(async (reset = true, options: { skipFullScreenLoading?: boolean } = {}) => {
+    if (reloadInFlightRef.current) return;
+    reloadInFlightRef.current = true;
+    if (reset) {
+      offsetRef.current = 0;
+    }
     try {
       if (reset) {
-        setLoading(true);
+        if (!options.skipFullScreenLoading) setLoading(true);
         setActiveIndex(0);
       }
       const [config, watched] = await Promise.all([getConfig(), loadWatched()]);
@@ -784,14 +803,35 @@ export default function ReelsScreen() {
       if (reset) setError(e?.message || 'Failed to load reels');
       else hapticError();
     } finally {
+      reloadInFlightRef.current = false;
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
+  const onRefreshReels = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await loadReels(true, { skipFullScreenLoading: true });
+    } catch {
+      setRefreshing(false);
+    }
+  }, [loadReels]);
+
+  // Tab press: when already on Reels tab, scroll to top and shuffle-refresh.
   useEffect(() => {
-    /* eslint-disable react-hooks/set-state-in-effect */
+    // Expo Router's TypeScript types don't expose `addListener` on the navigation
+    // object even though it is present at runtime for tab navigators.
+    return (navigation as any)?.addListener?.('tabPress', () => {
+      if (!navigation.isFocused() || refreshing || loading || reloadInFlightRef.current) return;
+      hapticLight();
+      listRef.current?.scrollToOffset({ offset: 0, animated: true });
+      void onRefreshReels();
+    });
+  }, [navigation, onRefreshReels, refreshing, loading]);
+
+  useEffect(() => {
     void loadReels(true);
-    /* eslint-enable react-hooks/set-state-in-effect */
   }, [loadReels]);
 
   useFocusEffect(useCallback(() => {
@@ -870,6 +910,7 @@ export default function ReelsScreen() {
 
   const renderItem = useCallback(({ item, index }: { item: ReelItem; index: number }) => (
     <ReelCard
+      key={item.reel_id}
       item={item}
       isActive={index === activeIndex && screenFocused}
       cardWidth={viewportWidth}
@@ -950,6 +991,14 @@ export default function ReelsScreen() {
             maxToRenderPerBatch={2}
             removeClippedSubviews={false}
             scrollEventThrottle={16}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefreshReels}
+                tintColor="#fff"
+                colors={['#fff']}
+              />
+            }
           />
         )}
       </View>
@@ -1072,23 +1121,17 @@ const s = StyleSheet.create({
   speedBadge: {
     position: 'absolute',
     alignSelf: 'center',
-    top: '35%',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(0, 0, 0, 0.65)',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-    borderRadius: Radius.full,
-    paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.two,
-    zIndex: 12,
+    bottom: 10,
+    zIndex: 16,
   },
   speedText: {
-    color: '#fff',
-    fontSize: TextScale.base,
-    fontWeight: '900',
-    letterSpacing: 0.5,
+    color: 'rgba(255,255,255,0.92)',
+    fontSize: TextScale.sm,
+    fontWeight: '400',
+    letterSpacing: 0.2,
+    textShadowColor: 'rgba(0,0,0,0.75)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
   },
 
   playPauseBadge: {

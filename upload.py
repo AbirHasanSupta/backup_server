@@ -1873,10 +1873,14 @@ async def delete_media_comment(
 
 SHARED_REWIND_DIR = os.path.join(APP_DATA_DIR, "shared_rewind_reels")
 os.makedirs(SHARED_REWIND_DIR, exist_ok=True)
+SHARED_DIRECT_POST_DIR = os.path.join(APP_DATA_DIR, "shared_direct_posts")
+os.makedirs(SHARED_DIRECT_POST_DIR, exist_ok=True)
 os.makedirs(SHARED_QUIZ_DIR, exist_ok=True)
 
 QUIZ_SHARE_MAX_TOTAL = 30
 QUIZ_SHARE_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+DIRECT_POST_MAX_FILES = 20
+DIRECT_POST_MAX_FILE_BYTES = 100 * 1024 * 1024
 
 
 def _validate_quiz_share_payload(score: int, total: int, quiz_items: list) -> None:
@@ -2242,6 +2246,118 @@ async def create_quiz_share(
             os.remove(os.path.join(SHARED_QUIZ_DIR, f"{group_id}.json"))
         except OSError:
             pass
+        raise
+
+
+@router.post("/api/share/direct-post/create")
+@router.post("/share/direct-post/create")
+async def create_direct_post_share(
+    request: Request,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Create a feed post from files picked in the device file manager.
+
+    Files are persisted under APP_DATA (not phone backup) and removed when the
+    owning post is deleted — same lifecycle as quiz/rewind shares.
+    """
+    form = await request.form()
+    shared_by_device_id = str(form.get("shared_by_device_id") or "")
+    target_device_ids_raw = form.get("target_device_ids")
+    caption = str(form.get("caption") or "").strip()[:2000]
+    uploads = form.getlist("files")
+
+    verify_auth(authorization or (f"Bearer {token}" if token else None), shared_by_device_id)
+    verify_known_device_by_id(shared_by_device_id)
+
+    if not uploads:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    if isinstance(target_device_ids_raw, list):
+        targets = target_device_ids_raw
+    elif isinstance(target_device_ids_raw, str):
+        try:
+            targets = json.loads(target_device_ids_raw)
+            if not isinstance(targets, list):
+                raise ValueError("target_device_ids must be a JSON array")
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid target_device_ids") from exc
+    else:
+        raise HTTPException(status_code=400, detail="Invalid target_device_ids")
+
+    if not targets:
+        raise HTTPException(status_code=400, detail="No target devices")
+
+    if len(uploads) > DIRECT_POST_MAX_FILES:
+        raise HTTPException(status_code=400, detail=f"Too many files (max {DIRECT_POST_MAX_FILES})")
+
+    known_ids = {
+        d["device_id"]
+        for d in await asyncio.to_thread(get_share_target_devices, shared_by_device_id)
+    }
+    valid_targets = [t for t in targets if t in known_ids]
+    if not valid_targets:
+        raise HTTPException(status_code=400, detail="No valid target devices")
+
+    persisted_paths: list[str] = []
+    share_items: list[dict] = []
+    try:
+        for idx, upload in enumerate(uploads):
+            if hasattr(upload, "read"):
+                content = await upload.read()
+                original_name = getattr(upload, "filename", None) or f"file_{idx + 1}"
+            elif isinstance(upload, bytes):
+                content = upload
+                original_name = f"file_{idx + 1}"
+            else:
+                raise HTTPException(status_code=400, detail=f"Invalid file at index {idx}")
+
+            if not content:
+                raise HTTPException(status_code=400, detail=f"Empty file at index {idx}")
+            if len(content) > DIRECT_POST_MAX_FILE_BYTES:
+                raise HTTPException(status_code=400, detail=f"File at index {idx} is too large")
+
+            safe_name = os.path.basename(str(original_name).replace("\\", "/")) or f"file_{idx + 1}"
+            _, ext = os.path.splitext(safe_name)
+            if not ext:
+                ext = ".bin"
+            dest_path = os.path.join(SHARED_DIRECT_POST_DIR, f"{uuid.uuid4().hex}{ext.lower()}")
+            with open(dest_path, "wb") as out:
+                out.write(content)
+            persisted_paths.append(dest_path)
+            share_items.append(
+                {
+                    "source_type": "direct_post_shared",
+                    "source_key": shared_by_device_id,
+                    "relative_path": dest_path,
+                    "size": len(content),
+                    "modified_time": int(time.time()),
+                }
+            )
+
+        result = await asyncio.to_thread(
+            create_device_share,
+            shared_by_device_id,
+            valid_targets,
+            (caption or "").strip() or None,
+            share_items,
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=500, detail="Failed to create direct post share")
+        return result
+    except HTTPException:
+        for p in persisted_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        raise
+    except Exception:
+        for p in persisted_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
         raise
 
 
@@ -2674,6 +2790,11 @@ def _resolve_share_path(share: dict) -> str:
     if source_type == "quiz_shared":
         full_path = os.path.abspath(relative_path)
         if os.path.commonpath([SHARED_QUIZ_DIR, full_path]) != SHARED_QUIZ_DIR:
+            raise HTTPException(status_code=400, detail="Invalid path")
+        return full_path
+    if source_type == "direct_post_shared":
+        full_path = os.path.abspath(relative_path)
+        if os.path.commonpath([SHARED_DIRECT_POST_DIR, full_path]) != SHARED_DIRECT_POST_DIR:
             raise HTTPException(status_code=400, detail="Invalid path")
         return full_path
     raise HTTPException(status_code=400, detail="Unknown share source type")

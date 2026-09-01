@@ -59,6 +59,9 @@ import {
   reactToMedia,
   getFeed,
   createDeviceShare,
+  createDirectPostShare,
+  DIRECT_POST_MAX_FILES,
+  DIRECT_POST_MAX_FILE_BYTES,
   getComments,
   addComment,
   deleteComment,
@@ -74,8 +77,8 @@ import {
   buildShareDownloadUrl,
   downloadShareFile,
 } from '../../downloader';
-import { checkDeviceConnection, uploadFile } from '../../uploader';
-import { getServerIp } from '../../settings';
+import { checkDeviceConnection } from '../../uploader';
+import { getServerIp, resolveReachableServer } from '../../settings';
 import { getCurrentSyncState } from '../../backgroundTask';
 import { prunePreviewCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
@@ -228,6 +231,12 @@ function getFileCategory(name: string): FileCategory {
 
 function isMediaExtension(ext: string): boolean {
   return IMAGE_EXTS.has(ext) || VIDEO_EXTS.has(ext) || AUDIO_EXTS.has(ext);
+}
+
+/** Identity check for two RemoteFile-shaped records: prefer share_id when both have one, else path. */
+function isSameRemoteFile(a: { share_id?: number | null; path: string } | null | undefined, b: { share_id?: number | null; path: string } | null | undefined): boolean {
+  if (!a || !b) return false;
+  return a.share_id != null && b.share_id != null ? a.share_id === b.share_id : a.path === b.path;
 }
 
 /** Returns a color/icon for a file category to use in the metadata card */
@@ -649,6 +658,7 @@ function SharedFeedCard({
   serverConfig,
   sourceId,
   onPreview,
+  onWarmPreview,
   onReact,
   onOpenComments,
   onShowReactors,
@@ -661,6 +671,7 @@ function SharedFeedCard({
   serverConfig: ServerConfig;
   sourceId: string;
   onPreview: (file: RemoteFile, postItems?: RemoteFile[]) => void;
+  onWarmPreview: (file: RemoteFile) => void;
   onReact: (file: RemoteFile, emoji: string) => void;
   onOpenComments: (file: RemoteFile) => void;
   onShowReactors: (file: RemoteFile) => void;
@@ -794,6 +805,7 @@ function SharedFeedCard({
               <TouchableOpacity
                 style={[feedCardStyles.mediaWrap, { width: cardWidth, height: mediaHeight }]}
                 onPress={() => handleMediaPress(subItem)}
+                onPressIn={() => onWarmPreview(subItem)}
                 activeOpacity={0.9}
               >
                 <Image
@@ -876,7 +888,7 @@ function SharedFeedCard({
           const badge = getPostKindBadge(item);
           return badge ? (
             <View style={[feedCardStyles.postKindBadge, { backgroundColor: badge.bg }]}>
-              <Text style={{ fontSize: TextScale.xs }}>{badge.emoji}</Text>
+              <Text style={feedCardStyles.postKindBadgeEmoji}>{badge.emoji}</Text>
               <Text style={[feedCardStyles.postKindBadgeText, { color: badge.fg }]} numberOfLines={1}>
                 {badge.text}
               </Text>
@@ -962,11 +974,9 @@ function CommentsModal({
     // Reset the sheet's UI state each time it opens (or the item changes), then
     // load fresh comments. These synchronous resets are intentional — a clean
     // sheet per open — and the fetch below is the external-sync work this effect exists for.
-    /* eslint-disable react-hooks/set-state-in-effect */
     setLoading(true);
     setComments([]);
     setDraft('');
-    /* eslint-enable react-hooks/set-state-in-effect */
     getComments(mediaId)
       .then((res) => { if (active) setComments(Array.isArray(res?.comments) ? res.comments : []); })
       .catch(() => { if (active) setComments([]); })
@@ -1022,8 +1032,7 @@ function CommentsModal({
             modalSheetStyles.sheet,
             {
               backgroundColor: colors.surface,
-              paddingBottom: insets.bottom + Spacing.three + (Platform.OS === 'android' ? keyboardHeight : 0),
-              maxHeight: SCREEN_H * 0.88 - (Platform.OS === 'android' ? keyboardHeight : 0),
+              ...modalSheetKeyboardStyle(keyboardHeight, insets.bottom, 0.88),
             },
           ]}
         >
@@ -1049,7 +1058,7 @@ function CommentsModal({
             <FlatList
               data={comments}
               keyExtractor={(c) => String(c.id)}
-              style={[modalSheetStyles.list, { maxHeight: keyboardHeight > 0 ? SCREEN_H * 0.28 : SCREEN_H * 0.45 }]}
+              style={[modalSheetStyles.list, { maxHeight: keyboardHeight > 0 ? SCREEN_H * 0.24 : SCREEN_H * 0.45 }]}
               contentContainerStyle={modalSheetStyles.listContent}
               keyboardShouldPersistTaps="handled"
               renderItem={({ item: c }) => (
@@ -1139,7 +1148,6 @@ function ManageShareModal({
   useEffect(() => {
     if (!visible || !item) return;
     let active = true;
-    /* eslint-disable react-hooks/set-state-in-effect */
     setLoading(true);
     setDeleting(false);
     setTogglingId(null);
@@ -1147,7 +1155,6 @@ function ManageShareModal({
     setSavingCaption(false);
     setCaption(item.group_caption || item.caption || '');
     setFiles(item.group_items && item.group_items.length > 0 ? item.group_items : [item]);
-    /* eslint-enable react-hooks/set-state-in-effect */
 
     Promise.all([
       getAllDevices().catch(() => ({ devices: [] })),
@@ -1281,14 +1288,17 @@ function ManageShareModal({
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={modalSheetStyles.backdrop} onPress={onClose} />
-      <View style={modalSheetStyles.avoider} pointerEvents="box-none">
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        style={modalSheetStyles.avoider}
+        pointerEvents="box-none"
+      >
         <View
           style={[
             modalSheetStyles.sheet,
             {
               backgroundColor: colors.surface,
-              paddingBottom: insets.bottom + Spacing.three + (Platform.OS === 'android' ? keyboardHeight : 0),
-              maxHeight: SCREEN_H * 0.88 - (Platform.OS === 'android' ? keyboardHeight : 0),
+              ...modalSheetKeyboardStyle(keyboardHeight, insets.bottom, 0.88),
             },
           ]}
         >
@@ -1301,7 +1311,7 @@ function ManageShareModal({
           </View>
 
           <ScrollView
-            style={[modalSheetStyles.scrollArea, { maxHeight: keyboardHeight > 0 ? SCREEN_H * 0.35 : SCREEN_H * 0.72 }]}
+            style={[modalSheetStyles.scrollArea, { maxHeight: keyboardHeight > 0 ? SCREEN_H * 0.3 : SCREEN_H * 0.72 }]}
             contentContainerStyle={modalSheetStyles.scrollContent}
             showsVerticalScrollIndicator={false}
             keyboardShouldPersistTaps="handled"
@@ -1539,9 +1549,24 @@ function ManageShareModal({
             </TouchableOpacity>
           </ScrollView>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
+}
+
+function modalSheetKeyboardStyle(
+  keyboardHeight: number,
+  insetsBottom: number,
+  maxFraction = 0.88,
+) {
+  const kb = Math.max(0, keyboardHeight);
+  return {
+    paddingBottom: insetsBottom + Spacing.three,
+    marginBottom: Platform.OS === 'android' ? kb : 0,
+    maxHeight: kb > 0
+      ? Math.min(SCREEN_H * maxFraction, SCREEN_H - kb - 20)
+      : SCREEN_H * maxFraction,
+  };
 }
 
 const modalSheetStyles = StyleSheet.create({
@@ -1825,9 +1850,12 @@ const modalSheetStyles = StyleSheet.create({
 
 const reactionStyles = StyleSheet.create({
   bar: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.two,
+    flexShrink: 1,
+    minWidth: 0,
   },
   emojiBtn: {
     flexDirection: 'row',
@@ -1948,9 +1976,9 @@ const feedCardStyles = StyleSheet.create({
   },
   body: {
     paddingHorizontal: Spacing.three,
-    paddingTop: Spacing.two + 2,
+    paddingTop: Spacing.two,
     paddingBottom: Spacing.three,
-    gap: 2,
+    gap: Spacing.one,
   },
   headerRow: {
     flexDirection: 'row',
@@ -1995,11 +2023,17 @@ const feedCardStyles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: Radius.full,
-    marginBottom: 4,
+  },
+  postKindBadgeEmoji: {
+    fontSize: TextScale.xs,
+    lineHeight: TextScale.sm,
+    includeFontPadding: false,
   },
   postKindBadgeText: {
     fontSize: TextScale.xs,
-    fontWeight: '800',
+    fontWeight: '700',
+    lineHeight: TextScale.sm,
+    includeFontPadding: false,
   },
   menuBtn: {
     padding: 4,
@@ -2015,7 +2049,6 @@ const feedCardStyles = StyleSheet.create({
   },
   caption: {
     fontSize: TextScale.sm,
-    marginTop: Spacing.two,
     lineHeight: 18,
   },
   actionRow: {
@@ -2023,9 +2056,9 @@ const feedCardStyles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: Spacing.two,
-    marginTop: Spacing.two + 2,
   },
   commentBtn: {
+    flexShrink: 0,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
@@ -2274,7 +2307,7 @@ function LibraryFilterBar({
   };
 
   return (
-    <View style={[filterStyles.wrap, { borderBottomColor: colors.surfaceBorder }]}>
+    <View style={[filterStyles.wrap, isFeed && filterStyles.wrapFeed, { borderBottomColor: colors.surfaceBorder }]}>
       <View style={filterStyles.searchAndSortRow}>
         <View style={[filterStyles.searchBox, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}>
           <AppIcon androidName="search" iosName="magnifyingglass" color={colors.textMuted} size={16} />
@@ -2377,6 +2410,12 @@ const filterStyles = StyleSheet.create({
     paddingBottom: Spacing.two,
     gap: Spacing.two,
     borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  wrapFeed: {
+    paddingTop: Spacing.one,
+    paddingBottom: Spacing.one,
+    gap: Spacing.one,
+    borderBottomWidth: 0,
   },
   searchAndSortRow: {
     flexDirection: 'row',
@@ -2631,7 +2670,6 @@ const PreviewModal = React.memo(function PreviewModal({
 
   // Reset zoom and fullscreen when file changes
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsFullscreen(false);
     scaleAnim.setValue(1);
     translateXAnim.setValue(0);
@@ -2743,9 +2781,10 @@ const PreviewModal = React.memo(function PreviewModal({
   const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 
   // ── Memoized PanResponder ──────────────────
-  const panResponder = useMemo(() => {
-    // eslint-disable-next-line react-hooks/refs
-    return PanResponder.create({
+  // PanResponder.create() handlers read stable refs — exhaustive-deps would
+  // incorrectly flag those refs as missing deps.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const panResponder = useMemo(() => PanResponder.create({
       onStartShouldSetPanResponder: () => !isVideoSeekingRef.current,
       onMoveShouldSetPanResponder: (evt, gs) => {
         if (isVideoSeekingRef.current) return false;
@@ -2841,9 +2880,7 @@ const PreviewModal = React.memo(function PreviewModal({
           Animated.spring(cur.slideAnim, { toValue: 0, useNativeDriver: true, speed: 22, bounciness: 4 }).start();
         }
       },
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }), []);
 
   if (!currentFile) return null;
 
@@ -3195,19 +3232,102 @@ function NativeVideoPreviewPlayer({
 
   const player = videoModule.useVideoPlayer(source, p => {
     p.loop = true;
+    // Do NOT call p.play() here — the initializer runs before the source is
+    // loaded and the native decoder hasn't filled even a single frame yet.
+    // Calling play() at this point causes the "plays 1 s → stalls → resumes"
+    // buffering splash because the player starts rendering before minBuffer
+    // is satisfied.  play() is deferred to the statusChange effect below,
+    // which fires only after readyToPlay (i.e. the buffer gate is met).
     p.bufferOptions = {
-      preferredForwardBufferDuration: 1.5,
-      minBufferForPlayback: 0.15,
+      preferredForwardBufferDuration: 4,
+      minBufferForPlayback: 2.5,
       prioritizeTimeOverSizeThreshold: true,
     };
-    if (isActive) {
-      p.play();
-    }
   });
 
   const { status } = useEvent(player, 'statusChange', { status: player.status });
   const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: player.playing });
-  const isBuffering = status !== 'readyToPlay' && status !== 'error';
+  const initialLoadDoneRef = useRef(false);
+  const isUpgradingRef = useRef(false);
+  const previewFallbackAttemptedRef = useRef(false);
+  const pendingSeekRef = useRef<number | null>(null);
+  const [showBuffering, setShowBuffering] = useState(true);
+
+  // Keep a ref so the statusChange effect always reads the latest isActive
+  // without needing isActive in its deps (adding it would restart the effect
+  // on every gallery swipe and re-trigger the play path at the wrong time).
+  const isActiveRef = useRef(isActive);
+  useEffect(() => { isActiveRef.current = isActive; }, [isActive]);
+
+  // Only show buffering on the first load for this source.
+  // Re-buffers and silent quality upgrades must not flash the overlay.
+  // Also, defer the initial play() call until readyToPlay so the native
+  // decoder never starts rendering before the buffer gate is satisfied —
+  // that race is what causes the one-second play-then-stall splash.
+  useEffect(() => {
+    if (status === 'readyToPlay') {
+      if (pendingSeekRef.current != null) {
+        const seekTo = pendingSeekRef.current;
+        pendingSeekRef.current = null;
+        safeMediaCall(() => { player.currentTime = seekTo; });
+      }
+      if (!isUpgradingRef.current) {
+        initialLoadDoneRef.current = true;
+        setShowBuffering(false);
+        // Honour the isActive intent now that the buffer gate is satisfied.
+        // Use the ref — NOT the closure-captured isActive prop — so we see
+        // the current value even if the gallery was scrolled while loading.
+        if (isActiveRef.current) {
+          safeMediaCall(() => player.play());
+        }
+      }
+      return;
+    }
+    if (status === 'error') {
+      if (
+        !previewFallbackAttemptedRef.current
+        && previewUri !== originalUri
+      ) {
+        previewFallbackAttemptedRef.current = true;
+        isUpgradingRef.current = true;
+        void player.replaceAsync({
+          uri: originalUri,
+          useCaching: true,
+          contentType: 'progressive',
+        }).then(() => {
+          upgradedRef.current = true;
+          // replaceAsync succeeded — player is now on the original URI.
+          // readyToPlay will fire next and set initialLoadDoneRef + call play.
+          // Do NOT set initialLoadDoneRef here; let readyToPlay do it so that
+          // the play gate is correctly guarded after source replacement too.
+        }).catch(() => {
+          initialLoadDoneRef.current = true;
+          setShowBuffering(false);
+        }).finally(() => {
+          isUpgradingRef.current = false;
+        });
+        return;
+      }
+      // Unrecoverable error: hide the spinner.
+      initialLoadDoneRef.current = true;
+      setShowBuffering(false);
+      return;
+    }
+    // Any non-ready, non-error status (loading, buffering):
+    // show the overlay only on the very first load, not on rebuffer mid-play.
+    if (!initialLoadDoneRef.current) {
+      setShowBuffering(true);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- isActive read via ref to avoid stale-closure
+  }, [status, previewUri, originalUri, player]);
+
+  useEffect(() => {
+    initialLoadDoneRef.current = false;
+    isUpgradingRef.current = false;
+    previewFallbackAttemptedRef.current = false;
+    pendingSeekRef.current = null;
+    setShowBuffering(true);
+  }, [previewUri]);
 
   const insets = useSafeAreaInsets();
   const [positionSec, setPositionSec] = useState(0);
@@ -3267,7 +3387,7 @@ function NativeVideoPreviewPlayer({
     });
   }, [player]);
 
-  // eslint-disable-next-line react-hooks/refs
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- PanResponder handlers read stable refs; player dep is correct
   const seekPanResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
@@ -3321,9 +3441,20 @@ function NativeVideoPreviewPlayer({
   useEffect(() => {
     // Never call pause/play from an unmount cleanup — tearing down the native
     // player while invoking controls races and can kill the whole app.
+    // Guard: only call play() once the buffer gate has been satisfied
+    // (initialLoadDoneRef set in the statusChange effect above).  Calling
+    // play() before readyToPlay causes the native decoder to start rendering
+    // immediately with an empty ring buffer — it plays for ~1 s then stalls
+    // to re-fill, which is the "buffering splash" reported for every video.
     if (isActive) {
-      safeMediaCall(() => player.play());
+      if (initialLoadDoneRef.current) {
+        safeMediaCall(() => player.play());
+      }
+      // else: the statusChange effect will call play() once readyToPlay fires.
     } else {
+      // Always pause when deactivated — even while buffering or upgrading.
+      // This guarantees the video never plays in the background after the user
+      // swipes to another file.
       safeMediaCall(() => player.pause());
     }
   }, [isActive, player]);
@@ -3345,6 +3476,7 @@ function NativeVideoPreviewPlayer({
       if (cancelled || upgradedRef.current) return;
       const position = player.currentTime;
       const wasPlaying = player.playing;
+      isUpgradingRef.current = true;
       try {
         await player.replaceAsync({
           uri: originalUri,
@@ -3353,6 +3485,8 @@ function NativeVideoPreviewPlayer({
         });
         if (cancelled) return;
         upgradedRef.current = true;
+        upgradeScheduledRef.current = false;
+        pendingSeekRef.current = position;
         safeMediaCall(() => { player.currentTime = position; });
         if (wasPlaying) {
           safeMediaCall(() => player.play());
@@ -3361,8 +3495,10 @@ function NativeVideoPreviewPlayer({
         // Allow another attempt later.
         upgradedRef.current = false;
         upgradeScheduledRef.current = false;
+      } finally {
+        isUpgradingRef.current = false;
       }
-    }, 1500);
+    }, 4000);
     upgradeTimerRef.current = timer;
 
     return () => {
@@ -3395,7 +3531,7 @@ function NativeVideoPreviewPlayer({
         surfaceType="textureView"
         fullscreenOptions={{ enable: true }}
       />
-      {isBuffering && (
+      {showBuffering && (
         <View style={pvStyles.imgLoadingOverlay} pointerEvents="none">
           <ActivityIndicator size="large" color="#fff" />
           <Text style={pvStyles.videoLoadingText}>Buffering video…</Text>
@@ -3541,9 +3677,13 @@ function NativeVideoPreviewPreloader({ uri, videoModule }: { uri: string; videoM
 
   videoModule.useVideoPlayer(source, player => {
     player.loop = true;
+    // The preloader just warms the cache; it never calls play().
+    // A small minBufferForPlayback is fine here because we never call play()
+    // on the preloader — we only want the network bytes in the decoder's
+    // ring buffer so that when the real player mounts it starts from cache.
     player.bufferOptions = {
-      preferredForwardBufferDuration: 1.5,
-      minBufferForPlayback: 0.15,
+      preferredForwardBufferDuration: 4,
+      minBufferForPlayback: 0.5,
       prioritizeTimeOverSizeThreshold: true,
     };
   });
@@ -4029,7 +4169,6 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   // Direct post from phone storage (Feed-only)
   const [directPostVisible, setDirectPostVisible] = useState(false);
-  const [directPostFolderName, setDirectPostFolderName] = useState('');
   const [directPostFiles, setDirectPostFiles] = useState<DeviceFileItem[]>([]);
   const [isOpeningFolder, setIsOpeningFolder] = useState(false);
 
@@ -4143,13 +4282,47 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         if (sourceModeRef.current === 'shared') {
           void loadSharedSources();
         }
-      } else {
-        sharedSourcesGen.current += 1;
-        setIsLoadingSources(false);
-        setServerStatus('disconnected');
+        return;
       }
+
+      // Attempt mesh failover re-discovery before marking offline
+      const resolved = await resolveReachableServer().catch(() => ({ ok: false, reconnected: false }));
+      if (!stillAlive()) return;
+      if (resolved.ok && resolved.reconnected) {
+        try {
+          const retry = await checkDeviceConnection();
+          if (!stillAlive()) return;
+          if (retry.connected) {
+            setServerStatus('connected');
+            loadServerConfig();
+            if (sourceModeRef.current === 'shared') {
+              void loadSharedSources();
+            }
+            return;
+          }
+        } catch {}
+      }
+      sharedSourcesGen.current += 1;
+      setIsLoadingSources(false);
+      setServerStatus('disconnected');
     } catch {
       if (!stillAlive()) return;
+      const resolved = await resolveReachableServer().catch(() => ({ ok: false, reconnected: false }));
+      if (!stillAlive()) return;
+      if (resolved.ok && resolved.reconnected) {
+        try {
+          const retry = await checkDeviceConnection();
+          if (!stillAlive()) return;
+          if (retry.connected) {
+            setServerStatus('connected');
+            loadServerConfig();
+            if (sourceModeRef.current === 'shared') {
+              void loadSharedSources();
+            }
+            return;
+          }
+        } catch {}
+      }
       sharedSourcesGen.current += 1;
       setIsLoadingSources(false);
       setServerStatus('disconnected');
@@ -4571,72 +4744,120 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
   }, [feedLoadingMore, feedHasMore, isFetching, isOffline, isDownloading, feedOffset]);
 
-  // Open device file manager, pick directory and scan files for Direct Post
-  const handleOpenDirectPost = useCallback(async () => {
+  const buildDirectPostFileItems = useCallback(async (uris: { uri: string; name: string; size?: number | null }[]) => {
+    const items: DeviceFileItem[] = [];
+    for (const asset of uris) {
+      const fileName = (asset.name || '').trim();
+      if (!fileName || fileName.startsWith('.')) continue;
+
+      let size = asset.size || 0;
+      let modifiedTime = Math.floor(Date.now() / 1000);
+      try {
+        const info = await FileSystem.getInfoAsync(asset.uri);
+        if (!info.exists || info.isDirectory) continue;
+        size = info.size || size || 0;
+        if (info.modificationTime) {
+          modifiedTime = Math.floor(info.modificationTime);
+        }
+      } catch {
+        if (!size) continue;
+      }
+
+      items.push({
+        uri: asset.uri,
+        name: fileName,
+        size,
+        modifiedTime,
+        selected: true,
+      });
+    }
+    return items;
+  }, []);
+
+  const pickDirectPostFiles = useCallback(async (append = false) => {
     if (isOffline) {
       Alert.alert('Server Offline', 'Please connect to the backup server first before sharing a post.');
       return;
     }
+
     setIsOpeningFolder(true);
     try {
-      const perm = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
-      if (!perm.granted) return;
-
-      const rawDecoded = decodeURIComponent(perm.directoryUri.split('/').pop() || '');
-      const folderName = rawDecoded.split(/[/:]/).filter(Boolean).pop() || 'Device Folder';
-      setDirectPostFolderName(folderName);
-
-      // Read files in the selected directory
-      const rawUris = await FileSystem.StorageAccessFramework.readDirectoryAsync(perm.directoryUri);
-      if (!rawUris || rawUris.length === 0) {
-        Alert.alert('Empty Folder', 'No files were found in the selected folder.');
+      let DocumentPicker: typeof import('expo-document-picker');
+      try {
+        /* eslint-disable-next-line @typescript-eslint/no-require-imports */
+        DocumentPicker = require('expo-document-picker');
+      } catch {
+        Alert.alert(
+          'Update required',
+          'File picker support needs a newer app build. Run npm install in the phone-backup project, then rebuild the app.'
+        );
         return;
       }
 
-      const items: DeviceFileItem[] = [];
-      for (const uri of rawUris) {
-        const decodedPart = decodeURIComponent(uri.split('/').pop() || '');
-        const fileName = decodedPart.substring(Math.max(decodedPart.lastIndexOf('/'), decodedPart.lastIndexOf(':')) + 1);
-        // Skip hidden/system files
-        if (!fileName || fileName.startsWith('.')) continue;
+      const result = await DocumentPicker.getDocumentAsync({
+        type: '*/*',
+        multiple: true,
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
 
-        let size = 0;
-        let modifiedTime = Math.floor(Date.now() / 1000);
-        try {
-          const info = await FileSystem.getInfoAsync(uri);
-          if (!info.exists || info.isDirectory) continue;
-          size = info.size || 0;
-          if (info.modificationTime) {
-            modifiedTime = Math.floor(info.modificationTime);
-          }
-        } catch {
-          continue;
-        }
-
-        items.push({
-          uri,
-          name: fileName,
-          size,
-          modifiedTime,
-          selected: true,
-        });
+      const assets = (result.assets || []).map((asset) => ({
+        uri: asset.uri,
+        name: asset.name || 'file',
+        size: asset.size ?? null,
+      }));
+      if (!assets.length) {
+        Alert.alert('No files selected', 'Choose one or more files from your device to post.');
+        return;
       }
 
+      const items = await buildDirectPostFileItems(assets);
       if (items.length === 0) {
-        Alert.alert('No Supported Files', 'No valid files found in this folder to share.');
+        Alert.alert('No supported files', 'Could not read the selected files.');
         return;
       }
 
-      setDirectPostFiles(items);
-      setDirectPostVisible(true);
+      const oversized = items.find((f) => (f.size || 0) > DIRECT_POST_MAX_FILE_BYTES);
+      if (oversized) {
+        Alert.alert('File too large', `${oversized.name} exceeds the 100 MB limit.`);
+        return;
+      }
+
+      if (append) {
+        setDirectPostFiles((prev) => {
+          const seen = new Set(prev.map((f) => f.uri));
+          const merged = [...prev, ...items.filter((f) => !seen.has(f.uri))];
+          if (merged.length > DIRECT_POST_MAX_FILES) {
+            Alert.alert('Too many files', `You can post up to ${DIRECT_POST_MAX_FILES} files at once.`);
+            return prev;
+          }
+          return merged;
+        });
+        setDirectPostVisible(true);
+      } else {
+        if (items.length > DIRECT_POST_MAX_FILES) {
+          Alert.alert('Too many files', `You can post up to ${DIRECT_POST_MAX_FILES} files at once.`);
+          return;
+        }
+        setDirectPostFiles(items);
+        setDirectPostVisible(true);
+      }
     } catch (err: any) {
-      Alert.alert('Error', sanitizeErrorMessage(err, 'Could not access the selected folder.'));
+      Alert.alert('Error', sanitizeErrorMessage(err, 'Could not open the file picker.'));
     } finally {
       setIsOpeningFolder(false);
     }
-  }, [isOffline]);
+  }, [isOffline, buildDirectPostFileItems]);
 
-  // Upload selected files and create feed post
+  const handleOpenDirectPost = useCallback(async () => {
+    await pickDirectPostFiles(false);
+  }, [pickDirectPostFiles]);
+
+  const handleAddDirectPostFiles = useCallback(async () => {
+    await pickDirectPostFiles(true);
+  }, [pickDirectPostFiles]);
+
+  // Upload selected files and create feed post (stored in server app-data, deleted with post)
   const handleDirectPostSubmit = useCallback(
     async (
       selectedFiles: DeviceFileItem[],
@@ -4644,61 +4865,38 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       caption: string,
       onProgress?: (statusText: string) => void
     ) => {
-      const cfg = await getConfig();
-      const deviceId = cfg?.deviceId;
-      if (!deviceId) {
-        throw new Error('Device configuration not available');
+      if (isOffline) {
+        throw new Error('Server is offline. Connect to the backup server and try again.');
       }
-
-      const folderName = directPostFolderName || 'Shared';
-      const items: {
-        source_type: string;
-        source_key: string;
-        relative_path: string;
-        size: number;
-        modified_time: number;
-      }[] = [];
-
-      for (let i = 0; i < selectedFiles.length; i++) {
-        const f = selectedFiles[i];
-        if (onProgress) {
-          onProgress(`Uploading file ${i + 1} of ${selectedFiles.length}…`);
-        }
-        const relativePath = `${folderName}/${f.name}`;
-        // Upload the file to server
-        await uploadFile({
-          uri: f.uri,
-          relativePath,
-          name: f.name,
-          size: f.size,
-          modifiedTime: f.modifiedTime,
-        });
-
-        items.push({
-          source_type: 'phone',
-          source_key: deviceId,
-          relative_path: relativePath,
-          size: f.size,
-          modified_time: f.modifiedTime,
-        });
+      if (!targetIds.length) {
+        throw new Error('Select at least one target device.');
+      }
+      if (!selectedFiles.length) {
+        throw new Error('Select at least one file to post.');
+      }
+      if (selectedFiles.length > DIRECT_POST_MAX_FILES) {
+        throw new Error(`Too many files (max ${DIRECT_POST_MAX_FILES}).`);
+      }
+      const oversized = selectedFiles.find((f) => (f.size || 0) > DIRECT_POST_MAX_FILE_BYTES);
+      if (oversized) {
+        throw new Error(`${oversized.name} exceeds the 100 MB limit.`);
       }
 
       if (onProgress) {
-        onProgress('Creating feed post…');
+        onProgress(`Uploading ${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'}…`);
       }
 
-      // Create the device share post on the server
-      await createDeviceShare(targetIds, caption, items);
+      await createDirectPostShare(targetIds, caption, selectedFiles, onProgress);
       hapticSuccess();
+      setDirectPostFiles([]);
 
-      // Refresh feed
       void handleFetch({ quiet: false, ignoreOffline: true, preserveSelection: true });
       Alert.alert(
         'Post Published!',
         `Successfully shared ${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'} to the feed.`
       );
     },
-    [directPostFolderName, handleFetch]
+    [handleFetch, isOffline]
   );
 
   const handleHidePost = useCallback((file: RemoteFile) => {
@@ -4791,6 +4989,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   // scroll smoothly to top and refresh the feed with the newest posts.
   useEffect(() => {
     if (!isFeedMode) return;
+    // Expo Router's TypeScript types don't expose `addListener` on the navigation
+    // object even though it is present at runtime for tab navigators.
     return (navigation as any)?.addListener?.('tabPress', () => {
       const isFocused = navigation.isFocused();
       if (isFocused) {
@@ -4828,9 +5028,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     const activeList = postItems ?? (isFeedMode ? [file] : previewableFiles);
     const idx = index !== undefined
       ? index
-      : activeList.findIndex(f =>
-          f.share_id != null && file.share_id != null ? f.share_id === file.share_id : f.path === file.path
-        );
+      : activeList.findIndex(f => isSameRemoteFile(f, file));
     setPreviewIndex(idx >= 0 ? idx : 0);
     setPreviewFile(file);
   }, [isFeedMode, previewableFiles]);
@@ -4852,6 +5050,27 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
   }, []);
 
+  // The hidden warm-preview player exists only to give the real player a
+  // head start before the user finishes their tap. Once the real preview is
+  // actually open for that same file, the real player owns buffering — keep
+  // the hidden preloader running too and it just double-buffers the same
+  // URL, fighting the real player for bandwidth (this was actively making
+  // the startup stutter worse, not better). And if a warm target is never
+  // opened at all (finger lands on a thumbnail, then the user scrolls away
+  // or long-presses into selection instead), nothing ever cleared it, so it
+  // sat there re-buffering that clip in the background indefinitely.
+  useEffect(() => {
+    if (!warmPreviewFile) return;
+    if (previewFile && isSameRemoteFile(previewFile, warmPreviewFile)) {
+      setWarmPreviewFile(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      setWarmPreviewFile(prev => (prev && isSameRemoteFile(prev, warmPreviewFile) ? null : prev));
+    }, 8000);
+    return () => clearTimeout(timer);
+  }, [warmPreviewFile, previewFile]);
+
   const handlePreviewNavigate = useCallback((newIndex: number) => {
     const activeList = isFeedMode && feedPreviewItems && feedPreviewItems.length > 0
       ? feedPreviewItems
@@ -4864,6 +5083,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const closePreview = useCallback(() => {
     setPreviewFile(null);
     setFeedPreviewItems(null);
+    setWarmPreviewFile(null);
   }, []);
 
   const expandingFoldersRef = useRef<Set<string>>(new Set());
@@ -5205,6 +5425,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           if (!folderInfo.exists) await FileSystem.makeDirectoryAsync(folderUri, { intermediates: true });
 
           const existingInfo = await FileSystem.getInfoAsync(destUri);
+          // expo-file-system types omit `.size` on the info object even though
+          // it is present at runtime when `exists` is true — cast is required.
           if (existingInfo.exists && fileInfo?.size && (existingInfo as any).size === fileInfo.size) {
             skipped++;
             completed++;
@@ -5490,23 +5712,24 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       <FlatList
         ref={listRef}
         style={{ flex: 1 }}
-        data={isFeedMode ? (isFiltering ? filteredFiles : baseFeedFiles) : (listRows as any)}
-        keyExtractor={(item: any) =>
+        data={isFeedMode ? (isFiltering ? filteredFiles : baseFeedFiles) : (listRows as unknown as RemoteFile[])}
+        keyExtractor={(item: RemoteFile | FlatRow) =>
           isFeedMode
-            ? (item.group_id != null
-                ? `group:${item.group_id}`
-                : item.share_id != null
-                  ? `share:${item.share_id}`
-                  : `shared:${item.source_id ?? ''}:${item.path}`)
-            : item.node.key
+            ? ((item as RemoteFile).group_id != null
+                ? `group:${(item as RemoteFile).group_id}`
+                : (item as RemoteFile).share_id != null
+                  ? `share:${(item as RemoteFile).share_id}`
+                  : `shared:${(item as RemoteFile).source_id ?? ''}:${(item as RemoteFile).path}`)
+            : (item as FlatRow).node.key
         }
-        renderItem={({ item }: any) =>
+        renderItem={({ item }: { item: RemoteFile | FlatRow }) =>
           isFeedMode ? (
             <SharedFeedCard
-              item={item}
+              item={item as RemoteFile}
               serverConfig={serverConfig}
               sourceId={selectedSourceId!}
               onPreview={handlePreview}
+              onWarmPreview={handleWarmPreview}
               onReact={handleToggleReaction}
               onOpenComments={setCommentsItem}
               onShowReactors={setReactorsItem}
@@ -5517,12 +5740,12 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             />
           ) : (
             <TreeNodeView
-              node={item.node}
-              depth={item.depth}
-              isExpanded={expandedKeys.has(item.node.key)}
+              node={(item as FlatRow).node}
+              depth={(item as FlatRow).depth}
+              isExpanded={expandedKeys.has((item as FlatRow).node.key)}
               selectedPaths={selectedPaths}
               selectionMode={selectionMode}
-              isLoadingSelection={loadingNodeKeys.has(item.node.key)}
+              isLoadingSelection={loadingNodeKeys.has((item as FlatRow).node.key)}
               onToggleNode={handleToggleNode}
               onEnterSelectionMode={handleEnterSelectionMode}
               onToggleExpand={handleToggleExpand}
@@ -5743,11 +5966,10 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       {/* Direct Post from Device File Manager (Feed-only) */}
       <DirectPostModal
         visible={directPostVisible}
-        folderName={directPostFolderName}
         files={directPostFiles}
         colors={colors}
         onClose={() => setDirectPostVisible(false)}
-        onChangeFolder={handleOpenDirectPost}
+        onAddFiles={handleAddDirectPostFiles}
         onSubmit={handleDirectPostSubmit}
       />
 

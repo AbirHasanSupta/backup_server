@@ -7,12 +7,14 @@ import {
   RefreshControl,
   Alert,
   StatusBar,
+  TouchableOpacity,
+  BackHandler,
 } from 'react-native';
 import Animated, {
   FadeInDown,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { getSyncHistory, clearSyncHistory } from '../../syncHistory';
 import type { SyncSession } from '@/components/HistorySessionCard';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
@@ -121,6 +123,7 @@ function ListHeader({ styles, colors, sessionCount, summary, onClear }: ListHead
 export default function HistoryScreen() {
   const { colors, isDark } = useAppTheme();
   const insets = useSafeAreaInsets();
+  const router = useRouter();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
   const [sessions, setSessions] = useState<SyncSession[]>([]);
@@ -151,6 +154,16 @@ export default function HistoryScreen() {
     useCallback(() => {
       load();
     }, [load])
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+        router.replace('/settings');
+        return true;
+      });
+      return () => sub.remove();
+    }, [router])
   );
 
   const onRefresh = useCallback(async () => {
@@ -195,7 +208,15 @@ export default function HistoryScreen() {
         onLayout={onHeaderLayout}
         style={[styles.pageHeader, { paddingTop: Spacing.five }, headerAnimatedStyle, { backgroundColor: colors.bg }]}
       >
-        <View>
+        <TouchableOpacity
+          onPress={() => router.replace('/settings')}
+          style={styles.backBtn}
+          hitSlop={12}
+          accessibilityLabel="Back to settings"
+        >
+          <AppIcon androidName="arrow_back" iosName="chevron.left" color={colors.text} size={22} />
+        </TouchableOpacity>
+        <View style={styles.pageHeaderMain}>
           <Text style={styles.pageTitle}>Sync History</Text>
           <Text style={styles.pageSubtitle}>
             {sessions.length > 0
@@ -290,8 +311,21 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     justifyContent: 'space-between',
+    gap: Spacing.three,
     paddingHorizontal: Spacing.five,
     paddingBottom: Spacing.four,
+  },
+  backBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+    backgroundColor: colors.surfaceSoft,
+  },
+  pageHeaderMain: {
+    flex: 1,
   },
   pageTitle: {
     fontSize: TextScale.xl,

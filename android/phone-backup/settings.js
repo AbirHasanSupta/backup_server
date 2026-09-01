@@ -738,6 +738,7 @@ export async function getActiveServerCandidates() {
 
 // ─── Mesh Roaming Auto-Failover Resolver ──────────────────────────────────────
 let _resolvingPromise = null;
+let _resolveGeneration = 0;
 
 /** @type {import('expo-network') | null} */
 let _Network = null;
@@ -750,6 +751,9 @@ async function quickProbe(target, port, timeoutMs = 1200) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`http://${target}:${port}/ping`, { signal: controller.signal });
+    // clearTimeout must be called unconditionally before inspecting res.ok —
+    // if we returned early on !res.ok without clearing, the timer would fire
+    // later and abort an unrelated in-flight request sharing the controller.
     clearTimeout(timer);
     if (res.ok) {
       const data = await res.json().catch(() => null);
@@ -774,27 +778,61 @@ function ipv4Octets(ip) {
 /**
  * Last-resort fallback for resolveReachableServer: sweeps the /24 subnet of the
  * given IP for a responding server.
+ *
+ * @param {string} baseIp           — any IP in the subnet to sweep
+ * @param {number} port
+ * @param {Set<string>} exclude     — mutable set; probed IPs are added so callers can pass the
+ *                                    same set across multiple sweep calls to avoid re-probing
+ * @param {string} [expectedServerId]
+ * @returns {Promise<{ip: string, probe: {ok: boolean, data: any}} | null>}
  */
-async function subnetSweep(baseIp, port, exclude) {
+async function subnetSweep(baseIp, port, exclude, expectedServerId = '') {
   const octets = ipv4Octets(baseIp);
   if (!octets) return null;
   const prefix = `${octets[0]}.${octets[1]}.${octets[2]}.`;
   const candidates = [];
   for (let i = 1; i <= 254; i++) {
     const ip = `${prefix}${i}`;
-    if (ip !== baseIp && !exclude.has(ip)) candidates.push(ip);
+    // Exclude both the base IP itself and anything already probed by the caller
+    if (!exclude.has(ip)) candidates.push(ip);
   }
 
   const BATCH = 32;
   for (let i = 0; i < candidates.length; i += BATCH) {
     const batch = candidates.slice(i, i + BATCH);
+    // Mark as probed before firing so concurrent callers don't duplicate work
+    batch.forEach((ip) => exclude.add(ip));
     const results = await Promise.all(
       batch.map(async (ip) => ({ ip, probe: await quickProbe(ip, port, 400) }))
     );
-    const found = results.find((r) => r.probe.ok);
+    const found = results.find((r) => {
+      if (!r.probe.ok) return false;
+      if (!expectedServerId) return true;
+      return r.probe.data?.server_id === expectedServerId;
+    });
     if (found) return found;
   }
   return null;
+}
+
+/**
+ * Shared commit path: persists the newly-discovered server IP, updates the
+ * saved-servers profile, and fires the settings-updated event.
+ * Extracted to avoid copy-paste divergence between the candidate and sweep paths.
+ */
+async function _commitReachableServer({ newIp, port, probeData, serverName }) {
+  // Write IP first so that any code triggered by the event sees the new IP.
+  await AsyncStorage.setItem(KEYS.SERVER_IP, newIp);
+  await saveServerProfile({
+    ip: newIp,
+    port,
+    serverId: probeData?.server_id || '',
+    name: probeData?.name || serverName || newIp,
+    all_ips: probeData?.all_ips || [newIp],
+    hostname: probeData?.hostname || '',
+  });
+  // Emit AFTER both writes so listeners always read a consistent state.
+  DeviceEventEmitter.emit('settings-updated');
 }
 
 /**
@@ -807,6 +845,10 @@ export async function resolveReachableServer(options = {}) {
     return _resolvingPromise;
   }
 
+  // Increment generation BEFORE assigning _resolvingPromise so that any
+  // older in-flight resolution that finishes after us sees a stale generation
+  // and does NOT clobber our promise in the finally block.
+  const generation = ++_resolveGeneration;
   _resolvingPromise = (async () => {
     try {
       const [currentIp, port, savedServers, serverName] = await Promise.all([
@@ -820,9 +862,19 @@ export async function resolveReachableServer(options = {}) {
         return { ok: false, ip: '', reconnected: false };
       }
 
+      const activeProfile = savedServers.find(
+        (s) => s.ip === currentIp || (Array.isArray(s.candidateIps) && s.candidateIps.includes(currentIp))
+      ) || null;
+      const expectedServerId = activeProfile?.serverId || '';
+
+      const matchesExpectedServer = (probe) => {
+        if (!expectedServerId) return true;
+        return probe?.data?.server_id === expectedServerId;
+      };
+
       // Step 1: Probe current configured IP first
       const currentProbe = await quickProbe(currentIp, port, options.timeoutMs || 1000);
-      if (currentProbe.ok) {
+      if (currentProbe.ok && matchesExpectedServer(currentProbe)) {
         // Refresh candidate list if server returned all_ips
         if (Array.isArray(currentProbe.data?.all_ips) && currentProbe.data.all_ips.length > 0) {
           saveServerProfile({
@@ -837,9 +889,34 @@ export async function resolveReachableServer(options = {}) {
         return { ok: true, ip: currentIp, reconnected: false, data: currentProbe.data };
       }
 
-      // Step 2: Probe all candidates from saved servers (mesh multi-homing failover)
+      // Step 2: Probe saved profile mesh IPs and hostnames concurrently.
+      // Timeout is generous here because after a mesh roam the ARP cache may
+      // still be settling — use at least 2 s regardless of the caller's hint.
+      const step2TimeoutMs = Math.max(options.timeoutMs || 1200, 2000);
+
       const candidates = new Set();
+      if (activeProfile) {
+        if (Array.isArray(activeProfile.candidateIps)) {
+          activeProfile.candidateIps.forEach((cip) => {
+            if (cip && cip !== currentIp) candidates.add(cip);
+          });
+        }
+        if (activeProfile.hostname) {
+          candidates.add(activeProfile.hostname);
+          if (!activeProfile.hostname.endsWith('.local')) {
+            candidates.add(`${activeProfile.hostname}.local`);
+          }
+        }
+      }
+      // Only fold in IPs from OTHER saved profiles when we can confirm, via
+      // serverId, that they refer to the same physical machine as the active
+      // profile. Without that check, resolving a dropped connection for one
+      // saved server could silently reconnect the app to a different server
+      // the user has saved, since matchesExpectedServer() accepts any
+      // responder when expectedServerId is unset.
       savedServers.forEach((s) => {
+        if (s === activeProfile) return;
+        if (!expectedServerId || s.serverId !== expectedServerId) return;
         if (s.ip && s.ip !== currentIp) candidates.add(s.ip);
         if (Array.isArray(s.candidateIps)) {
           s.candidateIps.forEach((cip) => { if (cip && cip !== currentIp) candidates.add(cip); });
@@ -854,31 +931,19 @@ export async function resolveReachableServer(options = {}) {
       if (candidateList.length > 0) {
         const probeResults = await Promise.all(
           candidateList.map(async (cand) => {
-            const probe = await quickProbe(cand, port, 1500);
+            const probe = await quickProbe(cand, port, step2TimeoutMs);
             return { target: cand, probe };
           })
         );
 
-        const found = probeResults.find((r) => r.probe.ok);
+        const found = probeResults.find((r) => r.probe.ok && matchesExpectedServer(r.probe));
         if (found) {
           const numericAllIp = Array.isArray(found.probe.data?.all_ips)
             ? found.probe.data.all_ips.find((ip) => ipv4Octets(ip))
             : null;
           const newIp = ipv4Octets(found.target) ? found.target : (numericAllIp || found.target);
           console.log(`[Mesh Roaming] Found server at candidate address: ${newIp} (was ${currentIp})`);
-          await AsyncStorage.setItem(KEYS.SERVER_IP, newIp);
-
-          // Update saved profile with newly confirmed IP and candidates
-          await saveServerProfile({
-            ip: newIp,
-            port,
-            serverId: found.probe.data?.server_id || '',
-            name: found.probe.data?.name || serverName || newIp,
-            all_ips: found.probe.data?.all_ips || candidateList,
-            hostname: found.probe.data?.hostname || '',
-          });
-
-          DeviceEventEmitter.emit('settings-updated');
+          await _commitReachableServer({ newIp, port, probeData: found.probe.data, serverName });
           return { ok: true, ip: newIp, reconnected: true, data: found.probe.data };
         }
       }
@@ -886,7 +951,11 @@ export async function resolveReachableServer(options = {}) {
       // Step 3: Subnet sweep — sweeps device's current network subnet (if roaming to a new mesh node AP)
       // as well as the last-known server IP's subnet.
       if (options.subnetSweep !== false) {
-        candidates.add(currentIp);
+        // Build the exclusion set for the sweep from everything already probed:
+        // currentIp (Step 1) + all Step 2 candidates.  Passing this set to
+        // subnetSweep (which mutates it) also prevents duplicate probes across
+        // multiple subnet sweeps when both the device and server subnets are swept.
+        const sweptExclude = new Set([currentIp, ...candidateList]);
 
         let deviceIp = null;
         try {
@@ -896,26 +965,21 @@ export async function resolveReachableServer(options = {}) {
         } catch (_e) {}
 
         const subnetsToSweep = [];
+        // Prefer the device's current subnet first — after roaming to a new AP,
+        // the server will also be on the device's new subnet.
         if (deviceIp && deviceIp !== '0.0.0.0' && deviceIp !== currentIp) {
           subnetsToSweep.push(deviceIp);
         }
         subnetsToSweep.push(currentIp);
 
         for (const baseIp of subnetsToSweep) {
-          const swept = await subnetSweep(baseIp, port, candidates);
+          // subnetSweep mutates sweptExclude, so each subsequent sweep
+          // automatically skips IPs already probed in earlier sweeps.
+          const swept = await subnetSweep(baseIp, port, sweptExclude, expectedServerId);
           if (swept) {
             const newIp = swept.ip;
             console.log(`[Mesh Roaming] Found server via subnet sweep: ${newIp} (was ${currentIp})`);
-            await AsyncStorage.setItem(KEYS.SERVER_IP, newIp);
-            await saveServerProfile({
-              ip: newIp,
-              port,
-              serverId: swept.probe.data?.server_id || '',
-              name: swept.probe.data?.name || serverName || newIp,
-              all_ips: swept.probe.data?.all_ips || [newIp],
-              hostname: swept.probe.data?.hostname || '',
-            });
-            DeviceEventEmitter.emit('settings-updated');
+            await _commitReachableServer({ newIp, port, probeData: swept.probe.data, serverName });
             return { ok: true, ip: newIp, reconnected: true, data: swept.probe.data };
           }
         }
@@ -926,7 +990,12 @@ export async function resolveReachableServer(options = {}) {
       console.warn('[resolveReachableServer] Error resolving server:', e?.message);
       return { ok: false, ip: '', reconnected: false };
     } finally {
-      _resolvingPromise = null;
+      // Only the most recent resolution clears _resolvingPromise. An older
+      // force-superseded resolution whose generation is stale deliberately
+      // leaves _resolvingPromise alone so the newer one can clean up.
+      if (generation === _resolveGeneration) {
+        _resolvingPromise = null;
+      }
     }
   })();
 
