@@ -87,7 +87,9 @@ export function DirectPostModal({
   const [postProgressText, setPostProgressText] = useState('');
   const wasVisibleRef = useRef(false);
   const filesRef = useRef(files);
-  filesRef.current = files;
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
 
   // Initialize modal state only when opening (not when appending files).
   useEffect(() => {

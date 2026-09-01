@@ -3240,7 +3240,7 @@ function NativeVideoPreviewPlayer({
     // which fires only after readyToPlay (i.e. the buffer gate is met).
     p.bufferOptions = {
       preferredForwardBufferDuration: 4,
-      minBufferForPlayback: 2.5,
+      minBufferForPlayback: 0.15,
       prioritizeTimeOverSizeThreshold: true,
     };
   });
@@ -3683,7 +3683,7 @@ function NativeVideoPreviewPreloader({ uri, videoModule }: { uri: string; videoM
     // ring buffer so that when the real player mounts it starts from cache.
     player.bufferOptions = {
       preferredForwardBufferDuration: 4,
-      minBufferForPlayback: 0.5,
+      minBufferForPlayback: 0.15,
       prioritizeTimeOverSizeThreshold: true,
     };
   });

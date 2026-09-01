@@ -805,21 +805,22 @@ export async function createDirectPostShare(targetDeviceIds, caption, files, onP
   }
 
   const { ip, port, key, deviceId } = config;
-  const formData = new FormData();
-  formData.append('shared_by_device_id', deviceId);
-  formData.append('target_device_ids', JSON.stringify(targetDeviceIds));
-  formData.append('caption', caption || '');
 
+  const filesPayload = [];
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     if (onProgress) {
-      onProgress(`Uploading file ${i + 1} of ${files.length}…`);
+      onProgress(`Reading file ${i + 1} of ${files.length}…`);
     }
-    const uri = file.uri?.startsWith('file://') ? file.uri : `file://${file.uri}`;
-    formData.append('files', {
-      uri,
+    const cleanUri = file.uri?.startsWith('file://') || file.uri?.startsWith('content://')
+      ? file.uri
+      : `file://${file.uri}`;
+    const base64Data = await FileSystem.readAsStringAsync(cleanUri, {
+      encoding: FileSystem.EncodingType?.Base64 || 'base64',
+    });
+    filesPayload.push({
       name: file.name || `file_${i + 1}`,
-      type: 'application/octet-stream',
+      base64: base64Data,
     });
   }
 
@@ -832,9 +833,15 @@ export async function createDirectPostShare(targetDeviceIds, caption, files, onP
     {
       method: 'POST',
       headers: {
+        'Content-Type': 'application/json',
         Authorization: `Bearer ${key}`,
       },
-      body: formData,
+      body: JSON.stringify({
+        shared_by_device_id: deviceId,
+        target_device_ids: targetDeviceIds,
+        caption: caption || '',
+        files: filesPayload,
+      }),
     },
   );
   if (!res.ok) {

@@ -796,7 +796,12 @@ export default function ReelsScreen() {
       offsetRef.current = reset ? raw.length : offsetRef.current + raw.length;
 
       const ranked = rankReels(raw, watched);
-      setReels(prev => reset ? ranked : [...prev, ...ranked]);
+      setReels(prev => {
+        if (reset) return ranked;
+        const existingIds = new Set(prev.map(r => r.reel_id));
+        const uniqueRanked = ranked.filter(r => !existingIds.has(r.reel_id));
+        return [...prev, ...uniqueRanked];
+      });
       if (reset) listRef.current?.scrollToOffset({ offset: 0, animated: false });
       setError(null);
     } catch (e: any) {
@@ -862,7 +867,7 @@ export default function ReelsScreen() {
     }
   }, []);
 
-  const viewabilityConfig = useMemo(() => ({ itemVisiblePercentThreshold: 75, minimumViewTime: 150 }), []);
+  const viewabilityConfig = useMemo(() => ({ itemVisiblePercentThreshold: 60, minimumViewTime: 50 }), []);
 
   const handleReact = useCallback(async (item: ReelItem, emoji: string) => {
     if (item.media_id == null) return;
@@ -977,18 +982,19 @@ export default function ReelsScreen() {
             renderItem={renderItem}
             getItemLayout={getItemLayout}
             extraData={extraData}
-            pagingEnabled
+            pagingEnabled={Platform.OS === 'ios'}
             snapToInterval={viewportHeight}
             snapToAlignment="start"
             decelerationRate="fast"
+            disableIntervalMomentum={true}
             showsVerticalScrollIndicator={false}
             onViewableItemsChanged={onViewableItemsChanged}
             viewabilityConfig={viewabilityConfig}
             onEndReached={handleLoadMore}
-            onEndReachedThreshold={3}
-            windowSize={3}
-            initialNumToRender={1}
-            maxToRenderPerBatch={2}
+            onEndReachedThreshold={1}
+            windowSize={5}
+            initialNumToRender={2}
+            maxToRenderPerBatch={3}
             removeClippedSubviews={false}
             scrollEventThrottle={16}
             refreshControl={

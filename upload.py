@@ -2261,16 +2261,55 @@ async def create_direct_post_share(
     Files are persisted under APP_DATA (not phone backup) and removed when the
     owning post is deleted — same lifecycle as quiz/rewind shares.
     """
-    form = await request.form()
-    shared_by_device_id = str(form.get("shared_by_device_id") or "")
-    target_device_ids_raw = form.get("target_device_ids")
-    caption = str(form.get("caption") or "").strip()[:2000]
-    uploads = form.getlist("files")
+    content_type = (request.headers.get("content-type") or "").lower()
+    raw_files_data: list[tuple[str, bytes]] = []
+
+    if "application/json" in content_type:
+        body = await request.json()
+        shared_by_device_id = str(body.get("shared_by_device_id") or "")
+        target_device_ids_raw = body.get("target_device_ids")
+        caption = str(body.get("caption") or "").strip()[:2000]
+        json_files = body.get("files") or []
+        if not isinstance(json_files, list) or not json_files:
+            raise HTTPException(status_code=400, detail="No files provided")
+
+        for idx, file_obj in enumerate(json_files):
+            if not isinstance(file_obj, dict):
+                raise HTTPException(status_code=400, detail=f"Invalid file item at index {idx}")
+            fname = str(file_obj.get("name") or f"file_{idx + 1}")
+            b64_str = file_obj.get("base64") or file_obj.get("data") or ""
+            if not isinstance(b64_str, str) or not b64_str.strip():
+                raise HTTPException(status_code=400, detail=f"Empty file at index {idx}")
+            if "," in b64_str:
+                b64_str = b64_str.split(",", 1)[1]
+            try:
+                decoded = base64.b64decode(b64_str)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid base64 at index {idx}") from exc
+            raw_files_data.append((fname, decoded))
+    else:
+        form = await request.form()
+        shared_by_device_id = str(form.get("shared_by_device_id") or "")
+        target_device_ids_raw = form.get("target_device_ids")
+        caption = str(form.get("caption") or "").strip()[:2000]
+        uploads = form.getlist("files")
+        if not uploads:
+            raise HTTPException(status_code=400, detail="No files provided")
+        for idx, upload in enumerate(uploads):
+            if hasattr(upload, "read"):
+                content = await upload.read()
+                original_name = getattr(upload, "filename", None) or f"file_{idx + 1}"
+            elif isinstance(upload, bytes):
+                content = upload
+                original_name = f"file_{idx + 1}"
+            else:
+                raise HTTPException(status_code=400, detail=f"Invalid file at index {idx}")
+            raw_files_data.append((original_name, content))
 
     verify_auth(authorization or (f"Bearer {token}" if token else None), shared_by_device_id)
     verify_known_device_by_id(shared_by_device_id)
 
-    if not uploads:
+    if not raw_files_data:
         raise HTTPException(status_code=400, detail="No files provided")
 
     if isinstance(target_device_ids_raw, list):
@@ -2288,7 +2327,7 @@ async def create_direct_post_share(
     if not targets:
         raise HTTPException(status_code=400, detail="No target devices")
 
-    if len(uploads) > DIRECT_POST_MAX_FILES:
+    if len(raw_files_data) > DIRECT_POST_MAX_FILES:
         raise HTTPException(status_code=400, detail=f"Too many files (max {DIRECT_POST_MAX_FILES})")
 
     known_ids = {
@@ -2302,16 +2341,7 @@ async def create_direct_post_share(
     persisted_paths: list[str] = []
     share_items: list[dict] = []
     try:
-        for idx, upload in enumerate(uploads):
-            if hasattr(upload, "read"):
-                content = await upload.read()
-                original_name = getattr(upload, "filename", None) or f"file_{idx + 1}"
-            elif isinstance(upload, bytes):
-                content = upload
-                original_name = f"file_{idx + 1}"
-            else:
-                raise HTTPException(status_code=400, detail=f"Invalid file at index {idx}")
-
+        for idx, (original_name, content) in enumerate(raw_files_data):
             if not content:
                 raise HTTPException(status_code=400, detail=f"Empty file at index {idx}")
             if len(content) > DIRECT_POST_MAX_FILE_BYTES:

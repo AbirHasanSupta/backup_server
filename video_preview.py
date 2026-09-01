@@ -477,10 +477,12 @@ def _is_android_direct_compatible(source_path: str) -> bool:
     if len(video_streams) != 1:
         return False
     video = video_streams[0]
-    # yuv420p H.264 plus AAC/MP3 are the broad Android baseline.
-    if video.get("codec_name") != "h264" or video.get("pix_fmt") not in {"yuv420p", "yuvj420p"}:
+    # H.264 / HEVC (H.265) video plus AAC/MP3/Opus audio have full native hardware decode on Android.
+    codec_name = str(video.get("codec_name") or "").lower()
+    pix_fmt = str(video.get("pix_fmt") or "").lower()
+    if codec_name not in {"h264", "hevc", "h265"} or pix_fmt not in {"yuv420p", "yuvj420p", "yuv420p10le"}:
         return False
-    return all(stream.get("codec_name") in {"aac", "mp3"} for stream in audio_streams)
+    return all(str(stream.get("codec_name") or "").lower() in {"aac", "mp3", "opus"} for stream in audio_streams)
 
 
 def _is_direct_streamable(source_path: str) -> bool:
