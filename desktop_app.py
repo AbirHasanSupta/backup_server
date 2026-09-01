@@ -62,7 +62,7 @@ try:
 except Exception:
     pystray = None
     _PILImage = None
-from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessions, init_db, remove_device, create_device_share, get_device_shares_by_sharer, get_share_targets_for_group, delete_device_share_group, remove_share_group_target, add_share_group_targets, edit_device_share_group_caption, set_device_username, upsert_device, search_files_for_device
+from database import get_devices, get_stats, get_sync_sessions, clear_sync_sessions, init_db, remove_device, create_device_share, get_device_shares_by_sharer, get_share_targets_for_group, delete_device_share_group, remove_share_group_target, add_share_group_targets, edit_device_share_group_caption, set_device_username, upsert_device
 
 
 def format_display_name(dev: dict) -> str:
@@ -473,12 +473,11 @@ DESKTOP_SHARE_DEVICE_ID = "desktop-server"
 
 class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
-    PAGES      = ["dashboard", "devices", "post_to_devices", "posts", "shared_folders", "settings", "logs", "history"]
+    PAGES      = ["dashboard", "devices", "post_to_devices", "shared_folders", "settings", "logs", "history"]
     PAGE_LABELS = {
         "dashboard": "Dashboard",
         "devices":   "Devices",
         "post_to_devices": "Post to Devices",
-        "posts":     "Posts",
         "shared_folders": "Shared Folders",
         "settings":  "Settings",
         "logs":      "Logs",
@@ -488,7 +487,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         "dashboard": "dashboard",
         "devices": "devices",
         "post_to_devices": "share",
-        "posts": "file",
         "shared_folders": "folders",
         "settings": "settings",
         "logs": "logs",
@@ -807,7 +805,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             "dashboard": self._build_dashboard(container),
             "devices":   self._build_devices(container),
             "post_to_devices": self._build_post_to_devices(container),
-            "posts": self._build_posts(container),
             "shared_folders": self._build_shared_folders(container),
             "settings":  self._build_settings(container),
             "logs":      self._build_logs(container),
@@ -848,20 +845,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
     def _build_dashboard(self, parent) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(parent, fg_color=C_BG)
 
-        hdr = self._page_header(frame, "Dashboard", "Your backup server at a glance")
-        quick_actions = ctk.CTkFrame(hdr, fg_color="transparent")
-        quick_actions.pack(side="right", pady=(4, 0))
-        ctk.CTkButton(
-            quick_actions, text="Share files", width=116, height=36,
-            fg_color=C_ACCENT, hover_color=C_ACCENT2, corner_radius=11,
-            font=FONT_SMALL, command=lambda: self._show_page("post_to_devices"),
-        ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
-            quick_actions, text="Shared folders", width=124, height=36,
-            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
-            border_width=1, border_color=C_BORDER, corner_radius=11,
-            font=FONT_SMALL, command=lambda: self._show_page("shared_folders"),
-        ).pack(side="left")
+        self._page_header(frame, "Dashboard", "Live overview")
         self._divider(frame)
 
         # ── Stat cards ────────────────────────────────────────────────────
@@ -877,24 +861,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         for icon, label, color, attr, command in card_defs:
             lbl = self._stat_card(cards_row, icon, label, "-", color, command)
             setattr(self, attr, lbl)
-
-        # The dashboard is deliberately action-oriented: these common tasks
-        # should not require users to hunt through the navigation rail.
-        quick_row = ctk.CTkFrame(frame, fg_color="transparent")
-        quick_row.pack(fill="x", padx=36, pady=(16, 0))
-        for title, detail, action in (
-            ("Review devices", "Open a device to browse its backed-up files or send it a post.", lambda: self._show_page("devices")),
-            ("Manage posts", "Search sent posts and adjust recipient access in one place.", lambda: self._show_page("posts")),
-            ("Set folder access", "Choose exactly which paired devices can restore each shared folder.", lambda: self._show_page("shared_folders")),
-        ):
-            action_card = ctk.CTkFrame(
-                quick_row, fg_color=C_SURFACE, corner_radius=13,
-                border_width=1, border_color=C_BORDER,
-            )
-            action_card.pack(side="left", fill="x", expand=True, padx=4)
-            ctk.CTkLabel(action_card, text=title, font=FONT_BODY, text_color=C_TEXT, anchor="w").pack(fill="x", padx=14, pady=(11, 1))
-            ctk.CTkLabel(action_card, text=detail, font=FONT_CAPTION, text_color=C_MUTED, anchor="w", justify="left", wraplength=220).pack(fill="x", padx=14, pady=(0, 11))
-            self._bind_click_tree(action_card, action)
 
         # ── Recent activity ───────────────────────────────────────────────
         self._section_label(frame, "Recent Activity")
@@ -1059,18 +1025,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         frame = ctk.CTkFrame(parent, fg_color=C_BG)
 
         hdr = self._page_header(frame, "Connected Devices", "Devices paired with this backup server")
-        controls = ctk.CTkFrame(hdr, fg_color="transparent")
-        controls.pack(side="right")
-        self._device_filter = ctk.CTkEntry(
-            controls, width=250, height=36,
-            placeholder_text="Search name, model, IP, or ID",
-            fg_color=C_ELEVATED, border_color=C_BORDER, border_width=1,
-            text_color=C_TEXT, corner_radius=11,
-        )
-        self._device_filter.pack(side="left", padx=(0, 8))
-        self._device_filter.bind("<KeyRelease>", lambda _event: self._refresh_devices())
         ctk.CTkButton(
-            controls, text="Refresh", width=92, height=36,
+            hdr, text="Refresh", width=110, height=36,
             fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
             text_color=C_ACCENT,
             border_width=1, border_color=C_BORDER,
@@ -1079,10 +1035,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         ).pack(side="right")
 
         self._divider(frame)
-        self._devices_summary = ctk.CTkLabel(
-            frame, text="", font=FONT_SMALL, text_color=C_MUTED, anchor="w",
-        )
-        self._devices_summary.pack(fill="x", padx=38, pady=(12, 0))
 
         self._devices_scroll = ctk.CTkScrollableFrame(
             frame, fg_color="transparent", label_text="",
@@ -1111,26 +1063,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._refresh_devices()
 
     def _refresh_devices(self):
-        all_devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
-        query = ""
-        try:
-            query = self._device_filter.get().strip().casefold()
-        except (AttributeError, tk.TclError):
-            pass
-        devices = all_devices
-        if query:
-            devices = [
-                device for device in all_devices
-                if query in " ".join(str(device.get(key) or "") for key in (
-                    "device_name", "username", "device_model", "device_ip", "device_id",
-                )).casefold()
-            ]
-        if hasattr(self, "_devices_summary"):
-            total = len(all_devices)
-            self._devices_summary.configure(
-                text=(f"{len(devices)} of {total} paired device{'s' if total != 1 else ''}" if query else
-                      f"{total} paired device{'s' if total != 1 else ''}")
-            )
+        devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
 
         # Clear empty state if it was showing
         if hasattr(self, "_devices_empty_widget") and self._devices_empty_widget:
@@ -1150,26 +1083,23 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 corner_radius=22, border_width=1, border_color=C_BORDER,
             )
             self._devices_empty_widget.pack(fill="x", padx=8, pady=30)
-            empty_title = "No matching devices" if query else "No devices connected yet"
-            empty_message = (
-                "Try a different search term." if query else
-                "Open Phone Backup on your Android device,\n"
-                "go to Settings > Server, and tap Discover\n"
-                "or enter this machine's IP address."
-            )
             ctk.CTkLabel(
                 self._devices_empty_widget, text="PB",
                 font=ctk.CTkFont(family="Segoe UI", size=30, weight="bold"),
                 text_color=C_ACCENT,
             ).pack(pady=(36, 4))
             ctk.CTkLabel(
-                self._devices_empty_widget, text=empty_title,
+                self._devices_empty_widget, text="No devices connected yet",
                 font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
                 text_color=C_TEXT,
             ).pack()
             ctk.CTkLabel(
                 self._devices_empty_widget,
-                text=empty_message,
+                text=(
+                    "Open Phone Backup on your Android device,\n"
+                    "go to Settings > Server, and tap Discover\n"
+                    "or enter this machine's IP address."
+                ),
                 font=FONT_BODY, text_color=C_MUTED, justify="center",
             ).pack(pady=(8, 36))
             return
@@ -1204,155 +1134,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         widgets["chip_ip"].configure(text=f"  IP {dev['device_ip']}  ")
         widgets["chip_files"].configure(text=f"  {dev['files_backed_up']:,} files  ")
 
-    @staticmethod
-    def _device_backup_folder(dev: dict) -> str:
-        """Resolve the local backup directory without changing legacy layout."""
-        import re
-        configured_root = str(load_config().get("BACKUP_ROOT", "")).strip()
-        if not configured_root:
-            return ""
-        root = os.path.abspath(configured_root)
-        folder_name = dev.get("folder_name")
-        device_id = dev.get("device_id")
-        if folder_name:
-            return os.path.join(root, folder_name)
-        if device_id:
-            return os.path.join(root, re.sub(r'[<>:"|?*]', "_", str(device_id)).strip())
-        return root
-
-    def _open_device_backup_folder(self, dev: dict):
-        folder = self._device_backup_folder(dev)
-        if not folder:
-            messagebox.showwarning("Device Backup Folder", "Choose a backup root folder in Settings first.")
-            return
-        try:
-            os.makedirs(folder, exist_ok=True)
-            os.startfile(folder)  # type: ignore[attr-defined]
-        except Exception as exc:
-            messagebox.showerror("Device Backup Folder", f"Could not open the backup folder:\n{exc}")
-
-    def _open_post_composer_for_device(self, device_id: str):
-        """Open the composer with one recipient pre-selected."""
-        self._show_page("post_to_devices")
-        if hasattr(self, "_post_device_filter_var"):
-            self._post_device_filter_var.set("")
-        self._refresh_post_devices_list()
-        recipient = self._post_device_vars.get(device_id)
-        if recipient:
-            recipient.set(True)
-
-    def _open_device_files_dialog(self, dev: dict):
-        """Search and open the backup records for one paired device."""
-        device_id = str(dev.get("device_id") or "")
-        if not device_id:
-            return
-        dialog = ctk.CTkToplevel(self)
-        dialog.title(f"Files · {format_display_name(dev)}")
-        dialog.geometry("880x620")
-        dialog.minsize(700, 460)
-        dialog.transient(self)
-        dialog.configure(fg_color=C_BG)
-
-        header = ctk.CTkFrame(dialog, fg_color="transparent")
-        header.pack(fill="x", padx=22, pady=(20, 0))
-        ctk.CTkLabel(
-            header, text=format_display_name(dev), font=FONT_TITLE,
-            text_color=C_TEXT, anchor="w",
-        ).pack(side="left")
-        ctk.CTkButton(
-            header, text="Open backup folder", width=142, height=34,
-            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
-            border_width=1, border_color=C_BORDER, corner_radius=10, font=FONT_SMALL,
-            command=lambda: self._open_device_backup_folder(dev),
-        ).pack(side="right")
-        ctk.CTkLabel(
-            dialog, text="Search the backup index by file or folder name. Results stay on this PC.",
-            font=FONT_SMALL, text_color=C_MUTED, anchor="w",
-        ).pack(fill="x", padx=24, pady=(2, 12))
-
-        search_row = ctk.CTkFrame(dialog, fg_color=C_SURFACE, corner_radius=14, border_width=1, border_color=C_BORDER)
-        search_row.pack(fill="x", padx=22, pady=(0, 10))
-        query_var = tk.StringVar()
-        entry = ctk.CTkEntry(
-            search_row, textvariable=query_var,
-            placeholder_text="Type a file name, folder, or path…",
-            height=40, fg_color=C_ELEVATED, border_color=C_BORDER, font=FONT_BODY,
-        )
-        entry.pack(side="left", fill="x", expand=True, padx=10, pady=10)
-        status = ctk.CTkLabel(search_row, text="Enter a search", font=FONT_SMALL, text_color=C_MUTED)
-        status.pack(side="right", padx=(0, 12))
-
-        results = ctk.CTkScrollableFrame(dialog, fg_color="transparent", label_text="")
-        results.pack(fill="both", expand=True, padx=18, pady=(0, 18))
-        search_after_id: str | None = None
-
-        def copy_path(path: str):
-            self.clipboard_clear()
-            self.clipboard_append(path)
-            status.configure(text="Path copied")
-
-        def open_file(path: str):
-            root = self._device_backup_folder(dev)
-            if not root:
-                messagebox.showwarning("Open File", "Choose a backup root folder in Settings first.")
-                return
-            safe_relative = str(path).replace("\\", "/").lstrip("/")
-            full_path = os.path.abspath(os.path.join(root, *safe_relative.split("/")))
-            try:
-                if os.path.commonpath([root, full_path]) != root:
-                    raise ValueError("Invalid backup path")
-                if not os.path.exists(full_path):
-                    messagebox.showinfo("File not found", "This file is recorded in the backup index but is not currently on disk.")
-                    return
-                os.startfile(full_path)  # type: ignore[attr-defined]
-            except Exception as exc:
-                messagebox.showerror("Open File", f"Could not open this file:\n{exc}")
-
-        def render_results():
-            nonlocal search_after_id
-            search_after_id = None
-            for child in results.winfo_children():
-                child.destroy()
-            query = query_var.get().strip()
-            if not query:
-                status.configure(text="Enter a search")
-                ctk.CTkLabel(results, text="Search by a file name, folder, or part of a path.", font=FONT_SMALL, text_color=C_MUTED).pack(pady=34)
-                return
-            try:
-                rows = search_files_for_device(device_id, query, limit=500)
-            except Exception:
-                rows = []
-            status.configure(text=f"{len(rows)} result{'s' if len(rows) != 1 else ''}" + (" (max 500)" if len(rows) == 500 else ""))
-            if not rows:
-                ctk.CTkLabel(results, text="No backed-up files match this search.", font=FONT_SMALL, text_color=C_MUTED).pack(pady=34)
-                return
-            for row in rows:
-                path = str(row.get("path") or "")
-                item = ctk.CTkFrame(results, fg_color=C_SURFACE, corner_radius=11, border_width=1, border_color=C_BORDER)
-                item.pack(fill="x", padx=4, pady=4)
-                copy = ctk.CTkFrame(item, fg_color="transparent")
-                copy.pack(side="left", fill="both", expand=True, padx=12, pady=9)
-                ctk.CTkLabel(copy, text=os.path.basename(path) or path, font=FONT_BODY, text_color=C_TEXT, anchor="w").pack(fill="x")
-                ctk.CTkLabel(copy, text=path, font=FONT_CAPTION, text_color=C_MUTED, anchor="w").pack(fill="x", pady=(2, 0))
-                ctk.CTkLabel(copy, text=f"{fmt_bytes(int(row.get('size') or 0))}  ·  updated {fmt_ts(row.get('modified_time'))}", font=FONT_CAPTION, text_color=C_MUTED, anchor="w").pack(fill="x", pady=(2, 0))
-                actions = ctk.CTkFrame(item, fg_color="transparent")
-                actions.pack(side="right", padx=10, pady=10)
-                ctk.CTkButton(actions, text="Copy path", width=76, height=28, fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT, border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION, command=lambda p=path: copy_path(p)).pack(side="left", padx=(0, 5))
-                ctk.CTkButton(actions, text="Open", width=58, height=28, fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT, border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION, command=lambda p=path: open_file(p)).pack(side="left")
-
-        def schedule_search(*_):
-            nonlocal search_after_id
-            if search_after_id:
-                try:
-                    dialog.after_cancel(search_after_id)
-                except Exception:
-                    pass
-            search_after_id = dialog.after(180, render_results)
-
-        query_var.trace_add("write", schedule_search)
-        entry.focus_set()
-        render_results()
-
     def _device_card(self, parent, dev: dict) -> dict:
         card = ctk.CTkFrame(
             parent,
@@ -1369,7 +1150,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             card, width=56, height=56, fg_color=C_SOFT_BLUE,
             corner_radius=14,
         )
-        icon_wrap.grid(row=0, column=0, rowspan=3, padx=(18, 12), pady=18)
+        icon_wrap.grid(row=0, column=0, rowspan=2, padx=(18, 12), pady=18)
         icon_wrap.grid_propagate(False)
         ctk.CTkLabel(
             icon_wrap, text="P", font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"),
@@ -1428,8 +1209,32 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         chip_files = ctk.CTkLabel(chip_files_f, text=f"  {dev['files_backed_up']:,} files  ", font=FONT_CAPTION, text_color=C_ACCENT)
         chip_files.pack()
 
-        chip_files_f.bind("<Button-1>", lambda _event: self._open_device_backup_folder(dev))
-        chip_files.bind("<Button-1>", lambda _event: self._open_device_backup_folder(dev))
+        def open_folder(event=None):
+            import re
+            from config import load_config
+            root = os.path.abspath(load_config()["BACKUP_ROOT"])
+            # Prefer the stable, human-readable folder_name set at registration.
+            # Fall back to a sanitized device_id for legacy devices that predate
+            # the folder_name column.
+            folder_name = dev.get("folder_name")
+            device_id   = dev.get("device_id")
+            if folder_name:
+                device_folder = os.path.join(root, folder_name)
+            elif device_id:
+                safe_device_id = re.sub(r'[<>:"|?*]', "_", device_id).strip()
+                device_folder = os.path.join(root, safe_device_id)
+            else:
+                device_folder = root
+
+            try:
+                os.makedirs(device_folder, exist_ok=True)
+                os.startfile(device_folder)
+            except Exception:
+                if os.path.exists(root):
+                    os.startfile(root)
+
+        chip_files_f.bind("<Button-1>", open_folder)
+        chip_files.bind("<Button-1>", open_folder)
         chip_files_f.configure(cursor="hand2")
         chip_files.configure(cursor="hand2")
 
@@ -1438,27 +1243,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         chip_date_f = ctk.CTkFrame(details_row, fg_color=_CHIP_TINTS[C_MUTED], corner_radius=8)
         chip_date_f.pack(side="left", padx=(0, 8))
         ctk.CTkLabel(chip_date_f, text=f"  since {fmt_ts(dev['first_seen'])[:10]}  ", font=FONT_CAPTION, text_color=C_MUTED).pack()
-
-        actions_row = ctk.CTkFrame(card, fg_color="transparent")
-        actions_row.grid(row=2, column=1, sticky="w", padx=4, pady=(0, 16))
-        ctk.CTkButton(
-            actions_row, text="Browse files", width=94, height=30,
-            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
-            border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION,
-            command=lambda d=dev: self._open_device_files_dialog(d),
-        ).pack(side="left", padx=(0, 7))
-        ctk.CTkButton(
-            actions_row, text="Open folder", width=92, height=30,
-            fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
-            border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION,
-            command=lambda d=dev: self._open_device_backup_folder(d),
-        ).pack(side="left", padx=(0, 7))
-        ctk.CTkButton(
-            actions_row, text="Send post", width=86, height=30,
-            fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
-            border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION,
-            command=lambda did=dev.get("device_id"): self._open_post_composer_for_device(str(did or "")),
-        ).pack(side="left")
 
         # ── Remove button ─────────────────────────────────────────────────
         dev_id   = dev["id"]
@@ -1481,7 +1265,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
             font=FONT_SMALL, corner_radius=8,
             command=do_remove,
-        ).grid(row=0, column=2, rowspan=3, padx=16)
+        ).grid(row=0, column=2, rowspan=2, padx=16)
 
         return {
             "outer": card,
@@ -1837,27 +1621,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         """Build the folder-sharing and per-device access management panel."""
         frame = ctk.CTkFrame(parent, fg_color=C_BG)
 
-        header = self._page_header(
+        self._page_header(
             frame,
             "Shared Folders",
-            "Choose what to share, then manage access for paired devices",
+            "Choose folders and the devices allowed to restore them",
         )
-        controls = ctk.CTkFrame(header, fg_color="transparent")
-        controls.pack(side="right")
-        self._shared_dirs_filter_var = tk.StringVar()
-        shared_search = ctk.CTkEntry(
-            controls, textvariable=self._shared_dirs_filter_var, width=240, height=36,
-            placeholder_text="Search folders or paths",
-            fg_color=C_ELEVATED, border_color=C_BORDER, border_width=1,
-            text_color=C_TEXT, corner_radius=11,
-        )
-        shared_search.pack(side="left", padx=(0, 8))
-        self._shared_dirs_filter_var.trace_add("write", lambda *_: self._refresh_shared_dirs_list())
-        ctk.CTkButton(
-            controls, text="+ Add folder", width=112, height=36,
-            fg_color=C_ACCENT, hover_color=C_ACCENT2, corner_radius=11,
-            font=FONT_SMALL, command=self._add_shared_folder,
-        ).pack(side="left")
         self._divider(frame)
 
         work_area = ctk.CTkFrame(frame, fg_color="transparent")
@@ -1874,7 +1642,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         ctk.CTkLabel(
             hint_row,
             text=(
-                "Add folders from this PC, then use Manage Access to decide exactly which paired devices can restore them."
+                "📂  Add any folder on this PC. It will appear in the Android Restore tab, "
+                "where selected devices can browse and download its files."
             ),
             font=FONT_SMALL, text_color=C_MUTED,
             justify="left", wraplength=560,
@@ -1900,18 +1669,22 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             fill="both", expand=True, padx=18, pady=(0, 12)
         )
 
+        add_btn_row = ctk.CTkFrame(card, fg_color="transparent")
+        add_btn_row.pack(side="bottom", fill="x", padx=18, pady=(0, 16))
+        ctk.CTkButton(
+            add_btn_row, text="+ Add Folder", width=150, height=38,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
+            text_color=C_ACCENT, border_width=1, border_color=C_BORDER,
+            corner_radius=12, font=FONT_BODY,
+            command=self._add_shared_folder,
+        ).pack(side="left")
+
         self._refresh_shared_dirs_list()
         return frame
 
     def _build_post_to_devices(self, parent) -> ctk.CTkFrame:
         frame = ctk.CTkFrame(parent, fg_color=C_BG)
-        header = self._page_header(frame, "Post to Devices", "Send files from this PC directly to a device's feed")
-        ctk.CTkButton(
-            header, text="Manage posts", width=112, height=36,
-            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
-            border_width=1, border_color=C_BORDER, corner_radius=11, font=FONT_SMALL,
-            command=lambda: self._show_page("posts"),
-        ).pack(side="right", pady=(4, 0))
+        self._page_header(frame, "Post to Devices", "Send files from this PC directly to a device's feed")
         self._divider(frame)
 
         work_area = ctk.CTkFrame(frame, fg_color="transparent", height=360)
@@ -1962,14 +1735,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         dev_header = ctk.CTkFrame(right, fg_color="transparent")
         dev_header.pack(fill="x", padx=18, pady=(18, 6))
         ctk.CTkLabel(dev_header, text="POST TO", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(side="left")
-        self._post_device_filter_var = tk.StringVar()
-        post_device_search = ctk.CTkEntry(
-            dev_header, textvariable=self._post_device_filter_var, width=150, height=27,
-            placeholder_text="Find a device",
-            fg_color=C_ELEVATED, border_color=C_BORDER, font=FONT_CAPTION,
-        )
-        post_device_search.pack(side="right", padx=(0, 6))
-        self._post_device_filter_var.trace_add("write", lambda *_: self._refresh_post_devices_list())
         ctk.CTkButton(
             dev_header, text="Refresh", width=80, height=26,
             fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
@@ -1990,100 +1755,25 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self._post_btn.pack(fill="x", padx=18, pady=(0, 18))
 
-        self._refresh_post_files_list()
-        self._refresh_post_devices_list()
-        return frame
-
-    def _build_posts(self, parent) -> ctk.CTkFrame:
-        """Build the full-size searchable management workspace for desktop posts."""
-        frame = ctk.CTkFrame(parent, fg_color=C_BG)
-        header = self._page_header(
-            frame,
-            "Posts",
-            "Search and manage posts sent from this desktop server",
-        )
+        posts_header = ctk.CTkFrame(frame, fg_color="transparent")
+        posts_header.pack(fill="x", padx=36, pady=(4, 6))
+        ctk.CTkLabel(posts_header, text="MY POSTS", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(side="left")
         ctk.CTkButton(
-            header, text="+ Create post", width=116, height=36,
-            fg_color=C_ACCENT, hover_color=C_ACCENT2, corner_radius=11, font=FONT_SMALL,
-            command=lambda: self._show_page("post_to_devices"),
-        ).pack(side="right", pady=(4, 0))
-        self._divider(frame)
-
-        filters = ctk.CTkFrame(frame, fg_color=C_SURFACE, corner_radius=16, border_width=1, border_color=C_BORDER)
-        filters.pack(fill="x", padx=36, pady=(16, 10))
-        filters.grid_columnconfigure(0, weight=1)
-
-        self._posts_search_var = tk.StringVar()
-        self._posts_date_var = tk.StringVar()
-        self._posts_device_filter_var = tk.StringVar(value="All devices")
-        self._posts_device_filter_ids: dict[str, str | None] = {"All devices": None}
-
-        ctk.CTkLabel(
-            filters, text="SEARCH", font=FONT_SECTION, text_color=C_MUTED,
-        ).grid(row=0, column=0, sticky="w", padx=(16, 8), pady=(12, 4))
-        ctk.CTkLabel(
-            filters, text="DEVICE", font=FONT_SECTION, text_color=C_MUTED,
-        ).grid(row=0, column=1, sticky="w", padx=(8, 8), pady=(12, 4))
-        ctk.CTkLabel(
-            filters, text="DATE", font=FONT_SECTION, text_color=C_MUTED,
-        ).grid(row=0, column=2, sticky="w", padx=(8, 8), pady=(12, 4))
-
-        search = ctk.CTkEntry(
-            filters, textvariable=self._posts_search_var,
-            placeholder_text="Caption, device, file name, folder, or full path",
-            height=36, fg_color=C_ELEVATED, border_color=C_BORDER,
-            font=FONT_BODY,
-        )
-        search.grid(row=1, column=0, sticky="ew", padx=(16, 8), pady=(0, 14))
-        search.bind("<Return>", lambda _event: self._refresh_post_posts_list())
-
-        self._posts_device_filter_menu = ctk.CTkOptionMenu(
-            filters, variable=self._posts_device_filter_var, values=["All devices"],
-            width=190, height=36, fg_color=C_ELEVATED, button_color=C_BORDER,
-            button_hover_color=C_MUTED, text_color=C_TEXT, dropdown_fg_color=C_SURFACE,
-            command=lambda _value: self._refresh_post_posts_list(),
-        )
-        self._posts_device_filter_menu.grid(row=1, column=1, sticky="ew", padx=8, pady=(0, 14))
-
-        date = ctk.CTkEntry(
-            filters, textvariable=self._posts_date_var,
-            placeholder_text="YYYY-MM-DD",
-            width=125, height=36, fg_color=C_ELEVATED, border_color=C_BORDER,
-            font=FONT_BODY,
-        )
-        date.grid(row=1, column=2, sticky="ew", padx=8, pady=(0, 14))
-        date.bind("<Return>", lambda _event: self._refresh_post_posts_list())
-        ctk.CTkButton(
-            filters, text="Clear", width=70, height=36,
+            posts_header, text="Refresh", width=80, height=26,
             fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
-            border_width=1, border_color=C_BORDER, corner_radius=9, font=FONT_SMALL,
-            command=self._clear_post_filters,
-        ).grid(row=1, column=3, padx=(0, 8), pady=(0, 14))
-        ctk.CTkButton(
-            filters, text="Refresh", width=80, height=36,
-            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
-            border_width=1, border_color=C_BORDER, corner_radius=9, font=FONT_SMALL,
+            border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION,
             command=self._refresh_post_posts_list,
-        ).grid(row=1, column=4, padx=(0, 16), pady=(0, 14))
+        ).pack(side="right")
 
-        self._posts_count_label = ctk.CTkLabel(
-            frame, text="0 posts", font=FONT_SMALL, text_color=C_MUTED, anchor="w",
+        self._post_posts_frame = ctk.CTkScrollableFrame(
+            frame, fg_color="transparent", label_text="",
         )
-        self._posts_count_label.pack(fill="x", padx=40, pady=(0, 6))
-        self._post_posts_frame = ctk.CTkScrollableFrame(frame, fg_color="transparent", label_text="")
         self._post_posts_frame.pack(fill="both", expand=True, padx=36, pady=(0, 20))
 
-        # Update results while typing without rebuilding the rest of the page.
-        self._posts_search_var.trace_add("write", lambda *_: self._refresh_post_posts_list())
-        self._posts_date_var.trace_add("write", lambda *_: self._refresh_post_posts_list())
+        self._refresh_post_files_list()
+        self._refresh_post_devices_list()
         self._refresh_post_posts_list()
         return frame
-
-    def _clear_post_filters(self):
-        self._posts_search_var.set("")
-        self._posts_date_var.set("")
-        self._posts_device_filter_var.set("All devices")
-        self._refresh_post_posts_list()
 
     def _browse_post_files(self):
         paths = filedialog.askopenfilenames(title="Select Files to Post")
@@ -2141,26 +1831,12 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ).pack(side="right", padx=2)
 
     def _refresh_post_devices_list(self):
-        previously_selected = {
-            did for did, var in self._post_device_vars.items()
-            if var.get()
-        }
         for w in self._post_devices_frame.winfo_children():
             w.destroy()
         self._post_device_vars.clear()
         devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
-        query = ""
-        try:
-            query = self._post_device_filter_var.get().strip().casefold()
-        except (AttributeError, tk.TclError):
-            pass
-        if query:
-            devices = [
-                dev for dev in devices
-                if query in " ".join((format_display_name(dev), str(dev.get("device_model") or ""), str(dev.get("device_id") or ""))).casefold()
-            ]
         if not devices:
-            ctk.CTkLabel(self._post_devices_frame, text="No devices match this search" if query else "No connected devices", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
+            ctk.CTkLabel(self._post_devices_frame, text="No connected devices", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
             return
 
         def _toggle_all():
@@ -2168,7 +1844,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             for var in self._post_device_vars.values():
                 var.set(v)
 
-        all_var = tk.BooleanVar(value=bool(devices) and all(dev.get("device_id") in previously_selected for dev in devices))
+        all_var = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             self._post_devices_frame, text="All", variable=all_var,
             font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
@@ -2178,7 +1854,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         for dev in devices:
             did = dev.get("device_id")
-            var = tk.BooleanVar(value=did in previously_selected)
+            var = tk.BooleanVar(value=False)
             ctk.CTkCheckBox(
                 self._post_devices_frame, text=format_display_name(dev),
                 variable=var, font=FONT_SMALL, text_color=C_TEXT,
@@ -2242,90 +1918,30 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 order.append(gid)
             groups[gid].append(r)
 
-        # Rebuild the recipient selector from current devices.  A display name
-        # can be duplicated, so include an ID suffix only when necessary.
-        devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
-        labels: dict[str, str | None] = {"All devices": None}
-        for device in devices:
-            device_id = device.get("device_id")
-            if not device_id:
-                continue
-            label = format_display_name(device)
-            if label in labels:
-                label = f"{label} ({device_id[-6:]})"
-            labels[label] = device_id
-        selected_label = self._posts_device_filter_var.get()
-        self._posts_device_filter_ids = labels
-        self._posts_device_filter_menu.configure(values=list(labels))
-        if selected_label not in labels:
-            self._posts_device_filter_var.set("All devices")
-
-        selected_device_id = self._posts_device_filter_ids.get(self._posts_device_filter_var.get())
-        text_query = self._posts_search_var.get().strip().casefold()
-        date_query = self._posts_date_var.get().strip()
-        matched_count = 0
-
         if not order:
-            self._posts_count_label.configure(text="0 posts")
             ctk.CTkLabel(self._post_posts_frame, text="No posts yet", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
             return
 
         for gid in order:
             items = groups[gid]
             head = items[0]
-            targets = get_share_targets_for_group(gid, DESKTOP_SHARE_DEVICE_ID)
-            target_ids = {target.get("target_device_id") for target in targets}
-            target_names = [format_display_name(target) for target in targets]
-            created_at = int(head.get("created_at") or 0)
-            date_text = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d") if created_at else ""
-            caption = head.get("group_caption") or head.get("caption") or ""
-            item_paths = [str(item.get("relative_path") or "") for item in items]
-            search_fields = [caption, date_text, *target_names, *target_ids]
-            for path in item_paths:
-                search_fields.extend((path, os.path.basename(path), os.path.dirname(path)))
-            searchable = "\n".join(str(value or "") for value in search_fields).casefold()
-
-            if selected_device_id and selected_device_id not in target_ids:
-                continue
-            # Prefix matching permits useful partial searches such as 2026-09
-            # while an exact YYYY-MM-DD value isolates one day's posts.
-            if date_query and not date_text.startswith(date_query):
-                continue
-            if text_query and text_query not in searchable:
-                continue
-
-            matched_count += 1
             card = ctk.CTkFrame(self._post_posts_frame, fg_color=C_SURFACE, corner_radius=14, border_width=1, border_color=C_BORDER)
             card.pack(fill="x", padx=4, pady=6)
 
             top = ctk.CTkFrame(card, fg_color="transparent")
             top.pack(fill="x", padx=14, pady=(12, 4))
             ctk.CTkLabel(
-                top, text=caption or "(no caption)",
+                top, text=head.get("group_caption") or "(no caption)",
                 font=FONT_BODY, text_color=C_TEXT, anchor="w",
             ).pack(side="left", fill="x", expand=True)
-            timestamp = f"{date_text}  ·  {fmt_rel(created_at)}" if date_text else fmt_rel(created_at)
-            ctk.CTkLabel(top, text=timestamp, font=FONT_CAPTION, text_color=C_MUTED, anchor="e").pack(side="right")
+            ctk.CTkLabel(top, text=fmt_rel(head.get("created_at")), font=FONT_CAPTION, text_color=C_MUTED, anchor="e").pack(side="right")
 
-            target_display = ", ".join(target_names) or "No devices"
+            targets = get_share_targets_for_group(gid, DESKTOP_SHARE_DEVICE_ID)
+            target_names = ", ".join(format_display_name(t) for t in targets) or "No devices"
             ctk.CTkLabel(
-                card, text=f"{len(items)} file(s)   •   Shared with: {target_display}",
+                card, text=f"{len(items)} file(s)   •   Shared with: {target_names}",
                 font=FONT_SMALL, text_color=C_MUTED, anchor="w",
-            ).pack(fill="x", padx=14, pady=(0, 4))
-
-            files_frame = ctk.CTkFrame(card, fg_color=C_ELEVATED, corner_radius=9)
-            files_frame.pack(fill="x", padx=14, pady=(2, 10))
-            for path in item_paths:
-                file_row = ctk.CTkFrame(files_frame, fg_color="transparent")
-                file_row.pack(fill="x", padx=10, pady=(6, 0) if path != item_paths[-1] else (6, 8))
-                ctk.CTkLabel(
-                    file_row, text=os.path.basename(path) or path,
-                    font=FONT_SMALL, text_color=C_TEXT, anchor="w",
-                ).pack(fill="x")
-                ctk.CTkLabel(
-                    file_row, text=path, font=FONT_CAPTION, text_color=C_MUTED,
-                    anchor="w", justify="left", wraplength=850,
-                ).pack(fill="x", pady=(1, 0))
+            ).pack(fill="x", padx=14, pady=(0, 10))
 
             btn_row = ctk.CTkFrame(card, fg_color="transparent")
             btn_row.pack(fill="x", padx=14, pady=(0, 12))
@@ -2347,16 +1963,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 border_width=1, border_color=C_ERROR_BORDER, corner_radius=8, font=FONT_CAPTION,
                 command=lambda g=gid: self._delete_post(g),
             ).pack(side="left")
-
-        self._posts_count_label.configure(
-            text=f"{matched_count} of {len(order)} post{'s' if len(order) != 1 else ''}"
-        )
-        if matched_count == 0:
-            ctk.CTkLabel(
-                self._post_posts_frame,
-                text="No posts match these filters",
-                font=FONT_SMALL, text_color=C_MUTED,
-            ).pack(pady=28)
 
     def _open_edit_caption_dialog(self, group_id: str, current_caption: str | None):
         dialog = ctk.CTkToplevel(self)
@@ -2383,83 +1989,28 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         ).pack(fill="x", padx=16, pady=(16, 16))
 
     def _open_manage_access_dialog(self, group_id: str):
-        """Edit post recipients with bulk selection and fast device search."""
         current = {t["target_device_id"] for t in get_share_targets_for_group(group_id, DESKTOP_SHARE_DEVICE_ID)}
-        devices = [
-            dev for dev in get_devices()
-            if dev.get("device_id") and dev.get("device_id") != DESKTOP_SHARE_DEVICE_ID
-        ]
         dialog = ctk.CTkToplevel(self)
         dialog.title("Manage Device Access")
-        dialog.geometry("460x560")
-        dialog.minsize(390, 420)
+        dialog.geometry("360x420")
         dialog.transient(self)
         dialog.grab_set()
-        dialog.configure(fg_color=C_BG)
 
-        ctk.CTkLabel(dialog, text="Post recipients", font=FONT_TITLE, text_color=C_TEXT, anchor="w").pack(fill="x", padx=20, pady=(20, 0))
-        ctk.CTkLabel(dialog, text="Choose who can see this post. Changes apply to every file in the post.", font=FONT_SMALL, text_color=C_MUTED, anchor="w", wraplength=400, justify="left").pack(fill="x", padx=20, pady=(2, 12))
-        panel = ctk.CTkFrame(dialog, fg_color=C_SURFACE, corner_radius=14, border_width=1, border_color=C_BORDER)
-        panel.pack(fill="both", expand=True, padx=18, pady=(0, 12))
+        ctk.CTkLabel(dialog, text="DEVICES", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(fill="x", padx=16, pady=(16, 6))
+        scroll = ctk.CTkScrollableFrame(dialog, fg_color=C_ELEVATED, corner_radius=12, border_width=1, border_color=C_BORDER, label_text="")
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 10))
 
         vars_map: dict[str, tk.BooleanVar] = {}
-        for dev in devices:
-            did = str(dev["device_id"])
-            vars_map[did] = tk.BooleanVar(value=did in current)
-
-        top_controls = ctk.CTkFrame(panel, fg_color="transparent")
-        top_controls.pack(fill="x", padx=14, pady=(14, 8))
-        all_var = tk.BooleanVar(value=bool(devices) and all(var.get() for var in vars_map.values()))
-
-        def select_all():
-            for var in vars_map.values():
-                var.set(all_var.get())
-            render_devices()
-
-        ctk.CTkCheckBox(
-            top_controls, text="All devices", variable=all_var,
-            font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
-            command=select_all,
-        ).pack(side="left")
-        search_var = tk.StringVar()
-        search = ctk.CTkEntry(
-            top_controls, textvariable=search_var, width=190, height=32,
-            placeholder_text="Find a device",
-            fg_color=C_ELEVATED, border_color=C_BORDER, font=FONT_SMALL,
-        )
-        search.pack(side="right")
-        scroll = ctk.CTkScrollableFrame(panel, fg_color=C_ELEVATED, corner_radius=10, border_width=1, border_color=C_BORDER, label_text="")
-        scroll.pack(fill="both", expand=True, padx=14, pady=(0, 14))
-
-        def sync_all_state():
-            all_var.set(bool(devices) and all(var.get() for var in vars_map.values()))
-
-        def render_devices(*_):
-            for child in scroll.winfo_children():
-                child.destroy()
-            query = search_var.get().strip().casefold()
-            matched = [
-                dev for dev in devices
-                if not query or query in " ".join((format_display_name(dev), str(dev.get("device_model") or ""), str(dev.get("device_id") or ""))).casefold()
-            ]
-            if not matched:
-                ctk.CTkLabel(scroll, text="No devices match this search.", font=FONT_SMALL, text_color=C_MUTED).pack(pady=24)
-                return
-            for dev in matched:
-                did = str(dev["device_id"])
-                row = ctk.CTkFrame(scroll, fg_color="transparent")
-                row.pack(fill="x", padx=6, pady=3)
-                ctk.CTkCheckBox(
-                    row, text=format_display_name(dev), variable=vars_map[did],
-                    font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
-                    command=sync_all_state,
-                ).pack(side="left")
-                model = str(dev.get("device_model") or "")
-                if model:
-                    ctk.CTkLabel(row, text=model, font=FONT_CAPTION, text_color=C_MUTED).pack(side="right")
-
-        search_var.trace_add("write", render_devices)
-        render_devices()
+        for dev in get_devices():
+            did = dev.get("device_id")
+            if did == DESKTOP_SHARE_DEVICE_ID:
+                continue
+            var = tk.BooleanVar(value=did in current)
+            ctk.CTkCheckBox(
+                scroll, text=format_display_name(dev), variable=var,
+                font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
+            ).pack(anchor="w", padx=8, pady=4)
+            vars_map[did] = var
 
         def _save():
             selected = {did for did, v in vars_map.items() if v.get()}
@@ -2472,19 +2023,12 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             dialog.destroy()
             self._refresh_post_posts_list()
 
-        footer = ctk.CTkFrame(dialog, fg_color="transparent")
-        footer.pack(fill="x", padx=18, pady=(0, 18))
         ctk.CTkButton(
-            footer, text="Cancel", width=100, height=38,
-            fg_color="transparent", hover_color=C_ELEVATED, text_color=C_TEXT,
+            dialog, text="Save", height=38,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
             border_width=1, border_color=C_BORDER, corner_radius=10, font=FONT_BODY,
-            command=dialog.destroy,
-        ).pack(side="left")
-        ctk.CTkButton(
-            footer, text="Save recipients", width=138, height=38,
-            fg_color=C_ACCENT, hover_color=C_ACCENT2, corner_radius=10, font=FONT_BODY,
             command=_save,
-        ).pack(side="right")
+        ).pack(fill="x", padx=16, pady=(0, 16))
 
     def _delete_post(self, group_id: str):
         if not confirm_dialog(self, "Delete Post", "Delete this post from all device feeds?"):
@@ -2747,26 +2291,14 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._save_shared_dirs_to_config()
 
     def _refresh_shared_dirs_list(self):
-        """Re-render a compact, access-focused list of shared folders."""
+        """Re-render the list of shared folder entries in the dedicated panel."""
         for w in self._shared_dirs_list_frame.winfo_children():
             w.destroy()
 
-        query = ""
-        try:
-            query = self._shared_dirs_filter_var.get().strip().casefold()
-        except (AttributeError, tk.TclError):
-            pass
-        matching_entries = [
-            (idx, entry) for idx, entry in enumerate(self._shared_dirs)
-            if not query or query in " ".join((str(entry.get("label") or ""), str(entry.get("path") or ""))).casefold()
-        ]
         count_label = getattr(self, "_shared_dirs_count", None)
         if count_label:
             count = len(self._shared_dirs)
-            count_label.configure(
-                text=(f"{len(matching_entries)} of {count} folder{'s' if count != 1 else ''}" if query else
-                      f"{count} folder{'s' if count != 1 else ''}")
-            )
+            count_label.configure(text=f"{count} folder{'s' if count != 1 else ''}")
 
         if not self._shared_dirs:
             ctk.CTkLabel(
@@ -2775,28 +2307,19 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 font=FONT_SMALL, text_color=C_MUTED, justify="center", wraplength=440,
             ).pack(expand=True, pady=20)
             return
-        if not matching_entries:
-            ctk.CTkLabel(
-                self._shared_dirs_list_frame,
-                text="No shared folders match this search.",
-                font=FONT_SMALL, text_color=C_MUTED,
-            ).pack(expand=True, pady=20)
-            return
 
-        devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
-        device_names = {str(d.get("device_id")): format_display_name(d) for d in devices if d.get("device_id")}
-        for idx, entry in matching_entries:
+        for idx, entry in enumerate(self._shared_dirs):
             row = ctk.CTkFrame(
                 self._shared_dirs_list_frame,
-                fg_color=C_SURFACE, corner_radius=12,
+                fg_color=C_SURFACE, corner_radius=10,
                 border_width=1, border_color=C_BORDER,
             )
             row.pack(fill="x", pady=(0, 6))
             row.grid_columnconfigure(1, weight=1)
 
             # Folder icon badge
-            icon_badge = ctk.CTkFrame(row, width=40, height=40, fg_color=C_SOFT_BLUE, corner_radius=10)
-            icon_badge.grid(row=0, column=0, rowspan=3, padx=(12, 0), pady=12)
+            icon_badge = ctk.CTkFrame(row, width=34, height=34, fg_color=C_SOFT_BLUE, corner_radius=8)
+            icon_badge.grid(row=0, column=0, rowspan=3, padx=(10, 0), pady=8)
             icon_badge.grid_propagate(False)
             NavigationIcon(icon_badge, "folders", C_ACCENT, C_SOFT_BLUE, size=16).pack(expand=True)
 
@@ -2817,145 +2340,59 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             lbl_var.trace_add("write", lambda *_, fn=_on_label_change: fn())
             lbl_entry.bind("<FocusOut>", lambda _event: self._flush_shared_dirs_save())
 
-            # Paths stay single-line so the sharing workspace remains scannable.
+            # Paths stay single-line so each shared location stays compact.
             path_text = self._shared_folder_display_path(entry.get("path", ""))
             ctk.CTkLabel(
                 row, text=path_text, font=FONT_SMALL, text_color=C_MUTED,
                 anchor="w",
             ).grid(row=1, column=1, sticky="ew", padx=(10, 8), pady=(0, 2))
 
-            tagged = set(entry.get("device_ids", []))
-            if "all" in tagged:
-                access_text = f"Access: every paired device ({len(devices)})"
-                access_color = C_SUCCESS
-            elif not tagged:
-                access_text = "Access: no devices selected"
-                access_color = C_MUTED
-            else:
-                names = [device_names.get(str(device_id), str(device_id)[-6:]) for device_id in tagged]
-                display_names = ", ".join(names[:3])
-                if len(names) > 3:
-                    display_names += f" +{len(names) - 3}"
-                access_text = f"Access: {display_names}"
-                access_color = C_ACCENT
-            ctk.CTkLabel(
-                row, text=access_text, font=FONT_CAPTION, text_color=access_color, anchor="w",
-            ).grid(row=2, column=1, sticky="ew", padx=(10, 8), pady=(1, 12))
+            # Device tag checkboxes
+            dev_row = ctk.CTkFrame(row, fg_color="transparent")
+            dev_row.grid(row=2, column=1, sticky="ew", padx=(10, 8), pady=(0, 8))
 
-            actions = ctk.CTkFrame(row, fg_color="transparent")
-            actions.grid(row=0, column=2, rowspan=3, padx=(0, 12), pady=12)
+            devices = get_devices()
+            tagged = set(entry.get("device_ids", []))
+            if not devices:
+                ctk.CTkLabel(
+                    dev_row, text="No paired devices yet.",
+                    font=FONT_SMALL, text_color=C_MUTED,
+                ).pack(side="left")
+            for dev in devices:
+                did = dev.get("device_id")
+                if not did:
+                    continue
+                if did == DESKTOP_SHARE_DEVICE_ID:
+                    continue
+                dvar = tk.BooleanVar(value=did in tagged or "all" in tagged)
+                def _on_toggle(i=idx, d=did, v=dvar):
+                    if i >= len(self._shared_dirs):
+                        return
+                    ids = set(self._shared_dirs[i].setdefault("device_ids", []))
+                    if v.get():
+                        ids.add(d)
+                    else:
+                        ids.discard(d)
+                        ids.discard("all")
+                    self._shared_dirs[i]["device_ids"] = list(ids)
+                    self._save_shared_dirs_to_config()
+                ctk.CTkCheckBox(
+                    dev_row, text=format_display_name(dev),
+                    variable=dvar, font=FONT_SMALL,
+                    command=_on_toggle,
+                    width=0, checkbox_width=16, checkbox_height=16,
+                ).pack(side="left", padx=(0, 10))
+
+            # Remove button
+            def _remove(i=idx):
+                self._remove_shared_folder(i)
             ctk.CTkButton(
-                actions, text="Manage access", width=108, height=29,
-                fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
-                border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION,
-                command=lambda i=idx: self._open_shared_folder_access_dialog(i),
-            ).pack(pady=(0, 5))
-            ctk.CTkButton(
-                actions, text="Open", width=108, height=29,
-                fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
-                border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_CAPTION,
-                command=lambda p=entry.get("path", ""): self._open_shared_folder_on_disk(str(p)),
-            ).pack(pady=(0, 5))
-            ctk.CTkButton(
-                actions, text="Remove", width=108, height=29,
+                row, text="Remove", width=76, height=30,
                 fg_color=C_SOFT_RED, hover_color=C_SOFT_RED_HOVER,
                 text_color=C_ERROR, border_width=1, border_color=C_ERROR_BORDER,
                 font=FONT_SMALL, corner_radius=8,
-                command=lambda i=idx: self._remove_shared_folder(i),
-            ).pack()
-
-    def _open_shared_folder_on_disk(self, path: str):
-        if not path:
-            return
-        try:
-            if not os.path.isdir(path):
-                messagebox.showinfo("Shared Folder", "This folder is no longer available at the configured path.")
-                return
-            os.startfile(path)  # type: ignore[attr-defined]
-        except Exception as exc:
-            messagebox.showerror("Shared Folder", f"Could not open this folder:\n{exc}")
-
-    def _open_shared_folder_access_dialog(self, idx: int):
-        """Offer a focused access editor instead of squeezing every device into a row."""
-        if not 0 <= idx < len(self._shared_dirs):
-            return
-        entry = self._shared_dirs[idx]
-        devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID and d.get("device_id")]
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Manage Folder Access")
-        dialog.geometry("460x560")
-        dialog.minsize(390, 430)
-        dialog.transient(self)
-        dialog.grab_set()
-        dialog.configure(fg_color=C_BG)
-
-        ctk.CTkLabel(dialog, text="Manage access", font=FONT_TITLE, text_color=C_TEXT, anchor="w").pack(fill="x", padx=20, pady=(20, 0))
-        ctk.CTkLabel(dialog, text=entry.get("label") or entry.get("path") or "Shared folder", font=FONT_SMALL, text_color=C_MUTED, anchor="w").pack(fill="x", padx=20, pady=(2, 14))
-        panel = ctk.CTkFrame(dialog, fg_color=C_SURFACE, corner_radius=14, border_width=1, border_color=C_BORDER)
-        panel.pack(fill="both", expand=True, padx=18, pady=(0, 18))
-
-        current = set(entry.get("device_ids", []))
-        all_var = tk.BooleanVar(value="all" in current)
-        all_row = ctk.CTkFrame(panel, fg_color="transparent")
-        all_row.pack(fill="x", padx=14, pady=(14, 6))
-        all_checkbox = ctk.CTkCheckBox(
-            all_row, text="Give every paired device access", variable=all_var,
-            font=FONT_BODY, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
-        )
-        all_checkbox.pack(side="left")
-        ctk.CTkLabel(all_row, text=f"{len(devices)} device{'s' if len(devices) != 1 else ''}", font=FONT_CAPTION, text_color=C_MUTED).pack(side="right")
-
-        ctk.CTkLabel(panel, text="INDIVIDUAL DEVICES", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(fill="x", padx=14, pady=(10, 5))
-        devices_frame = ctk.CTkScrollableFrame(panel, fg_color=C_ELEVATED, corner_radius=10, border_width=1, border_color=C_BORDER, label_text="")
-        devices_frame.pack(fill="both", expand=True, padx=14, pady=(0, 12))
-        selected_vars: dict[str, tk.BooleanVar] = {}
-        checkboxes: list[ctk.CTkCheckBox] = []
-        if not devices:
-            ctk.CTkLabel(devices_frame, text="Pair a device first, then return here to grant access.", font=FONT_SMALL, text_color=C_MUTED, wraplength=310, justify="center").pack(pady=28)
-        for device in devices:
-            device_id = str(device["device_id"])
-            var = tk.BooleanVar(value=device_id in current)
-            selected_vars[device_id] = var
-            checkbox = ctk.CTkCheckBox(
-                devices_frame, text=format_display_name(device), variable=var,
-                font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
-            )
-            checkbox.pack(anchor="w", padx=10, pady=6)
-            checkboxes.append(checkbox)
-
-        def sync_individual_state(*_):
-            state = "disabled" if all_var.get() else "normal"
-            for checkbox in checkboxes:
-                checkbox.configure(state=state)
-
-        all_var.trace_add("write", sync_individual_state)
-        sync_individual_state()
-
-        footer = ctk.CTkFrame(dialog, fg_color="transparent")
-        footer.pack(fill="x", padx=18, pady=(0, 18))
-        ctk.CTkButton(
-            footer, text="Cancel", width=100, height=38,
-            fg_color="transparent", hover_color=C_ELEVATED, text_color=C_TEXT,
-            border_width=1, border_color=C_BORDER, corner_radius=10, font=FONT_BODY,
-            command=dialog.destroy,
-        ).pack(side="left")
-
-        def save_access():
-            if not 0 <= idx < len(self._shared_dirs):
-                dialog.destroy()
-                return
-            self._shared_dirs[idx]["device_ids"] = (
-                ["all"] if all_var.get() else [device_id for device_id, var in selected_vars.items() if var.get()]
-            )
-            self._save_shared_dirs_to_config()
-            self._refresh_shared_dirs_list()
-            dialog.destroy()
-
-        ctk.CTkButton(
-            footer, text="Save access", width=126, height=38,
-            fg_color=C_ACCENT, hover_color=C_ACCENT2, corner_radius=10, font=FONT_BODY,
-            command=save_access,
-        ).pack(side="right")
+                command=_remove,
+            ).grid(row=0, column=2, rowspan=3, padx=(0, 10))
 
     def _save_shared_dirs_to_config(self):
         """Save current _shared_dirs list to config.json immediately."""
@@ -3560,8 +2997,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._refresh_dashboard()
         elif page == "devices":
             self._refresh_devices()
-        elif page == "posts":
-            self._refresh_post_posts_list()
         elif page == "shared_folders":
             self._refresh_shared_dirs_list()
         elif page == "settings":
@@ -3597,8 +3032,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._refresh_dashboard()
         elif self._current_page == "devices":
             self._refresh_devices()
-        elif self._current_page == "posts":
-            self._refresh_post_posts_list()
         elif self._current_page == "logs":
             self._refresh_logs()
         elif self._current_page == "history":
