@@ -3016,6 +3016,41 @@ def get_device_shares_by_sharer(sharer_device_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_all_share_targets_for_sharer(sharer_device_id: str) -> dict[str, list[dict]]:
+    """Return all target devices for every group owned by sharer_device_id in one query.
+
+    Returns a dict mapping share_group_id -> list of target device dicts.
+    Replaces N individual get_share_targets_for_group calls in the desktop UI.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT ds.share_group_id,
+               dst.target_device_id,
+               d.device_name, d.device_model, d.username
+        FROM device_share_groups dsg
+        JOIN device_shares ds ON ds.share_group_id = dsg.id
+        JOIN device_share_targets dst ON dst.share_id = ds.id
+        LEFT JOIN devices d ON d.device_id = dst.target_device_id
+        WHERE dsg.shared_by_device_id = ?
+        """,
+        (sharer_device_id,),
+    ).fetchall()
+    conn.close()
+    result: dict[str, list[dict]] = {}
+    for r in rows:
+        gid = r["share_group_id"]
+        if gid not in result:
+            result[gid] = []
+        result[gid].append({
+            "target_device_id": r["target_device_id"],
+            "device_name":      r["device_name"],
+            "device_model":     r["device_model"],
+            "username":         r["username"],
+        })
+    return result
+
+
 def get_unseen_share_notifications(target_device_id: str) -> list[dict]:
     """Return post groups shared TO this device that it has not yet been notified about."""
     conn = get_conn()
