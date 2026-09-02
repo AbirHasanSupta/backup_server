@@ -117,6 +117,7 @@ def main() -> None:
         "starlette.middleware",
         "starlette.responses",
         "starlette.requests",
+        "tkinterdnd2",
         "pystray",
         "pystray._win32",
         "PIL",
@@ -162,6 +163,7 @@ def main() -> None:
         "--icon", str(ROOT / "assets" / "icon.ico"),
         "--add-data", f"{ROOT / 'assets'}{sep}assets",
         "--collect-all", "customtkinter",
+        "--collect-all", "tkinterdnd2",
     ]
 
     for imp in hidden_imports:
