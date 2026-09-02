@@ -1252,7 +1252,10 @@ def _is_folder_tagged_for_device(
     - Device requests must supply device_id and match tagged device IDs (or 'all').
     """
     req_token = _extract_bearer(authorization) or query_token
-    if req_token and req_token == load_config()["API_KEY"]:
+    # API key bypass only for admin/desktop access with no device identity.
+    # When device_id is provided the caller is an Android device — always
+    # enforce the device_ids list, even if it authenticates with the API key.
+    if req_token and req_token == load_config()["API_KEY"] and not device_id:
         return True
 
     if not device_id:
