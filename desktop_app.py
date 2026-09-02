@@ -1171,7 +1171,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     self._s_devices.configure(text=str(len(devices)))
                     self._s_size.configure(text=fmt_bytes(stats["total_size_bytes"] or 0))
                     self._s_last.configure(text=fmt_rel(stats.get("last_backup_time")))
-                if logs != self._last_dash_logs:
+                # Fast change detection: compare length + last timestamp (avoids O(n) list equality)
+                last_ts = logs[-1]["time"] if logs else 0
+                cached_ts = self._last_dash_logs[-1]["time"] if self._last_dash_logs else -1
+                if len(logs) != len(self._last_dash_logs) or last_ts != cached_ts:
                     self._dash_log.configure(state="normal")
                     self._dash_log.delete("1.0", "end")
                     self._dash_log.configure(state="disabled")
@@ -1800,40 +1803,56 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
     def _refresh_post_files_list(self):
         for w in self._post_files_list_frame.winfo_children():
             w.destroy()
-        self._post_files_list_frame.update_idletasks()
         count = len(self._post_selected_files)
-        total_size = sum(os.path.getsize(p) for p in self._post_selected_files if os.path.isfile(p))
-        self._post_files_count.configure(text=f"{count} file{'s' if count != 1 else ''} · {fmt_bytes(total_size)}")
+        paths = list(self._post_selected_files)
 
-        if not self._post_selected_files:
-            ctk.CTkLabel(self._post_files_list_frame, text="No files queued for posting.", font=FONT_SMALL, text_color=C_MUTED).pack(pady=28)
-            return
+        def _measure():
+            sizes = {}
+            for p in paths:
+                try:
+                    sizes[p] = os.path.getsize(p) if os.path.isfile(p) else 0
+                except OSError:
+                    sizes[p] = 0
+            total = sum(sizes.values())
+            self.after(0, lambda: _render(sizes, total))
 
-        last = len(self._post_selected_files) - 1
-        for i, path in enumerate(self._post_selected_files):
-            row = ctk.CTkFrame(self._post_files_list_frame, fg_color="transparent")
-            row.pack(fill="x", pady=2)
-            fname = os.path.basename(path) or path
-            size_txt = fmt_bytes(os.path.getsize(path)) if os.path.isfile(path) else ""
-            ctk.CTkLabel(row, text=f"{fname}  ({size_txt})", font=FONT_SMALL, text_color=C_TEXT, anchor="w").pack(side="left", fill="x", expand=True, padx=(4, 6))
+        def _render(sizes, total):
+            if not self._post_files_list_frame.winfo_exists():
+                return
+            self._post_files_count.configure(
+                text=f"{count} file{'s' if count != 1 else ''} · {fmt_bytes(total)}"
+            )
+            if not paths:
+                ctk.CTkLabel(self._post_files_list_frame, text="No files queued for posting.",
+                             font=FONT_SMALL, text_color=C_MUTED).pack(pady=28)
+                return
+            last = len(paths) - 1
+            for i, path in enumerate(paths):
+                row = ctk.CTkFrame(self._post_files_list_frame, fg_color="transparent")
+                row.pack(fill="x", pady=2)
+                fname = os.path.basename(path) or path
+                size_txt = fmt_bytes(sizes[path]) if sizes.get(path) else ""
+                ctk.CTkLabel(row, text=f"{fname}  ({size_txt})", font=FONT_SMALL,
+                             text_color=C_TEXT, anchor="w").pack(side="left", fill="x", expand=True, padx=(4, 6))
+                ctk.CTkButton(
+                    row, text="✕", width=24, height=24, fg_color="transparent",
+                    hover_color=C_SOFT_RED, text_color=C_MUTED, corner_radius=6,
+                    font=FONT_CAPTION, command=lambda p=path: self._remove_post_file(p),
+                ).pack(side="right", padx=2)
+                ctk.CTkButton(
+                    row, text="▼", width=24, height=24, fg_color="transparent",
+                    hover_color=C_ELEVATED, text_color=C_MUTED, corner_radius=6,
+                    font=FONT_CAPTION, state="disabled" if i == last else "normal",
+                    command=lambda idx=i: self._move_post_file(idx, 1),
+                ).pack(side="right", padx=2)
+                ctk.CTkButton(
+                    row, text="▲", width=24, height=24, fg_color="transparent",
+                    hover_color=C_ELEVATED, text_color=C_MUTED, corner_radius=6,
+                    font=FONT_CAPTION, state="disabled" if i == 0 else "normal",
+                    command=lambda idx=i: self._move_post_file(idx, -1),
+                ).pack(side="right", padx=2)
 
-            ctk.CTkButton(
-                row, text="✕", width=24, height=24, fg_color="transparent",
-                hover_color=C_SOFT_RED, text_color=C_MUTED, corner_radius=6,
-                font=FONT_CAPTION, command=lambda p=path: self._remove_post_file(p),
-            ).pack(side="right", padx=2)
-            ctk.CTkButton(
-                row, text="▼", width=24, height=24, fg_color="transparent",
-                hover_color=C_ELEVATED, text_color=C_MUTED, corner_radius=6,
-                font=FONT_CAPTION, state="disabled" if i == last else "normal",
-                command=lambda idx=i: self._move_post_file(idx, 1),
-            ).pack(side="right", padx=2)
-            ctk.CTkButton(
-                row, text="▲", width=24, height=24, fg_color="transparent",
-                hover_color=C_ELEVATED, text_color=C_MUTED, corner_radius=6,
-                font=FONT_CAPTION, state="disabled" if i == 0 else "normal",
-                command=lambda idx=i: self._move_post_file(idx, -1),
-            ).pack(side="right", padx=2)
+        threading.Thread(target=_measure, daemon=True).start()
 
     def _refresh_post_devices_list(self):
         # Clear debounce handle
@@ -2421,110 +2440,133 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         ).pack(fill="x", padx=18, pady=16)
 
     def _open_manage_access_dialog(self, group_id: str):
-        current = {t["target_device_id"] for t in get_share_targets_for_group(group_id, DESKTOP_SHARE_DEVICE_ID)}
-        devices = [
-            dev for dev in get_devices()
-            if dev.get("device_id") and dev.get("device_id") != DESKTOP_SHARE_DEVICE_ID
-        ]
         dialog = ctk.CTkToplevel(self)
         dialog.title("Manage Post Access")
         dialog.geometry("480x560")
         dialog.minsize(400, 420)
         dialog.transient(self)
-        dialog.grab_set()
         dialog.configure(fg_color=C_BG)
 
-        ctk.CTkLabel(dialog, text="Manage Post Recipients", font=FONT_TITLE, text_color=C_TEXT, anchor="w").pack(fill="x", padx=22, pady=(18, 0))
-        ctk.CTkLabel(dialog, text="Select which devices can view and download this post.", font=FONT_SUBTITLE, text_color=C_MUTED, anchor="w").pack(fill="x", padx=22, pady=(2, 10))
+        loading_lbl = ctk.CTkLabel(dialog, text="Loading…", font=FONT_BODY, text_color=C_MUTED)
+        loading_lbl.pack(expand=True)
 
-        panel = ctk.CTkFrame(dialog, fg_color=C_SURFACE, corner_radius=12, border_width=1, border_color=C_BORDER)
-        panel.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+        def _fetch():
+            try:
+                current = {t["target_device_id"] for t in get_share_targets_for_group(group_id, DESKTOP_SHARE_DEVICE_ID)}
+                devices = [dev for dev in get_devices()
+                           if dev.get("device_id") and dev.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
+            except Exception:
+                current, devices = set(), []
+            if dialog.winfo_exists():
+                dialog.after(0, lambda: _build(current, devices))
 
-        vars_map: dict[str, tk.BooleanVar] = {}
-        for dev in devices:
-            did = str(dev["device_id"])
-            vars_map[did] = tk.BooleanVar(value=did in current)
+        def _build(current, devices):
+            if not dialog.winfo_exists():
+                return
+            loading_lbl.destroy()
+            dialog.grab_set()
 
-        top_controls = ctk.CTkFrame(panel, fg_color="transparent")
-        top_controls.pack(fill="x", padx=14, pady=(12, 6))
-        all_var = tk.BooleanVar(value=bool(devices) and all(var.get() for var in vars_map.values()))
+            ctk.CTkLabel(dialog, text="Manage Post Recipients", font=FONT_TITLE,
+                         text_color=C_TEXT, anchor="w").pack(fill="x", padx=22, pady=(18, 0))
+            ctk.CTkLabel(dialog, text="Select which devices can view and download this post.",
+                         font=FONT_SUBTITLE, text_color=C_MUTED, anchor="w").pack(fill="x", padx=22, pady=(2, 10))
 
-        def select_all():
-            for var in vars_map.values():
-                var.set(all_var.get())
+            panel = ctk.CTkFrame(dialog, fg_color=C_SURFACE, corner_radius=12,
+                                 border_width=1, border_color=C_BORDER)
+            panel.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+
+            vars_map: dict[str, tk.BooleanVar] = {}
+            for dev in devices:
+                did = str(dev["device_id"])
+                vars_map[did] = tk.BooleanVar(value=did in current)
+
+            top_controls = ctk.CTkFrame(panel, fg_color="transparent")
+            top_controls.pack(fill="x", padx=14, pady=(12, 6))
+            all_var = tk.BooleanVar(value=bool(devices) and all(var.get() for var in vars_map.values()))
+
+            def select_all():
+                for var in vars_map.values():
+                    var.set(all_var.get())
+                render_devices()
+
+            ctk.CTkCheckBox(
+                top_controls, text="Select All", variable=all_var,
+                font=FONT_SMALL_B, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
+                command=select_all,
+            ).pack(side="left")
+
+            search_var = tk.StringVar()
+            ctk.CTkEntry(
+                top_controls, textvariable=search_var, width=180, height=30,
+                placeholder_text="Filter devices…",
+                fg_color=C_ELEVATED, border_color=C_BORDER, font=FONT_SMALL,
+            ).pack(side="right")
+
+            scroll = ctk.CTkScrollableFrame(panel, fg_color=C_ELEVATED, corner_radius=9,
+                                            border_width=1, border_color=C_BORDER, label_text="")
+            scroll.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+
+            def sync_all_state():
+                all_var.set(bool(devices) and all(var.get() for var in vars_map.values()))
+
+            def render_devices(*_):
+                for child in scroll.winfo_children():
+                    child.destroy()
+                query = search_var.get().strip().casefold()
+                matched = [
+                    dev for dev in devices
+                    if not query or query in " ".join((
+                        format_display_name(dev),
+                        str(dev.get("device_model") or ""),
+                        str(dev.get("device_id") or ""),
+                    )).casefold()
+                ]
+                if not matched:
+                    ctk.CTkLabel(scroll, text="No devices match search.",
+                                 font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
+                    return
+                for dev in matched:
+                    did = str(dev["device_id"])
+                    row = ctk.CTkFrame(scroll, fg_color="transparent")
+                    row.pack(fill="x", padx=6, pady=2)
+                    ctk.CTkCheckBox(
+                        row, text=format_display_name(dev), variable=vars_map[did],
+                        font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
+                        command=sync_all_state,
+                    ).pack(side="left")
+                    model = str(dev.get("device_model") or "")
+                    if model:
+                        ctk.CTkLabel(row, text=model, font=FONT_CAPTION, text_color=C_MUTED).pack(side="right")
+
+            search_var.trace_add("write", render_devices)
             render_devices()
 
-        ctk.CTkCheckBox(
-            top_controls, text="Select All", variable=all_var,
-            font=FONT_SMALL_B, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
-            command=select_all,
-        ).pack(side="left")
+            def _save():
+                selected = {did for did, v in vars_map.items() if v.get()}
+                to_add = list(selected - current)
+                to_remove = current - selected
+                if to_add:
+                    add_share_group_targets(group_id, to_add, DESKTOP_SHARE_DEVICE_ID)
+                for did in to_remove:
+                    remove_share_group_target(group_id, did, DESKTOP_SHARE_DEVICE_ID)
+                dialog.destroy()
+                self._refresh_post_posts_list()
 
-        search_var = tk.StringVar()
-        search = ctk.CTkEntry(
-            top_controls, textvariable=search_var, width=180, height=30,
-            placeholder_text="Filter devices…",
-            fg_color=C_ELEVATED, border_color=C_BORDER, font=FONT_SMALL,
-        )
-        search.pack(side="right")
+            footer = ctk.CTkFrame(dialog, fg_color="transparent")
+            footer.pack(fill="x", padx=20, pady=(0, 16))
+            ctk.CTkButton(
+                footer, text="Cancel", width=100, height=36,
+                fg_color="transparent", hover_color=C_ELEVATED, text_color=C_TEXT,
+                border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_BODY_B,
+                command=dialog.destroy,
+            ).pack(side="left")
+            ctk.CTkButton(
+                footer, text="Save Recipients", width=140, height=36,
+                fg_color=C_ACCENT, hover_color=C_ACCENT2, corner_radius=8, font=FONT_BODY_B,
+                command=_save,
+            ).pack(side="right")
 
-        scroll = ctk.CTkScrollableFrame(panel, fg_color=C_ELEVATED, corner_radius=9, border_width=1, border_color=C_BORDER, label_text="")
-        scroll.pack(fill="both", expand=True, padx=14, pady=(0, 12))
-
-        def sync_all_state():
-            all_var.set(bool(devices) and all(var.get() for var in vars_map.values()))
-
-        def render_devices(*_):
-            for child in scroll.winfo_children():
-                child.destroy()
-            query = search_var.get().strip().casefold()
-            matched = [
-                dev for dev in devices
-                if not query or query in " ".join((format_display_name(dev), str(dev.get("device_model") or ""), str(dev.get("device_id") or ""))).casefold()
-            ]
-            if not matched:
-                ctk.CTkLabel(scroll, text="No devices match search.", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
-                return
-            for dev in matched:
-                did = str(dev["device_id"])
-                row = ctk.CTkFrame(scroll, fg_color="transparent")
-                row.pack(fill="x", padx=6, pady=2)
-                ctk.CTkCheckBox(
-                    row, text=format_display_name(dev), variable=vars_map[did],
-                    font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
-                    command=sync_all_state,
-                ).pack(side="left")
-                model = str(dev.get("device_model") or "")
-                if model:
-                    ctk.CTkLabel(row, text=model, font=FONT_CAPTION, text_color=C_MUTED).pack(side="right")
-
-        search_var.trace_add("write", render_devices)
-        render_devices()
-
-        def _save():
-            selected = {did for did, v in vars_map.items() if v.get()}
-            to_add = list(selected - current)
-            to_remove = current - selected
-            if to_add:
-                add_share_group_targets(group_id, to_add, DESKTOP_SHARE_DEVICE_ID)
-            for did in to_remove:
-                remove_share_group_target(group_id, did, DESKTOP_SHARE_DEVICE_ID)
-            dialog.destroy()
-            self._refresh_post_posts_list()
-
-        footer = ctk.CTkFrame(dialog, fg_color="transparent")
-        footer.pack(fill="x", padx=20, pady=(0, 16))
-        ctk.CTkButton(
-            footer, text="Cancel", width=100, height=36,
-            fg_color="transparent", hover_color=C_ELEVATED, text_color=C_TEXT,
-            border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_BODY_B,
-            command=dialog.destroy,
-        ).pack(side="left")
-        ctk.CTkButton(
-            footer, text="Save Recipients", width=140, height=36,
-            fg_color=C_ACCENT, hover_color=C_ACCENT2, corner_radius=8, font=FONT_BODY_B,
-            command=_save,
-        ).pack(side="right")
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def _delete_post(self, group_id: str):
         if not confirm_dialog(self, "Delete Post", "Delete this post from all device feeds permanently?"):
@@ -3172,10 +3214,19 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             font=FONT_CAPTION, text_color=C_MUTED, anchor="w",
         ).pack(anchor="w", padx=8, pady=(0, 20))
 
-        self.after(100, self._refresh_video_preview_cache_status)
-        self.after(120, self._refresh_rewind_cache_status)
-        self.after(140, self._refresh_thumbnail_cache_status)
-        self.after(160, self._refresh_memory_index_status)
+        def _bg_refresh_cache_statuses():
+            for fn in (
+                self._refresh_video_preview_cache_status,
+                self._refresh_rewind_cache_status,
+                self._refresh_thumbnail_cache_status,
+                self._refresh_memory_index_status,
+            ):
+                try:
+                    fn()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_bg_refresh_cache_statuses, daemon=True).start()
 
         return frame
 
@@ -3204,20 +3255,26 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         status_var = getattr(self, "_preview_cache_status_var", None)
         if status_var is None:
             return
-        try:
-            from video_preview import get_video_preview_cache_stats
-            stats = get_video_preview_cache_stats()
-            cached = f"{stats['files']} cached files · {fmt_bytes(int(stats['bytes']))}"
-            limit = int(stats.get("limit_bytes", 0))
-            limit_text = "unlimited" if limit == 0 else fmt_bytes(limit)
-            activity = ""
-            if stats.get("running"):
-                activity = f" · optimizing {stats['running']}"
-            elif stats.get("queued"):
-                activity = f" · {stats['queued']} queued"
-            status_var.set(f"{cached} (limit {limit_text}){activity}")
-        except Exception:
-            status_var.set("Preview cache stats unavailable.")
+
+        def _fetch():
+            try:
+                from video_preview import get_video_preview_cache_stats
+                stats = get_video_preview_cache_stats()
+                cached = f"{stats['files']} cached files · {fmt_bytes(int(stats['bytes']))}"
+                limit = int(stats.get("limit_bytes", 0))
+                limit_text = "unlimited" if limit == 0 else fmt_bytes(limit)
+                activity = ""
+                if stats.get("running"):
+                    activity = f" · optimizing {stats['running']}"
+                elif stats.get("queued"):
+                    activity = f" · {stats['queued']} queued"
+                text = f"{cached} (limit {limit_text}){activity}"
+            except Exception:
+                text = "Preview cache stats unavailable."
+            if getattr(self, "_preview_cache_status_var", None) is status_var:
+                self.after(0, lambda: status_var.set(text))
+
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def _clear_video_preview_cache(self):
         if not confirm_dialog(
@@ -3253,12 +3310,18 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         status_var = getattr(self, "_rewind_cache_status_var", None)
         if status_var is None:
             return
-        try:
-            from rewind import get_rewind_cache_stats
-            stats = get_rewind_cache_stats()
-            status_var.set(f"{stats['files']} files · {fmt_bytes(int(stats['bytes']))}")
-        except Exception:
-            status_var.set("Rewind cache stats unavailable.")
+
+        def _fetch():
+            try:
+                from rewind import get_rewind_cache_stats
+                stats = get_rewind_cache_stats()
+                text = f"{stats['files']} files · {fmt_bytes(int(stats['bytes']))}"
+            except Exception:
+                text = "Rewind cache stats unavailable."
+            if getattr(self, "_rewind_cache_status_var", None) is status_var:
+                self.after(0, lambda: status_var.set(text))
+
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def _clear_rewind_cache(self):
         if not confirm_dialog(
@@ -3293,12 +3356,18 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         status_var = getattr(self, "_thumb_cache_status_var", None)
         if status_var is None:
             return
-        try:
-            from thumbnail import get_thumbnail_cache_stats
-            stats = get_thumbnail_cache_stats()
-            status_var.set(f"{stats['files']} images · {fmt_bytes(int(stats['bytes']))}")
-        except Exception:
-            status_var.set("Thumbnail cache stats unavailable.")
+
+        def _fetch():
+            try:
+                from thumbnail import get_thumbnail_cache_stats
+                stats = get_thumbnail_cache_stats()
+                text = f"{stats['files']} images · {fmt_bytes(int(stats['bytes']))}"
+            except Exception:
+                text = "Thumbnail cache stats unavailable."
+            if getattr(self, "_thumb_cache_status_var", None) is status_var:
+                self.after(0, lambda: status_var.set(text))
+
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def _clear_thumbnail_cache(self):
         if not confirm_dialog(
@@ -3333,14 +3402,20 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         status_var = getattr(self, "_memory_index_status_var", None)
         if status_var is None:
             return
-        try:
-            import memories
-            stats = memories.get_memory_index_stats()
-            last = stats.get("last_indexed_at")
-            last_txt = datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "never"
-            status_var.set(f"{stats['files']:,} indexed files · last run {last_txt}")
-        except Exception:
-            status_var.set("Memory index stats unavailable.")
+
+        def _fetch():
+            try:
+                import memories
+                stats = memories.get_memory_index_stats()
+                last = stats.get("last_indexed_at")
+                last_txt = datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "never"
+                text = f"{stats['files']:,} indexed files · last run {last_txt}"
+            except Exception:
+                text = "Memory index stats unavailable."
+            if getattr(self, "_memory_index_status_var", None) is status_var:
+                self.after(0, lambda: status_var.set(text))
+
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def _clean_and_reindex_memories(self):
         if not confirm_dialog(
@@ -3530,14 +3605,23 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         if query:
             logs = [e for e in logs if query in e["message"].lower()]
 
-        if logs != self._last_logs_cache or query != self._last_logs_query:
-            self._log_box.configure(state="normal")
-            self._log_box.delete("1.0", "end")
-            self._log_box.configure(state="disabled")
-            for entry in reversed(logs):
-                self._insert_log_line(self._log_box, entry)
-            self._last_logs_cache = logs.copy()
-            self._last_logs_query = query
+        # Cap to last 500 entries so the textbox never grows unbounded
+        logs = logs[-500:]
+
+        # Fast change detection: compare length + last timestamp instead of full list equality
+        last_ts = logs[-1]["time"] if logs else 0
+        cached_ts = self._last_logs_cache[-1]["time"] if self._last_logs_cache else -1
+        if (len(logs) == len(self._last_logs_cache) and last_ts == cached_ts
+                and query == self._last_logs_query):
+            return
+
+        self._log_box.configure(state="normal")
+        self._log_box.delete("1.0", "end")
+        self._log_box.configure(state="disabled")
+        for entry in reversed(logs):
+            self._insert_log_line(self._log_box, entry)
+        self._last_logs_cache = logs.copy()
+        self._last_logs_query = query
 
     def _clear_logs(self):
         clear_logs()
@@ -3984,8 +4068,14 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._refresh_post_files_list()
             self._refresh_post_devices_list()
         elif page == "posts":
-            # Reset guard + cache so a re-visit always fetches fresh, never gets
-            # stuck on "Loading…" because a previous in-flight request blocked it.
+            # Cancel any in-progress chunked render before resetting guard
+            old_chunk = getattr(self, "_posts_chunk_after_id", None)
+            if old_chunk:
+                try:
+                    self.after_cancel(old_chunk)
+                except Exception:
+                    pass
+                self._posts_chunk_after_id = None
             self._refresh_in_flight["posts"] = False
             self._posts_cache_key = ""
             self._show_posts_loading_state()
@@ -3995,9 +4085,16 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         elif page == "settings":
             self._refresh_settings()
         elif page == "logs":
-            self._refresh_logs()
+            self.after(0, self._refresh_logs)
         elif page == "history":
-            # Same pattern for history.
+            # Cancel any in-progress chunked render before resetting guard
+            old_hist_chunk = getattr(self, "_hist_chunk_after_id", None)
+            if old_hist_chunk:
+                try:
+                    self.after_cancel(old_hist_chunk)
+                except Exception:
+                    pass
+                self._hist_chunk_after_id = None
             self._refresh_in_flight["history"] = False
             self._hist_cache_key = ""
             self._show_history_loading_state()
@@ -4030,21 +4127,20 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
     def _auto_refresh(self):
         # Only the active page is refreshed; all other pages are skipped entirely.
         # shared_folders, settings, post_to_devices are user-driven and not polled.
-        # posts is polled only when on the tab — but skip if a filter search is
-        # already in-flight (debounce may be running).
         page = self._current_page
         if page == "dashboard":
             self._refresh_dashboard()
         elif page == "devices":
             self._refresh_devices()
         elif page == "posts":
-            # Skip auto-refresh when the user is actively typing (debounce pending)
-            if not self._posts_search_after_id:
+            # Skip when user is typing (debounce pending) or a fetch is already running
+            if not self._posts_search_after_id and not self._refresh_in_flight.get("posts"):
                 self._refresh_post_posts_list()
         elif page == "logs":
             self._refresh_logs()
         elif page == "history":
-            self._refresh_history()
+            if not self._refresh_in_flight.get("history"):
+                self._refresh_history()
         self.after(2000, self._auto_refresh)
 
     # ─── Server Lifecycle Control ─────────────────────────────────────────────
