@@ -613,6 +613,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._hist_page_size: int = 30
         self._hist_all_sessions: list = []
 
+        # Chunked-render cancel handles (prevent stacked after() calls)
+        self._posts_chunk_after_id: str | None = None
+        self._hist_chunk_after_id:  str | None = None
+        self._post_devices_filter_after_id: str | None = None
+
         # Settings Draft & System Tray
         self._settings_draft: dict[str, object] | None = None
         self._tray_icon = None
@@ -884,6 +889,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._last_dash_logs = []
         self._last_logs_cache = []
         self._last_logs_query = ""
+        # Reset lazy-page cache so all pages are rebuilt fresh after a theme change
+        self._pages = {}
         self.configure(fg_color=C_BG)
         self._setup_grid()
         self._build_sidebar()
@@ -921,18 +928,18 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         container.grid_rowconfigure(0, weight=1)
         self._frames_container = container
 
-        self._pages: dict[str, ctk.CTkFrame] = {
-            "dashboard":       self._build_dashboard(container),
-            "devices":         self._build_devices(container),
-            "post_to_devices": self._build_post_to_devices(container),
-            "posts":           self._build_posts(container),
-            "shared_folders":  self._build_shared_folders(container),
-            "settings":        self._build_settings(container),
-            "logs":            self._build_logs(container),
-            "history":         self._build_history(container),
+        # Lazy loading: pages are built on first visit, not all at startup.
+        self._pages: dict[str, ctk.CTkFrame] = {}
+        self._page_builders = {
+            "dashboard":       self._build_dashboard,
+            "devices":         self._build_devices,
+            "post_to_devices": self._build_post_to_devices,
+            "posts":           self._build_posts,
+            "shared_folders":  self._build_shared_folders,
+            "settings":        self._build_settings,
+            "logs":            self._build_logs,
+            "history":         self._build_history,
         }
-        for f in self._pages.values():
-            f.grid(row=0, column=0, sticky="nsew")
 
     # ─── Shared UI Helpers ───────────────────────────────────────────────────
 
@@ -1222,7 +1229,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self.after_cancel(self._devices_search_after_id)
             except Exception:
                 pass
-        self._devices_search_after_id = self.after(150, self._refresh_devices)
+        self._devices_search_after_id = self.after(300, self._refresh_devices)
 
     def _edit_device_username(self, dev: dict):
         device_id = dev.get("device_id")
@@ -1748,7 +1755,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             fg_color=C_ELEVATED, border_color=C_BORDER, font=FONT_CAPTION,
         )
         post_device_search.pack(side="right")
-        self._post_device_filter_var.trace_add("write", lambda *_: self._refresh_post_devices_list())
+        self._post_device_filter_var.trace_add("write", lambda *_: self._schedule_post_devices_refresh())
 
         self._post_devices_frame = ctk.CTkScrollableFrame(
             right, fg_color=C_ELEVATED, corner_radius=10, border_width=1, border_color=C_BORDER, label_text="",
@@ -1829,53 +1836,68 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ).pack(side="right", padx=2)
 
     def _refresh_post_devices_list(self):
+        # Clear debounce handle
+        self._post_devices_filter_after_id = None
+
         previously_selected = {
             did for did, var in self._post_device_vars.items()
             if var.get()
         }
-        for w in self._post_devices_frame.winfo_children():
-            w.destroy()
-        self._post_devices_frame.update_idletasks()
-        self._post_device_vars.clear()
-        devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
         query = ""
         try:
             query = self._post_device_filter_var.get().strip().casefold()
         except (AttributeError, tk.TclError):
             pass
 
-        if query:
-            devices = [
-                dev for dev in devices
-                if query in " ".join((format_display_name(dev), str(dev.get("device_model") or ""), str(dev.get("device_id") or ""))).casefold()
-            ]
+        def _fetch():
+            try:
+                all_devs = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
+            except Exception:
+                all_devs = []
+            self.after(0, lambda: _render(all_devs))
 
-        if not devices:
-            ctk.CTkLabel(self._post_devices_frame, text="No matching devices" if query else "No connected devices", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
-            return
+        def _render(all_devs):
+            if not self._post_devices_frame.winfo_exists():
+                return
+            for w in self._post_devices_frame.winfo_children():
+                w.destroy()
+            self._post_device_vars.clear()
 
-        def _toggle_all():
-            v = all_var.get()
-            for var in self._post_device_vars.values():
-                var.set(v)
+            devices = all_devs
+            if query:
+                devices = [
+                    dev for dev in all_devs
+                    if query in " ".join((format_display_name(dev), str(dev.get("device_model") or ""), str(dev.get("device_id") or ""))).casefold()
+                ]
 
-        all_var = tk.BooleanVar(value=bool(devices) and all(dev.get("device_id") in previously_selected for dev in devices))
-        ctk.CTkCheckBox(
-            self._post_devices_frame, text="Select All Devices", variable=all_var,
-            font=FONT_SMALL_B, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
-            command=_toggle_all,
-        ).pack(anchor="w", padx=8, pady=(4, 6))
-        ctk.CTkFrame(self._post_devices_frame, height=1, fg_color=C_BORDER).pack(fill="x", padx=6, pady=(0, 6))
+            if not devices:
+                ctk.CTkLabel(self._post_devices_frame, text="No matching devices" if query else "No connected devices", font=FONT_SMALL, text_color=C_MUTED).pack(pady=20)
+                return
 
-        for dev in devices:
-            did = dev.get("device_id")
-            var = tk.BooleanVar(value=did in previously_selected)
+            def _toggle_all():
+                v = all_var.get()
+                for var in self._post_device_vars.values():
+                    var.set(v)
+
+            all_var = tk.BooleanVar(value=bool(devices) and all(dev.get("device_id") in previously_selected for dev in devices))
             ctk.CTkCheckBox(
-                self._post_devices_frame, text=format_display_name(dev),
-                variable=var, font=FONT_SMALL, text_color=C_TEXT,
-                border_color=C_BORDER, fg_color=C_ACCENT,
-            ).pack(anchor="w", padx=8, pady=3)
-            self._post_device_vars[did] = var
+                self._post_devices_frame, text="Select All Devices", variable=all_var,
+                font=FONT_SMALL_B, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
+                command=_toggle_all,
+            ).pack(anchor="w", padx=8, pady=(4, 6))
+            ctk.CTkFrame(self._post_devices_frame, height=1, fg_color=C_BORDER).pack(fill="x", padx=6, pady=(0, 6))
+
+            for dev in devices:
+                did = dev.get("device_id")
+                var = tk.BooleanVar(value=did in previously_selected)
+                ctk.CTkCheckBox(
+                    self._post_devices_frame, text=format_display_name(dev),
+                    variable=var, font=FONT_SMALL, text_color=C_TEXT,
+                    border_color=C_BORDER, fg_color=C_ACCENT,
+                ).pack(anchor="w", padx=8, pady=3)
+                self._post_device_vars[did] = var
+
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def _post_files_to_devices(self):
         if not self._post_selected_files:
@@ -1911,7 +1933,9 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     self._post_selected_files.clear()
                     self._post_caption_box.delete("1.0", "end")
                     self._refresh_post_files_list()
-                    self._refresh_post_posts_list()
+                    # Post list is only loaded when navigating to the posts tab;
+                    # invalidate the cache key so it refreshes on next visit.
+                    self._posts_cache_key = ""
                     messagebox.showinfo("Posted Successfully", f"Shared {result['count']} file(s) with {len(targets)} device(s).")
                 else:
                     messagebox.showerror("Failed", "Could not post the selected files.")
@@ -1958,7 +1982,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             filters, variable=self._posts_device_filter_var, values=["All devices"],
             width=180, height=34, fg_color=C_ELEVATED, button_color=C_BORDER,
             text_color=C_TEXT, dropdown_fg_color=C_SURFACE,
-            command=lambda _value: self._refresh_post_posts_list(),
+            command=lambda _value: self._refresh_post_posts_list(_show_loading=True),
         )
         self._posts_device_filter_menu.grid(row=1, column=1, sticky="ew", padx=6, pady=(0, 10))
 
@@ -2020,25 +2044,103 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._posts_date_var.trace_add("write", lambda *_: self._schedule_posts_refresh())
         return frame
 
+    def _show_posts_loading_state(self):
+        """Show a loading indicator in the posts list immediately — called before the DB fetch starts."""
+        if not hasattr(self, "_post_posts_frame") or not self._post_posts_frame.winfo_exists():
+            return
+        # Cancel any in-progress chunked render
+        old_render_id = getattr(self, "_posts_chunk_after_id", None)
+        if old_render_id:
+            try:
+                self.after_cancel(old_render_id)
+            except Exception:
+                pass
+            self._posts_chunk_after_id = None
+        for w in self._post_posts_frame.winfo_children():
+            w.destroy()
+        # Muted "loading" placeholder — visible instantly
+        loading = ctk.CTkFrame(
+            self._post_posts_frame, fg_color=C_SURFACE,
+            corner_radius=12, border_width=1, border_color=C_BORDER,
+        )
+        loading.pack(fill="x", padx=4, pady=16)
+        ctk.CTkLabel(
+            loading, text="Loading posts…",
+            font=FONT_BODY, text_color=C_MUTED,
+        ).pack(pady=28)
+        try:
+            self._posts_count_label.configure(text="Loading…")
+            self._posts_prev_btn.configure(state="disabled")
+            self._posts_next_btn.configure(state="disabled")
+            self._posts_page_lbl.configure(text="")
+        except Exception:
+            pass
+
+    def _show_history_loading_state(self):
+        """Show a loading indicator in the history list immediately — called before the DB fetch starts."""
+        if not hasattr(self, "_hist_scroll") or not self._hist_scroll.winfo_exists():
+            return
+        # Cancel any in-progress chunked render
+        old_hist_chunk = getattr(self, "_hist_chunk_after_id", None)
+        if old_hist_chunk:
+            try:
+                self.after_cancel(old_hist_chunk)
+            except Exception:
+                pass
+            self._hist_chunk_after_id = None
+        for w in self._hist_scroll.winfo_children():
+            w.destroy()
+        loading = ctk.CTkFrame(
+            self._hist_scroll, fg_color=C_SURFACE,
+            corner_radius=12, border_width=1, border_color=C_BORDER,
+        )
+        loading.pack(fill="x", padx=4, pady=16)
+        ctk.CTkLabel(
+            loading, text="Loading history…",
+            font=FONT_BODY, text_color=C_MUTED,
+        ).pack(pady=28)
+        try:
+            self._hist_banner_lbl.configure(text="Loading…", text_color=C_MUTED)
+            self._hist_prev_btn.configure(state="disabled")
+            self._hist_next_btn.configure(state="disabled")
+            self._hist_page_lbl.configure(text="")
+        except Exception:
+            pass
+
     def _schedule_posts_refresh(self):
         if self._posts_search_after_id:
             try:
                 self.after_cancel(self._posts_search_after_id)
             except Exception:
                 pass
-        self._posts_search_after_id = self.after(150, self._refresh_post_posts_list)
+        # 300 ms debounce — avoids DB fetch on every keystroke
+        self._posts_search_after_id = self.after(300, self._refresh_post_posts_list)
+
+    def _schedule_post_devices_refresh(self):
+        """Debounced refresh for the recipient-device list in the Post composer."""
+        after_id = getattr(self, "_post_devices_filter_after_id", None)
+        if after_id:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+        self._post_devices_filter_after_id = self.after(200, self._refresh_post_devices_list)
 
     def _clear_post_filters(self):
         self._posts_search_var.set("")
         self._posts_date_var.set("")
         self._posts_device_filter_var.set("All devices")
-        self._refresh_post_posts_list()
+        self._refresh_post_posts_list(_show_loading=True)
 
-    def _refresh_post_posts_list(self, force: bool = False):
+    def _refresh_post_posts_list(self, force: bool = False, _show_loading: bool = False):
         self._posts_search_after_id = None
         if self._refresh_in_flight.get("posts"):
             return
         self._refresh_in_flight["posts"] = True
+
+        # Show skeleton immediately when explicitly requested (e.g. button press / filter clear)
+        if _show_loading:
+            self._show_posts_loading_state()
 
         # Snapshot filter state on main thread (safe)
         text_query  = self._posts_search_var.get().strip().casefold()
@@ -2086,11 +2188,20 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             """Back on main thread: update dropdown, filter, paginate, render."""
             self._refresh_in_flight["posts"] = False
 
-            # Cache key check: if nothing changed and not forced, keep existing render
+            # Cache key check: skip re-render only if data is truly unchanged AND
+            # the list already has real cards (not just the loading placeholder).
             cache_sig = f"{text_query}|{date_query}|{dev_label}|" + "|".join(
                 f"{gid}:{len(items)}:{sorted(list(tids))}" for gid, items, _, tids, _ in post_specs
             )
-            if not force and getattr(self, "_posts_cache_key", None) == cache_sig:
+            loading_showing = (
+                not self._posts_all_matched  # no data cached yet
+                or (
+                    hasattr(self, "_post_posts_frame")
+                    and self._post_posts_frame.winfo_exists()
+                    and len(self._post_posts_frame.winfo_children()) <= 1
+                )
+            )
+            if not force and not loading_showing and getattr(self, "_posts_cache_key", None) == cache_sig:
                 return
             self._posts_cache_key = cache_sig
 
@@ -2141,12 +2252,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _posts_render_page(self):
-        """Render the current page of matched posts."""
+        """Render the current page of matched posts without blocking the UI."""
         matched    = self._posts_all_matched
         page       = self._posts_page
         page_size  = self._posts_page_size
         total      = len(matched)
-        total_raw  = total   # already filtered; count label shows filtered/total
         num_pages  = max(1, (total + page_size - 1) // page_size)
         page       = max(0, min(page, num_pages - 1))
         self._posts_page = page
@@ -2155,10 +2265,18 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         end   = min(start + page_size, total)
         page_items = matched[start:end]
 
-        # Clear frame
+        # ── Clear existing cards ──────────────────────────────────────────────
+        # Cancel any in-progress chunked render before wiping the frame
+        old_render_id = getattr(self, "_posts_chunk_after_id", None)
+        if old_render_id:
+            try:
+                self.after_cancel(old_render_id)
+            except Exception:
+                pass
+            self._posts_chunk_after_id = None
+
         for w in self._post_posts_frame.winfo_children():
             w.destroy()
-        self._post_posts_frame.update_idletasks()
 
         # Update count + pagination labels
         try:
@@ -2180,15 +2298,28 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ).pack(pady=36)
             return
 
-        # Build cards for this page
-        for spec in page_items:
-            self._build_post_card(*spec)
+        # ── Chunked rendering: build cards in small batches so the UI stays
+        #    responsive. Each batch yields back to the event loop via after(0).
+        _CHUNK = 5  # cards per batch
 
-        # Scroll to top after page change
-        try:
-            self._post_posts_frame._parent_canvas.yview_moveto(0)
-        except Exception:
-            pass
+        def _render_chunk(items_remaining: list):
+            if not self._post_posts_frame.winfo_exists():
+                return
+            batch = items_remaining[:_CHUNK]
+            rest  = items_remaining[_CHUNK:]
+            for spec in batch:
+                self._build_post_card(*spec)
+            if rest:
+                self._posts_chunk_after_id = self.after(0, lambda: _render_chunk(rest))
+            else:
+                self._posts_chunk_after_id = None
+                # Scroll to top once all cards are placed
+                try:
+                    self._post_posts_frame._parent_canvas.yview_moveto(0)
+                except Exception:
+                    pass
+
+        _render_chunk(list(page_items))
 
     def _posts_prev_page(self):
         self._posts_page = max(0, self._posts_page - 1)
@@ -2466,7 +2597,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self.after_cancel(self._shared_search_after_id)
             except Exception:
                 pass
-        self._shared_search_after_id = self.after(150, self._refresh_shared_dirs_list)
+        self._shared_search_after_id = self.after(300, self._refresh_shared_dirs_list)
 
     @staticmethod
     def _shared_folder_display_path(path: str, max_length: int = 70) -> str:
@@ -3435,7 +3566,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             dropdown_text_color=C_TEXT,
             dropdown_hover_color=C_SOFT_BLUE,
             corner_radius=9,
-            command=lambda _: self._refresh_history(force=True),
+            command=lambda _: self._refresh_history(force=True, _show_loading=True),
         )
         self._hist_device_menu.pack(side="left", padx=(0, 8))
 
@@ -3444,7 +3575,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER,
             text_color=C_ACCENT, border_width=1, border_color=C_BORDER,
             corner_radius=8, font=FONT_SMALL_B,
-            command=lambda: self._refresh_history(force=True),
+            command=lambda: self._refresh_history(force=True, _show_loading=True),
         ).pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
@@ -3535,10 +3666,14 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         return "|".join(repr(tuple(session.get(field) for field in fields)) for session in sessions)
 
-    def _refresh_history(self, force: bool = False):
+    def _refresh_history(self, force: bool = False, _show_loading: bool = False):
         if self._refresh_in_flight.get("history"):
             return
         self._refresh_in_flight["history"] = True
+
+        # Show skeleton immediately when explicitly requested
+        if _show_loading:
+            self._show_history_loading_state()
 
         selected = self._hist_device_var.get()
         dev_map = getattr(self, "_hist_device_id_map", {})
@@ -3567,7 +3702,15 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 pass
 
             new_key = self._history_cache_key(sessions)
-            if not force and new_key == self._hist_cache_key:
+            loading_showing = (
+                not self._hist_all_sessions
+                or (
+                    hasattr(self, "_hist_scroll")
+                    and self._hist_scroll.winfo_exists()
+                    and len(self._hist_scroll.winfo_children()) <= 1
+                )
+            )
+            if not force and not loading_showing and new_key == self._hist_cache_key:
                 return
             self._hist_cache_key = new_key
             self._hist_sessions_cache = sessions
@@ -3630,9 +3773,17 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         except Exception:
             pass
 
+        # Cancel any in-progress chunked render
+        old_hist_chunk = getattr(self, "_hist_chunk_after_id", None)
+        if old_hist_chunk:
+            try:
+                self.after_cancel(old_hist_chunk)
+            except Exception:
+                pass
+            self._hist_chunk_after_id = None
+
         for w in self._hist_scroll.winfo_children():
             w.destroy()
-        self._hist_scroll.update_idletasks()
 
         if not sessions:
             empty = ctk.CTkFrame(
@@ -3668,7 +3819,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             mins = secs // 60
             return f"{mins}m {secs % 60}s" if (secs % 60) else f"{mins}m"
 
-        for sess in page_sessions:
+        def _build_hist_card(sess):
+            """Build a single history session card."""
             outcome = sess.get("outcome", "completed")
             label, fg, bg = OUTCOME_CFG.get(outcome, ("Unknown", C_ACCENT, C_SOFT_BLUE))
             device_label = sess.get("device_name") or sess.get("device_id") or "Unknown device"
@@ -3719,7 +3871,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 stat_items.append(f"✓ {skipped:,} saved")
             if not uploaded and not skipped:
                 stat_items.append("0 files")
-
             if errors:
                 stat_items.append(f"✗ {errors} errors")
             if dur_ms:
@@ -3731,15 +3882,29 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ctk.CTkLabel(
                 body, text=f"•   {stats_str}", font=FONT_SMALL, text_color=stats_clr, anchor="w",
             ).pack(side="left")
-
             ctk.CTkLabel(
                 body, text=_fmt_ts(started_ts), font=FONT_CAPTION, text_color=C_MUTED, anchor="e",
             ).pack(side="right")
 
-        try:
-            self._hist_scroll._parent_canvas.yview_moveto(0)
-        except Exception:
-            pass
+        # Chunked rendering — 8 rows per batch to keep the UI fluid
+        _HIST_CHUNK = 8
+
+        def _render_hist_chunk(items_remaining: list):
+            if not self._hist_scroll.winfo_exists():
+                return
+            for sess in items_remaining[:_HIST_CHUNK]:
+                _build_hist_card(sess)
+            rest = items_remaining[_HIST_CHUNK:]
+            if rest:
+                self._hist_chunk_after_id = self.after(0, lambda: _render_hist_chunk(rest))
+            else:
+                self._hist_chunk_after_id = None
+                try:
+                    self._hist_scroll._parent_canvas.yview_moveto(0)
+                except Exception:
+                    pass
+
+        _render_hist_chunk(list(page_sessions))
 
     def _hist_prev_page(self):
         self._hist_page = max(0, self._hist_page - 1)
@@ -3758,6 +3923,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         dev_map = getattr(self, "_hist_device_id_map", {})
         filter_id = dev_map.get(selected) if selected != "All Devices" else None
 
+        self._show_history_loading_state()
+
         def _do_clear():
             try:
                 clear_sync_sessions(device_id=filter_id)
@@ -3775,6 +3942,15 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
     # ─── Navigation ───────────────────────────────────────────────────────────
 
     def _show_page(self, page: str):
+        # ── Lazy build: construct the frame only on first visit ───────────────
+        if page not in self._pages:
+            builder = self._page_builders.get(page)
+            if builder is None:
+                return
+            frame = builder(self._frames_container)
+            frame.grid(row=0, column=0, sticky="nsew")
+            self._pages[page] = frame
+
         for name, btn in self._nav_btns.items():
             accent = self._nav_accents[name]
             if name == page:
@@ -3799,6 +3975,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._pages[page].tkraise()
         self._current_page = page
 
+        # Only trigger the refresh for the page we just navigated to.
         if page == "dashboard":
             self._refresh_dashboard()
         elif page == "devices":
@@ -3807,7 +3984,12 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._refresh_post_files_list()
             self._refresh_post_devices_list()
         elif page == "posts":
-            self._refresh_post_posts_list()
+            # Reset guard + cache so a re-visit always fetches fresh, never gets
+            # stuck on "Loading…" because a previous in-flight request blocked it.
+            self._refresh_in_flight["posts"] = False
+            self._posts_cache_key = ""
+            self._show_posts_loading_state()
+            self.after(0, self._refresh_post_posts_list)
         elif page == "shared_folders":
             self._refresh_shared_dirs_list()
         elif page == "settings":
@@ -3815,7 +3997,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         elif page == "logs":
             self._refresh_logs()
         elif page == "history":
-            self._refresh_history(force=True)
+            # Same pattern for history.
+            self._refresh_in_flight["history"] = False
+            self._hist_cache_key = ""
+            self._show_history_loading_state()
+            self.after(0, lambda: self._refresh_history(force=True))
 
     # ─── Auto-Refresh Loop ────────────────────────────────────────────────────
 
@@ -3842,19 +4028,22 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._sw_dark_mode.deselect()
 
     def _auto_refresh(self):
-        # Only the active page is refreshed. Pages not listed here
-        # (shared_folders, settings) load once on navigation and are not
-        # polled — they contain user-driven data refreshed explicitly
-        # when the user takes an action, so background polling is wasteful.
-        if self._current_page == "dashboard":
+        # Only the active page is refreshed; all other pages are skipped entirely.
+        # shared_folders, settings, post_to_devices are user-driven and not polled.
+        # posts is polled only when on the tab — but skip if a filter search is
+        # already in-flight (debounce may be running).
+        page = self._current_page
+        if page == "dashboard":
             self._refresh_dashboard()
-        elif self._current_page == "devices":
+        elif page == "devices":
             self._refresh_devices()
-        elif self._current_page == "posts":
-            self._refresh_post_posts_list()
-        elif self._current_page == "logs":
+        elif page == "posts":
+            # Skip auto-refresh when the user is actively typing (debounce pending)
+            if not self._posts_search_after_id:
+                self._refresh_post_posts_list()
+        elif page == "logs":
             self._refresh_logs()
-        elif self._current_page == "history":
+        elif page == "history":
             self._refresh_history()
         self.after(2000, self._auto_refresh)
 
