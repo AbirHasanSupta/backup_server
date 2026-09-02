@@ -3184,19 +3184,6 @@ function VideoPreviewPlayer(props: VideoPreviewPlayerProps) {
   return <NativeVideoPreviewPlayer {...props} videoModule={expoVideoModule} />;
 }
 
-// Swallows any touch that starts inside the controls panel but isn't
-// claimed by a more specific descendant (seek track / buttons). Without
-// this, a touch landing on the panel's padding/gaps (not exactly on the
-// track or a button) falls through — past the video's own touch catcher,
-// which is a sibling, not an ancestor, of this panel — straight up to the
-// outer gallery PanResponder, which reads it as a file-swipe or a
-// fullscreen-chrome tap. Stateless and shared across every video instance;
-// PanResponder view identity, not object identity, is what's tracked.
-const controlsPanelGuard = PanResponder.create({
-  onStartShouldSetPanResponder: () => true,
-  onMoveShouldSetPanResponder: () => true,
-});
-
 function NativeVideoPreviewPlayer({
   previewUri,
   originalUri,
@@ -3236,6 +3223,8 @@ function NativeVideoPreviewPlayer({
 
   const { status } = useEvent(player, 'statusChange', { status: player.status });
   const { isPlaying } = useEvent(player, 'playingChange', { isPlaying: player.playing });
+  const { muted } = useEvent(player, 'mutedChange', { muted: player.muted });
+  const isMuted = muted ?? false;
   const initialLoadDoneRef = useRef(false);
   const isUpgradingRef = useRef(false);
   const previewFallbackAttemptedRef = useRef(false);
@@ -3314,7 +3303,6 @@ function NativeVideoPreviewPlayer({
   const insets = useSafeAreaInsets();
   const [positionSec, setPositionSec] = useState(0);
   const [durationSec, setDurationSec] = useState(0);
-  const [isMuted, setIsMuted] = useState(false);
   // Seeking state — while the user drags the bar we freeze the position display
   const [isSeeking, setIsSeeking] = useState(false);
   const [seekProgress, setSeekProgress] = useState(0);
@@ -3323,6 +3311,8 @@ function NativeVideoPreviewPlayer({
   // Layout width of the seekbar track, measured on layout
   const seekBarWidthRef = useRef(1);
   const wasPlayingBeforeSeekRef = useRef(false);
+  const grantPageXRef = useRef(0);
+  const grantLocationXRef = useRef(0);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -3344,10 +3334,8 @@ function NativeVideoPreviewPlayer({
   }, [player]);
 
   const toggleMute = useCallback(() => {
-    setIsMuted(prev => {
-      const next = !prev;
-      safeMediaCall(() => { player.muted = next; });
-      return next;
+    safeMediaCall(() => {
+      player.muted = !player.muted;
     });
   }, [player]);
 
@@ -3369,7 +3357,6 @@ function NativeVideoPreviewPlayer({
     });
   }, [player]);
 
-   
   const seekPanResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
@@ -3381,12 +3368,18 @@ function NativeVideoPreviewPlayer({
       wasPlayingBeforeSeekRef.current = player.playing;
       safeMediaCall(() => player.pause());
       setIsSeeking(true);
-      const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / seekBarWidthRef.current));
+      const width = Math.max(1, seekBarWidthRef.current);
+      const locX = evt.nativeEvent.locationX;
+      grantLocationXRef.current = locX;
+      grantPageXRef.current = evt.nativeEvent.pageX;
+      const ratio = Math.max(0, Math.min(1, locX / width));
       seekProgressRef.current = ratio;
       setSeekProgress(ratio);
     },
     onPanResponderMove: (evt) => {
-      const ratio = Math.max(0, Math.min(1, evt.nativeEvent.locationX / seekBarWidthRef.current));
+      const width = Math.max(1, seekBarWidthRef.current);
+      const currentX = grantLocationXRef.current + (evt.nativeEvent.pageX - grantPageXRef.current);
+      const ratio = Math.max(0, Math.min(1, currentX / width));
       seekProgressRef.current = ratio;
       setSeekProgress(ratio);
     },
@@ -3465,11 +3458,10 @@ function NativeVideoPreviewPlayer({
       {/* ── Full video controls panel ── */}
       <View
         style={[pvStyles.videoControlsPanel, { bottom: insets.bottom + Spacing.two }]}
-        pointerEvents="auto"
-        {...controlsPanelGuard.panHandlers}
+        pointerEvents="box-none"
       >
         {/* Seekbar row */}
-        <View style={pvStyles.videoSeekRow} pointerEvents="auto">
+        <View style={pvStyles.videoSeekRow} pointerEvents="box-none">
           <Text style={pvStyles.videoTimeLabel}>{formatMediaTime(displayPosition)}</Text>
           {/* Seekbar track — touchable for tap+drag seeking */}
           <View
@@ -3496,7 +3488,7 @@ function NativeVideoPreviewPlayer({
         </View>
 
         {/* Buttons row */}
-        <View style={pvStyles.videoButtonRow} pointerEvents="auto">
+        <View style={pvStyles.videoButtonRow} pointerEvents="box-none">
           {/* Mute / Volume */}
           <TouchableOpacity
             onPress={toggleMute}

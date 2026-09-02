@@ -16,6 +16,7 @@ import {
   Animated,
   LayoutChangeEvent,
   RefreshControl,
+  PanResponder,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
@@ -137,26 +138,49 @@ function rankReels(items: ReelItem[], watched: Set<string>, sessionSeed: number)
     .map(({ item }) => item);
 }
 
-// ─── Bottom Progress bar (Instagram-style) ────────────────────────────────────
+// ─── Media Time Helper ────────────────────────────────────────────────────────
 
-function ReelProgressBar({ progress }: { progress: number }) {
-  const pct = `${Math.min(100, Math.max(0, progress * 100))}%` as const;
-  return (
-    <View style={progressStyles.track}>
-      <View style={[progressStyles.fill, { width: pct }]} />
-    </View>
-  );
+function formatMediaTime(sec: number): string {
+  const s = Math.max(0, Math.floor(sec || 0));
+  const m = Math.floor(s / 60);
+  return `${m}:${String(s % 60).padStart(2, '0')}`;
 }
+
+// ─── Bottom Progress / Seek Bar (YouTube Shorts style) ───────────────────────
 
 const progressStyles = StyleSheet.create({
   track: {
     height: 2.5,
     width: '100%',
-    backgroundColor: 'rgba(255, 255, 255, 0.22)',
+    backgroundColor: 'rgba(255, 255, 255, 0.25)',
+    position: 'relative',
+    justifyContent: 'center',
+  },
+  trackActive: {
+    height: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.4)',
   },
   fill: {
     height: '100%',
     backgroundColor: '#FFFFFF',
+  },
+  fillActive: {
+    backgroundColor: '#FFFFFF',
+  },
+  thumb: {
+    position: 'absolute',
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#FFFFFF',
+    top: '50%',
+    marginTop: -7,
+    marginLeft: -7,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.8,
+    shadowRadius: 4,
+    elevation: 6,
   },
 });
 
@@ -170,9 +194,10 @@ type VideoPlayerProps = {
   muted: boolean;
   onProgress: (current: number, total: number) => void;
   onReady: () => void;
+  playerRef?: React.RefObject<any>;
 };
 
-function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onReady }: VideoPlayerProps) {
+function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onReady, playerRef }: VideoPlayerProps) {
   const mod = expoVideoModule!;
 
   const source = useMemo<VideoSource>(() => ({
@@ -199,6 +224,12 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
   const onProgressRef = useRef(onProgress);
 
   useEffect(() => {
+    if (playerRef) {
+      playerRef.current = player;
+    }
+  }, [player, playerRef]);
+
+  useEffect(() => {
     onReadyRef.current = onReady;
     onProgressRef.current = onProgress;
   }, [onReady, onProgress]);
@@ -223,7 +254,7 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
         const dur = player.duration || 0;
         if (dur > 0) onProgressRef.current(player.currentTime || 0, dur);
       } catch {}
-    }, 200);
+    }, 150);
     return () => clearInterval(interval);
   }, [player, isActive]);
 
@@ -291,6 +322,8 @@ function ReelCard({
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(1.0);
   const [progress, setProgress] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [showControls, setShowControls] = useState(false);
   const [show2x, setShow2x] = useState(false);
@@ -302,6 +335,23 @@ function ReelCard({
   const lastTapRef = useRef(0);
   const longPressRef = useRef(false);
   const readyOnceRef = useRef(false);
+
+  // Draggable seek state
+  const playerRef = useRef<any>(null);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [seekProgress, setSeekProgress] = useState(0);
+  const isSeekingRef = useRef(false);
+  const seekProgressRef = useRef(0);
+  const wasPlayingBeforeSeekRef = useRef(false);
+  const grantPageXRef = useRef(0);
+  const grantLocationXRef = useRef(0);
+  const seekBarWidthRef = useRef(cardWidth || SCREEN_W);
+  const durationRef = useRef(0);
+  const isPlayingRef = useRef(isPlaying);
+
+  useEffect(() => { durationRef.current = duration; }, [duration]);
+  useEffect(() => { seekBarWidthRef.current = cardWidth || SCREEN_W; }, [cardWidth]);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
   const videoUrl = serverConfig ? buildSharePreviewUrl(serverConfig, item.share_id) : '';
   const thumbUrl = serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
@@ -361,12 +411,20 @@ function ReelCard({
     if (isActive) {
       setIsPlaying(true);
       setProgress(0);
+      setCurrentTime(0);
+      setDuration(0);
+      setIsSeeking(false);
+      isSeekingRef.current = false;
+      seekProgressRef.current = 0;
       if (!readyOnceRef.current) setIsLoading(true);
     } else {
       setIsPlaying(false);
       setShowEmojiPicker(false);
       setShow2x(false);
       setSpeed(1.0);
+      setIsSeeking(false);
+      isSeekingRef.current = false;
+      seekProgressRef.current = 0;
       if (controlsTimer.current) clearTimeout(controlsTimer.current);
       setShowControls(false);
     }
@@ -378,7 +436,11 @@ function ReelCard({
   }, []);
 
   const handleProgress = useCallback((cur: number, dur: number) => {
-    setProgress(dur > 0 ? cur / dur : 0);
+    if (!isSeekingRef.current) {
+      setCurrentTime(cur);
+      setDuration(dur);
+      setProgress(dur > 0 ? cur / dur : 0);
+    }
   }, []);
 
   const handleReady = useCallback(() => {
@@ -394,6 +456,77 @@ function ReelCard({
       onReact(item, '❤️');
     }
   }, [isLiked, myReaction, item, onReact]);
+
+  const seekPanResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onStartShouldSetPanResponderCapture: () => true,
+    onMoveShouldSetPanResponderCapture: () => true,
+    onPanResponderTerminationRequest: () => false,
+    onPanResponderGrant: (evt) => {
+      isSeekingRef.current = true;
+      setIsSeeking(true);
+      hapticLight();
+      const p = playerRef.current;
+      if (p) {
+        wasPlayingBeforeSeekRef.current = p.playing ?? isPlayingRef.current;
+        try { p.pause(); } catch {}
+      } else {
+        wasPlayingBeforeSeekRef.current = isPlayingRef.current;
+      }
+      const width = Math.max(1, seekBarWidthRef.current || cardWidth || SCREEN_W);
+      const locX = evt.nativeEvent.locationX;
+      grantLocationXRef.current = locX;
+      grantPageXRef.current = evt.nativeEvent.pageX;
+      const ratio = Math.max(0, Math.min(1, locX / width));
+      seekProgressRef.current = ratio;
+      setSeekProgress(ratio);
+      const dur = durationRef.current;
+      if (p && dur > 0) {
+        try { p.currentTime = ratio * dur; } catch {}
+      }
+    },
+    onPanResponderMove: (evt) => {
+      const width = Math.max(1, seekBarWidthRef.current || cardWidth || SCREEN_W);
+      const currentX = grantLocationXRef.current + (evt.nativeEvent.pageX - grantPageXRef.current);
+      const ratio = Math.max(0, Math.min(1, currentX / width));
+      seekProgressRef.current = ratio;
+      setSeekProgress(ratio);
+      const p = playerRef.current;
+      const dur = durationRef.current;
+      if (p && dur > 0) {
+        try { p.currentTime = ratio * dur; } catch {}
+      }
+    },
+    onPanResponderRelease: () => {
+      const finalRatio = seekProgressRef.current;
+      const p = playerRef.current;
+      const dur = durationRef.current;
+      if (p && dur > 0) {
+        try { p.currentTime = finalRatio * dur; } catch {}
+      }
+      isSeekingRef.current = false;
+      setIsSeeking(false);
+      setProgress(finalRatio);
+      setCurrentTime(finalRatio * dur);
+      hapticSelection();
+      if (wasPlayingBeforeSeekRef.current && p) {
+        try { p.play(); } catch {}
+      }
+    },
+    onPanResponderTerminate: () => {
+      isSeekingRef.current = false;
+      setIsSeeking(false);
+      const p = playerRef.current;
+      if (wasPlayingBeforeSeekRef.current && p) {
+        try { p.play(); } catch {}
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- PanResponder handlers read stable refs
+  }), []);
+
+  const activeProgress = isSeeking ? seekProgress : progress;
+  const displaySeekTime = isSeeking ? seekProgress * (duration || 0) : currentTime;
 
   return (
     <View style={[s.reel, { width: cardWidth, height: cardHeight }]}>
@@ -417,6 +550,7 @@ function ReelCard({
           muted={muted}
           onProgress={handleProgress}
           onReady={handleReady}
+          playerRef={playerRef}
         />
       ) : null}
 
@@ -568,9 +702,42 @@ function ReelCard({
         )}
       </View>
 
-      {/* Bottom Progress Bar (Instagram style) */}
-      <View style={s.progressWrap} pointerEvents="none">
-        <ReelProgressBar progress={progress} />
+      {/* Draggable Progress / Seek Bar (YouTube Shorts style) */}
+      <View
+        style={s.progressWrap}
+        onLayout={e => {
+          const w = e.nativeEvent.layout.width;
+          if (w > 0) seekBarWidthRef.current = w;
+        }}
+        {...seekPanResponder.panHandlers}
+      >
+        {/* Floating Time Preview Bubble (shown while dragging, like YouTube Shorts) */}
+        {isSeeking && (
+          <View style={s.seekTimeBubble} pointerEvents="none">
+            <Text style={s.seekTimeText}>
+              {formatMediaTime(displaySeekTime)} / {formatMediaTime(duration)}
+            </Text>
+          </View>
+        )}
+
+        <View style={[progressStyles.track, isSeeking && progressStyles.trackActive]}>
+          <View
+            style={[
+              progressStyles.fill,
+              isSeeking && progressStyles.fillActive,
+              { width: `${Math.min(100, Math.max(0, activeProgress * 100))}%` },
+            ]}
+          />
+          {/* Draggable Seek Thumb (glows/expands during drag) */}
+          {isSeeking && (
+            <View
+              style={[
+                progressStyles.thumb,
+                { left: `${Math.min(100, Math.max(0, activeProgress * 100))}%` },
+              ]}
+            />
+          )}
+        </View>
       </View>
     </View>
   );
@@ -1135,8 +1302,32 @@ const s = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    height: 2.5,
-    zIndex: 15,
+    height: 32,
+    justifyContent: 'flex-end',
+    zIndex: 30,
+  },
+  seekTimeBubble: {
+    position: 'absolute',
+    bottom: 24,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.8)',
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.5,
+    shadowRadius: 4,
+    elevation: 5,
+    zIndex: 35,
+  },
+  seekTimeText: {
+    color: '#FFFFFF',
+    fontSize: TextScale.xs,
+    fontWeight: '700',
+    letterSpacing: 0.5,
   },
 
   speedBadge: {
@@ -1198,7 +1389,7 @@ const s = StyleSheet.create({
     bottom: Spacing.four,
     alignItems: 'center',
     gap: Spacing.four,
-    zIndex: 12,
+    zIndex: 35,
   },
   actionBtn: {
     alignItems: 'center',
@@ -1244,7 +1435,7 @@ const s = StyleSheet.create({
     borderRadius: Radius.full,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.2)',
-    zIndex: 25,
+    zIndex: 45,
     ...Shadows.card,
   },
   emojiBtn: {
