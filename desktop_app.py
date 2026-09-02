@@ -2306,7 +2306,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 text=f"{total} post{'s' if total != 1 else ''}"
                 if total else "0 posts"
             )
-            pg_txt = f"Page {page + 1} / {num_pages}" if num_pages > 1 else ""
+            page_from = start + 1 if total else 0
+            pg_txt = f"Page {page + 1} / {num_pages}  ({page_from}–{end} of {total})" if num_pages > 1 else (f"{total} post{'s' if total != 1 else ''}" if total else "")
             self._posts_page_lbl.configure(text=pg_txt)
             self._posts_prev_btn.configure(state="normal" if page > 0 else "disabled")
             self._posts_next_btn.configure(state="normal" if page < num_pages - 1 else "disabled")
@@ -2799,87 +2800,121 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         if not 0 <= idx < len(self._shared_dirs):
             return
         entry = self._shared_dirs[idx]
-        devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID and d.get("device_id")]
+        entry_id = entry.get("id")  # stable identity; idx can shift if folders are removed
+
         dialog = ctk.CTkToplevel(self)
         dialog.title("Manage Folder Access")
         dialog.geometry("480x560")
         dialog.minsize(400, 420)
         dialog.transient(self)
-        dialog.grab_set()
         dialog.configure(fg_color=C_BG)
 
-        ctk.CTkLabel(dialog, text="Folder Access Permissions", font=FONT_TITLE, text_color=C_TEXT, anchor="w").pack(fill="x", padx=22, pady=(18, 0))
-        ctk.CTkLabel(dialog, text=entry.get("label") or entry.get("path") or "Shared folder", font=FONT_SUBTITLE, text_color=C_MUTED, anchor="w").pack(fill="x", padx=22, pady=(2, 12))
+        loading_lbl = ctk.CTkLabel(dialog, text="Loading…", font=FONT_BODY, text_color=C_MUTED)
+        loading_lbl.pack(expand=True)
 
-        panel = ctk.CTkFrame(dialog, fg_color=C_SURFACE, corner_radius=12, border_width=1, border_color=C_BORDER)
-        panel.pack(fill="both", expand=True, padx=20, pady=(0, 14))
+        def _fetch():
+            try:
+                devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID and d.get("device_id")]
+            except Exception:
+                devices = []
+            if dialog.winfo_exists():
+                dialog.after(0, lambda: _build(devices))
 
-        current = set(entry.get("device_ids", []))
-        all_var = tk.BooleanVar(value="all" in current)
-        all_row = ctk.CTkFrame(panel, fg_color="transparent")
-        all_row.pack(fill="x", padx=14, pady=(12, 6))
+        def _build(devices):
+            if not dialog.winfo_exists():
+                return
+            loading_lbl.destroy()
+            dialog.grab_set()
 
-        all_checkbox = ctk.CTkCheckBox(
-            all_row, text="Allow all paired devices to restore this folder", variable=all_var,
-            font=FONT_BODY_B, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
-        )
-        all_checkbox.pack(side="left")
-        ctk.CTkLabel(all_row, text=f"{len(devices)} device{'s' if len(devices) != 1 else ''}", font=FONT_CAPTION, text_color=C_MUTED).pack(side="right")
-
-        ctk.CTkLabel(panel, text="INDIVIDUAL ACCESS", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(fill="x", padx=14, pady=(10, 4))
-        devices_frame = ctk.CTkScrollableFrame(panel, fg_color=C_ELEVATED, corner_radius=9, border_width=1, border_color=C_BORDER, label_text="")
-        devices_frame.pack(fill="both", expand=True, padx=14, pady=(0, 12))
-
-        selected_vars: dict[str, tk.BooleanVar] = {}
-        checkboxes: list[ctk.CTkCheckBox] = []
-
-        if not devices:
-            ctk.CTkLabel(devices_frame, text="No devices paired yet.", font=FONT_SMALL, text_color=C_MUTED).pack(pady=28)
-
-        for device in devices:
-            device_id = str(device["device_id"])
-            var = tk.BooleanVar(value=device_id in current)
-            selected_vars[device_id] = var
-            checkbox = ctk.CTkCheckBox(
-                devices_frame, text=format_display_name(device), variable=var,
-                font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
+            # Re-resolve index by stable entry_id in case list shifted
+            current_idx = next(
+                (i for i, e in enumerate(self._shared_dirs) if e.get("id") == entry_id),
+                None,
             )
-            checkbox.pack(anchor="w", padx=8, pady=4)
-            checkboxes.append(checkbox)
-
-        def sync_individual_state(*_):
-            state = "disabled" if all_var.get() else "normal"
-            for checkbox in checkboxes:
-                checkbox.configure(state=state)
-
-        all_var.trace_add("write", sync_individual_state)
-        sync_individual_state()
-
-        footer = ctk.CTkFrame(dialog, fg_color="transparent")
-        footer.pack(fill="x", padx=20, pady=(0, 16))
-        ctk.CTkButton(
-            footer, text="Cancel", width=100, height=36,
-            fg_color="transparent", hover_color=C_ELEVATED, text_color=C_TEXT,
-            border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_BODY_B,
-            command=dialog.destroy,
-        ).pack(side="left")
-
-        def save_access():
-            if not 0 <= idx < len(self._shared_dirs):
+            if current_idx is None:
                 dialog.destroy()
                 return
-            self._shared_dirs[idx]["device_ids"] = (
-                ["all"] if all_var.get() else [device_id for device_id, var in selected_vars.items() if var.get()]
-            )
-            self._save_shared_dirs_to_config()
-            self._refresh_shared_dirs_list()
-            dialog.destroy()
+            live_entry = self._shared_dirs[current_idx]
+            current = set(live_entry.get("device_ids", []))
 
-        ctk.CTkButton(
-            footer, text="Save Access", width=130, height=36,
-            fg_color=C_ACCENT, hover_color=C_ACCENT2, corner_radius=8, font=FONT_BODY_B,
-            command=save_access,
-        ).pack(side="right")
+            ctk.CTkLabel(dialog, text="Folder Access Permissions", font=FONT_TITLE, text_color=C_TEXT, anchor="w").pack(fill="x", padx=22, pady=(18, 0))
+            ctk.CTkLabel(dialog, text=live_entry.get("label") or live_entry.get("path") or "Shared folder", font=FONT_SUBTITLE, text_color=C_MUTED, anchor="w").pack(fill="x", padx=22, pady=(2, 12))
+
+            panel = ctk.CTkFrame(dialog, fg_color=C_SURFACE, corner_radius=12, border_width=1, border_color=C_BORDER)
+            panel.pack(fill="both", expand=True, padx=20, pady=(0, 14))
+
+            all_var = tk.BooleanVar(value="all" in current)
+            all_row = ctk.CTkFrame(panel, fg_color="transparent")
+            all_row.pack(fill="x", padx=14, pady=(12, 6))
+
+            all_checkbox = ctk.CTkCheckBox(
+                all_row, text="Allow all paired devices to restore this folder", variable=all_var,
+                font=FONT_BODY_B, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
+            )
+            all_checkbox.pack(side="left")
+            ctk.CTkLabel(all_row, text=f"{len(devices)} device{'s' if len(devices) != 1 else ''}", font=FONT_CAPTION, text_color=C_MUTED).pack(side="right")
+
+            ctk.CTkLabel(panel, text="INDIVIDUAL ACCESS", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(fill="x", padx=14, pady=(10, 4))
+            devices_frame = ctk.CTkScrollableFrame(panel, fg_color=C_ELEVATED, corner_radius=9, border_width=1, border_color=C_BORDER, label_text="")
+            devices_frame.pack(fill="both", expand=True, padx=14, pady=(0, 12))
+
+            selected_vars: dict[str, tk.BooleanVar] = {}
+            checkboxes: list[ctk.CTkCheckBox] = []
+
+            if not devices:
+                ctk.CTkLabel(devices_frame, text="No devices paired yet.", font=FONT_SMALL, text_color=C_MUTED).pack(pady=28)
+
+            for device in devices:
+                device_id = str(device["device_id"])
+                var = tk.BooleanVar(value=device_id in current)
+                selected_vars[device_id] = var
+                checkbox = ctk.CTkCheckBox(
+                    devices_frame, text=format_display_name(device), variable=var,
+                    font=FONT_SMALL, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
+                )
+                checkbox.pack(anchor="w", padx=8, pady=4)
+                checkboxes.append(checkbox)
+
+            def sync_individual_state(*_):
+                state = "disabled" if all_var.get() else "normal"
+                for checkbox in checkboxes:
+                    checkbox.configure(state=state)
+
+            all_var.trace_add("write", sync_individual_state)
+            sync_individual_state()
+
+            footer = ctk.CTkFrame(dialog, fg_color="transparent")
+            footer.pack(fill="x", padx=20, pady=(0, 16))
+            ctk.CTkButton(
+                footer, text="Cancel", width=100, height=36,
+                fg_color="transparent", hover_color=C_ELEVATED, text_color=C_TEXT,
+                border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_BODY_B,
+                command=dialog.destroy,
+            ).pack(side="left")
+
+            def save_access():
+                # Re-resolve at save time so concurrent folder removals don't corrupt data
+                resolved_idx = next(
+                    (i for i, e in enumerate(self._shared_dirs) if e.get("id") == entry_id),
+                    None,
+                )
+                if resolved_idx is None:
+                    dialog.destroy()
+                    return
+                self._shared_dirs[resolved_idx]["device_ids"] = (
+                    ["all"] if all_var.get() else [did for did, v in selected_vars.items() if v.get()]
+                )
+                self._save_shared_dirs_to_config()
+                self._refresh_shared_dirs_list()
+                dialog.destroy()
+
+            ctk.CTkButton(
+                footer, text="Save Access", width=130, height=36,
+                fg_color=C_ACCENT, hover_color=C_ACCENT2, corner_radius=8, font=FONT_BODY_B,
+                command=save_access,
+            ).pack(side="right")
+
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def _save_shared_dirs_to_config(self):
         try:

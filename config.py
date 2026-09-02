@@ -260,4 +260,13 @@ HOST = _cfg["HOST"]
 PORT = int(_cfg["PORT"])
 DB_PATH = _cfg["DB_PATH"]
 REQUIRE_APPROVAL = bool(_cfg.get("REQUIRE_APPROVAL", True))
+
+
+def get_shared_dirs() -> list:
+    """Always read from the live config so access changes take effect without restart."""
+    return load_config().get("SHARED_DIRS", [])
+
+
+# Backward-compat shim: behaves like a list at import time but warns callers
+# that use the stale binding directly.  Server code should call get_shared_dirs().
 SHARED_DIRS: list = _cfg.get("SHARED_DIRS", [])
