@@ -1161,7 +1161,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 stats, devices = None, []
             # get_logs() reads in-memory state — safe to call from either thread
             logs = get_logs()[-25:]
-            self.after(0, lambda: _render(stats, devices, logs))
+            try:
+                self.after(0, lambda: _render(stats, devices, logs))
+            except RuntimeError:
+                self._refresh_in_flight["dashboard"] = False
 
         def _render(stats, devices, logs):
             self._refresh_in_flight["dashboard"] = False
@@ -1264,7 +1267,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 all_devices = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
             except Exception:
                 all_devices = []
-            self.after(0, lambda: _render(all_devices))
+            try:
+                self.after(0, lambda: _render(all_devices))
+            except RuntimeError:
+                self._refresh_in_flight["devices"] = False
 
         def _render(all_devices):
             self._refresh_in_flight["devices"] = False
@@ -1813,7 +1819,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 except OSError:
                     sizes[p] = 0
             total = sum(sizes.values())
-            self.after(0, lambda: _render(sizes, total))
+            try:
+                self.after(0, lambda: _render(sizes, total))
+            except RuntimeError:
+                pass
 
         def _render(sizes, total):
             if not self._post_files_list_frame.winfo_exists():
@@ -1872,7 +1881,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 all_devs = [d for d in get_devices() if d.get("device_id") != DESKTOP_SHARE_DEVICE_ID]
             except Exception:
                 all_devs = []
-            self.after(0, lambda: _render(all_devs))
+            try:
+                self.after(0, lambda: _render(all_devs))
+            except RuntimeError:
+                pass
 
         def _render(all_devs):
             if not self._post_devices_frame.winfo_exists():
@@ -2119,6 +2131,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         ).pack(pady=28)
         try:
             self._hist_banner_lbl.configure(text="Loading…", text_color=C_MUTED)
+            self._hist_count_label.configure(text="")
             self._hist_prev_btn.configure(state="disabled")
             self._hist_next_btn.configure(state="disabled")
             self._hist_page_lbl.configure(text="")
@@ -2664,14 +2677,18 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             except Exception:
                 devices = []
             try:
-                self.after(0, lambda: _render(devices))
+                fresh = list(load_config().get("SHARED_DIRS", []))
+            except Exception:
+                fresh = None
+            try:
+                self.after(0, lambda: _render(devices, fresh))
             except RuntimeError:
-                # tk not yet in main loop or already destroyed; unlock the guard
-                # so the next navigation to this page triggers a fresh fetch.
                 self._refresh_in_flight["shared_dirs"] = False
 
-        def _render(devices):
+        def _render(devices, fresh=None):
             self._refresh_in_flight["shared_dirs"] = False
+            if fresh is not None:
+                self._shared_dirs = fresh
             if not self._shared_dirs_list_frame.winfo_exists():
                 return
             for w in self._shared_dirs_list_frame.winfo_children():
@@ -2826,7 +2843,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             loading_lbl.destroy()
             dialog.grab_set()
 
-            # Re-resolve index by stable entry_id in case list shifted
+            try:
+                self._shared_dirs = list(load_config().get("SHARED_DIRS", []))
+            except Exception:
+                pass
             current_idx = next(
                 (i for i, e in enumerate(self._shared_dirs) if e.get("id") == entry_id),
                 None,
@@ -2893,7 +2913,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ).pack(side="left")
 
             def save_access():
-                # Re-resolve at save time so concurrent folder removals don't corrupt data
+                try:
+                    self._shared_dirs = list(load_config().get("SHARED_DIRS", []))
+                except Exception:
+                    pass
                 resolved_idx = next(
                     (i for i, e in enumerate(self._shared_dirs) if e.get("id") == entry_id),
                     None,
@@ -3623,7 +3646,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             if query:
                 logs = [e for e in logs if query in e["message"].lower()]
             logs = logs[-500:]
-            self.after(0, lambda: _render(logs, query))
+            try:
+                self.after(0, lambda: _render(logs, query))
+            except RuntimeError:
+                pass
 
         def _render(logs, q):
             last_ts = logs[-1]["time"] if logs else 0
@@ -3705,10 +3731,15 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self._hist_banner_lbl.pack(expand=True)
 
+        self._hist_count_label = ctk.CTkLabel(
+            frame, text="0 sessions", font=FONT_SMALL, text_color=C_MUTED, anchor="w",
+        )
+        self._hist_count_label.pack(fill="x", padx=34, pady=(8, 0))
+
         self._hist_scroll = ctk.CTkScrollableFrame(
             frame, fg_color="transparent", label_text="",
         )
-        self._hist_scroll.pack(fill="both", expand=True, padx=28, pady=(8, 4))
+        self._hist_scroll.pack(fill="both", expand=True, padx=28, pady=(4, 4))
         self._hist_scroll.grid_columnconfigure(0, weight=1)
 
         # Pagination bar
@@ -3790,7 +3821,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             except Exception:
                 devices, device_names, device_id_map, sessions = [], ["All Devices"], {}, []
 
-            self.after(0, lambda: _render(device_names, device_id_map, sessions))
+            try:
+                self.after(0, lambda: _render(device_names, device_id_map, sessions))
+            except RuntimeError:
+                self._refresh_in_flight["history"] = False
 
         def _render(device_names, device_id_map, sessions):
             self._refresh_in_flight["history"] = False
@@ -3868,7 +3902,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         page_sessions = sessions[start:end]
 
         try:
-            pg_txt = f"Page {page + 1} / {num_pages}" if num_pages > 1 else ""
+            self._hist_count_label.configure(
+                text=f"{total} session{'s' if total != 1 else ''}" if total else "0 sessions"
+            )
+            page_from = start + 1 if total else 0
+            pg_txt = f"Page {page + 1} / {num_pages}  ({page_from}–{end} of {total})" if num_pages > 1 else (f"{total} session{'s' if total != 1 else ''}" if total else "")
             self._hist_page_lbl.configure(text=pg_txt)
             self._hist_prev_btn.configure(state="normal" if page > 0 else "disabled")
             self._hist_next_btn.configure(state="normal" if page < num_pages - 1 else "disabled")

@@ -16,7 +16,7 @@ import uuid
 import memories
 import rewind
 from fastapi import APIRouter, HTTPException, Request, UploadFile, Form, Header, File
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from config import load_config, APP_DATA_DIR, SHARED_QUIZ_DIR
@@ -1275,13 +1275,15 @@ async def list_shared_sources(
     """
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     dirs = _get_shared_dirs()
-    return {
-        "sources": [
-            {"id": d["id"], "label": d["label"]}
-            for d in dirs
-            if d.get("id") and d.get("label") and _is_folder_tagged_for_device(d, device_id, authorization, token)
-        ]
-    }
+    sources = [
+        {"id": d["id"], "label": d["label"]}
+        for d in dirs
+        if d.get("id") and d.get("label") and _is_folder_tagged_for_device(d, device_id, authorization, token)
+    ]
+    return JSONResponse(
+        content={"sources": sources},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 @router.get("/shared/{source_id}/files")
