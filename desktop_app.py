@@ -636,7 +636,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Start background polling
         self.after(500,  self._poll_pending_connections)
-        self.after(2000, self._auto_refresh)
+        self.after(3000, self._auto_refresh)
         self.after(1000, self._tick_uptime)
 
         # Launch Server
@@ -1300,7 +1300,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     return
                 for w in self._devices_scroll.winfo_children():
                     w.destroy()
-                self._devices_scroll.update_idletasks()
                 self._device_card_widgets.clear()
 
                 self._devices_empty_widget = ctk.CTkFrame(
@@ -2296,6 +2295,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         for w in self._post_posts_frame.winfo_children():
             w.destroy()
+        try:
+            self._post_posts_frame._parent_canvas.yview_moveto(0)
+        except Exception:
+            pass
 
         # Update count + pagination labels
         try:
@@ -2319,7 +2322,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # ── Chunked rendering: build cards in small batches so the UI stays
         #    responsive. Each batch yields back to the event loop via after(0).
-        _CHUNK = 5  # cards per batch
+        _CHUNK = 15  # cards per batch
 
         def _render_chunk(items_remaining: list):
             if not self._post_posts_frame.winfo_exists():
@@ -2332,11 +2335,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._posts_chunk_after_id = self.after(0, lambda: _render_chunk(rest))
             else:
                 self._posts_chunk_after_id = None
-                # Scroll to top once all cards are placed
-                try:
-                    self._post_posts_frame._parent_canvas.yview_moveto(0)
-                except Exception:
-                    pass
 
         _render_chunk(list(page_items))
 
@@ -2356,12 +2354,12 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             return
         card = ctk.CTkFrame(
             self._post_posts_frame, fg_color=C_SURFACE,
-            corner_radius=12, border_width=1, border_color=C_BORDER,
+            corner_radius=8, border_width=1, border_color=C_BORDER,
         )
-        card.pack(fill="x", padx=4, pady=5)
+        card.pack(fill="x", padx=4, pady=3)
 
         top = ctk.CTkFrame(card, fg_color="transparent")
-        top.pack(fill="x", padx=14, pady=(10, 2))
+        top.pack(fill="x", padx=12, pady=(7, 1))
         ctk.CTkLabel(
             top, text=caption or "(no caption)",
             font=FONT_BODY_B, text_color=C_TEXT, anchor="w",
@@ -2370,30 +2368,15 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         ctk.CTkLabel(top, text=timestamp, font=FONT_CAPTION, text_color=C_MUTED, anchor="e").pack(side="right")
 
         target_display = ", ".join(target_names) or "No devices"
+        author = head.get("sharer_device_id") or "Desktop"
         ctk.CTkLabel(
-            card, text=f"{len(items)} file(s)   •   Shared with: {target_display}",
+            card,
+            text=f"{len(items)} file{'s' if len(items) != 1 else ''}   •   {author}   •   Shared with: {target_display}",
             font=FONT_SMALL, text_color=C_MUTED, anchor="w",
-        ).pack(fill="x", padx=14, pady=(0, 4))
-
-        # Show up to 3 filenames inline; collapse the rest to a count.
-        # This keeps widget count O(1) per card regardless of how many files
-        # a post contains, preventing X pixmap exhaustion on large posts.
-        _PREVIEW_MAX = 3
-        preview_names = [os.path.basename(p) or p for p in item_paths[:_PREVIEW_MAX]]
-        overflow     = len(item_paths) - _PREVIEW_MAX
-        file_summary = "\n".join(preview_names)
-        if overflow > 0:
-            file_summary += f"\n  … and {overflow} more file{'s' if overflow != 1 else ''}"
-        files_frame = ctk.CTkFrame(card, fg_color=C_ELEVATED, corner_radius=8)
-        files_frame.pack(fill="x", padx=14, pady=(2, 8))
-        ctk.CTkLabel(
-            files_frame, text=file_summary,
-            font=FONT_SMALL, text_color=C_TEXT,
-            anchor="w", justify="left", wraplength=860,
-        ).pack(fill="x", padx=10, pady=6)
+        ).pack(fill="x", padx=12, pady=(0, 4))
 
         btn_row = ctk.CTkFrame(card, fg_color="transparent")
-        btn_row.pack(fill="x", padx=14, pady=(0, 10))
+        btn_row.pack(fill="x", padx=12, pady=(0, 7))
         ctk.CTkButton(
             btn_row, text="Edit Caption", width=100, height=28,
             fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
@@ -2692,7 +2675,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 return
             for w in self._shared_dirs_list_frame.winfo_children():
                 w.destroy()
-            self._shared_dirs_list_frame.update_idletasks()
 
             matching_entries = [
                 (idx, entry) for idx, entry in enumerate(self._shared_dirs)
@@ -3601,27 +3583,28 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         except Exception:
             pass
 
-        logs = get_logs()
-        if query:
-            logs = [e for e in logs if query in e["message"].lower()]
+        def _fetch():
+            logs = get_logs()
+            if query:
+                logs = [e for e in logs if query in e["message"].lower()]
+            logs = logs[-500:]
+            self.after(0, lambda: _render(logs, query))
 
-        # Cap to last 500 entries so the textbox never grows unbounded
-        logs = logs[-500:]
+        def _render(logs, q):
+            last_ts = logs[-1]["time"] if logs else 0
+            cached_ts = self._last_logs_cache[-1]["time"] if self._last_logs_cache else -1
+            if (len(logs) == len(self._last_logs_cache) and last_ts == cached_ts
+                    and q == self._last_logs_query):
+                return
+            self._log_box.configure(state="normal")
+            self._log_box.delete("1.0", "end")
+            self._log_box.configure(state="disabled")
+            for entry in reversed(logs):
+                self._insert_log_line(self._log_box, entry)
+            self._last_logs_cache = logs.copy()
+            self._last_logs_query = q
 
-        # Fast change detection: compare length + last timestamp instead of full list equality
-        last_ts = logs[-1]["time"] if logs else 0
-        cached_ts = self._last_logs_cache[-1]["time"] if self._last_logs_cache else -1
-        if (len(logs) == len(self._last_logs_cache) and last_ts == cached_ts
-                and query == self._last_logs_query):
-            return
-
-        self._log_box.configure(state="normal")
-        self._log_box.delete("1.0", "end")
-        self._log_box.configure(state="disabled")
-        for entry in reversed(logs):
-            self._insert_log_line(self._log_box, entry)
-        self._last_logs_cache = logs.copy()
-        self._last_logs_query = query
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def _clear_logs(self):
         clear_logs()
@@ -3868,6 +3851,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         for w in self._hist_scroll.winfo_children():
             w.destroy()
+        try:
+            self._hist_scroll._parent_canvas.yview_moveto(0)
+        except Exception:
+            pass
 
         if not sessions:
             empty = ctk.CTkFrame(
@@ -3904,7 +3891,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             return f"{mins}m {secs % 60}s" if (secs % 60) else f"{mins}m"
 
         def _build_hist_card(sess):
-            """Build a single history session card."""
+            """Build a single lightweight history session card."""
             outcome = sess.get("outcome", "completed")
             label, fg, bg = OUTCOME_CFG.get(outcome, ("Unknown", C_ACCENT, C_SOFT_BLUE))
             device_label = sess.get("device_name") or sess.get("device_id") or "Unknown device"
@@ -3915,63 +3902,59 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             errors       = sess.get("errors",      0)
             dur_ms       = sess.get("duration_ms", 0)
 
-            card = ctk.CTkFrame(
-                self._hist_scroll, fg_color=C_SURFACE,
-                corner_radius=8, border_width=1, border_color=C_BORDER,
-            )
-            card.pack(fill="x", padx=4, pady=2)
-
-            accent_bar = ctk.CTkFrame(card, width=3, fg_color=fg, corner_radius=0)
-            accent_bar.pack(side="left", fill="y")
-
-            body = ctk.CTkFrame(card, fg_color="transparent")
-            body.pack(side="left", fill="both", expand=True, padx=(8, 10), pady=(4, 4))
-
-            badge_pill = ctk.CTkFrame(body, fg_color=bg, corner_radius=6)
-            badge_pill.pack(side="left", padx=(0, 6))
-            ctk.CTkLabel(
-                badge_pill, text=label, font=ctk.CTkFont(family="Segoe UI Variable Text", size=9, weight="bold"),
-                text_color=fg,
-            ).pack(padx=6, pady=1)
-
-            if trigger == "auto":
-                auto_pill = ctk.CTkFrame(
-                    body, fg_color=C_ELEVATED, corner_radius=6, border_width=1, border_color=C_BORDER,
-                )
-                auto_pill.pack(side="left", padx=(0, 6))
-                ctk.CTkLabel(
-                    auto_pill, text="AUTO", font=ctk.CTkFont(family="Segoe UI Variable Text", size=8, weight="bold"),
-                    text_color=C_MUTED,
-                ).pack(padx=5, pady=1)
-
-            ctk.CTkLabel(
-                body, text=device_label, font=FONT_SMALL_B, text_color=C_TEXT, anchor="w",
-            ).pack(side="left", padx=(0, 8))
-
             stat_items = []
             if uploaded:
-                stat_items.append(f"⬆︎ {uploaded:,} uploaded")
+                stat_items.append(f"⬆ {uploaded:,}")
             if skipped:
-                stat_items.append(f"✓ {skipped:,} saved")
+                stat_items.append(f"✓ {skipped:,}")
             if not uploaded and not skipped:
                 stat_items.append("0 files")
             if errors:
-                stat_items.append(f"✗ {errors} errors")
+                stat_items.append(f"✗ {errors}")
             if dur_ms:
-                stat_items.append(f"⏱ {_fmt_dur(dur_ms)}")
-
-            stats_str = "   •   ".join(stat_items)
+                stat_items.append(_fmt_dur(dur_ms))
             stats_clr = C_ERROR if errors else (C_SUCCESS if uploaded else C_MUTED)
+            trigger_txt = "  AUTO" if trigger == "auto" else ""
+            stats_str = "  •  ".join(stat_items)
 
-            ctk.CTkLabel(
-                body, text=f"•   {stats_str}", font=FONT_SMALL, text_color=stats_clr, anchor="w",
-            ).pack(side="left")
-            ctk.CTkLabel(
-                body, text=_fmt_ts(started_ts), font=FONT_CAPTION, text_color=C_MUTED, anchor="e",
-            ).pack(side="right")
+            # Single flat frame — no nested body frame, no accent bar frame
+            card = ctk.CTkFrame(
+                self._hist_scroll, fg_color=C_SURFACE,
+                corner_radius=6, border_width=1, border_color=C_BORDER,
+            )
+            card.pack(fill="x", padx=4, pady=1)
+            card.grid_columnconfigure(2, weight=1)
 
-        # Chunked rendering — 8 rows per batch to keep the UI fluid
-        _HIST_CHUNK = 8
+            # Outcome badge (column 0)
+            badge = ctk.CTkFrame(card, fg_color=bg, corner_radius=5, width=72)
+            badge.grid(row=0, column=0, padx=(6, 4), pady=5, sticky="w")
+            badge.grid_propagate(False)
+            ctk.CTkLabel(
+                badge, text=label,
+                font=ctk.CTkFont(family="Segoe UI Variable Text", size=9, weight="bold"),
+                text_color=fg,
+            ).pack(expand=True)
+
+            # Device name (column 1)
+            ctk.CTkLabel(
+                card, text=device_label + trigger_txt,
+                font=FONT_SMALL_B, text_color=C_TEXT, anchor="w",
+            ).grid(row=0, column=1, padx=(0, 8), pady=5, sticky="w")
+
+            # Stats (column 2, expands)
+            ctk.CTkLabel(
+                card, text=stats_str,
+                font=FONT_SMALL, text_color=stats_clr, anchor="w",
+            ).grid(row=0, column=2, padx=0, pady=5, sticky="ew")
+
+            # Timestamp (column 3, right-aligned)
+            ctk.CTkLabel(
+                card, text=_fmt_ts(started_ts),
+                font=FONT_CAPTION, text_color=C_MUTED, anchor="e",
+            ).grid(row=0, column=3, padx=(4, 10), pady=5, sticky="e")
+
+        # Chunked rendering — 20 rows per batch for fast page loads
+        _HIST_CHUNK = 20
 
         def _render_hist_chunk(items_remaining: list):
             if not self._hist_scroll.winfo_exists():
@@ -3983,10 +3966,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._hist_chunk_after_id = self.after(0, lambda: _render_hist_chunk(rest))
             else:
                 self._hist_chunk_after_id = None
-                try:
-                    self._hist_scroll._parent_canvas.yview_moveto(0)
-                except Exception:
-                    pass
 
         _render_hist_chunk(list(page_sessions))
 
@@ -4035,6 +4014,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             frame.grid(row=0, column=0, sticky="nsew")
             self._pages[page] = frame
 
+        # Raise immediately so the UI feels instant
+        self._pages[page].tkraise()
+        self._current_page = page
+
         for name, btn in self._nav_btns.items():
             accent = self._nav_accents[name]
             if name == page:
@@ -4055,9 +4038,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     font=FONT_BODY,
                 )
                 accent.configure(fg_color="transparent")
-
-        self._pages[page].tkraise()
-        self._current_page = page
 
         # Only trigger the refresh for the page we just navigated to.
         if page == "dashboard":
@@ -4141,7 +4121,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         elif page == "history":
             if not self._refresh_in_flight.get("history"):
                 self._refresh_history()
-        self.after(2000, self._auto_refresh)
+        self.after(3000, self._auto_refresh)
 
     # ─── Server Lifecycle Control ─────────────────────────────────────────────
 
