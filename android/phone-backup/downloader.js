@@ -1030,6 +1030,36 @@ export async function getSavedReels(offset = 0, limit = 50) {
 }
 
 /**
+ * Fetch liked reels for this device.
+ * @param {number} [offset=0]
+ * @param {number} [limit=50]
+ * @returns {Promise<{reels: Array<any>, has_more: boolean, total: number}>}
+ */
+export async function getLikedReels(offset = 0, limit = 50) {
+  const { ip, port, key, deviceId } = await getConfig();
+  if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
+  return await fetchJsonWithTimeout(
+    `http://${ip}:${port}/api/reels/liked?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+}
+
+/**
+ * Fetch reposted reels created by this device.
+ * @param {number} [offset=0]
+ * @param {number} [limit=50]
+ * @returns {Promise<{reels: Array<any>, has_more: boolean, total: number}>}
+ */
+export async function getRepostedReels(offset = 0, limit = 50) {
+  const { ip, port, key, deviceId } = await getConfig();
+  if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
+  return await fetchJsonWithTimeout(
+    `http://${ip}:${port}/api/reels/reposted?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+}
+
+/**
  * Post groups shared to this device that it hasn't been notified about yet.
  * @returns {Promise<{posts: Array<{group_id: string, shared_by: string, caption?: string, post_title?: string, item_count: number, created_at: number}>}>}
  */

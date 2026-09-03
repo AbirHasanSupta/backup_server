@@ -3445,13 +3445,32 @@ def toggle_save_reel(device_id: str, reel_id: str, share_id: int, media_id: int 
     """Toggle save status. Returns True if now saved, False if unsaved."""
     conn = get_conn()
     row = conn.execute(
-        "SELECT 1 FROM saved_reels WHERE device_id = ? AND reel_id = ? LIMIT 1",
-        (device_id, str(reel_id)),
+        "SELECT 1 FROM saved_reels WHERE device_id = ? AND (reel_id = ? OR share_id = ?) LIMIT 1",
+        (device_id, str(reel_id), int(share_id)),
     ).fetchone()
     if row:
-        conn.execute("DELETE FROM saved_reels WHERE device_id = ? AND reel_id = ?", (device_id, str(reel_id)))
+        conn.execute(
+            "DELETE FROM saved_reels WHERE device_id = ? AND (reel_id = ? OR share_id = ?)",
+            (device_id, str(reel_id), int(share_id)),
+        )
         saved = False
     else:
+        # Access control: ensure device has permission to view this share before saving
+        access = conn.execute(
+            """
+            SELECT 1 FROM device_shares ds
+            WHERE ds.id = ?
+              AND (
+                ds.shared_by_device_id = ?
+                OR EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
+              )
+            """,
+            (int(share_id), device_id, device_id),
+        ).fetchone()
+        if not access:
+            conn.close()
+            raise PermissionError("Access denied: You do not have permission to save this reel.")
+
         now_ts = int(_time.time())
         conn.execute(
             """
@@ -3478,7 +3497,7 @@ def get_saved_reel_ids(device_id: str) -> set[str]:
 
 
 def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
-    """Return list of saved reels for device_id, newest saved first, with full share metadata."""
+    """Return list of saved reels for device_id, newest saved first, with full share metadata and access control."""
     conn = get_conn()
     rows = conn.execute(
         """
@@ -3497,10 +3516,14 @@ def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
         LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE sr.device_id = ?
+          AND (
+            ds.shared_by_device_id = ?
+            OR EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
+          )
         ORDER BY sr.created_at DESC
         LIMIT ? OFFSET ?
         """,
-        (device_id, limit, offset),
+        (device_id, device_id, device_id, limit, offset),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -3683,3 +3706,66 @@ def cancel_repost(reposter_device_id: str, share_id: int) -> dict:
     # Delete the entire share group and its targets/saves
     deleted = delete_device_share_group(group_id, reposter_device_id)
     return {"ok": deleted, "group_id": group_id}
+
+
+def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
+    """Return list of reels liked/reacted to by device_id, newest reaction first, with full share metadata."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT ds.id AS share_id, ds.id AS reel_id, MAX(r.created_at) AS liked_at, r.emoji AS liked_emoji,
+               ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
+               ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
+               ds.created_at, ds.share_group_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id,
+               d.device_name AS shared_by_name, d.username AS shared_by_username,
+               orig_d.device_name AS orig_shared_by_name, orig_d.username AS orig_shared_by_username,
+               COALESCE(dsg.caption, ds.caption) AS group_caption,
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title
+        FROM reactions r
+        JOIN device_shares ds ON ds.media_id = r.media_id
+        LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
+        LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        WHERE r.source_id = ?
+          AND (
+            ds.shared_by_device_id = ?
+            OR EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
+          )
+        GROUP BY ds.media_id
+        ORDER BY MAX(r.created_at) DESC
+        LIMIT ? OFFSET ?
+        """,
+        (device_id, device_id, device_id, limit, offset),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_reposted_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
+    """Return list of reels reposted by device_id, newest repost first, with full share metadata."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT ds.id AS share_id, ds.id AS reel_id, ds.created_at AS reposted_at,
+               ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
+               ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
+               ds.created_at, ds.share_group_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id,
+               d.device_name AS shared_by_name, d.username AS shared_by_username,
+               orig_d.device_name AS orig_shared_by_name, orig_d.username AS orig_shared_by_username,
+               COALESCE(dsg.caption, ds.caption) AS group_caption,
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title
+        FROM device_shares ds
+        JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
+        WHERE ds.shared_by_device_id = ?
+          AND dsg.post_kind = 'reel_repost'
+        ORDER BY ds.created_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (device_id, limit, offset),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

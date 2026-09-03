@@ -31,6 +31,8 @@ import { useAppTheme } from '@/hooks/use-app-theme';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   getSavedReels,
+  getLikedReels,
+  getRepostedReels,
   getConfig,
   buildSharePreviewUrl,
   buildShareThumbnailUrl,
@@ -83,6 +85,9 @@ export type SavedReelItem = {
   caption: string | null;
   created_at: number;
   saved_at?: number;
+  liked_at?: number;
+  liked_emoji?: string;
+  reposted_at?: number;
   reaction_counts: Record<string, number>;
   user_reactions: string[];
   comment_count: number;
@@ -91,6 +96,14 @@ export type SavedReelItem = {
   is_saved?: boolean;
   group_id?: string | null;
 };
+
+export type LibrarySegment = 'saved' | 'liked' | 'reposts';
+
+const SEGMENTS: { id: LibrarySegment; label: string; androidIcon: string; iosIcon: string }[] = [
+  { id: 'saved', label: 'Saved', androidIcon: 'bookmark', iosIcon: 'bookmark.fill' },
+  { id: 'liked', label: 'Liked', androidIcon: 'favorite', iosIcon: 'heart.fill' },
+  { id: 'reposts', label: 'Reposts', androidIcon: 'repeat', iosIcon: 'arrow.2.squarepath' },
+];
 
 type Comment = {
   id: number;
@@ -263,6 +276,8 @@ type SavedReelCardProps = {
   isActive: boolean;
   serverConfig: ServerConfig;
   muted: boolean;
+  segmentTitle?: string;
+  segmentIndexText?: string;
   onToggleMute: () => void;
   onReact: (item: SavedReelItem, emoji: string) => void;
   onOpenComments: (item: SavedReelItem) => void;
@@ -276,6 +291,8 @@ function SavedReelCard({
   isActive,
   serverConfig,
   muted,
+  segmentTitle,
+  segmentIndexText,
   onToggleMute,
   onReact,
   onOpenComments,
@@ -520,14 +537,26 @@ function SavedReelCard({
         delayLongPress={350}
       />
 
-      {/* Top Left Close Button */}
-      <TouchableOpacity
-        style={[s.viewerCloseBtn, { top: insets.top + Spacing.two }]}
-        onPress={onCloseViewer}
-        hitSlop={14}
-      >
-        <AppIcon androidName="close" iosName="xmark" color="#fff" size={22} />
-      </TouchableOpacity>
+      {/* Top Header Overlay Bar */}
+      <View style={[s.viewerTopBar, { top: insets.top + Spacing.two }]} pointerEvents="box-none">
+        <TouchableOpacity
+          style={s.viewerCloseBtn}
+          onPress={onCloseViewer}
+          hitSlop={14}
+          accessibilityLabel="Close viewer"
+        >
+          <AppIcon androidName="close" iosName="xmark" color="#fff" size={20} />
+        </TouchableOpacity>
+
+        {segmentTitle ? (
+          <View style={s.viewerSegmentBadge}>
+            <Text style={s.viewerSegmentText}>{segmentTitle}</Text>
+            {segmentIndexText ? <Text style={s.viewerIndexText}>{segmentIndexText}</Text> : null}
+          </View>
+        ) : null}
+
+        <View style={{ width: 38 }} />
+      </View>
 
       {/* 2x speed badge */}
       {show2x && (
@@ -841,14 +870,19 @@ function CommentsSheet({
   );
 }
 
-// ─── Main Saved Reels Screen ──────────────────────────────────────────────────
+// ─── Main Reels Library Screen (Saved, Liked, Reposts) ────────────────────────
 
 export default function SavedReelsScreen() {
   const { colors } = useAppTheme();
   const insets = useSafeAreaInsets();
   const router = useRouter();
 
+  const [activeSegment, setActiveSegment] = useState<LibrarySegment>('saved');
+
   const [savedReels, setSavedReels] = useState<SavedReelItem[]>([]);
+  const [likedReels, setLikedReels] = useState<SavedReelItem[]>([]);
+  const [repostedReels, setRepostedReels] = useState<SavedReelItem[]>([]);
+
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -863,23 +897,40 @@ export default function SavedReelsScreen() {
 
   const viewerListRef = useRef<FlatList<SavedReelItem>>(null);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (targetSegment?: LibrarySegment) => {
     try {
       setError(null);
-      const [config, res] = await Promise.all([
-        getConfig(),
-        getSavedReels(0, 100),
-      ]);
+      const config = await getConfig();
       setServerConfig(config);
-      const items = Array.isArray(res?.reels) ? res.reels : [];
-      setSavedReels(items);
+
+      const [savedRes, likedRes, repostedRes] = await Promise.allSettled([
+        getSavedReels(0, 100),
+        getLikedReels(0, 100),
+        getRepostedReels(0, 100),
+      ]);
+
+      if (savedRes.status === 'fulfilled') {
+        setSavedReels(Array.isArray(savedRes.value?.reels) ? savedRes.value.reels : []);
+      }
+      if (likedRes.status === 'fulfilled') {
+        setLikedReels(Array.isArray(likedRes.value?.reels) ? likedRes.value.reels : []);
+      }
+      if (repostedRes.status === 'fulfilled') {
+        setRepostedReels(Array.isArray(repostedRes.value?.reels) ? repostedRes.value.reels : []);
+      }
+
+      const seg = targetSegment || activeSegment;
+      const currentRes = seg === 'saved' ? savedRes : seg === 'liked' ? likedRes : repostedRes;
+      if (currentRes.status === 'rejected') {
+        setError(currentRes.reason?.message || 'Failed to load reels');
+      }
     } catch (e: any) {
-      setError(e?.message || 'Failed to load saved reels');
+      setError(e?.message || 'Failed to load reels');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [activeSegment]);
 
   useEffect(() => {
     void loadData();
@@ -902,48 +953,95 @@ export default function SavedReelsScreen() {
     void loadData();
   }, [loadData]);
 
+  const currentReels = useMemo(() => {
+    if (activeSegment === 'saved') return savedReels;
+    if (activeSegment === 'liked') return likedReels;
+    return repostedReels;
+  }, [activeSegment, savedReels, likedReels, repostedReels]);
+
   const handleToggleSave = useCallback(async (item: SavedReelItem) => {
     hapticSelection();
-    // Optimistic removal from saved reels list
+    const willBeSaved = !item.is_saved;
+
+    // Update across all lists
     setSavedReels(prev => {
-      const next = prev.filter(r => r.reel_id !== item.reel_id);
-      if (next.length === 0) {
+      if (willBeSaved) {
+        return [{ ...item, is_saved: true }, ...prev];
+      }
+      const next = prev.filter(r => r.reel_id !== item.reel_id && r.share_id !== item.share_id);
+      if (activeSegment === 'saved' && next.length === 0) {
         setViewerIndex(null);
       }
       return next;
     });
+
+    setLikedReels(prev => prev.map(r =>
+      (r.reel_id === item.reel_id || r.share_id === item.share_id) ? { ...r, is_saved: willBeSaved } : r
+    ));
+
+    setRepostedReels(prev => prev.map(r =>
+      (r.reel_id === item.reel_id || r.share_id === item.share_id) ? { ...r, is_saved: willBeSaved } : r
+    ));
+
     try {
       await toggleSaveReel(item.reel_id, item.share_id, item.media_id ?? undefined);
     } catch {
       // Rollback on failure
-      setSavedReels(prev => [item, ...prev]);
+      setSavedReels(prev => {
+        if (willBeSaved) {
+          return prev.filter(r => r.reel_id !== item.reel_id && r.share_id !== item.share_id);
+        }
+        return [{ ...item, is_saved: true }, ...prev];
+      });
       hapticError();
     }
-  }, []);
+  }, [activeSegment]);
 
   const handleCommentAdded = useCallback((reelId: string) => {
-    setSavedReels(prev => prev.map(r =>
+    const updater = (prev: SavedReelItem[]) => prev.map(r =>
       r.reel_id === reelId ? { ...r, comment_count: r.comment_count + 1 } : r
-    ));
+    );
+    setSavedReels(updater);
+    setLikedReels(updater);
+    setRepostedReels(updater);
   }, []);
 
   const handleCommentDeleted = useCallback((reelId: string) => {
-    setSavedReels(prev => prev.map(r =>
+    const updater = (prev: SavedReelItem[]) => prev.map(r =>
       r.reel_id === reelId ? { ...r, comment_count: Math.max(0, r.comment_count - 1) } : r
-    ));
+    );
+    setSavedReels(updater);
+    setLikedReels(updater);
+    setRepostedReels(updater);
   }, []);
 
   const handleReact = useCallback(async (item: SavedReelItem, emoji: string) => {
     if (item.media_id == null) return;
     try {
       const res = await reactToMedia(item.media_id, emoji);
-      setSavedReels(prev => prev.map(r =>
-        r.reel_id === item.reel_id
+      const isNowReacted = (res.user_reactions?.length ?? 0) > 0;
+
+      const updater = (prev: SavedReelItem[]) => prev.map(r =>
+        r.reel_id === item.reel_id || r.media_id === item.media_id
           ? { ...r, reaction_counts: res.counts ?? r.reaction_counts, user_reactions: res.user_reactions ?? r.user_reactions }
           : r
-      ));
-    } catch { hapticError(); }
-  }, []);
+      );
+
+      setSavedReels(updater);
+      setRepostedReels(updater);
+
+      setLikedReels(prev => {
+        if (!isNowReacted && activeSegment === 'liked') {
+          const filtered = prev.filter(r => r.reel_id !== item.reel_id && r.media_id !== item.media_id);
+          if (filtered.length === 0) setViewerIndex(null);
+          return filtered;
+        }
+        return updater(prev);
+      });
+    } catch {
+      hapticError();
+    }
+  }, [activeSegment]);
 
   const handleOpenRepost = useCallback((item: SavedReelItem) => {
     if (item.user_has_reposted) {
@@ -957,15 +1055,25 @@ export default function SavedReelsScreen() {
             onPress: async () => {
               try {
                 await cancelRepostReel(item.share_id);
-                setSavedReels(prev => prev.map(r =>
-                  r.reel_id === item.reel_id
+                const updater = (prev: SavedReelItem[]) => prev.map(r =>
+                  r.reel_id === item.reel_id || r.share_id === item.share_id
                     ? {
                         ...r,
                         user_has_reposted: false,
                         repost_count: Math.max(0, (r.repost_count || 1) - 1),
                       }
                     : r
-                ));
+                );
+                setSavedReels(updater);
+                setLikedReels(updater);
+
+                setRepostedReels(prev => {
+                  const filtered = prev.filter(r => r.reel_id !== item.reel_id && r.share_id !== item.share_id);
+                  if (activeSegment === 'reposts' && filtered.length === 0) {
+                    setViewerIndex(null);
+                  }
+                  return filtered;
+                });
                 hapticSuccess();
               } catch (err: any) {
                 hapticError();
@@ -983,21 +1091,24 @@ export default function SavedReelsScreen() {
     } else {
       setRepostTarget(item);
     }
-  }, []);
+  }, [activeSegment]);
 
   const handleRepostSubmit = useCallback(async (targetDeviceIds: string[], caption: string) => {
     if (!repostTarget) return;
     try {
       await repostReel(repostTarget.share_id, targetDeviceIds, caption);
-      setSavedReels(prev => prev.map(r =>
-        r.reel_id === repostTarget.reel_id
+      const updater = (prev: SavedReelItem[]) => prev.map(r =>
+        r.reel_id === repostTarget.reel_id || r.share_id === repostTarget.share_id
           ? {
               ...r,
               user_has_reposted: true,
               repost_count: (r.repost_count || 0) + 1,
             }
           : r
-      ));
+      );
+      setSavedReels(updater);
+      setLikedReels(updater);
+      setRepostedReels(prev => [{ ...repostTarget, user_has_reposted: true, is_repost: true }, ...prev]);
       hapticSuccess();
       setRepostTarget(null);
     } catch (err: any) {
@@ -1056,16 +1167,27 @@ export default function SavedReelsScreen() {
           </View>
         )}
 
-        {/* Top Badges */}
+        {/* Top Badges per active segment */}
         <View style={s.gridTopRow} pointerEvents="none">
           {item.is_repost ? (
             <View style={s.gridPillBadge}>
-              <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color="#fff" size={11} />
+              <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color="#38BDF8" size={12} />
             </View>
           ) : <View />}
-          <View style={s.gridSavedBadge}>
-            <AppIcon androidName="bookmark" iosName="bookmark.fill" color="#FBBF24" size={13} />
-          </View>
+
+          {activeSegment === 'saved' ? (
+            <View style={s.gridSavedBadge}>
+              <AppIcon androidName="bookmark" iosName="bookmark.fill" color="#FBBF24" size={13} />
+            </View>
+          ) : activeSegment === 'liked' ? (
+            <View style={s.gridLikedBadge}>
+              <AppIcon androidName="favorite" iosName="heart.fill" color="#FF2D55" size={13} />
+            </View>
+          ) : (
+            <View style={s.gridRepostBadge}>
+              <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color="#38BDF8" size={13} />
+            </View>
+          )}
         </View>
 
         {/* Bottom Card Overlay */}
@@ -1088,7 +1210,13 @@ export default function SavedReelsScreen() {
         </View>
       </TouchableOpacity>
     );
-  }, [serverConfig, openViewerAt]);
+  }, [serverConfig, activeSegment, openViewerAt]);
+
+  const segmentTitle = useMemo(() => {
+    if (activeSegment === 'saved') return 'Saved Reels';
+    if (activeSegment === 'liked') return 'Liked Reels';
+    return 'Reposted Reels';
+  }, [activeSegment]);
 
   return (
     <View style={[s.screen, { backgroundColor: colors.bg, paddingTop: insets.top }]}>
@@ -1112,10 +1240,10 @@ export default function SavedReelsScreen() {
         </TouchableOpacity>
 
         <View style={s.headerTitleWrap}>
-          <Text style={[s.headerTitle, { color: colors.text }]}>Saved Reels</Text>
-          {savedReels.length > 0 && (
+          <Text style={[s.headerTitle, { color: colors.text }]}>Reels Library</Text>
+          {currentReels.length > 0 && (
             <View style={[s.countBadge, { backgroundColor: colors.primarySoft }]}>
-              <Text style={[s.countBadgeText, { color: colors.primary }]}>{savedReels.length}</Text>
+              <Text style={[s.countBadgeText, { color: colors.primary }]}>{currentReels.length}</Text>
             </View>
           )}
         </View>
@@ -1123,29 +1251,114 @@ export default function SavedReelsScreen() {
         <View style={{ width: 36 }} />
       </View>
 
+      {/* 3-Segment Switcher Bar */}
+      <View style={[s.segmentBarWrap, { backgroundColor: colors.bg }]}>
+        <View style={[s.segmentBar, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}>
+          {SEGMENTS.map(seg => {
+            const isActive = seg.id === activeSegment;
+            const count =
+              seg.id === 'saved'
+                ? savedReels.length
+                : seg.id === 'liked'
+                ? likedReels.length
+                : repostedReels.length;
+
+            return (
+              <TouchableOpacity
+                key={seg.id}
+                style={[
+                  s.segmentTab,
+                  isActive && [s.segmentTabActive, { backgroundColor: colors.primary }],
+                ]}
+                onPress={() => {
+                  hapticSelection();
+                  setActiveSegment(seg.id);
+                  setViewerIndex(null);
+                }}
+                activeOpacity={0.8}
+                accessibilityLabel={`${seg.label} tab, ${count} items`}
+              >
+                <AppIcon
+                  androidName={seg.androidIcon}
+                  iosName={seg.iosIcon}
+                  color={isActive ? '#FFFFFF' : colors.textSecondary}
+                  size={15}
+                />
+                <Text
+                  style={[
+                    s.segmentTabText,
+                    { color: isActive ? '#FFFFFF' : colors.textSecondary },
+                    isActive && s.segmentTabTextActive,
+                  ]}
+                >
+                  {seg.label}
+                </Text>
+                {count > 0 && (
+                  <View
+                    style={[
+                      s.segmentCountBadge,
+                      {
+                        backgroundColor: isActive
+                          ? 'rgba(255, 255, 255, 0.25)'
+                          : colors.primarySoft,
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        s.segmentCountText,
+                        { color: isActive ? '#FFFFFF' : colors.primary },
+                      ]}
+                    >
+                      {count}
+                    </Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
       {/* Body Content */}
       {loading ? (
         <View style={s.center}>
           <ActivityIndicator color={colors.primary} size="large" />
-          <Text style={[s.loadingText, { color: colors.textSecondary }]}>Loading saved reels…</Text>
+          <Text style={[s.loadingText, { color: colors.textSecondary }]}>Loading {segmentTitle.toLowerCase()}…</Text>
         </View>
       ) : error ? (
         <View style={s.center}>
           <AppIcon androidName="error_outline" iosName="exclamationmark.circle" color={colors.error} size={48} />
-          <Text style={[s.emptyTitle, { color: colors.text }]}>Could not load saved reels</Text>
+          <Text style={[s.emptyTitle, { color: colors.text }]}>Could not load {segmentTitle.toLowerCase()}</Text>
           <Text style={[s.emptyBody, { color: colors.textSecondary }]}>{error}</Text>
-          <TouchableOpacity style={[s.retryBtn, { backgroundColor: colors.primary }]} onPress={loadData}>
+          <TouchableOpacity style={[s.retryBtn, { backgroundColor: colors.primary }]} onPress={() => loadData()}>
             <Text style={s.retryText}>Retry</Text>
           </TouchableOpacity>
         </View>
-      ) : savedReels.length === 0 ? (
+      ) : currentReels.length === 0 ? (
         <View style={s.center}>
           <View style={[s.emptyIconWrap, { backgroundColor: colors.surfaceSoft }]}>
-            <AppIcon androidName="bookmark_border" iosName="bookmark" color={colors.textMuted} size={52} />
+            {activeSegment === 'saved' ? (
+              <AppIcon androidName="bookmark_border" iosName="bookmark" color={colors.textMuted} size={52} />
+            ) : activeSegment === 'liked' ? (
+              <AppIcon androidName="favorite_border" iosName="heart" color={colors.textMuted} size={52} />
+            ) : (
+              <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color={colors.textMuted} size={52} />
+            )}
           </View>
-          <Text style={[s.emptyTitle, { color: colors.text }]}>No Saved Reels Yet</Text>
+          <Text style={[s.emptyTitle, { color: colors.text }]}>
+            {activeSegment === 'saved'
+              ? 'No Saved Reels Yet'
+              : activeSegment === 'liked'
+              ? 'No Liked Reels Yet'
+              : 'No Reposts Yet'}
+          </Text>
           <Text style={[s.emptyBody, { color: colors.textSecondary }]}>
-            Tap the bookmark icon on any reel in the Reels tab to save it here for easy access.
+            {activeSegment === 'saved'
+              ? 'Tap the bookmark icon on any reel in the Reels tab to save it here for easy access.'
+              : activeSegment === 'liked'
+              ? 'Double tap or tap the heart icon on any reel in the Reels tab to add it to your likes.'
+              : 'Share reels to other devices on your network to feature them in your reposts.'}
           </Text>
           <TouchableOpacity
             style={[s.exploreBtn, { backgroundColor: colors.primary }]}
@@ -1156,8 +1369,8 @@ export default function SavedReelsScreen() {
         </View>
       ) : (
         <FlatList
-          data={savedReels}
-          keyExtractor={item => item.reel_id}
+          data={currentReels}
+          keyExtractor={item => `${activeSegment}_${item.reel_id}_${item.share_id}`}
           numColumns={2}
           contentContainerStyle={s.gridListContent}
           columnWrapperStyle={s.gridRow}
@@ -1184,21 +1397,28 @@ export default function SavedReelsScreen() {
           <View style={s.modalContainer}>
             <FlatList
               ref={viewerListRef}
-              data={savedReels}
-              keyExtractor={item => item.reel_id}
-              initialScrollIndex={viewerIndex}
+              data={currentReels}
+              keyExtractor={item => `${activeSegment}_viewer_${item.reel_id}_${item.share_id}`}
+              initialScrollIndex={viewerIndex != null && viewerIndex < currentReels.length ? viewerIndex : 0}
               getItemLayout={(_, index) => ({ length: SCREEN_H, offset: SCREEN_H * index, index })}
               pagingEnabled
               showsVerticalScrollIndicator={false}
               onViewableItemsChanged={onViewerItemsChanged}
               viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
+              onScrollToIndexFailed={info => {
+                setTimeout(() => {
+                  viewerListRef.current?.scrollToIndex({ index: Math.min(info.index, currentReels.length - 1), animated: false });
+                }, 50);
+              }}
               renderItem={({ item, index }) => (
                 <SavedReelCard
-                  key={item.reel_id}
+                  key={`${activeSegment}_card_${item.reel_id}`}
                   item={item}
                   isActive={index === activeViewerIndex}
                   serverConfig={serverConfig}
                   muted={muted}
+                  segmentTitle={segmentTitle}
+                  segmentIndexText={`${index + 1} / ${currentReels.length}`}
                   onToggleMute={handleToggleMute}
                   onReact={handleReact}
                   onOpenComments={setCommentsTarget}
@@ -1245,7 +1465,7 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: Spacing.four,
-    paddingVertical: Spacing.three,
+    paddingVertical: Spacing.two + 2,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   headerBackBtn: {
@@ -1274,6 +1494,50 @@ const s = StyleSheet.create({
     fontSize: TextScale.xs,
     fontWeight: '800',
   },
+
+  // ─── Segment Switcher ───
+  segmentBarWrap: {
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.two + 2,
+  },
+  segmentBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 4,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    gap: 4,
+  },
+  segmentTab: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    borderRadius: Radius.full,
+    gap: 5,
+  },
+  segmentTabActive: {
+    ...Shadows.card,
+  },
+  segmentTabText: {
+    fontSize: TextScale.xs,
+    fontWeight: '600',
+  },
+  segmentTabTextActive: {
+    fontWeight: '800',
+  },
+  segmentCountBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: Radius.full,
+    marginLeft: 2,
+  },
+  segmentCountText: {
+    fontSize: 10,
+    fontWeight: '800',
+  },
+
   center: {
     flex: 1,
     alignItems: 'center',
@@ -1328,7 +1592,7 @@ const s = StyleSheet.create({
     fontSize: TextScale.sm,
   },
 
-  // Grid
+  // ─── Grid ───
   gridListContent: {
     padding: Spacing.three,
     gap: Spacing.three,
@@ -1364,6 +1628,18 @@ const s = StyleSheet.create({
     borderRadius: Radius.full,
   },
   gridSavedBadge: {
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: Radius.full,
+  },
+  gridLikedBadge: {
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: Radius.full,
+  },
+  gridRepostBadge: {
     backgroundColor: 'rgba(0,0,0,0.6)',
     paddingHorizontal: 6,
     paddingVertical: 3,
@@ -1407,7 +1683,7 @@ const s = StyleSheet.create({
     fontSize: 11,
   },
 
-  // Full-screen viewer modal
+  // ─── Full-screen viewer modal ───
   modalContainer: {
     flex: 1,
     backgroundColor: '#000000',
@@ -1418,18 +1694,45 @@ const s = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
-  viewerCloseBtn: {
+  viewerTopBar: {
     position: 'absolute',
     left: Spacing.four,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    right: Spacing.four,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    zIndex: 40,
+  },
+  viewerCloseBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 40,
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  viewerSegmentBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: Radius.full,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  viewerSegmentText: {
+    color: '#FFFFFF',
+    fontSize: TextScale.xs,
+    fontWeight: '800',
+  },
+  viewerIndexText: {
+    color: 'rgba(255, 255, 255, 0.6)',
+    fontSize: 11,
+    fontWeight: '600',
   },
   speedBadge: {
     position: 'absolute',

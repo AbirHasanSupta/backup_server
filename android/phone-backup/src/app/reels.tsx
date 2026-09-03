@@ -1410,14 +1410,14 @@ export default function ReelsScreen() {
         <Text style={s.headerTitle}>Reels</Text>
 
         <View style={s.headerRightActions}>
-          {/* Saved Reels Screen Redirect */}
+          {/* Reels Library Screen Redirect (Saved, Liked, Reposts) */}
           <TouchableOpacity
             style={s.headerBtn}
             onPress={() => { hapticLight(); router.push('/saved-reels'); }}
             hitSlop={12}
-            accessibilityLabel="Saved Reels"
+            accessibilityLabel="Reels Library"
           >
-            <AppIcon androidName="bookmark" iosName="bookmark.fill" color="#fff" size={18} />
+            <AppIcon androidName="video_library" iosName="play.square.stack.fill" color="#fff" size={18} />
           </TouchableOpacity>
 
           {/* Shuffle Reels */}
