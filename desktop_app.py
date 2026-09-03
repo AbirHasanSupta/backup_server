@@ -2304,7 +2304,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
             # Store for pagination
             self._posts_all_matched = matched
-            self._posts_page = 0       # new filter → back to page 0
+            if not _preserve_scroll:
+                self._posts_page = 0   # new filter → back to page 0
             self._posts_render_page(reset_scroll=not _preserve_scroll)
 
         threading.Thread(target=_fetch, daemon=True).start()
@@ -2322,6 +2323,24 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         start = page * page_size
         end   = min(start + page_size, total)
         page_items = matched[start:end]
+
+        # ── Skip rebuild if page content is unchanged (e.g. auto-refresh with no real changes) ──
+        current_gids = [spec[0] for spec in page_items]
+        rendered_gids = list(self._post_card_widgets.keys())
+        if not reset_scroll and current_gids == rendered_gids:
+            # Data identical, just update labels and restore scroll — no card rebuild needed
+            try:
+                self._posts_count_label.configure(
+                    text=f"{total} post{'s' if total != 1 else ''}" if total else "0 posts"
+                )
+                page_from = start + 1 if total else 0
+                pg_txt = f"Page {page + 1} / {num_pages}  ({page_from}–{end} of {total})" if num_pages > 1 else (f"{total} post{'s' if total != 1 else ''}" if total else "")
+                self._posts_page_lbl.configure(text=pg_txt)
+                self._posts_prev_btn.configure(state="normal" if page > 0 else "disabled")
+                self._posts_next_btn.configure(state="normal" if page < num_pages - 1 else "disabled")
+            except Exception:
+                pass
+            return
 
         # ── Clear existing cards ──────────────────────────────────────────────
         # Cancel any in-progress chunked render before wiping the frame
@@ -2446,12 +2465,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ),
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
-            btn_row, text="Manage Access", width=110, height=28,
-            fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
-            border_width=1, border_color=C_BORDER, corner_radius=7, font=FONT_CAPTION,
-            command=lambda g=gid: self._open_manage_access_dialog(g),
-        ).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(
             btn_row, text="Edit Files", width=90, height=28,
             fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
             border_width=1, border_color=C_BORDER, corner_radius=7, font=FONT_CAPTION,
@@ -2459,6 +2472,12 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 g,
                 next((e[1] for e in self._posts_all_matched if e[0] == g), []),
             ),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            btn_row, text="Manage Access", width=110, height=28,
+            fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER, corner_radius=7, font=FONT_CAPTION,
+            command=lambda g=gid: self._open_manage_access_dialog(g),
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
             btn_row, text="Delete", width=80, height=28,
