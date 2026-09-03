@@ -586,6 +586,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         # Caching & Differential update states
         self._device_card_widgets: dict[str, dict] = {}
+        self._post_card_widgets:   dict[str, dict] = {}
+        self._shared_folder_card_widgets: dict[str, dict] = {}
         self._last_dash_logs: list[dict] = []
         self._last_logs_cache: list[dict] = []
         self._last_logs_query: str = ""
@@ -1807,6 +1809,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._refresh_post_files_list()
 
     def _refresh_post_files_list(self):
+        _saved_files_scroll = 0.0
+        try:
+            _saved_files_scroll = self._post_files_list_frame._parent_canvas.yview()[0]
+        except Exception:
+            pass
         for w in self._post_files_list_frame.winfo_children():
             w.destroy()
         count = len(self._post_selected_files)
@@ -1860,6 +1867,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     font=FONT_CAPTION, state="disabled" if i == 0 else "normal",
                     command=lambda idx=i: self._move_post_file(idx, -1),
                 ).pack(side="right", padx=2)
+            if _saved_files_scroll > 0:
+                try:
+                    self._post_files_list_frame._parent_canvas.yview_moveto(_saved_files_scroll)
+                except Exception:
+                    pass
 
         threading.Thread(target=_measure, daemon=True).start()
 
@@ -1890,6 +1902,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         def _render(all_devs):
             if not self._post_devices_frame.winfo_exists():
                 return
+            _saved_dev_scroll = 0.0
+            try:
+                _saved_dev_scroll = self._post_devices_frame._parent_canvas.yview()[0]
+            except Exception:
+                pass
             for w in self._post_devices_frame.winfo_children():
                 w.destroy()
             self._post_device_vars.clear()
@@ -1927,6 +1944,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     border_color=C_BORDER, fg_color=C_ACCENT,
                 ).pack(anchor="w", padx=8, pady=3)
                 self._post_device_vars[did] = var
+            if _saved_dev_scroll > 0:
+                try:
+                    self._post_devices_frame._parent_canvas.yview_moveto(_saved_dev_scroll)
+                except Exception:
+                    pass
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -2089,6 +2111,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._posts_chunk_after_id = None
         for w in self._post_posts_frame.winfo_children():
             w.destroy()
+        try:
+            self._post_posts_frame._parent_canvas.yview_moveto(0)
+        except Exception:
+            pass
         # Muted "loading" placeholder — visible instantly
         loading = ctk.CTkFrame(
             self._post_posts_frame, fg_color=C_SURFACE,
@@ -2164,7 +2190,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._posts_device_filter_var.set("All devices")
         self._refresh_post_posts_list(_show_loading=True)
 
-    def _refresh_post_posts_list(self, force: bool = False, _show_loading: bool = False):
+    def _refresh_post_posts_list(self, force: bool = False, _show_loading: bool = False, _preserve_scroll: bool = False):
         self._posts_search_after_id = None
         if self._refresh_in_flight.get("posts"):
             return
@@ -2279,11 +2305,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             # Store for pagination
             self._posts_all_matched = matched
             self._posts_page = 0       # new filter → back to page 0
-            self._posts_render_page()
+            self._posts_render_page(reset_scroll=not _preserve_scroll)
 
         threading.Thread(target=_fetch, daemon=True).start()
 
-    def _posts_render_page(self):
+    def _posts_render_page(self, reset_scroll: bool = True):
         """Render the current page of matched posts without blocking the UI."""
         matched    = self._posts_all_matched
         page       = self._posts_page
@@ -2307,12 +2333,21 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 pass
             self._posts_chunk_after_id = None
 
+        saved_scroll = 0.0
+        if not reset_scroll:
+            try:
+                saved_scroll = self._post_posts_frame._parent_canvas.yview()[0]
+            except Exception:
+                pass
+
         for w in self._post_posts_frame.winfo_children():
             w.destroy()
-        try:
-            self._post_posts_frame._parent_canvas.yview_moveto(0)
-        except Exception:
-            pass
+        self._post_card_widgets.clear()
+        if reset_scroll:
+            try:
+                self._post_posts_frame._parent_canvas.yview_moveto(0)
+            except Exception:
+                pass
 
         # Update count + pagination labels
         try:
@@ -2350,6 +2385,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._posts_chunk_after_id = self.after(0, lambda: _render_chunk(rest))
             else:
                 self._posts_chunk_after_id = None
+                if not reset_scroll and saved_scroll > 0:
+                    try:
+                        self._post_posts_frame._parent_canvas.yview_moveto(saved_scroll)
+                    except Exception:
+                        pass
 
         _render_chunk(list(page_items))
 
@@ -2375,20 +2415,24 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         top = ctk.CTkFrame(card, fg_color="transparent")
         top.pack(fill="x", padx=12, pady=(7, 1))
-        ctk.CTkLabel(
+        caption_lbl = ctk.CTkLabel(
             top, text=caption or "(no caption)",
             font=FONT_BODY_B, text_color=C_TEXT, anchor="w",
-        ).pack(side="left", fill="x", expand=True)
+        )
+        caption_lbl.pack(side="left", fill="x", expand=True)
         timestamp = f"{date_text}  ·  {fmt_rel(created_at)}" if date_text else fmt_rel(created_at)
         ctk.CTkLabel(top, text=timestamp, font=FONT_CAPTION, text_color=C_MUTED, anchor="e").pack(side="right")
 
         target_display = ", ".join(target_names) or "No devices"
         author = head.get("sharer_device_id") or "Desktop"
-        ctk.CTkLabel(
+        meta_lbl = ctk.CTkLabel(
             card,
             text=f"{len(items)} file{'s' if len(items) != 1 else ''}   •   {author}   •   Shared with: {target_display}",
             font=FONT_SMALL, text_color=C_MUTED, anchor="w",
-        ).pack(fill="x", padx=12, pady=(0, 4))
+        )
+        meta_lbl.pack(fill="x", padx=12, pady=(0, 4))
+
+        self._post_card_widgets[gid] = {"caption_lbl": caption_lbl, "meta_lbl": meta_lbl}
 
         btn_row = ctk.CTkFrame(card, fg_color="transparent")
         btn_row.pack(fill="x", padx=12, pady=(0, 7))
@@ -2396,7 +2440,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             btn_row, text="Edit Caption", width=100, height=28,
             fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
             border_width=1, border_color=C_BORDER, corner_radius=7, font=FONT_CAPTION,
-            command=lambda g=gid, c=head.get("group_caption"): self._open_edit_caption_dialog(g, c),
+            command=lambda g=gid: self._open_edit_caption_dialog(
+                g,
+                next((e[7] for e in self._posts_all_matched if e[0] == g), None),
+            ),
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
             btn_row, text="Manage Access", width=110, height=28,
@@ -2408,7 +2455,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             btn_row, text="Edit Files", width=90, height=28,
             fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
             border_width=1, border_color=C_BORDER, corner_radius=7, font=FONT_CAPTION,
-            command=lambda g=gid, i=items: self._open_edit_files_dialog(g, i),
+            command=lambda g=gid: self._open_edit_files_dialog(
+                g,
+                next((e[1] for e in self._posts_all_matched if e[0] == g), []),
+            ),
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
             btn_row, text="Delete", width=80, height=28,
@@ -2434,7 +2484,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         def _save():
             edit_device_share_group_caption(group_id, DESKTOP_SHARE_DEVICE_ID, box.get("1.0", "end").strip())
             dialog.destroy()
-            self._refresh_post_posts_list()
+            self._refresh_post_card(group_id)
 
         ctk.CTkButton(
             dialog, text="Save Caption", height=36,
@@ -2554,7 +2604,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 for did in to_remove:
                     remove_share_group_target(group_id, did, DESKTOP_SHARE_DEVICE_ID)
                 dialog.destroy()
-                self._refresh_post_posts_list()
+                self._refresh_post_card(group_id)
 
             footer = ctk.CTkFrame(dialog, fg_color="transparent")
             footer.pack(fill="x", padx=20, pady=(0, 16))
@@ -2572,6 +2622,59 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         threading.Thread(target=_fetch, daemon=True).start()
 
+    def _refresh_post_card(self, group_id: str):
+        try:
+            scroll_pos = self._post_posts_frame._parent_canvas.yview()[0]
+        except Exception:
+            scroll_pos = 0.0
+
+        def _fetch():
+            try:
+                rows    = [r for r in get_device_shares_by_sharer(DESKTOP_SHARE_DEVICE_ID)
+                           if r.get("share_group_id") == group_id]
+                targets = get_share_targets_for_group(group_id, DESKTOP_SHARE_DEVICE_ID)
+            except Exception:
+                rows, targets = [], []
+            self.after(0, lambda: _apply(rows, targets))
+
+        def _apply(rows, targets):
+            if not rows:
+                return
+            head         = rows[0]
+            target_names = [format_display_name(t) for t in targets]
+            target_ids   = {t.get("target_device_id") for t in targets}
+            created_at   = int(head.get("created_at") or 0)
+            date_text    = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d") if created_at else ""
+            caption      = head.get("group_caption") or head.get("caption") or ""
+            item_paths   = [str(r.get("relative_path") or "") for r in rows]
+
+            for i, entry in enumerate(self._posts_all_matched):
+                if entry[0] == group_id:
+                    self._posts_all_matched[i] = (
+                        group_id, rows, head, target_ids, target_names,
+                        date_text, created_at, caption, item_paths,
+                    )
+                    break
+
+            widgets = self._post_card_widgets.get(group_id)
+            if widgets:
+                try:
+                    widgets["caption_lbl"].configure(text=caption or "(no caption)")
+                    author         = head.get("sharer_device_id") or "Desktop"
+                    target_display = ", ".join(target_names) or "No devices"
+                    widgets["meta_lbl"].configure(
+                        text=f"{len(rows)} file{'s' if len(rows) != 1 else ''}   •   {author}   •   Shared with: {target_display}"
+                    )
+                except Exception:
+                    pass
+
+            try:
+                self._post_posts_frame._parent_canvas.yview_moveto(scroll_pos)
+            except Exception:
+                pass
+
+        threading.Thread(target=_fetch, daemon=True).start()
+
     def _open_edit_files_dialog(self, group_id: str, items: list[dict]):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Edit Post Files")
@@ -2583,10 +2686,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         file_list: list[dict] = [
             {
-                "source_type": it.get("source_type", "desktop"),
-                "source_key": it.get("source_key", DESKTOP_SHARE_DEVICE_ID),
+                "source_type":   it.get("source_type", "desktop"),
+                "source_key":    it.get("source_key", DESKTOP_SHARE_DEVICE_ID),
                 "relative_path": it.get("relative_path", ""),
-                "size": int(it.get("size") or 0),
+                "size":          int(it.get("size") or 0),
                 "modified_time": int(it.get("modified_time") or 0),
             }
             for it in items
@@ -2613,8 +2716,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 return
             last = len(file_list) - 1
             for i, item in enumerate(file_list):
-                path = item["relative_path"]
-                fname = os.path.basename(path) or path
+                path     = item["relative_path"]
+                fname    = os.path.basename(path) or path
                 size_txt = fmt_bytes(item["size"]) if item["size"] else ""
                 row = ctk.CTkFrame(list_frame, fg_color="transparent")
                 row.pack(fill="x", pady=2)
@@ -2662,10 +2765,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     continue
                 try:
                     file_list.append({
-                        "source_type": "desktop",
-                        "source_key": DESKTOP_SHARE_DEVICE_ID,
+                        "source_type":   "desktop",
+                        "source_key":    DESKTOP_SHARE_DEVICE_ID,
                         "relative_path": abs_p,
-                        "size": os.path.getsize(p),
+                        "size":          os.path.getsize(p),
                         "modified_time": int(os.path.getmtime(p)),
                     })
                 except Exception:
@@ -2677,7 +2780,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 messagebox.showwarning("No files", "Post must have at least one file.", parent=dialog)
                 return
             save_btn.configure(state="disabled", text="Saving…")
-
             snapshot = list(file_list)
 
             def _run():
@@ -2686,8 +2788,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 def _finish():
                     save_btn.configure(state="normal", text="Save Changes")
                     if ok:
-                        self._posts_cache_key = ""
-                        self._refresh_post_posts_list()
+                        self._refresh_post_card(group_id)
                         dialog.destroy()
                     else:
                         messagebox.showerror("Error", "Failed to save file changes.", parent=dialog)
@@ -2841,8 +2942,14 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._shared_dirs = fresh
             if not self._shared_dirs_list_frame.winfo_exists():
                 return
+            _saved_shared_scroll = 0.0
+            try:
+                _saved_shared_scroll = self._shared_dirs_list_frame._parent_canvas.yview()[0]
+            except Exception:
+                pass
             for w in self._shared_dirs_list_frame.winfo_children():
                 w.destroy()
+            self._shared_folder_card_widgets.clear()
 
             matching_entries = [
                 (idx, entry) for idx, entry in enumerate(self._shared_dirs)
@@ -2924,9 +3031,18 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     access_text = f"Access: {display_names}"
                     access_color = C_ACCENT
 
-                ctk.CTkLabel(
+                access_lbl = ctk.CTkLabel(
                     row, text=access_text, font=FONT_CAPTION, text_color=access_color, anchor="w",
-                ).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=(1, 10))
+                )
+                access_lbl.grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=(1, 10))
+
+                folder_id = entry.get("id")
+                if folder_id:
+                    self._shared_folder_card_widgets[folder_id] = {
+                        "access_lbl": access_lbl,
+                        "device_names": device_names,
+                        "devices": devices,
+                    }
 
                 actions = ctk.CTkFrame(row, fg_color="transparent")
                 actions.grid(row=0, column=2, rowspan=3, padx=(0, 10), pady=10)
@@ -2949,6 +3065,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     font=FONT_CAPTION, corner_radius=7,
                     command=lambda i=idx: self._remove_shared_folder(i),
                 ).pack()
+            if _saved_shared_scroll > 0:
+                try:
+                    self._shared_dirs_list_frame._parent_canvas.yview_moveto(_saved_shared_scroll)
+                except Exception:
+                    pass
 
         threading.Thread(target=_fetch, daemon=True).start()
 
@@ -3078,7 +3199,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     ["all"] if all_var.get() else [did for did, v in selected_vars.items() if v.get()]
                 )
                 self._save_shared_dirs_to_config()
-                self._refresh_shared_dirs_list()
+                self._refresh_shared_folder_card(entry_id)
                 dialog.destroy()
 
             ctk.CTkButton(
@@ -3088,6 +3209,41 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ).pack(side="right")
 
         threading.Thread(target=_fetch, daemon=True).start()
+
+    def _refresh_shared_folder_card(self, entry_id: str):
+        try:
+            self._shared_dirs = list(load_config().get("SHARED_DIRS", []))
+        except Exception:
+            return
+        entry = next((e for e in self._shared_dirs if e.get("id") == entry_id), None)
+        if not entry:
+            return
+        widgets = self._shared_folder_card_widgets.get(entry_id)
+        if not widgets:
+            return
+        access_lbl   = widgets.get("access_lbl")
+        device_names = widgets.get("device_names", {})
+        devices      = widgets.get("devices", [])
+        if not access_lbl or not access_lbl.winfo_exists():
+            return
+        tagged = set(entry.get("device_ids", []))
+        if "all" in tagged:
+            access_text  = f"Access: All paired devices ({len(devices)})"
+            access_color = C_SUCCESS
+        elif not tagged:
+            access_text  = "Access: No devices selected"
+            access_color = C_MUTED
+        else:
+            names = [device_names.get(str(did), str(did)[-6:]) for did in tagged]
+            display_names = ", ".join(names[:3])
+            if len(names) > 3:
+                display_names += f" +{len(names) - 3}"
+            access_text  = f"Access: {display_names}"
+            access_color = C_ACCENT
+        try:
+            access_lbl.configure(text=access_text, text_color=access_color)
+        except Exception:
+            pass
 
     def _save_shared_dirs_to_config(self):
         try:
@@ -4338,7 +4494,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         elif page == "posts":
             # Skip when user is typing (debounce pending) or a fetch is already running
             if not self._posts_search_after_id and not self._refresh_in_flight.get("posts"):
-                self._refresh_post_posts_list()
+                self._refresh_post_posts_list(_preserve_scroll=True)
         elif page == "logs":
             self._refresh_logs()
         elif page == "history":

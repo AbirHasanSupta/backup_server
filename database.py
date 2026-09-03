@@ -3339,11 +3339,11 @@ def update_share_group_items(group_id: str, requesting_device_id: str, new_items
         _cleanup_persisted_share_files(old_ids)
         conn.execute("DELETE FROM device_shares WHERE share_group_id = ?", (group_id,))
 
-    cap_row = conn.execute(
+    meta = conn.execute(
         "SELECT caption, created_at FROM device_share_groups WHERE id = ?", (group_id,)
     ).fetchone()
-    cap = cap_row["caption"] if cap_row else None
-    now_ts = cap_row["created_at"] if cap_row else int(_time.time())
+    cap    = meta["caption"] if meta else None
+    now_ts = meta["created_at"] if meta else int(_time.time())
 
     for it in new_items:
         source_type   = it["source_type"]
