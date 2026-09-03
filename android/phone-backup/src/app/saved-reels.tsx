@@ -606,7 +606,7 @@ function SavedReelCard({
                 androidName={isLiked ? 'favorite' : 'favorite_border'}
                 iosName={isLiked ? 'heart.fill' : 'heart'}
                 color={isLiked ? '#FF2D55' : '#FFFFFF'}
-                size={30}
+                size={24}
               />
             )}
           </View>
@@ -616,7 +616,7 @@ function SavedReelCard({
         {/* Comments */}
         <TouchableOpacity style={s.actionBtn} onPress={() => { hapticLight(); onOpenComments(item); }} activeOpacity={0.75}>
           <View style={s.actionIconWrap}>
-            <AppIcon androidName="chat_bubble_outline" iosName="bubble.right.fill" color="#FFFFFF" size={28} />
+            <AppIcon androidName="chat_bubble_outline" iosName="bubble.right.fill" color="#FFFFFF" size={23} />
           </View>
           <Text style={s.actionCount}>{item.comment_count > 0 ? item.comment_count : 'Comment'}</Text>
         </TouchableOpacity>
@@ -624,7 +624,7 @@ function SavedReelCard({
         {/* Repost */}
         <TouchableOpacity style={s.actionBtn} onPress={() => { hapticLight(); onOpenRepost(item); }} activeOpacity={0.75}>
           <View style={s.actionIconWrap}>
-            <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color={item.user_has_reposted ? '#38BDF8' : '#FFFFFF'} size={28} />
+            <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color={item.user_has_reposted ? '#38BDF8' : '#FFFFFF'} size={23} />
           </View>
           <Text style={s.actionCount}>{(item.repost_count || 0) > 0 ? item.repost_count : 'Repost'}</Text>
         </TouchableOpacity>
@@ -636,7 +636,7 @@ function SavedReelCard({
               androidName={item.is_saved ? 'bookmark' : 'bookmark_border'}
               iosName={item.is_saved ? 'bookmark.fill' : 'bookmark'}
               color={item.is_saved ? '#FBBF24' : '#FFFFFF'}
-              size={28}
+              size={23}
             />
           </View>
           <Text style={s.actionCount}>{item.is_saved ? 'Saved' : 'Save'}</Text>
@@ -649,7 +649,7 @@ function SavedReelCard({
               androidName={muted ? 'volume_off' : 'volume_up'}
               iosName={muted ? 'speaker.slash.fill' : 'speaker.wave.2.fill'}
               color="#FFFFFF"
-              size={26}
+              size={21}
             />
           </View>
           <Text style={s.actionCount}>{muted ? 'Muted' : 'Sound'}</Text>
@@ -897,6 +897,16 @@ export default function SavedReelsScreen() {
 
   const viewerListRef = useRef<FlatList<SavedReelItem>>(null);
 
+  const isNotOwnReel = useCallback((r: SavedReelItem, deviceId?: string) => {
+    if (!r) return false;
+    if (r.is_own_post) return false;
+    if (deviceId) {
+      if (r.shared_by_device_id === deviceId && !r.is_repost) return false;
+      if (r.original_author?.device_id === deviceId) return false;
+    }
+    return true;
+  }, []);
+
   const loadData = useCallback(async (targetSegment?: LibrarySegment) => {
     try {
       setError(null);
@@ -910,13 +920,16 @@ export default function SavedReelsScreen() {
       ]);
 
       if (savedRes.status === 'fulfilled') {
-        setSavedReels(Array.isArray(savedRes.value?.reels) ? savedRes.value.reels : []);
+        const list = Array.isArray(savedRes.value?.reels) ? savedRes.value.reels : [];
+        setSavedReels(list.filter(r => isNotOwnReel(r, config?.deviceId)));
       }
       if (likedRes.status === 'fulfilled') {
-        setLikedReels(Array.isArray(likedRes.value?.reels) ? likedRes.value.reels : []);
+        const list = Array.isArray(likedRes.value?.reels) ? likedRes.value.reels : [];
+        setLikedReels(list.filter(r => isNotOwnReel(r, config?.deviceId)));
       }
       if (repostedRes.status === 'fulfilled') {
-        setRepostedReels(Array.isArray(repostedRes.value?.reels) ? repostedRes.value.reels : []);
+        const list = Array.isArray(repostedRes.value?.reels) ? repostedRes.value.reels : [];
+        setRepostedReels(list.filter(r => isNotOwnReel(r, config?.deviceId) && Boolean(r.is_repost)));
       }
 
       const seg = targetSegment || activeSegment;
@@ -930,7 +943,7 @@ export default function SavedReelsScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [activeSegment]);
+  }, [activeSegment, isNotOwnReel]);
 
   useEffect(() => {
     void loadData();
@@ -1043,55 +1056,47 @@ export default function SavedReelsScreen() {
     }
   }, [activeSegment]);
 
-  const handleOpenRepost = useCallback((item: SavedReelItem) => {
+  const handleOpenRepost = useCallback(async (item: SavedReelItem) => {
     if (item.user_has_reposted) {
-      Alert.alert(
-        'Repost Options',
-        'You have reposted this reel. Would you like to remove your repost or share with more devices?',
-        [
-          {
-            text: 'Remove Repost',
-            style: 'destructive',
-            onPress: async () => {
-              try {
-                await cancelRepostReel(item.share_id);
-                const updater = (prev: SavedReelItem[]) => prev.map(r =>
-                  r.reel_id === item.reel_id || r.share_id === item.share_id
-                    ? {
-                        ...r,
-                        user_has_reposted: false,
-                        repost_count: Math.max(0, (r.repost_count || 1) - 1),
-                      }
-                    : r
-                );
-                setSavedReels(updater);
-                setLikedReels(updater);
+      hapticLight();
+      const prevSaved = savedReels;
+      const prevLiked = likedReels;
+      const prevReposted = repostedReels;
 
-                setRepostedReels(prev => {
-                  const filtered = prev.filter(r => r.reel_id !== item.reel_id && r.share_id !== item.share_id);
-                  if (activeSegment === 'reposts' && filtered.length === 0) {
-                    setViewerIndex(null);
-                  }
-                  return filtered;
-                });
-                hapticSuccess();
-              } catch (err: any) {
-                hapticError();
-                Alert.alert('Could not cancel repost', err?.message || 'Failed to remove repost.');
-              }
-            },
-          },
-          {
-            text: 'Repost to More Devices...',
-            onPress: () => setRepostTarget(item),
-          },
-          { text: 'Cancel', style: 'cancel' },
-        ],
+      const updater = (prev: SavedReelItem[]) => prev.map(r =>
+        r.reel_id === item.reel_id || r.share_id === item.share_id
+          ? {
+              ...r,
+              user_has_reposted: false,
+              repost_count: Math.max(0, (r.repost_count || 1) - 1),
+            }
+          : r
       );
+      setSavedReels(updater);
+      setLikedReels(updater);
+
+      setRepostedReels(prev => {
+        const filtered = prev.filter(r => r.reel_id !== item.reel_id && r.share_id !== item.share_id);
+        if (activeSegment === 'reposts' && filtered.length === 0) {
+          setViewerIndex(null);
+        }
+        return filtered;
+      });
+
+      try {
+        await cancelRepostReel(item.share_id);
+        hapticSuccess();
+      } catch (err: any) {
+        setSavedReels(prevSaved);
+        setLikedReels(prevLiked);
+        setRepostedReels(prevReposted);
+        hapticError();
+        Alert.alert('Could not cancel repost', err?.message || 'Failed to remove repost.');
+      }
     } else {
       setRepostTarget(item);
     }
-  }, [activeSegment]);
+  }, [activeSegment, savedReels, likedReels, repostedReels]);
 
   const handleRepostSubmit = useCallback(async (targetDeviceIds: string[], caption: string) => {
     if (!repostTarget) return;
@@ -1117,6 +1122,14 @@ export default function SavedReelsScreen() {
     }
   }, [repostTarget]);
 
+  const handleGoBack = useCallback(() => {
+    if (viewerIndex != null) {
+      setViewerIndex(null);
+      return;
+    }
+    router.replace('/reels');
+  }, [viewerIndex, router]);
+
   // Handle hardware back press on Android (and back gesture): returns to normal Reels tab
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -1124,11 +1137,7 @@ export default function SavedReelsScreen() {
         setViewerIndex(null);
         return true;
       }
-      if (router.canGoBack()) {
-        router.back();
-      } else {
-        router.replace('/reels');
-      }
+      router.replace('/reels');
       return true;
     });
     return () => sub.remove();
@@ -1226,13 +1235,7 @@ export default function SavedReelsScreen() {
       <View style={[s.headerBar, { borderBottomColor: colors.surfaceBorder }]}>
         <TouchableOpacity
           style={s.headerBackBtn}
-          onPress={() => {
-            if (router.canGoBack()) {
-              router.back();
-            } else {
-              router.replace('/reels');
-            }
-          }}
+          onPress={handleGoBack}
           hitSlop={14}
           accessibilityLabel="Go back to reels"
         >
@@ -1447,6 +1450,15 @@ export default function SavedReelsScreen() {
         visible={repostTarget != null}
         count={1}
         colors={colors}
+        excludeDeviceIds={
+          repostTarget
+            ? [
+                repostTarget.original_author?.device_id,
+                repostTarget.shared_by_device_id,
+                serverConfig?.deviceId,
+              ].filter(Boolean) as string[]
+            : []
+        }
         onClose={() => setRepostTarget(null)}
         onSubmit={handleRepostSubmit}
       />
@@ -1777,19 +1789,19 @@ const s = StyleSheet.create({
   rightActions: {
     position: 'absolute',
     right: Spacing.three,
-    bottom: 50,
+    bottom: 44,
     alignItems: 'center',
-    gap: Spacing.four,
+    gap: 10,
     zIndex: 35,
   },
   actionBtn: {
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
+    gap: 2,
   },
   actionIconWrap: {
-    width: 44,
-    height: 44,
+    width: 36,
+    height: 36,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -1799,11 +1811,11 @@ const s = StyleSheet.create({
     elevation: 4,
   },
   actionEmojiText: {
-    fontSize: 24,
+    fontSize: 20,
   },
   actionCount: {
     color: '#FFFFFF',
-    fontSize: TextScale.xs,
+    fontSize: 11,
     fontWeight: '700',
     textShadowColor: 'rgba(0, 0, 0, 0.9)',
     textShadowOffset: { width: 0, height: 1 },
@@ -1812,7 +1824,7 @@ const s = StyleSheet.create({
   emojiPicker: {
     position: 'absolute',
     right: Spacing.three,
-    bottom: 160,
+    bottom: 145,
     flexDirection: 'column',
     alignItems: 'center',
     gap: Spacing.two,

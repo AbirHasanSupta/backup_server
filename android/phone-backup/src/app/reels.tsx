@@ -752,7 +752,7 @@ function ReelCard({
                 androidName={isLiked ? 'favorite' : 'favorite_border'}
                 iosName={isLiked ? 'heart.fill' : 'heart'}
                 color={isLiked ? '#FF2D55' : '#FFFFFF'}
-                size={30}
+                size={24}
               />
             )}
           </View>
@@ -772,7 +772,7 @@ function ReelCard({
               androidName="chat_bubble_outline"
               iosName="bubble.right.fill"
               color="#FFFFFF"
-              size={28}
+              size={23}
             />
           </View>
           <Text style={s.actionCount}>
@@ -791,7 +791,7 @@ function ReelCard({
               androidName="repeat"
               iosName="arrow.2.squarepath"
               color={item.user_has_reposted ? '#38BDF8' : '#FFFFFF'}
-              size={28}
+              size={23}
             />
           </View>
           <Text style={s.actionCount}>
@@ -810,7 +810,7 @@ function ReelCard({
               androidName={item.is_saved ? 'bookmark' : 'bookmark_border'}
               iosName={item.is_saved ? 'bookmark.fill' : 'bookmark'}
               color={item.is_saved ? '#FBBF24' : '#FFFFFF'}
-              size={28}
+              size={23}
             />
           </View>
           <Text style={s.actionCount}>
@@ -829,7 +829,7 @@ function ReelCard({
               androidName={muted ? 'volume_off' : 'volume_up'}
               iosName={muted ? 'speaker.slash.fill' : 'speaker.wave.2.fill'}
               color="#FFFFFF"
-              size={26}
+              size={21}
             />
           </View>
           <Text style={s.actionCount}>{muted ? 'Muted' : 'Sound'}</Text>
@@ -1272,41 +1272,27 @@ export default function ReelsScreen() {
     }
   }, []);
 
-  const handleOpenRepost = useCallback((item: ReelItem) => {
+  const handleOpenRepost = useCallback(async (item: ReelItem) => {
     if (item.user_has_reposted) {
-      Alert.alert(
-        'Repost Options',
-        'You have reposted this reel. Would you like to remove your repost or share with more devices?',
-        [
-          {
-            text: 'Remove Repost',
-            style: 'destructive',
-            onPress: async () => {
-              try {
-                await cancelRepostReel(item.share_id);
-                setReels(prev => prev.map(r =>
-                  r.reel_id === item.reel_id
-                    ? {
-                        ...r,
-                        user_has_reposted: false,
-                        repost_count: Math.max(0, (r.repost_count || 1) - 1),
-                      }
-                    : r
-                ));
-                hapticSuccess();
-              } catch (err: any) {
-                hapticError();
-                Alert.alert('Could not cancel repost', err?.message || 'Failed to remove repost.');
-              }
-            },
-          },
-          {
-            text: 'Repost to More Devices...',
-            onPress: () => setRepostTarget(item),
-          },
-          { text: 'Cancel', style: 'cancel' },
-        ],
-      );
+      hapticLight();
+      const prevReels = reelsRef.current;
+      setReels(prev => prev.map(r =>
+        r.reel_id === item.reel_id || r.share_id === item.share_id
+          ? {
+              ...r,
+              user_has_reposted: false,
+              repost_count: Math.max(0, (r.repost_count || 1) - 1),
+            }
+          : r
+      ));
+      try {
+        await cancelRepostReel(item.share_id);
+        hapticSuccess();
+      } catch (err: any) {
+        setReels(prevReels);
+        hapticError();
+        Alert.alert('Could not cancel repost', err?.message || 'Failed to remove repost.');
+      }
     } else {
       setRepostTarget(item);
     }
@@ -1500,6 +1486,15 @@ export default function ReelsScreen() {
         visible={repostTarget != null}
         count={1}
         colors={colors}
+        excludeDeviceIds={
+          repostTarget
+            ? [
+                repostTarget.original_author?.device_id,
+                repostTarget.shared_by_device_id,
+                serverConfig?.deviceId,
+              ].filter(Boolean) as string[]
+            : []
+        }
         onClose={() => setRepostTarget(null)}
         onSubmit={handleRepostSubmit}
       />
@@ -1690,19 +1685,19 @@ const s = StyleSheet.create({
   rightActions: {
     position: 'absolute',
     right: Spacing.three,
-    bottom: Spacing.four,
+    bottom: Spacing.three,
     alignItems: 'center',
-    gap: Spacing.four,
+    gap: 10,
     zIndex: 35,
   },
   actionBtn: {
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
+    gap: 2,
   },
   actionIconWrap: {
-    width: 44,
-    height: 44,
+    width: 36,
+    height: 36,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
@@ -1712,11 +1707,11 @@ const s = StyleSheet.create({
     elevation: 4,
   },
   actionEmojiText: {
-    fontSize: 24,
+    fontSize: 20,
   },
   actionCount: {
     color: '#FFFFFF',
-    fontSize: TextScale.xs,
+    fontSize: 11,
     fontWeight: '700',
     textShadowColor: 'rgba(0, 0, 0, 0.9)',
     textShadowOffset: { width: 0, height: 1 },
@@ -1726,7 +1721,7 @@ const s = StyleSheet.create({
   emojiPicker: {
     position: 'absolute',
     right: Spacing.three,
-    bottom: 140,
+    bottom: 125,
     flexDirection: 'column',
     alignItems: 'center',
     gap: Spacing.two,

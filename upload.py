@@ -2752,7 +2752,7 @@ async def get_saved_reels_endpoint(
     authorization: str = Header(None),
     token: str = None,
 ):
-    """Return paginated list of saved reels for device_id with full media details."""
+    """Return paginated list of saved reels for device_id (excluding own device's reels) with full media details."""
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
 
@@ -2767,8 +2767,13 @@ async def get_saved_reels_endpoint(
 
         reels = []
         for s in saved_rows:
-            is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id"))
+            if s["shared_by_device_id"] == device_id:
+                continue
             orig_id = s.get("original_shared_by_device_id") or s["shared_by_device_id"]
+            if orig_id == device_id:
+                continue
+
+            is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id"))
             orig_name = s.get("orig_shared_by_name") if s.get("original_shared_by_device_id") else s.get("shared_by_name")
             orig_username = s.get("orig_shared_by_username") if s.get("original_shared_by_device_id") else s.get("shared_by_username")
             reposter_name = s.get("shared_by_name")
@@ -2808,7 +2813,7 @@ async def get_saved_reels_endpoint(
                 "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
                 "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
                 "repost_count": repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
-                "is_own_post": s["shared_by_device_id"] == device_id,
+                "is_own_post": False,
                 "is_saved": True,
                 "group_id": s.get("share_group_id"),
             })
@@ -2829,7 +2834,7 @@ async def get_liked_reels_endpoint(
     authorization: str = Header(None),
     token: str = None,
 ):
-    """Return paginated list of reels liked by device_id with full media details."""
+    """Return paginated list of reels liked by device_id (excluding own device's reels) with full media details."""
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
 
@@ -2851,8 +2856,13 @@ async def get_liked_reels_endpoint(
 
         reels = []
         for s in video_rows:
-            is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id"))
+            if s["shared_by_device_id"] == device_id:
+                continue
             orig_id = s.get("original_shared_by_device_id") or s["shared_by_device_id"]
+            if orig_id == device_id:
+                continue
+
+            is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id"))
             orig_name = s.get("orig_shared_by_name") if s.get("original_shared_by_device_id") else s.get("shared_by_name")
             orig_username = s.get("orig_shared_by_username") if s.get("original_shared_by_device_id") else s.get("shared_by_username")
             reposter_name = s.get("shared_by_name")
@@ -2893,7 +2903,7 @@ async def get_liked_reels_endpoint(
                 "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
                 "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
                 "repost_count": repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
-                "is_own_post": s["shared_by_device_id"] == device_id,
+                "is_own_post": False,
                 "is_saved": str(s["share_id"]) in saved_ids,
                 "group_id": s.get("share_group_id"),
             })
@@ -2914,7 +2924,7 @@ async def get_reposted_reels_endpoint(
     authorization: str = Header(None),
     token: str = None,
 ):
-    """Return paginated list of reels reposted by device_id with full media details."""
+    """Return paginated list of reels reposted by device_id (excluding own original posts) with full media details."""
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
 
@@ -2935,8 +2945,13 @@ async def get_reposted_reels_endpoint(
 
         reels = []
         for s in video_rows:
-            is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id")) or bool(s.get("repost_of_share_id"))
             orig_id = s.get("original_shared_by_device_id") or s["shared_by_device_id"]
+            if orig_id == device_id:
+                continue
+            is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id")) or bool(s.get("repost_of_share_id"))
+            if not is_repost:
+                continue
+
             orig_name = s.get("orig_shared_by_name") if s.get("original_shared_by_device_id") else s.get("shared_by_name")
             orig_username = s.get("orig_shared_by_username") if s.get("original_shared_by_device_id") else s.get("shared_by_username")
             reposter_name = s.get("shared_by_name")
@@ -2949,7 +2964,7 @@ async def get_reposted_reels_endpoint(
                 "path": s["relative_path"],
                 "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
                 "shared_by_device_id": s["shared_by_device_id"],
-                "is_repost": is_repost,
+                "is_repost": True,
                 "user_has_reposted": True,
                 "original_author": {
                     "device_id": orig_id,
@@ -2962,7 +2977,7 @@ async def get_reposted_reels_endpoint(
                     "name": reposter_name,
                     "username": reposter_username,
                     "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
-                } if is_repost else None,
+                },
                 "caption": s.get("group_caption") or s.get("caption"),
                 "created_at": s["created_at"],
                 "reposted_at": s.get("reposted_at"),
@@ -2970,7 +2985,7 @@ async def get_reposted_reels_endpoint(
                 "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
                 "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
                 "repost_count": repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
-                "is_own_post": True,
+                "is_own_post": False,
                 "is_saved": str(s["share_id"]) in saved_ids,
                 "group_id": s.get("share_group_id"),
             })

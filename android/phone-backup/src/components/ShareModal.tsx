@@ -34,12 +34,14 @@ export function ShareModal({
   visible,
   count,
   colors,
+  excludeDeviceIds,
   onClose,
   onSubmit,
 }: {
   visible: boolean;
   count: number;
   colors: AppColors;
+  excludeDeviceIds?: string[];
   onClose: () => void;
   onSubmit: (targetIds: string[], caption: string) => Promise<void>;
 }) {
@@ -57,16 +59,17 @@ export function ShareModal({
     setLoading(true);
     setSelected(new Set());
     setCaption('');
+    const excludedSet = new Set(excludeDeviceIds || []);
     listShareTargetDevices()
       .then((res) => {
         if (!active) return;
         const list = Array.isArray(res?.devices) ? res.devices : [];
-        setDevices(list.filter((d) => d.device_id !== 'desktop-server'));
+        setDevices(list.filter((d) => d.device_id !== 'desktop-server' && !excludedSet.has(d.device_id)));
       })
       .catch(() => { if (active) setDevices([]); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [visible]);
+  }, [visible, excludeDeviceIds]);
 
   const toggle = useCallback((id: string) => {
     setSelected((prev) => {

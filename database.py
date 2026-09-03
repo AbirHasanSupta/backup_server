@@ -3442,7 +3442,7 @@ def unsave_reel(device_id: str, reel_id: str) -> bool:
 
 
 def toggle_save_reel(device_id: str, reel_id: str, share_id: int, media_id: int | None = None) -> bool:
-    """Toggle save status. Returns True if now saved, False if unsaved."""
+    """Toggle save status. Returns True if now saved, False if unsaved. Prevents saving own reels."""
     conn = get_conn()
     row = conn.execute(
         "SELECT 1 FROM saved_reels WHERE device_id = ? AND (reel_id = ? OR share_id = ?) LIMIT 1",
@@ -3455,10 +3455,11 @@ def toggle_save_reel(device_id: str, reel_id: str, share_id: int, media_id: int 
         )
         saved = False
     else:
-        # Access control: ensure device has permission to view this share before saving
+        # Access control: ensure device has permission to view this share before saving, and is not saving its own reel
         access = conn.execute(
             """
-            SELECT 1 FROM device_shares ds
+            SELECT ds.shared_by_device_id, ds.original_shared_by_device_id
+            FROM device_shares ds
             WHERE ds.id = ?
               AND (
                 ds.shared_by_device_id = ?
@@ -3470,6 +3471,10 @@ def toggle_save_reel(device_id: str, reel_id: str, share_id: int, media_id: int 
         if not access:
             conn.close()
             raise PermissionError("Access denied: You do not have permission to save this reel.")
+
+        if access["shared_by_device_id"] == device_id or access["original_shared_by_device_id"] == device_id:
+            conn.close()
+            raise PermissionError("Cannot save your own reels.")
 
         now_ts = int(_time.time())
         conn.execute(
@@ -3497,7 +3502,7 @@ def get_saved_reel_ids(device_id: str) -> set[str]:
 
 
 def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
-    """Return list of saved reels for device_id, newest saved first, with full share metadata and access control."""
+    """Return list of saved reels for device_id (excluding own device's reels), newest saved first."""
     conn = get_conn()
     rows = conn.execute(
         """
@@ -3516,14 +3521,13 @@ def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
         LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE sr.device_id = ?
-          AND (
-            ds.shared_by_device_id = ?
-            OR EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
-          )
+          AND ds.shared_by_device_id != ?
+          AND (ds.original_shared_by_device_id IS NULL OR ds.original_shared_by_device_id != ?)
+          AND EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
         ORDER BY sr.created_at DESC
         LIMIT ? OFFSET ?
         """,
-        (device_id, device_id, device_id, limit, offset),
+        (device_id, device_id, device_id, device_id, limit, offset),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -3533,12 +3537,9 @@ def repost_reel(shared_by_device_id: str, share_id: int, target_device_ids: list
     """
     Repost an existing reel to specified target devices with post_kind='reel_repost'.
     Stores original creator reference so both reposter and original author info are preserved.
+    Prevents reposting own reels and excludes the original author and self from targets to eliminate loops.
     """
     import uuid as _uuid
-    targets = [t for t in (target_device_ids or []) if t and t != shared_by_device_id]
-    if not targets:
-        return {"ok": False, "error": "Select at least one target device to repost to."}
-
     conn = get_conn()
     orig = conn.execute(
         """
@@ -3555,18 +3556,31 @@ def repost_reel(shared_by_device_id: str, share_id: int, target_device_ids: list
         conn.close()
         return {"ok": False, "error": "Reel to repost was not found."}
 
-    # Access control: reposter must be the sharer or an authorized recipient
-    if orig["shared_by_device_id"] != shared_by_device_id:
-        recipient = conn.execute(
-            "SELECT 1 FROM device_share_targets WHERE share_id = ? AND target_device_id = ?",
-            (int(share_id), shared_by_device_id),
-        ).fetchone()
-        if not recipient:
-            conn.close()
-            return {"ok": False, "error": "You do not have permission to repost this reel."}
-
     # If already a repost, preserve original author, otherwise sharer is original author
     orig_creator_id = orig["original_shared_by_device_id"] or orig["shared_by_device_id"]
+
+    # Prevent reposting own reel
+    if orig_creator_id == shared_by_device_id or orig["shared_by_device_id"] == shared_by_device_id:
+        conn.close()
+        return {"ok": False, "error": "You cannot repost your own reel."}
+
+    # Access control: reposter must be an authorized recipient of this share
+    recipient = conn.execute(
+        "SELECT 1 FROM device_share_targets WHERE share_id = ? AND target_device_id = ?",
+        (int(share_id), shared_by_device_id),
+    ).fetchone()
+    if not recipient:
+        conn.close()
+        return {"ok": False, "error": "You do not have permission to repost this reel."}
+
+    # Filter out reposter, original creator, and direct sharer to eliminate looping
+    targets = [
+        t for t in (target_device_ids or [])
+        if t and t != shared_by_device_id and t != orig_creator_id and t != orig["shared_by_device_id"]
+    ]
+    if not targets:
+        conn.close()
+        return {"ok": False, "error": "Cannot repost to the original author or yourself. Select other target devices."}
 
     group_id = str(_uuid.uuid4())
     now_ts = int(_time.time())
@@ -3666,7 +3680,7 @@ def get_user_reposted_media_ids(device_id: str) -> set[int]:
 
 def cancel_repost(reposter_device_id: str, share_id: int) -> dict:
     """
-    Remove a user's repost of a reel.
+    Remove a user's repost of a reel in one operation.
     Finds the repost share group created by this device for this share/media and deletes it.
     """
     conn = get_conn()
@@ -3688,12 +3702,16 @@ def cancel_repost(reposter_device_id: str, share_id: int) -> dict:
             SELECT ds.id, ds.share_group_id, ds.media_id, ds.repost_of_share_id
             FROM device_shares ds
             JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
-            WHERE (ds.repost_of_share_id = ? OR ds.media_id = (SELECT media_id FROM device_shares WHERE id = ?))
-              AND ds.shared_by_device_id = ?
+            WHERE ds.shared_by_device_id = ?
               AND dsg.post_kind = 'reel_repost'
+              AND (
+                ds.repost_of_share_id = ?
+                OR ds.repost_of_share_id = (SELECT repost_of_share_id FROM device_shares WHERE id = ?)
+                OR (ds.media_id IS NOT NULL AND ds.media_id = (SELECT media_id FROM device_shares WHERE id = ?))
+              )
             LIMIT 1
             """,
-            (int(share_id), int(share_id), reposter_device_id),
+            (reposter_device_id, int(share_id), int(share_id), int(share_id)),
         ).fetchone()
 
     if not row:
@@ -3709,7 +3727,7 @@ def cancel_repost(reposter_device_id: str, share_id: int) -> dict:
 
 
 def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
-    """Return list of reels liked/reacted to by device_id, newest reaction first, with full share metadata."""
+    """Return list of reels liked/reacted to by device_id (excluding own device's reels), newest reaction first."""
     conn = get_conn()
     rows = conn.execute(
         """
@@ -3728,22 +3746,21 @@ def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
         LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE r.source_id = ?
-          AND (
-            ds.shared_by_device_id = ?
-            OR EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
-          )
+          AND ds.shared_by_device_id != ?
+          AND (ds.original_shared_by_device_id IS NULL OR ds.original_shared_by_device_id != ?)
+          AND EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
         GROUP BY ds.media_id
         ORDER BY MAX(r.created_at) DESC
         LIMIT ? OFFSET ?
         """,
-        (device_id, device_id, device_id, limit, offset),
+        (device_id, device_id, device_id, device_id, limit, offset),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 def get_reposted_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
-    """Return list of reels shared/reposted by device_id, newest first, with full share metadata."""
+    """Return list of reels reposted by device_id (excluding own original posts), newest first."""
     conn = get_conn()
     rows = conn.execute(
         """
@@ -3761,10 +3778,12 @@ def get_reposted_reels(device_id: str, offset: int = 0, limit: int = 50) -> list
         LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
         LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         WHERE ds.shared_by_device_id = ?
+          AND dsg.post_kind = 'reel_repost'
+          AND (ds.original_shared_by_device_id IS NOT NULL AND ds.original_shared_by_device_id != ?)
         ORDER BY ds.created_at DESC
         LIMIT ? OFFSET ?
         """,
-        (device_id, limit, offset),
+        (device_id, device_id, limit, offset),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
