@@ -3743,7 +3743,7 @@ def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
 
 
 def get_reposted_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
-    """Return list of reels reposted by device_id, newest repost first, with full share metadata."""
+    """Return list of reels shared/reposted by device_id, newest first, with full share metadata."""
     conn = get_conn()
     rows = conn.execute(
         """
@@ -3761,7 +3761,6 @@ def get_reposted_reels(device_id: str, offset: int = 0, limit: int = 50) -> list
         LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
         LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         WHERE ds.shared_by_device_id = ?
-          AND dsg.post_kind = 'reel_repost'
         ORDER BY ds.created_at DESC
         LIMIT ? OFFSET ?
         """,

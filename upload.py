@@ -2543,18 +2543,14 @@ async def get_reels_feed(
         saved_ids = get_saved_reel_ids(device_id)
 
         received = get_device_shares_for_target(device_id)
-        sent = get_device_shares_by_sharer(device_id)
 
         seen_share_ids: set[int] = set()
         all_shares: list[dict] = []
         for s in received:
-            if s["share_id"] not in seen_share_ids:
+            # Own device's shared/reposted reels should not appear in the main reels feed
+            if s["shared_by_device_id"] != device_id and s["share_id"] not in seen_share_ids:
                 seen_share_ids.add(s["share_id"])
-                all_shares.append({**s, "is_own_post": s["shared_by_device_id"] == device_id})
-        for s in sent:
-            if s["share_id"] not in seen_share_ids:
-                seen_share_ids.add(s["share_id"])
-                all_shares.append({**s, "is_own_post": True})
+                all_shares.append({**s, "is_own_post": False})
 
         def _is_video(s):
             ext = os.path.splitext(s["relative_path"])[1].lower()
@@ -2939,6 +2935,7 @@ async def get_reposted_reels_endpoint(
 
         reels = []
         for s in video_rows:
+            is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id")) or bool(s.get("repost_of_share_id"))
             orig_id = s.get("original_shared_by_device_id") or s["shared_by_device_id"]
             orig_name = s.get("orig_shared_by_name") if s.get("original_shared_by_device_id") else s.get("shared_by_name")
             orig_username = s.get("orig_shared_by_username") if s.get("original_shared_by_device_id") else s.get("shared_by_username")
@@ -2952,7 +2949,7 @@ async def get_reposted_reels_endpoint(
                 "path": s["relative_path"],
                 "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
                 "shared_by_device_id": s["shared_by_device_id"],
-                "is_repost": True,
+                "is_repost": is_repost,
                 "user_has_reposted": True,
                 "original_author": {
                     "device_id": orig_id,
@@ -2965,7 +2962,7 @@ async def get_reposted_reels_endpoint(
                     "name": reposter_name,
                     "username": reposter_username,
                     "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
-                },
+                } if is_repost else None,
                 "caption": s.get("group_caption") or s.get("caption"),
                 "created_at": s["created_at"],
                 "reposted_at": s.get("reposted_at"),

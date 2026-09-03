@@ -1157,8 +1157,8 @@ export default function ReelsScreen() {
       const { reels: raw, has_more } = await getReelsFeed(reset ? 0 : offsetRef.current, 30, currentSeed);
       hasMoreRef.current = has_more && raw.length > 0;
       offsetRef.current = reset ? raw.length : offsetRef.current + raw.length;
-
-      const ranked = rankReels(raw, watched, currentSeed, affinity);
+      const filteredRaw = (raw || []).filter(r => !r.is_own_post && (!config?.deviceId || r.shared_by_device_id !== config.deviceId));
+      const ranked = rankReels(filteredRaw, watched, currentSeed, affinity);
       setReels(prev => {
         if (reset) return ranked;
         const existingIds = new Set(prev.map(r => r.reel_id));
