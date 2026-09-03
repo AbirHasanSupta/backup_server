@@ -268,8 +268,12 @@ export async function computeCleanupCandidates(options = {}) {
       });
     }
 
-    if (serverRecord && !file.file_id) {
-      file.file_id = serverRecord.file_id;
+    if (serverRecord) {
+      if (!file.file_id) file.file_id = serverRecord.file_id;
+      if (serverRecord.size > 0) {
+        file.size = serverRecord.size;
+        file.metadataLoaded = true;
+      }
     }
 
     return isLocalBackedUp || isServerBackedUp;
