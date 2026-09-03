@@ -924,6 +924,112 @@ export async function getReelsFeed(offset = 0, limit = 30, seed = 0) {
 }
 
 /**
+ * Repost an existing reel to selected devices with access control.
+ * @param {number} shareId
+ * @param {string[]} targetDeviceIds
+ * @param {string} [caption]
+ * @returns {Promise<{ok: boolean, share_id: number, group_id: string}>}
+ */
+export async function repostReel(shareId, targetDeviceIds, caption = '') {
+  const { ip, port, key, deviceId } = await getConfig();
+  if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
+  const res = await fetch(
+    `http://${ip}:${port}/api/reels/repost`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        device_id: deviceId,
+        share_id: shareId,
+        target_device_ids: targetDeviceIds,
+        caption: caption || null,
+      }),
+    },
+  );
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const err = await res.json();
+      if (err?.detail) detail = `: ${err.detail}`;
+    } catch {}
+    throw new Error(`Failed to repost reel (${res.status})${detail}`);
+  }
+  return await res.json();
+}
+
+/**
+ * Cancel / undo a user's repost of a reel.
+ * @param {number} shareId
+ * @returns {Promise<{ok: boolean, share_id: number}>}
+ */
+export async function cancelRepostReel(shareId) {
+  const { ip, port, key, deviceId } = await getConfig();
+  if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
+  const res = await fetch(
+    `http://${ip}:${port}/api/reels/repost/cancel`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        device_id: deviceId,
+        share_id: shareId,
+      }),
+    },
+  );
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const err = await res.json();
+      if (err?.detail) detail = `: ${err.detail}`;
+    } catch {}
+    throw new Error(`Failed to cancel repost (${res.status})${detail}`);
+  }
+  return await res.json();
+}
+
+/**
+ * Toggle bookmark/save state for a reel.
+ * @param {string} reelId
+ * @param {number} shareId
+ * @param {number} [mediaId]
+ * @returns {Promise<{ok: boolean, saved: boolean, reel_id: string}>}
+ */
+export async function toggleSaveReel(reelId, shareId, mediaId = null) {
+  const { ip, port, key, deviceId } = await getConfig();
+  if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
+  const res = await fetch(
+    `http://${ip}:${port}/api/reels/save`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        device_id: deviceId,
+        reel_id: String(reelId),
+        share_id: shareId,
+        media_id: mediaId,
+      }),
+    },
+  );
+  if (!res.ok) throw new Error(`Failed to update saved reel (${res.status})`);
+  return await res.json();
+}
+
+/**
+ * Fetch saved/bookmarked reels for this device.
+ * @param {number} [offset=0]
+ * @param {number} [limit=50]
+ * @returns {Promise<{reels: Array<any>, has_more: boolean, total: number}>}
+ */
+export async function getSavedReels(offset = 0, limit = 50) {
+  const { ip, port, key, deviceId } = await getConfig();
+  if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
+  return await fetchJsonWithTimeout(
+    `http://${ip}:${port}/api/reels/saved?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
+    { headers: { Authorization: `Bearer ${key}` } },
+  );
+}
+
+/**
  * Post groups shared to this device that it hasn't been notified about yet.
  * @returns {Promise<{posts: Array<{group_id: string, shared_by: string, caption?: string, post_title?: string, item_count: number, created_at: number}>}>}
  */

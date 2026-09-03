@@ -708,6 +708,10 @@ def init_db():
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_device_shares_group ON device_shares(share_group_id)"
         )
+    if "original_shared_by_device_id" not in existing_cols:
+        conn.execute("ALTER TABLE device_shares ADD COLUMN original_shared_by_device_id TEXT")
+    if "repost_of_share_id" not in existing_cols:
+        conn.execute("ALTER TABLE device_shares ADD COLUMN repost_of_share_id INTEGER")
 
     # Migration: add post_kind/post_title to device_share_groups if not present
     existing_group_cols = {row[1] for row in conn.execute("PRAGMA table_info(device_share_groups)").fetchall()}
@@ -715,6 +719,24 @@ def init_db():
         conn.execute("ALTER TABLE device_share_groups ADD COLUMN post_kind TEXT")
     if "post_title" not in existing_group_cols:
         conn.execute("ALTER TABLE device_share_groups ADD COLUMN post_title TEXT")
+
+    # 17. saved_reels table for bookmarked reels
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS saved_reels
+        (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id   TEXT    NOT NULL,
+            reel_id     TEXT    NOT NULL,
+            share_id    INTEGER NOT NULL,
+            media_id    INTEGER,
+            created_at  INTEGER NOT NULL,
+            UNIQUE (device_id, reel_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_reels_device ON saved_reels(device_id, created_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_reels_share ON saved_reels(share_id)")
 
     conn.commit()
     conn.close()
@@ -2977,12 +2999,16 @@ def get_device_shares_for_target(target_device_id: str) -> list[dict]:
         SELECT ds.id AS share_id, ds.media_id, ds.source_type, ds.source_key,
                ds.relative_path, ds.size, ds.modified_time, ds.caption,
                ds.shared_by_device_id, ds.created_at, ds.share_group_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id,
                d.device_name AS shared_by_name, d.username AS shared_by_username,
+               orig_d.device_name AS orig_shared_by_name, orig_d.username AS orig_shared_by_username,
                COALESCE(dsg.caption, ds.caption) AS group_caption,
-               dsg.post_kind AS post_kind, dsg.post_title AS post_title
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title,
+               t.seen AS seen
         FROM device_share_targets t
         JOIN device_shares ds ON ds.id = t.share_id
         LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE t.target_device_id = ?
         ORDER BY ds.created_at DESC, ds.id ASC
@@ -3001,11 +3027,15 @@ def get_device_shares_by_sharer(sharer_device_id: str) -> list[dict]:
         SELECT ds.id AS share_id, ds.media_id, ds.source_type, ds.source_key,
                ds.relative_path, ds.size, ds.modified_time, ds.caption,
                ds.shared_by_device_id, ds.created_at, ds.share_group_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id,
                d.device_name AS shared_by_name, d.username AS shared_by_username,
+               orig_d.device_name AS orig_shared_by_name, orig_d.username AS orig_shared_by_username,
                COALESCE(dsg.caption, ds.caption) AS group_caption,
-               dsg.post_kind AS post_kind, dsg.post_title AS post_title
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title,
+               1 AS seen
         FROM device_shares ds
         LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE ds.shared_by_device_id = ?
         ORDER BY ds.created_at DESC, ds.id ASC
@@ -3151,6 +3181,7 @@ def delete_device_share_group(group_id: str, requesting_device_id: str) -> bool:
     if share_ids:
         placeholders = ",".join("?" * len(share_ids))
         conn.execute(f"DELETE FROM device_share_targets WHERE share_id IN ({placeholders})", share_ids)
+        conn.execute(f"DELETE FROM saved_reels WHERE share_id IN ({placeholders})", share_ids)
     _cleanup_persisted_share_files(share_ids)
     conn.execute("DELETE FROM device_shares WHERE share_group_id = ?", (group_id,))
     conn.execute("DELETE FROM device_share_groups WHERE id = ?", (group_id,))
@@ -3183,6 +3214,7 @@ def delete_device_share(share_id: int, requesting_device_id: str) -> bool:
             conn.close()
             return delete_device_share_group(group_id, requesting_device_id)
     conn.execute("DELETE FROM device_share_targets WHERE share_id = ?", (share_id,))
+    conn.execute("DELETE FROM saved_reels WHERE share_id = ?", (share_id,))
     _cleanup_persisted_share_files([share_id])
     conn.execute("DELETE FROM device_shares WHERE id = ?", (share_id,))
     conn.commit()
@@ -3372,3 +3404,282 @@ def update_share_group_items(group_id: str, requesting_device_id: str, new_items
     conn.commit()
     conn.close()
     return True
+
+
+# ─── Saved Reels & Reposts Helpers ─────────────────────────────────────────────
+
+def save_reel(device_id: str, reel_id: str, share_id: int, media_id: int | None = None) -> bool:
+    """Save/bookmark a reel for a device (server-side bookmark)."""
+    conn = get_conn()
+    now_ts = int(_time.time())
+    conn.execute(
+        """
+        INSERT INTO saved_reels (device_id, reel_id, share_id, media_id, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(device_id, reel_id) DO UPDATE SET
+            share_id = excluded.share_id,
+            media_id = COALESCE(excluded.media_id, saved_reels.media_id),
+            created_at = excluded.created_at
+        """,
+        (device_id, str(reel_id), int(share_id), media_id, now_ts),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def unsave_reel(device_id: str, reel_id: str) -> bool:
+    """Remove a saved reel bookmark for a device."""
+    conn = get_conn()
+    cur = conn.execute(
+        "DELETE FROM saved_reels WHERE device_id = ? AND reel_id = ?",
+        (device_id, str(reel_id)),
+    )
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def toggle_save_reel(device_id: str, reel_id: str, share_id: int, media_id: int | None = None) -> bool:
+    """Toggle save status. Returns True if now saved, False if unsaved."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM saved_reels WHERE device_id = ? AND reel_id = ? LIMIT 1",
+        (device_id, str(reel_id)),
+    ).fetchone()
+    if row:
+        conn.execute("DELETE FROM saved_reels WHERE device_id = ? AND reel_id = ?", (device_id, str(reel_id)))
+        saved = False
+    else:
+        now_ts = int(_time.time())
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO saved_reels (device_id, reel_id, share_id, media_id, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (device_id, str(reel_id), int(share_id), media_id, now_ts),
+        )
+        saved = True
+    conn.commit()
+    conn.close()
+    return saved
+
+
+def get_saved_reel_ids(device_id: str) -> set[str]:
+    """Return set of reel_ids saved by this device."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT reel_id FROM saved_reels WHERE device_id = ?",
+        (device_id,),
+    ).fetchall()
+    conn.close()
+    return {r["reel_id"] for r in rows}
+
+
+def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
+    """Return list of saved reels for device_id, newest saved first, with full share metadata."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT sr.reel_id, sr.share_id, sr.created_at AS saved_at,
+               ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
+               ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
+               ds.created_at, ds.share_group_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id,
+               d.device_name AS shared_by_name, d.username AS shared_by_username,
+               orig_d.device_name AS orig_shared_by_name, orig_d.username AS orig_shared_by_username,
+               COALESCE(dsg.caption, ds.caption) AS group_caption,
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title
+        FROM saved_reels sr
+        JOIN device_shares ds ON ds.id = sr.share_id
+        LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
+        LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        WHERE sr.device_id = ?
+        ORDER BY sr.created_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (device_id, limit, offset),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def repost_reel(shared_by_device_id: str, share_id: int, target_device_ids: list[str], caption: str | None = None) -> dict:
+    """
+    Repost an existing reel to specified target devices with post_kind='reel_repost'.
+    Stores original creator reference so both reposter and original author info are preserved.
+    """
+    import uuid as _uuid
+    targets = [t for t in (target_device_ids or []) if t and t != shared_by_device_id]
+    if not targets:
+        return {"ok": False, "error": "Select at least one target device to repost to."}
+
+    conn = get_conn()
+    orig = conn.execute(
+        """
+        SELECT ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
+               ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
+               ds.original_shared_by_device_id
+        FROM device_shares ds
+        WHERE ds.id = ?
+        """,
+        (int(share_id),),
+    ).fetchone()
+
+    if not orig:
+        conn.close()
+        return {"ok": False, "error": "Reel to repost was not found."}
+
+    # Access control: reposter must be the sharer or an authorized recipient
+    if orig["shared_by_device_id"] != shared_by_device_id:
+        recipient = conn.execute(
+            "SELECT 1 FROM device_share_targets WHERE share_id = ? AND target_device_id = ?",
+            (int(share_id), shared_by_device_id),
+        ).fetchone()
+        if not recipient:
+            conn.close()
+            return {"ok": False, "error": "You do not have permission to repost this reel."}
+
+    # If already a repost, preserve original author, otherwise sharer is original author
+    orig_creator_id = orig["original_shared_by_device_id"] or orig["shared_by_device_id"]
+
+    group_id = str(_uuid.uuid4())
+    now_ts = int(_time.time())
+    cap = (caption or "").strip() or None
+
+    conn.execute(
+        """
+        INSERT INTO device_share_groups
+            (id, caption, shared_by_device_id, created_at, post_kind, post_title)
+        VALUES (?, ?, ?, ?, 'reel_repost', 'Reposted Reel')
+        """,
+        (group_id, cap, shared_by_device_id, now_ts),
+    )
+
+    cur = conn.execute(
+        """
+        INSERT INTO device_shares
+            (media_id, source_type, source_key, relative_path, size, modified_time,
+             caption, shared_by_device_id, created_at, share_group_id,
+             original_shared_by_device_id, repost_of_share_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            orig["media_id"],
+            orig["source_type"],
+            orig["source_key"],
+            orig["relative_path"],
+            orig["size"],
+            orig["modified_time"],
+            cap,
+            shared_by_device_id,
+            now_ts,
+            group_id,
+            orig_creator_id,
+            int(share_id),
+        ),
+    )
+    new_share_id = cur.lastrowid
+
+    conn.executemany(
+        "INSERT OR IGNORE INTO device_share_targets (share_id, target_device_id, seen) VALUES (?, ?, 0)",
+        [(new_share_id, t) for t in targets],
+    )
+
+    conn.commit()
+    conn.close()
+    return {"ok": True, "share_id": new_share_id, "group_id": group_id}
+
+
+def get_repost_counts_for_media_ids(media_ids: list[int]) -> dict[int, int]:
+    """Return dict mapping media_id -> count of reposts."""
+    if not media_ids:
+        return {}
+    conn = get_conn()
+    placeholders = ",".join(["?"] * len(media_ids))
+    rows = conn.execute(
+        f"""
+        SELECT ds.media_id, COUNT(DISTINCT ds.id) AS cnt
+        FROM device_shares ds
+        JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        WHERE ds.media_id IN ({placeholders})
+          AND dsg.post_kind = 'reel_repost'
+        GROUP BY ds.media_id
+        """,
+        media_ids,
+    ).fetchall()
+    conn.close()
+    return {r["media_id"]: r["cnt"] for r in rows}
+
+
+def get_user_reposted_info(device_id: str) -> tuple[set[int], set[int]]:
+    """Return (set of media_ids, set of repost_of_share_ids) that this device has reposted."""
+    if not device_id:
+        return set(), set()
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT ds.media_id, ds.repost_of_share_id
+        FROM device_shares ds
+        JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        WHERE ds.shared_by_device_id = ?
+          AND dsg.post_kind = 'reel_repost'
+        """,
+        (device_id,),
+    ).fetchall()
+    conn.close()
+    media_ids = {r["media_id"] for r in rows if r["media_id"] is not None}
+    share_ids = {r["repost_of_share_id"] for r in rows if r["repost_of_share_id"] is not None}
+    return media_ids, share_ids
+
+
+def get_user_reposted_media_ids(device_id: str) -> set[int]:
+    """Return set of media_ids that this device has reposted."""
+    media_ids, _ = get_user_reposted_info(device_id)
+    return media_ids
+
+
+def cancel_repost(reposter_device_id: str, share_id: int) -> dict:
+    """
+    Remove a user's repost of a reel.
+    Finds the repost share group created by this device for this share/media and deletes it.
+    """
+    conn = get_conn()
+    # 1. Check if share_id is directly the repost share created by this user
+    row = conn.execute(
+        """
+        SELECT ds.id, ds.share_group_id, ds.media_id, ds.repost_of_share_id
+        FROM device_shares ds
+        JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        WHERE ds.id = ? AND ds.shared_by_device_id = ? AND dsg.post_kind = 'reel_repost'
+        """,
+        (int(share_id), reposter_device_id),
+    ).fetchone()
+
+    # 2. Or if share_id is the original share, find the repost created by reposter_device_id
+    if not row:
+        row = conn.execute(
+            """
+            SELECT ds.id, ds.share_group_id, ds.media_id, ds.repost_of_share_id
+            FROM device_shares ds
+            JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+            WHERE (ds.repost_of_share_id = ? OR ds.media_id = (SELECT media_id FROM device_shares WHERE id = ?))
+              AND ds.shared_by_device_id = ?
+              AND dsg.post_kind = 'reel_repost'
+            LIMIT 1
+            """,
+            (int(share_id), int(share_id), reposter_device_id),
+        ).fetchone()
+
+    if not row:
+        conn.close()
+        return {"ok": False, "error": "No active repost found to cancel."}
+
+    group_id = row["share_group_id"]
+    conn.close()
+
+    # Delete the entire share group and its targets/saves
+    deleted = delete_device_share_group(group_id, reposter_device_id)
+    return {"ok": deleted, "group_id": group_id}

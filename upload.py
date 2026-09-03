@@ -71,6 +71,16 @@ from database import (
     mark_share_notifications_seen,
     add_share_group_targets,
     edit_device_share_group_caption,
+    save_reel,
+    unsave_reel,
+    toggle_save_reel,
+    get_saved_reel_ids,
+    get_saved_reels,
+    repost_reel,
+    cancel_repost,
+    get_repost_counts_for_media_ids,
+    get_user_reposted_media_ids,
+    get_user_reposted_info,
     MAX_COMMENT_LENGTH,
 )
 from trips import cluster_source_media, trigger_background_clustering
@@ -2433,6 +2443,12 @@ async def get_unified_feed(
                 seen_share_ids.add(s["share_id"])
                 all_shares.append({**s, "is_own_post": True})
 
+        # Exclude shares that are exclusively for Reels (reposted reels)
+        all_shares = [
+            s for s in all_shares
+            if s.get("post_kind") not in ("reel_repost", "reels_only")
+        ]
+
         # Group shares by share_group_id (or fall back to share_id as a singleton group)
         from collections import OrderedDict
         groups: OrderedDict[str, dict] = OrderedDict()
@@ -2514,48 +2530,89 @@ async def get_reels_feed(
     authorization: str = Header(None),
     token: str = None,
 ):
-    """Every video shared with/by this device, flattened out of its post group and
-    served in randomized order, independent of the feed's chronological/user sort."""
+    """Every video shared with/by this device (including reposts), flattened out of its
+    post group and served with rich author, reposter, saved, and engagement metadata."""
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
 
     def _build():
         video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
 
+        saved_ids = get_saved_reel_ids(device_id)
+
         received = get_device_shares_for_target(device_id)
+        sent = get_device_shares_by_sharer(device_id)
 
         seen_share_ids: set[int] = set()
         all_shares: list[dict] = []
         for s in received:
-            if s["shared_by_device_id"] != device_id and s["share_id"] not in seen_share_ids:
+            if s["share_id"] not in seen_share_ids:
                 seen_share_ids.add(s["share_id"])
-                all_shares.append({**s, "is_own_post": False})
+                all_shares.append({**s, "is_own_post": s["shared_by_device_id"] == device_id})
+        for s in sent:
+            if s["share_id"] not in seen_share_ids:
+                seen_share_ids.add(s["share_id"])
+                all_shares.append({**s, "is_own_post": True})
 
         def _is_video(s):
             ext = os.path.splitext(s["relative_path"])[1].lower()
             return s["source_type"] in ("rewind", "rewind_shared") or ext in video_exts
 
         reel_shares = [s for s in all_shares if _is_video(s)]
-        media_ids = [s["media_id"] for s in reel_shares]
+        media_ids = [s["media_id"] for s in reel_shares if s.get("media_id")]
 
         counts_map, user_map = get_reactions_for_media_ids(media_ids, current_source_id=device_id)
         comment_counts = get_comment_counts_for_media_ids(media_ids)
+        repost_counts = get_repost_counts_for_media_ids(media_ids)
+        user_reposted_media, user_reposted_shares = get_user_reposted_info(device_id)
 
-        reels = [{
-            "reel_id": str(s["share_id"]),
-            "share_id": s["share_id"],
-            "media_id": s["media_id"],
-            "path": s["relative_path"],
-            "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
-            "shared_by_device_id": s["shared_by_device_id"],
-            "caption": s.get("group_caption") or s.get("caption"),
-            "created_at": s["created_at"],
-            "reaction_counts": counts_map.get(s["media_id"], {}),
-            "user_reactions": user_map.get(s["media_id"], []),
-            "comment_count": comment_counts.get(s["media_id"], 0),
-            "is_own_post": s["is_own_post"],
-            "group_id": s.get("share_group_id"),
-        } for s in reel_shares]
+        reels = []
+        for s in reel_shares:
+            is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id"))
+            orig_id = s.get("original_shared_by_device_id") or s["shared_by_device_id"]
+            orig_name = s.get("orig_shared_by_name") if s.get("original_shared_by_device_id") else s.get("shared_by_name")
+            orig_username = s.get("orig_shared_by_username") if s.get("original_shared_by_device_id") else s.get("shared_by_username")
+            reposter_name = s.get("shared_by_name")
+            reposter_username = s.get("shared_by_username")
+
+            has_reposted = (
+                (s.get("media_id") in user_reposted_media if s.get("media_id") else False)
+                or (s["share_id"] in user_reposted_shares)
+                or (s.get("post_kind") == "reel_repost" and s.get("shared_by_device_id") == device_id)
+            )
+
+            reels.append({
+                "reel_id": str(s["share_id"]),
+                "share_id": s["share_id"],
+                "media_id": s.get("media_id"),
+                "path": s["relative_path"],
+                "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
+                "shared_by_device_id": s["shared_by_device_id"],
+                "is_repost": is_repost,
+                "user_has_reposted": has_reposted,
+                "original_author": {
+                    "device_id": orig_id,
+                    "name": orig_name,
+                    "username": orig_username,
+                    "display_name": format_display_name(orig_username, orig_name) or orig_id,
+                },
+                "reposted_by": {
+                    "device_id": s["shared_by_device_id"],
+                    "name": reposter_name,
+                    "username": reposter_username,
+                    "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                } if is_repost else None,
+                "caption": s.get("group_caption") or s.get("caption"),
+                "created_at": s["created_at"],
+                "reaction_counts": counts_map.get(s["media_id"], {}) if s.get("media_id") else {},
+                "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
+                "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+                "repost_count": repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+                "is_own_post": s["is_own_post"],
+                "is_saved": str(s["share_id"]) in saved_ids,
+                "is_unseen": not bool(s.get("seen", 1)),
+                "group_id": s.get("share_group_id"),
+            })
 
         random.Random(seed).shuffle(reels)
 
@@ -2563,6 +2620,200 @@ async def get_reels_feed(
         page = reels[offset: offset + limit]
         has_more = (offset + limit) < total
         return page, has_more, total
+
+    page, has_more, total = await asyncio.to_thread(_build)
+    return {"reels": page, "has_more": has_more, "total": total}
+
+
+@router.post("/api/reels/repost")
+@router.post("/reels/repost")
+async def repost_reel_endpoint(
+    request: Request,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Repost a reel to specific target devices with access control."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+    device_id = str(body.get("device_id") or body.get("shared_by_device_id") or "").strip()
+    share_id_raw = body.get("share_id")
+    target_devices = body.get("target_device_ids") or []
+    caption = str(body.get("caption") or "").strip() or None
+
+    if not device_id:
+        raise HTTPException(status_code=400, detail="device_id is required")
+    if share_id_raw is None:
+        raise HTTPException(status_code=400, detail="share_id is required")
+    try:
+        share_id = int(share_id_raw)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid share_id") from exc
+
+    if not isinstance(target_devices, list) or not target_devices:
+        raise HTTPException(status_code=400, detail="Select at least one target device")
+
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+
+    res = await asyncio.to_thread(repost_reel, device_id, share_id, target_devices, caption)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to repost reel"))
+    return res
+
+
+@router.post("/api/reels/repost/cancel")
+@router.post("/reels/repost/cancel")
+async def cancel_reel_repost_endpoint(
+    request: Request,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Cancel / remove a user's repost of a reel."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+    device_id = str(body.get("device_id") or "").strip()
+    share_id_raw = body.get("share_id")
+
+    if not device_id:
+        raise HTTPException(status_code=400, detail="device_id is required")
+    if share_id_raw is None:
+        raise HTTPException(status_code=400, detail="share_id is required")
+    try:
+        share_id = int(share_id_raw)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid share_id") from exc
+
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+
+    res = await asyncio.to_thread(cancel_repost, device_id, share_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to cancel repost"))
+    return res
+
+
+@router.post("/api/reels/save")
+@router.post("/reels/save")
+async def toggle_save_reel_endpoint(
+    request: Request,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Toggle saved/bookmark state for a reel."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+    device_id = str(body.get("device_id") or "").strip()
+    reel_id = str(body.get("reel_id") or "").strip()
+    share_id_raw = body.get("share_id")
+    media_id_raw = body.get("media_id")
+
+    if not device_id:
+        raise HTTPException(status_code=400, detail="device_id is required")
+    if not reel_id:
+        raise HTTPException(status_code=400, detail="reel_id is required")
+    if share_id_raw is None:
+        raise HTTPException(status_code=400, detail="share_id is required")
+
+    try:
+        share_id = int(share_id_raw)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid share_id") from exc
+
+    media_id = None
+    if media_id_raw is not None:
+        try:
+            media_id = int(media_id_raw)
+        except (ValueError, TypeError):
+            pass
+
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+
+    saved = await asyncio.to_thread(toggle_save_reel, device_id, reel_id, share_id, media_id)
+    return {"ok": True, "saved": saved, "reel_id": reel_id}
+
+
+@router.get("/api/reels/saved")
+@router.get("/reels/saved")
+async def get_saved_reels_endpoint(
+    device_id: str,
+    offset: int = 0,
+    limit: int = 50,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Return paginated list of saved reels for device_id with full media details."""
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+
+    def _build():
+        saved_rows = get_saved_reels(device_id, offset, limit)
+        media_ids = [s["media_id"] for s in saved_rows if s.get("media_id")]
+
+        counts_map, user_map = get_reactions_for_media_ids(media_ids, current_source_id=device_id)
+        comment_counts = get_comment_counts_for_media_ids(media_ids)
+        repost_counts = get_repost_counts_for_media_ids(media_ids)
+        user_reposted_media, user_reposted_shares = get_user_reposted_info(device_id)
+
+        reels = []
+        for s in saved_rows:
+            is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id"))
+            orig_id = s.get("original_shared_by_device_id") or s["shared_by_device_id"]
+            orig_name = s.get("orig_shared_by_name") if s.get("original_shared_by_device_id") else s.get("shared_by_name")
+            orig_username = s.get("orig_shared_by_username") if s.get("original_shared_by_device_id") else s.get("shared_by_username")
+            reposter_name = s.get("shared_by_name")
+            reposter_username = s.get("shared_by_username")
+
+            has_reposted = (
+                (s.get("media_id") in user_reposted_media if s.get("media_id") else False)
+                or (s["share_id"] in user_reposted_shares)
+                or (s.get("post_kind") == "reel_repost" and s.get("shared_by_device_id") == device_id)
+            )
+
+            reels.append({
+                "reel_id": str(s["reel_id"]),
+                "share_id": s["share_id"],
+                "media_id": s.get("media_id"),
+                "path": s["relative_path"],
+                "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
+                "shared_by_device_id": s["shared_by_device_id"],
+                "is_repost": is_repost,
+                "user_has_reposted": has_reposted,
+                "original_author": {
+                    "device_id": orig_id,
+                    "name": orig_name,
+                    "username": orig_username,
+                    "display_name": format_display_name(orig_username, orig_name) or orig_id,
+                },
+                "reposted_by": {
+                    "device_id": s["shared_by_device_id"],
+                    "name": reposter_name,
+                    "username": reposter_username,
+                    "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                } if is_repost else None,
+                "caption": s.get("group_caption") or s.get("caption"),
+                "created_at": s["created_at"],
+                "saved_at": s.get("saved_at"),
+                "reaction_counts": counts_map.get(s["media_id"], {}) if s.get("media_id") else {},
+                "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
+                "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+                "repost_count": repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+                "is_own_post": s["shared_by_device_id"] == device_id,
+                "is_saved": True,
+                "group_id": s.get("share_group_id"),
+            })
+
+        total = len(reels)
+        return reels, (offset + limit) < total or len(saved_rows) == limit, total
 
     page, has_more, total = await asyncio.to_thread(_build)
     return {"reels": page, "has_more": has_more, "total": total}

@@ -407,6 +407,10 @@ function RootLayoutContent() {
           name="free-up"
           options={{ href: null, tabBarStyle: { display: 'none' } }}
         />
+        <Tabs.Screen
+          name="saved-reels"
+          options={{ href: null, tabBarStyle: { display: 'none' } }}
+        />
       </Tabs>
     </SafeAreaProvider>
   );
