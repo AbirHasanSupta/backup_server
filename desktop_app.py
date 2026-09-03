@@ -85,6 +85,7 @@ from database import (
     set_device_username,
     upsert_device,
     search_files_for_device,
+    update_share_group_items,
 )
 
 DESKTOP_SHARE_DEVICE_ID = "desktop-server"
@@ -2404,6 +2405,12 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             command=lambda g=gid: self._open_manage_access_dialog(g),
         ).pack(side="left", padx=(0, 6))
         ctk.CTkButton(
+            btn_row, text="Edit Files", width=90, height=28,
+            fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER, corner_radius=7, font=FONT_CAPTION,
+            command=lambda g=gid, i=items: self._open_edit_files_dialog(g, i),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
             btn_row, text="Delete", width=80, height=28,
             fg_color="transparent", hover_color=C_SOFT_RED, text_color=C_ERROR,
             border_width=1, border_color=C_ERROR_BORDER, corner_radius=7, font=FONT_CAPTION,
@@ -2564,6 +2571,149 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             ).pack(side="right")
 
         threading.Thread(target=_fetch, daemon=True).start()
+
+    def _open_edit_files_dialog(self, group_id: str, items: list[dict]):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Edit Post Files")
+        dialog.geometry("520x520")
+        dialog.minsize(420, 400)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.configure(fg_color=C_SURFACE)
+
+        file_list: list[dict] = [
+            {
+                "source_type": it.get("source_type", "desktop"),
+                "source_key": it.get("source_key", DESKTOP_SHARE_DEVICE_ID),
+                "relative_path": it.get("relative_path", ""),
+                "size": int(it.get("size") or 0),
+                "modified_time": int(it.get("modified_time") or 0),
+            }
+            for it in items
+        ]
+
+        ctk.CTkLabel(
+            dialog, text="EDIT POST FILES", font=FONT_SECTION, text_color=C_MUTED, anchor="w",
+        ).pack(fill="x", padx=18, pady=(16, 4))
+
+        list_frame = ctk.CTkScrollableFrame(
+            dialog, fg_color=C_ELEVATED, corner_radius=10,
+            border_width=1, border_color=C_BORDER, label_text="",
+        )
+        list_frame.pack(fill="both", expand=True, padx=18, pady=(0, 8))
+
+        def _render():
+            for w in list_frame.winfo_children():
+                w.destroy()
+            if not file_list:
+                ctk.CTkLabel(
+                    list_frame, text="No files — add files below.",
+                    font=FONT_SMALL, text_color=C_MUTED,
+                ).pack(pady=24)
+                return
+            last = len(file_list) - 1
+            for i, item in enumerate(file_list):
+                path = item["relative_path"]
+                fname = os.path.basename(path) or path
+                size_txt = fmt_bytes(item["size"]) if item["size"] else ""
+                row = ctk.CTkFrame(list_frame, fg_color="transparent")
+                row.pack(fill="x", pady=2)
+                ctk.CTkLabel(
+                    row,
+                    text=f"{fname}  ({size_txt})" if size_txt else fname,
+                    font=FONT_SMALL, text_color=C_TEXT, anchor="w",
+                ).pack(side="left", fill="x", expand=True, padx=(4, 6))
+                ctk.CTkButton(
+                    row, text="✕", width=24, height=24, fg_color="transparent",
+                    hover_color=C_SOFT_RED, text_color=C_MUTED, corner_radius=6,
+                    font=FONT_CAPTION, command=lambda idx=i: _remove(idx),
+                ).pack(side="right", padx=2)
+                ctk.CTkButton(
+                    row, text="▼", width=24, height=24, fg_color="transparent",
+                    hover_color=C_ELEVATED, text_color=C_MUTED, corner_radius=6,
+                    font=FONT_CAPTION,
+                    state="disabled" if i == last else "normal",
+                    command=lambda idx=i: _move(idx, 1),
+                ).pack(side="right", padx=2)
+                ctk.CTkButton(
+                    row, text="▲", width=24, height=24, fg_color="transparent",
+                    hover_color=C_ELEVATED, text_color=C_MUTED, corner_radius=6,
+                    font=FONT_CAPTION,
+                    state="disabled" if i == 0 else "normal",
+                    command=lambda idx=i: _move(idx, -1),
+                ).pack(side="right", padx=2)
+
+        def _remove(idx: int):
+            if 0 <= idx < len(file_list):
+                file_list.pop(idx)
+            _render()
+
+        def _move(idx: int, delta: int):
+            new_idx = idx + delta
+            if 0 <= new_idx < len(file_list):
+                file_list[idx], file_list[new_idx] = file_list[new_idx], file_list[idx]
+            _render()
+
+        def _add_files():
+            paths = filedialog.askopenfilenames(parent=dialog, title="Add Files to Post")
+            for p in paths:
+                abs_p = os.path.abspath(p)
+                if any(f["relative_path"] == abs_p for f in file_list):
+                    continue
+                try:
+                    file_list.append({
+                        "source_type": "desktop",
+                        "source_key": DESKTOP_SHARE_DEVICE_ID,
+                        "relative_path": abs_p,
+                        "size": os.path.getsize(p),
+                        "modified_time": int(os.path.getmtime(p)),
+                    })
+                except Exception:
+                    pass
+            _render()
+
+        def _save():
+            if not file_list:
+                messagebox.showwarning("No files", "Post must have at least one file.", parent=dialog)
+                return
+            save_btn.configure(state="disabled", text="Saving…")
+
+            snapshot = list(file_list)
+
+            def _run():
+                ok = update_share_group_items(group_id, DESKTOP_SHARE_DEVICE_ID, snapshot)
+
+                def _finish():
+                    save_btn.configure(state="normal", text="Save Changes")
+                    if ok:
+                        self._posts_cache_key = ""
+                        self._refresh_post_posts_list()
+                        dialog.destroy()
+                    else:
+                        messagebox.showerror("Error", "Failed to save file changes.", parent=dialog)
+
+                self.after(0, _finish)
+
+            threading.Thread(target=_run, daemon=True).start()
+
+        _render()
+
+        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_row.pack(fill="x", padx=18, pady=(0, 16))
+
+        ctk.CTkButton(
+            btn_row, text="+ Add Files", width=100, height=34,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER, corner_radius=8, font=FONT_SMALL_B,
+            command=_add_files,
+        ).pack(side="left", padx=(0, 8))
+
+        save_btn = ctk.CTkButton(
+            btn_row, text="Save Changes", height=34,
+            fg_color=C_ACCENT, hover_color=C_ACCENT2, text_color="#FFFFFF",
+            corner_radius=8, font=FONT_BODY_B, command=_save,
+        )
+        save_btn.pack(side="right")
 
     def _delete_post(self, group_id: str):
         if not confirm_dialog(self, "Delete Post", "Delete this post from all device feeds permanently?"):

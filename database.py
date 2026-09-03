@@ -3306,3 +3306,69 @@ def is_share_target(share_id: int, device_id: str) -> bool:
     ).fetchone()
     conn.close()
     return row is not None
+
+
+def update_share_group_items(group_id: str, requesting_device_id: str, new_items: list[dict]) -> bool:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT shared_by_device_id FROM device_share_groups WHERE id = ?",
+        (group_id,),
+    ).fetchone()
+    if not row or row["shared_by_device_id"] != requesting_device_id:
+        conn.close()
+        return False
+
+    target_rows = conn.execute(
+        """
+        SELECT DISTINCT dst.target_device_id
+        FROM device_shares ds
+        JOIN device_share_targets dst ON dst.share_id = ds.id
+        WHERE ds.share_group_id = ?
+        """,
+        (group_id,),
+    ).fetchall()
+    targets = [r["target_device_id"] for r in target_rows]
+
+    old_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM device_shares WHERE share_group_id = ?", (group_id,)
+    ).fetchall()]
+
+    if old_ids:
+        ph = ",".join("?" * len(old_ids))
+        conn.execute(f"DELETE FROM device_share_targets WHERE share_id IN ({ph})", old_ids)
+        _cleanup_persisted_share_files(old_ids)
+        conn.execute("DELETE FROM device_shares WHERE share_group_id = ?", (group_id,))
+
+    cap_row = conn.execute(
+        "SELECT caption, created_at FROM device_share_groups WHERE id = ?", (group_id,)
+    ).fetchone()
+    cap = cap_row["caption"] if cap_row else None
+    now_ts = cap_row["created_at"] if cap_row else int(_time.time())
+
+    for it in new_items:
+        source_type   = it["source_type"]
+        source_key    = it["source_key"]
+        relative_path = it["relative_path"]
+        size          = int(it.get("size") or 0)
+        modified_time = int(it.get("modified_time") or 0)
+        media_id      = get_or_create_media_id(source_type, source_key, relative_path, size, modified_time)
+        cur           = conn.execute(
+            """
+            INSERT INTO device_shares
+                (media_id, source_type, source_key, relative_path, size, modified_time,
+                 caption, shared_by_device_id, created_at, share_group_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (media_id, source_type, source_key, relative_path, size, modified_time,
+             cap, requesting_device_id, now_ts, group_id),
+        )
+        share_id = cur.lastrowid
+        if targets:
+            conn.executemany(
+                "INSERT OR IGNORE INTO device_share_targets (share_id, target_device_id) VALUES (?, ?)",
+                [(share_id, t) for t in targets],
+            )
+
+    conn.commit()
+    conn.close()
+    return True
