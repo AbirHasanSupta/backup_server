@@ -78,3 +78,15 @@ export async function getPlaceName(lat?: number, lon?: number): Promise<string |
   inFlight.set(key, promise);
   return promise;
 }
+
+export async function clearGeocodeCache(): Promise<void> {
+  try {
+    const keys = await AsyncStorage.getAllKeys();
+    const geocodeKeys = keys.filter((k) => k.startsWith(CACHE_PREFIX));
+    if (geocodeKeys.length > 0) {
+      await AsyncStorage.multiRemove(geocodeKeys);
+    }
+  } catch (err) {
+    console.warn('[Geocode] Error clearing geocode cache:', err);
+  }
+}

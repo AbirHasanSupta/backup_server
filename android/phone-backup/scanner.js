@@ -121,21 +121,28 @@ function createMetadataScheduler(reportActivity) {
 }
 
 export async function enrichFileMetadata(file) {
-  if (file.metadataLoaded) return file;
+  if (file.metadataLoaded && file.size > 0) return file;
 
   let info = { size: 0, modificationTime: 0 };
+  let fetchSucceeded = false;
   try {
     const infoPromise = FileSystem.getInfoAsync(file.uri, { size: true });
-    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 3000));
+    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 4000));
     const res = await Promise.race([infoPromise, timeoutPromise]);
-    if (res) info = res;
+    if (res && res.exists) {
+      info = res;
+      fetchSucceeded = true;
+    }
   } catch {}
+
+  const size = (info.size != null && info.size > 0) ? info.size : (file.size || 0);
+  const modifiedTime = Math.floor(info.modificationTime || 0) || file.modifiedTime || 0;
 
   return {
     ...file,
-    modifiedTime: Math.floor(info.modificationTime || 0),
-    size: info.size || 0,
-    metadataLoaded: true,
+    modifiedTime,
+    size,
+    metadataLoaded: fetchSucceeded || size > 0,
   };
 }
 
@@ -163,7 +170,7 @@ function addFile(uri, relativePath, name, result, shouldInclude, reportActivity,
     size: cached ? cached.size : 0,
     name,
     id: uri,
-    metadataLoaded: !!cached,
+    metadataLoaded: Boolean(cached && cached.size > 0),
   };
   result.push(file);
   counters.files++;
@@ -310,10 +317,10 @@ export async function scanIncrementalBackup(onActivity, snapshotCache, options =
   };
 }
 
-/** Enrich metadata for newly discovered files only (snapshot hits are skipped). */
+/** Enrich metadata for newly discovered files only (snapshot hits with valid size are skipped). */
 export async function enrichFilesBatch(files, options = {}) {
   const { shouldStop, concurrency = METADATA_BATCH_SIZE } = options;
-  const targets = files.filter((file) => !file.metadataLoaded);
+  const targets = files.filter((file) => !file.metadataLoaded || !file.size || file.size <= 0);
   if (!targets.length) return files;
 
   let nextIndex = 0;

@@ -252,7 +252,7 @@ export default function FreeUpScreen() {
     const thresholdSec = nowSec - THIRTY_DAYS_SEC;
 
     for (const f of files) {
-      const sz = f.size || 0;
+      const sz = Number(f.size) || 0;
       const mtimeSec = f.modifiedTime > 1e11 ? f.modifiedTime / 1000 : f.modifiedTime;
       totalBytes += sz;
       const cat = getFileCategory(getDisplayName(f));
@@ -308,7 +308,7 @@ export default function FreeUpScreen() {
         return getFileCategory(getDisplayName(f)) === 'video';
       }
       if (activeTab === 'large') {
-        return (f.size || 0) >= LARGE_FILE_THRESHOLD;
+        return (Number(f.size) || 0) >= LARGE_FILE_THRESHOLD;
       }
       if (activeTab === 'older') {
         const mtimeSec = f.modifiedTime > 1e11 ? f.modifiedTime / 1000 : f.modifiedTime;
@@ -318,8 +318,8 @@ export default function FreeUpScreen() {
     });
 
     list.sort((a, b) => {
-      if (sortOption === 'largest') return (b.size || 0) - (a.size || 0);
-      if (sortOption === 'smallest') return (a.size || 0) - (b.size || 0);
+      if (sortOption === 'largest') return (Number(b.size) || 0) - (Number(a.size) || 0);
+      if (sortOption === 'smallest') return (Number(a.size) || 0) - (Number(b.size) || 0);
       if (sortOption === 'newest') return (b.modifiedTime || 0) - (a.modifiedTime || 0);
       if (sortOption === 'oldest') return (a.modifiedTime || 0) - (b.modifiedTime || 0);
       return 0;
@@ -465,7 +465,7 @@ export default function FreeUpScreen() {
   );
 
   const selectedBytes = useMemo(
-    () => selectedFiles.reduce((s, f) => s + (f.size || 0), 0),
+    () => selectedFiles.reduce((s, f) => s + (Number(f.size) || 0), 0),
     [selectedFiles]
   );
 
@@ -493,7 +493,7 @@ export default function FreeUpScreen() {
         try {
           await FileSystem.deleteAsync(file.uri, { idempotent: true });
           succeeded.push(file);
-          freedAccumulator += file.size || 0;
+          freedAccumulator += Number(file.size) || 0;
         } catch {
           failed.push(getDisplayName(file));
         }

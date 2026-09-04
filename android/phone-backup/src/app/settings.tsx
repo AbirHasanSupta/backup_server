@@ -44,7 +44,7 @@ import {
   resolveReachableServer,
   switchToSavedServer,
 } from '../../settings';
-import { hapticMedium, hapticLight } from '@/utils/haptics';
+import { hapticMedium, hapticLight, hapticSuccess, hapticError } from '@/utils/haptics';
 import { registerBackgroundTask, runSync, getCurrentSyncState } from '../../backgroundTask';
 import { connectToServer } from '../../connectToServer';
 import { checkDeviceConnection } from '../../uploader';
@@ -57,6 +57,9 @@ import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { clearAllDiskCache } from '@/utils/previewCacheManager';
+import { clearGeocodeCache } from '@/utils/geocode';
+import { invalidateCleanupCache } from '../../freeUpStorage';
+import { invalidatePendingBackupCache } from '../../pendingBackup';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
 function normalizeServerAddress(input: string): string {
@@ -416,10 +419,18 @@ export default function SettingsScreen() {
   };
 
   const handleCleanCache = async () => {
+    hapticMedium();
     try {
-      await clearAllDiskCache();
-      Alert.alert('Cache Cleared', 'All temporary preview files and image caches have been cleared from disk.');
+      await Promise.all([
+        clearAllDiskCache(),
+        clearGeocodeCache(),
+      ]);
+      invalidateCleanupCache();
+      invalidatePendingBackupCache();
+      hapticSuccess();
+      Alert.alert('Cache Cleared', 'All temporary preview files, image caches, location caches, and temporary data have been cleared from disk.');
     } catch (err: any) {
+      hapticError();
       Alert.alert('Error', sanitizeErrorMessage(err, 'Could not clear disk cache.'));
     }
   };

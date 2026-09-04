@@ -7,6 +7,7 @@ import {
   getDeviceToken,
   resolveReachableServer,
   applyServerUploadCacheRecovery,
+  saveServerProfile,
 } from './settings';
 import { getPendingShareNotifications, markShareNotificationsSeen } from './downloader';
 import { showNewSharePostNotification } from './notificationService';
@@ -19,14 +20,19 @@ function isNetworkError(err) {
   const msg = (err?.message || String(err || '')).toLowerCase();
   return (
     msg.includes('network request failed') ||
+    msg.includes('fetch failed') ||
+    msg.includes('failed to fetch') ||
     msg.includes('timeout') ||
+    msg.includes('timed out') ||
     msg.includes('econnrefused') ||
     msg.includes('noroutetohost') ||
     msg.includes('socketexception') ||
     msg.includes('host unreachable') ||
     msg.includes('failed to connect') ||
     msg.includes('software caused connection abort') ||
-    msg.includes('connection refused')
+    msg.includes('connection refused') ||
+    msg.includes('unknownhost') ||
+    msg.includes('enotfound')
   );
 }
 
@@ -37,8 +43,8 @@ async function withAutoFailover(action) {
     if (isNetworkError(err)) {
       console.log('[Uploader] Network error encountered. Attempting mesh failover re-resolution...');
       const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
-      if (resolved.ok && resolved.reconnected) {
-        console.log(`[Uploader] Re-executing request against new server IP: ${resolved.ip}`);
+      if (resolved.ok) {
+        console.log(`[Uploader] Re-executing request against reachable server IP: ${resolved.ip}`);
         return await action();
       }
     }
@@ -206,6 +212,16 @@ export async function checkDeviceConnection(options = {}) {
     if (body.device_connected === true) {
       checkAndNotifyNewShares();
     }
+    if (Array.isArray(body.all_ips) && body.all_ips.length > 0) {
+      saveServerProfile({
+        ip: serverIp,
+        port: serverPort,
+        serverId: body.server_id || '',
+        all_ips: body.all_ips,
+        candidateIps: body.all_ips,
+        hostname: body.hostname || '',
+      }).catch(() => {});
+    }
     return {
       connected: body.device_connected === true,
       serverVersion: body.server_version || '',
@@ -321,7 +337,7 @@ export async function uploadFile(item, onProgress, options = {}) {
   const verifyDisk = options.verifyDisk === true ? 'true' : 'false';
   const safeName = (item.name || item.relativePath.split('/').pop() || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
   const uniqueId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  const cacheUri = `${FileSystem.cacheDirectory}${uniqueId}_${safeName}`;
+  const cacheUri = `${FileSystem.cacheDirectory}upload_tmp_${uniqueId}_${safeName}`;
 
   // ── Step 1: Copy SAF file to a local cache path ───────────────────────────
   // Some SAF URIs (system files, recently-deleted files, restricted paths) can

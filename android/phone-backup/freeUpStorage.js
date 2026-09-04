@@ -22,7 +22,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { DeviceEventEmitter } from 'react-native';
-import { scan, enrichFilesBatch } from './scanner';
+import { scan, enrichFilesBatch, normalizeRelativePath } from './scanner';
 import {
   getServerIp,
   getServerPort,
@@ -31,9 +31,11 @@ import {
   getDeviceToken,
   getSyncRuntimeState,
   loadScanSnapshot,
+  saveScanSnapshot,
   removePathsFromScanSnapshot,
   markUploadedBatch,
   getUploadCacheStorageKey,
+  resolveReachableServer,
 } from './settings';
 
 // ─── Persistence keys ─────────────────────────────────────────────────────────
@@ -72,11 +74,12 @@ async function getServerConfig() {
 }
 
 export function formatFreeUpBytes(bytes) {
-  if (!bytes || bytes <= 0) return '0 B';
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
-  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${bytes} B`;
+  const num = Number(bytes) || 0;
+  if (num <= 0) return '0 B';
+  if (num >= 1024 ** 3) return `${(num / 1024 ** 3).toFixed(1)} GB`;
+  if (num >= 1024 ** 2) return `${(num / 1024 ** 2).toFixed(1)} MB`;
+  if (num >= 1024) return `${(num / 1024).toFixed(0)} KB`;
+  return `${num} B`;
 }
 
 // ─── Already-cleaned paths cache ─────────────────────────────────────────────
@@ -127,22 +130,35 @@ export async function flushPendingCleanupReports() {
 
   try {
     const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
-    const res = await fetch(
-      `http://${serverIp}:${serverPort}/cleanup/delete`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          source_id: deviceId,
-          files: pending.map((f) => ({ path: f.relativePath, size: f.size || 0, file_id: f.file_id || null })),
-        }),
-        signal: AbortSignal.timeout(10000),
+    const sendReports = async (ip, port) => {
+      return fetch(
+        `http://${ip}:${port}/cleanup/delete`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            source_id: deviceId,
+            files: pending.map((f) => ({ path: f.relativePath, size: Number(f.size) || 0, file_id: f.file_id || null })),
+          }),
+          signal: AbortSignal.timeout(10000),
+        }
+      );
+    };
+
+    let res;
+    try {
+      res = await sendReports(serverIp, serverPort);
+    } catch {
+      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
+      if (resolved.ok) {
+        res = await sendReports(resolved.ip, serverPort);
       }
-    );
-    if (res.ok) {
+    }
+
+    if (res?.ok) {
       await savePendingReports([]);
     }
   } catch {
@@ -155,24 +171,38 @@ export async function flushPendingCleanupReports() {
 async function fetchServerCandidates() {
   try {
     const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
-    const res = await fetch(
-      `http://${serverIp}:${serverPort}/cleanup/candidates?source_id=${encodeURIComponent(deviceId)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-        },
-        signal: AbortSignal.timeout(8000),
+    const fetchFrom = async (ip, port) => {
+      return fetch(
+        `http://${ip}:${port}/cleanup/candidates?source_id=${encodeURIComponent(deviceId)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+          },
+          signal: AbortSignal.timeout(8000),
+        }
+      );
+    };
+
+    let res;
+    try {
+      res = await fetchFrom(serverIp, serverPort);
+    } catch {
+      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
+      if (resolved.ok) {
+        res = await fetchFrom(resolved.ip, serverPort);
       }
-    );
-    if (!res.ok) return null;
+    }
+
+    if (!res || !res.ok) return null;
     const body = await res.json();
     if (Array.isArray(body.candidates)) {
       const map = new Map();
       for (const item of body.candidates) {
         if (item.path) {
-          map.set(item.path, {
+          const normPath = normalizeRelativePath(item.path);
+          map.set(normPath, {
             file_id: item.file_id,
-            size: item.size || 0,
+            size: Number(item.size) || 0,
             capture_time: item.capture_time,
           });
         }
@@ -239,7 +269,7 @@ export async function computeCleanupCandidates(options = {}) {
 
   // Check local upload cache in batches of 500
   const CHUNK = 500;
-  const uploadKeys = scannedFiles.map((f) => getUploadCacheStorageKey(f.relativePath));
+  const uploadKeys = scannedFiles.map((f) => getUploadCacheStorageKey(normalizeRelativePath(f.relativePath)));
   const chunks = [];
   for (let i = 0; i < uploadKeys.length; i += CHUNK) {
     chunks.push(uploadKeys.slice(i, i + CHUNK));
@@ -250,15 +280,17 @@ export async function computeCleanupCandidates(options = {}) {
   const newlyConfirmedServerFiles = [];
 
   const candidates = scannedFiles.filter((file) => {
+    const normPath = normalizeRelativePath(file.relativePath);
+
     // 1. Exclude already cleaned files
-    if (cleanedPaths.has(file.relativePath)) return false;
+    if (cleanedPaths.has(normPath) || cleanedPaths.has(file.relativePath)) return false;
 
     // 2. Check local upload cache
-    const localUploaded = localUploadMap.get(getUploadCacheStorageKey(file.relativePath));
+    const localUploaded = localUploadMap.get(getUploadCacheStorageKey(normPath));
     const isLocalBackedUp = localUploaded != null;
 
     // 3. Check server candidates (if server was reachable)
-    const serverRecord = serverCandidatesMap ? serverCandidatesMap.get(file.relativePath) : null;
+    const serverRecord = serverCandidatesMap ? serverCandidatesMap.get(normPath) : null;
     const isServerBackedUp = serverRecord != null;
 
     if (isServerBackedUp && !isLocalBackedUp) {
@@ -288,21 +320,28 @@ export async function computeCleanupCandidates(options = {}) {
 
   // Populate metadata (size, modifiedTime) from snapshot cache where available
   for (const file of candidates) {
-    if (!file.metadataLoaded) {
-      const snap = snapshotCache.get(file.relativePath);
-      if (snap) {
-        file.modifiedTime = snap.mtime || file.modifiedTime || 0;
-        file.size = snap.size || file.size || 0;
+    const normPath = normalizeRelativePath(file.relativePath);
+    const snap = snapshotCache.get(normPath) || snapshotCache.get(file.relativePath);
+    if (snap) {
+      if (!file.modifiedTime || file.modifiedTime === 0) {
+        file.modifiedTime = snap.mtime || 0;
+      }
+      if ((!file.size || file.size <= 0) && snap.size > 0) {
+        file.size = snap.size;
         file.metadataLoaded = true;
       }
     }
   }
 
-  // Enrich any remaining candidate files that still lack size metadata
-  const needEnrichment = candidates.filter((f) => !f.metadataLoaded);
+  // Enrich any remaining candidate files that still lack positive size metadata
+  const needEnrichment = candidates.filter((f) => !f.size || f.size <= 0 || !f.metadataLoaded);
   if (needEnrichment.length > 0) {
+    if (onProgress) onProgress({ phase: 'scanning', files: candidates.length, enriching: needEnrichment.length });
     await enrichFilesBatch(needEnrichment, { shouldStop });
     if (shouldStop?.()) return null;
+
+    // Update snapshot cache with the newly enriched sizes and persist
+    saveScanSnapshot(needEnrichment, { merge: true }).catch(() => {});
   }
 
   return _finalize(candidates, cleanedPaths);
@@ -310,7 +349,7 @@ export async function computeCleanupCandidates(options = {}) {
 
 function _finalize(candidates, _cleanedPaths) {
   // Sort by size descending by default (largest files first to maximize reclaimed space)
-  candidates.sort((a, b) => (b.size || 0) - (a.size || 0) || (b.modifiedTime || 0) - (a.modifiedTime || 0));
+  candidates.sort((a, b) => (Number(b.size) || 0) - (Number(a.size) || 0) || (b.modifiedTime || 0) - (a.modifiedTime || 0));
   cachedFiles = candidates;
 
   let totalBytes = 0;
@@ -322,7 +361,7 @@ function _finalize(candidates, _cleanedPaths) {
   let otherCount = 0;
 
   for (const f of candidates) {
-    const sz = f.size || 0;
+    const sz = Number(f.size) || 0;
     totalBytes += sz;
     const cat = getFileCategory(f.name || f.relativePath);
     if (cat === 'image') {
@@ -397,8 +436,8 @@ export async function getCleanupSummary() {
       let otherCount = 0;
 
       for (const [path, info] of snapshotCache.entries()) {
-        if (cleanedPaths.has(path)) continue;
-        const sz = info.size || 0;
+        if (cleanedPaths.has(path) || cleanedPaths.has(normalizeRelativePath(path))) continue;
+        const sz = Number(info.size) || 0;
         count += 1;
         totalBytes += sz;
         const cat = getFileCategory(path);
@@ -475,27 +514,39 @@ export async function reportDeletedFiles(files) {
 
   try {
     const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
-    const res = await fetch(
-      `http://${serverIp}:${serverPort}/cleanup/delete`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          source_id: deviceId,
-          files: files.map((f) => ({
-            path: f.relativePath,
-            size: f.size || 0,
-            file_id: f.file_id || null,
-          })),
-        }),
-        signal: AbortSignal.timeout(15000),
-      }
-    );
+    const sendDelete = async (ip, port) => {
+      return fetch(
+        `http://${ip}:${port}/cleanup/delete`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            source_id: deviceId,
+            files: files.map((f) => ({
+              path: f.relativePath,
+              size: Number(f.size) || 0,
+              file_id: f.file_id || null,
+            })),
+          }),
+          signal: AbortSignal.timeout(15000),
+        }
+      );
+    };
 
-    if (res.ok) {
+    let res;
+    try {
+      res = await sendDelete(serverIp, serverPort);
+    } catch {
+      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
+      if (resolved.ok) {
+        res = await sendDelete(resolved.ip, serverPort);
+      }
+    }
+
+    if (res?.ok) {
       const body = await res.json();
       // Remove successfully reported files from pending queue
       const reportedPaths = new Set(files.map((f) => f.relativePath));
@@ -519,13 +570,17 @@ export async function markAsCleanedLocally(relativePaths) {
   if (!relativePaths || !relativePaths.length) return;
 
   const existing = await loadCleanedPathsCache();
-  for (const p of relativePaths) existing.add(p);
+  for (const p of relativePaths) {
+    existing.add(p);
+    existing.add(normalizeRelativePath(p));
+  }
   await persistCleanedPaths(existing);
   await removePathsFromScanSnapshot(relativePaths).catch(() => {});
 
   if (cachedFiles) {
-    const cleaned = new Set(relativePaths);
-    cachedFiles = cachedFiles.filter((f) => !cleaned.has(f.relativePath));
+    const cleaned = new Set(relativePaths.map((p) => normalizeRelativePath(p)));
+    relativePaths.forEach((p) => cleaned.add(p));
+    cachedFiles = cachedFiles.filter((f) => !cleaned.has(f.relativePath) && !cleaned.has(normalizeRelativePath(f.relativePath)));
     _finalize(cachedFiles, existing);
   }
 }

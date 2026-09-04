@@ -3,6 +3,27 @@ import { Image } from 'expo-image';
 
 export const MAX_PREVIEW_CACHE_ITEMS = 10;
 
+const TEMP_FILE_PREFIXES = [
+  'restore_tmp_',
+  'upload_tmp_',
+  'freeup_preview_',
+  'pending_preview_',
+  'direct_post_',
+  'memory_save_',
+  'memory_share_',
+  'media_save_',
+  'media_share_',
+  'flashback_save_',
+  'roulette_',
+  'roulette_share_',
+  'rewind_',
+  'recap_',
+  'places_',
+  'quiz_',
+  'ReactNative-snapshot-',
+  'tmp_',
+];
+
 /**
  * Dynamically returns the preview cache directory path.
  */
@@ -82,13 +103,13 @@ export async function prunePreviewCache(maxItems: number = MAX_PREVIEW_CACHE_ITE
       }
     }
 
-    // 2. Clean up temporary files in root cache directory (restore_tmp_*, upload_tmp_*) older than 2 minutes
+    // 2. Clean up stale temporary files in root cache directory older than 2 minutes
     try {
       const rootFiles = await FileSystem.readDirectoryAsync(FileSystem.cacheDirectory);
       const now = Date.now() / 1000;
       for (const fname of rootFiles) {
-        if (fname.startsWith('restore_tmp_') || fname.startsWith('upload_tmp_')) {
-          const rootUri = FileSystem.cacheDirectory + fname;
+        if (TEMP_FILE_PREFIXES.some((prefix) => fname.startsWith(prefix))) {
+          const rootUri = `${FileSystem.cacheDirectory}${fname}`;
           const info = await FileSystem.getInfoAsync(rootUri);
           if (info.exists) {
             const rawMtime = info.modificationTime ?? 0;
@@ -103,6 +124,29 @@ export async function prunePreviewCache(maxItems: number = MAX_PREVIEW_CACHE_ITE
       // Ignore root cache cleanup errors
     }
 
+    // 3. Clean up stale temporary files in documentDirectory older than 2 minutes
+    if (FileSystem.documentDirectory) {
+      try {
+        const docFiles = await FileSystem.readDirectoryAsync(FileSystem.documentDirectory);
+        const now = Date.now() / 1000;
+        for (const fname of docFiles) {
+          if (TEMP_FILE_PREFIXES.some((prefix) => fname.startsWith(prefix))) {
+            const docUri = `${FileSystem.documentDirectory}${fname}`;
+            const info = await FileSystem.getInfoAsync(docUri);
+            if (info.exists && !info.isDirectory) {
+              const rawMtime = info.modificationTime ?? 0;
+              const mtimeSec = rawMtime > 1e11 ? rawMtime / 1000 : rawMtime;
+              if (mtimeSec > 0 && now - mtimeSec > 120) {
+                await FileSystem.deleteAsync(docUri, { idempotent: true }).catch(() => {});
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore doc temp cleanup errors
+      }
+    }
+
     const remainingCount = Math.min(fileEntries.length, maxItems);
     return { prunedCount, remainingCount };
   } catch (err) {
@@ -112,25 +156,56 @@ export async function prunePreviewCache(maxItems: number = MAX_PREVIEW_CACHE_ITE
 }
 
 /**
- * Returns current statistics of the preview cache (file count & total bytes).
+ * Returns current statistics of all disk caches (file count & total bytes).
  */
 export async function getPreviewCacheStats(): Promise<{ count: number; sizeBytes: number; formattedSize: string }> {
   try {
     if (!FileSystem.cacheDirectory) return { count: 0, sizeBytes: 0, formattedSize: '0 B' };
-    const dir = await ensurePreviewCacheDir();
-    if (!dir) return { count: 0, sizeBytes: 0, formattedSize: '0 B' };
 
-    const filenames = await FileSystem.readDirectoryAsync(dir);
     let sizeBytes = 0;
     let count = 0;
 
-    for (const name of filenames) {
-      const uri = dir + name;
-      const info = await FileSystem.getInfoAsync(uri);
-      if (info.exists && !info.isDirectory) {
-        count++;
-        sizeBytes += (info as any).size ?? 0;
-      }
+    const visitedUris = new Set<string>();
+
+    async function measureDir(dirUri: string) {
+      if (visitedUris.has(dirUri)) return;
+      visitedUris.add(dirUri);
+      try {
+        const filenames = await FileSystem.readDirectoryAsync(dirUri);
+        for (const name of filenames) {
+          const uri = dirUri.endsWith('/') ? `${dirUri}${name}` : `${dirUri}/${name}`;
+          try {
+            const info = await FileSystem.getInfoAsync(uri);
+            if (info.exists) {
+              if (info.isDirectory) {
+                await measureDir(uri);
+              } else {
+                count++;
+                sizeBytes += (info as any).size ?? 0;
+              }
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+
+    await measureDir(FileSystem.cacheDirectory);
+
+    // Also count temporary files in documentDirectory
+    if (FileSystem.documentDirectory) {
+      try {
+        const docEntries = await FileSystem.readDirectoryAsync(FileSystem.documentDirectory);
+        for (const fname of docEntries) {
+          if (TEMP_FILE_PREFIXES.some((p) => fname.startsWith(p))) {
+            const uri = `${FileSystem.documentDirectory}${fname}`;
+            const info = await FileSystem.getInfoAsync(uri);
+            if (info.exists && !info.isDirectory) {
+              count++;
+              sizeBytes += (info as any).size ?? 0;
+            }
+          }
+        }
+      } catch {}
     }
 
     const formattedSize = formatBytes(sizeBytes);
@@ -141,27 +216,43 @@ export async function getPreviewCacheStats(): Promise<{ count: number; sizeBytes
 }
 
 /**
- * Completely clears all preview files, temp files, and expo-image disk/memory caches.
+ * Completely clears all preview files, temp files, image caches, and document directory temp files.
  */
 export async function clearAllDiskCache(): Promise<void> {
   try {
-    if (FileSystem.cacheDirectory) {
-      const dir = await ensurePreviewCacheDir();
-      if (dir) {
-        await FileSystem.deleteAsync(dir, { idempotent: true });
-        await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
-      }
-
-      // Clear expo-image memory and disk cache safely
+    // 1. Clear Expo Image memory and disk cache
+    try {
       Image.clearMemoryCache();
       await Image.clearDiskCache().catch(() => {});
+    } catch {}
 
-      // Clean leftover temp files
-      const rootFiles = await FileSystem.readDirectoryAsync(FileSystem.cacheDirectory);
-      for (const fname of rootFiles) {
-        if (fname.startsWith('restore_tmp_') || fname.startsWith('upload_tmp_')) {
-          await FileSystem.deleteAsync(FileSystem.cacheDirectory + fname, { idempotent: true }).catch(() => {});
+    // 2. Clear everything in FileSystem.cacheDirectory
+    if (FileSystem.cacheDirectory) {
+      try {
+        const rootEntries = await FileSystem.readDirectoryAsync(FileSystem.cacheDirectory);
+        for (const entry of rootEntries) {
+          const entryUri = `${FileSystem.cacheDirectory}${entry}`;
+          await FileSystem.deleteAsync(entryUri, { idempotent: true }).catch(() => {});
         }
+      } catch (err) {
+        console.warn('[CacheManager] Error deleting cacheDirectory entries:', err);
+      }
+      // Re-ensure preview cache dir
+      await ensurePreviewCacheDir().catch(() => {});
+    }
+
+    // 3. Scan and delete temporary files in FileSystem.documentDirectory
+    if (FileSystem.documentDirectory) {
+      try {
+        const docEntries = await FileSystem.readDirectoryAsync(FileSystem.documentDirectory);
+        for (const fname of docEntries) {
+          if (TEMP_FILE_PREFIXES.some((prefix) => fname.startsWith(prefix))) {
+            const docUri = `${FileSystem.documentDirectory}${fname}`;
+            await FileSystem.deleteAsync(docUri, { idempotent: true }).catch(() => {});
+          }
+        }
+      } catch (err) {
+        console.warn('[CacheManager] Error deleting documentDirectory temp files:', err);
       }
     }
   } catch (err) {
@@ -175,4 +266,5 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
+
 

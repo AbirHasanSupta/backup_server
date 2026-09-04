@@ -242,15 +242,19 @@ FONT_CAPTION: ctk.CTkFont
 def get_all_local_ips() -> list[str]:
     """Returns all active, non-loopback, non-link-local IPv4 addresses."""
     ips = set()
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("8.8.8.8", 80))
-            outbound_ip = s.getsockname()[0]
-            if outbound_ip and not outbound_ip.startswith("127."):
-                ips.add(outbound_ip)
-    except Exception:
-        pass
 
+    # 1. Outbound socket probes
+    for target in ("8.8.8.8", "1.1.1.1", "224.0.0.1"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((target, 80))
+                outbound_ip = s.getsockname()[0]
+                if outbound_ip and not outbound_ip.startswith("127.") and not outbound_ip.startswith("169.254."):
+                    ips.add(outbound_ip)
+        except Exception:
+            pass
+
+    # 2. Hostname getaddrinfo and gethostbyname_ex
     try:
         hostname = socket.gethostname()
         for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
@@ -268,7 +272,35 @@ def get_all_local_ips() -> list[str]:
     except Exception:
         pass
 
-    res = list(ips)
+    # 3. Windows ipconfig parsing / OS interface scanning
+    if platform.system() == "Windows":
+        try:
+            import subprocess
+            import re
+            out = subprocess.check_output(
+                ["ipconfig"],
+                text=True,
+                errors="ignore",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                timeout=3,
+            )
+            for ip in re.findall(r"IPv4 Address[.\s]+:\s*([\d.]+)", out):
+                if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                    ips.add(ip)
+        except Exception:
+            pass
+
+    # Sort so that common LAN subnets (192.168.x.x, 10.x.x.x) come first
+    def _sort_key(ip_str: str) -> tuple[int, str]:
+        if ip_str.startswith("192.168."):
+            return (0, ip_str)
+        if ip_str.startswith("10."):
+            return (1, ip_str)
+        if ip_str.startswith("172."):
+            return (2, ip_str)
+        return (3, ip_str)
+
+    res = sorted(ips, key=_sort_key)
     return res if res else ["127.0.0.1"]
 
 
@@ -4618,9 +4650,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                             continue
                         msg = data.decode("utf-8", errors="ignore")
                         if "PING" in msg or "DISCOVER" in msg or "backup" in msg.lower():
+                            cfg = load_config()
                             resp = json.dumps({
                                 "status": "ok",
-                                "name": socket.gethostname(),
+                                "server_id": cfg.get("SERVER_ID", ""),
+                                "name": cfg.get("DESKTOP_NAME") or socket.gethostname(),
                                 "hostname": f"{socket.gethostname()}.local",
                                 "version": "4.3.1",
                                 "all_ips": get_all_local_ips(),

@@ -557,7 +557,14 @@ export async function saveScanSnapshot(files, options = {}) {
     }
   }
   for (const file of files) {
-    obj[normalizeSnapshotPath(file.relativePath)] = `${file.modifiedTime}:${file.size || 0}`;
+    const normPath = normalizeSnapshotPath(file.relativePath);
+    let size = Number(file.size) || 0;
+    if (size <= 0 && obj[normPath]) {
+      const existingSize = Number(String(obj[normPath]).split(':')[1]) || 0;
+      if (existingSize > 0) size = existingSize;
+    }
+    const mtime = file.modifiedTime || 0;
+    obj[normPath] = `${mtime}:${size}`;
   }
   await AsyncStorage.setItem(KEYS.SCAN_SNAPSHOT, JSON.stringify(obj));
 }
@@ -588,6 +595,11 @@ export async function removePathsFromScanSnapshot(paths) {
   if (!obj || typeof obj !== 'object') return;
   let changed = false;
   for (const p of paths) {
+    const normP = normalizeSnapshotPath(p);
+    if (obj[normP] !== undefined) {
+      delete obj[normP];
+      changed = true;
+    }
     if (obj[p] !== undefined) {
       delete obj[p];
       changed = true;
@@ -797,13 +809,13 @@ async function subnetSweep(baseIp, port, exclude, expectedServerId = '') {
     if (!exclude.has(ip)) candidates.push(ip);
   }
 
-  const BATCH = 32;
+  const BATCH = 40;
   for (let i = 0; i < candidates.length; i += BATCH) {
     const batch = candidates.slice(i, i + BATCH);
     // Mark as probed before firing so concurrent callers don't duplicate work
     batch.forEach((ip) => exclude.add(ip));
     const results = await Promise.all(
-      batch.map(async (ip) => ({ ip, probe: await quickProbe(ip, port, 400) }))
+      batch.map(async (ip) => ({ ip, probe: await quickProbe(ip, port, 1000) }))
     );
     const found = results.find((r) => {
       if (!r.probe.ok) return false;
@@ -829,6 +841,7 @@ async function _commitReachableServer({ newIp, port, probeData, serverName }) {
     serverId: probeData?.server_id || '',
     name: probeData?.name || serverName || newIp,
     all_ips: probeData?.all_ips || [newIp],
+    candidateIps: probeData?.candidateIps || probeData?.all_ips || [newIp],
     hostname: probeData?.hostname || '',
   });
   // Emit AFTER both writes so listeners always read a consistent state.
@@ -883,6 +896,7 @@ export async function resolveReachableServer(options = {}) {
             serverId: currentProbe.data.server_id || '',
             name: currentProbe.data.name || serverName || currentIp,
             all_ips: currentProbe.data.all_ips,
+            candidateIps: currentProbe.data.all_ips,
             hostname: currentProbe.data.hostname || '',
           }).catch(() => {});
         }
@@ -890,8 +904,6 @@ export async function resolveReachableServer(options = {}) {
       }
 
       // Step 2: Probe saved profile mesh IPs and hostnames concurrently.
-      // Timeout is generous here because after a mesh roam the ARP cache may
-      // still be settling — use at least 2 s regardless of the caller's hint.
       const step2TimeoutMs = Math.max(options.timeoutMs || 1200, 2000);
 
       const candidates = new Set();
@@ -908,12 +920,7 @@ export async function resolveReachableServer(options = {}) {
           }
         }
       }
-      // Only fold in IPs from OTHER saved profiles when we can confirm, via
-      // serverId, that they refer to the same physical machine as the active
-      // profile. Without that check, resolving a dropped connection for one
-      // saved server could silently reconnect the app to a different server
-      // the user has saved, since matchesExpectedServer() accepts any
-      // responder when expectedServerId is unset.
+
       savedServers.forEach((s) => {
         if (s === activeProfile) return;
         if (!expectedServerId || s.serverId !== expectedServerId) return;
@@ -948,13 +955,9 @@ export async function resolveReachableServer(options = {}) {
         }
       }
 
-      // Step 3: Subnet sweep — sweeps device's current network subnet (if roaming to a new mesh node AP)
-      // as well as the last-known server IP's subnet.
+      // Step 3: Subnet sweep — sweeps device's current network subnet (if roaming to a new mesh node AP),
+      // last-known server IP's subnet, and any known candidate subnets.
       if (options.subnetSweep !== false) {
-        // Build the exclusion set for the sweep from everything already probed:
-        // currentIp (Step 1) + all Step 2 candidates.  Passing this set to
-        // subnetSweep (which mutates it) also prevents duplicate probes across
-        // multiple subnet sweeps when both the device and server subnets are swept.
         const sweptExclude = new Set([currentIp, ...candidateList]);
 
         let deviceIp = null;
@@ -964,17 +967,38 @@ export async function resolveReachableServer(options = {}) {
           }
         } catch (_e) {}
 
+        const sweptSubnetPrefixes = new Set();
         const subnetsToSweep = [];
-        // Prefer the device's current subnet first — after roaming to a new AP,
-        // the server will also be on the device's new subnet.
-        if (deviceIp && deviceIp !== '0.0.0.0' && deviceIp !== currentIp) {
-          subnetsToSweep.push(deviceIp);
+
+        const addSubnet = (ip) => {
+          const oct = ipv4Octets(ip);
+          if (oct) {
+            const prefix = `${oct[0]}.${oct[1]}.${oct[2]}`;
+            if (!sweptSubnetPrefixes.has(prefix)) {
+              sweptSubnetPrefixes.add(prefix);
+              subnetsToSweep.push(ip);
+            }
+          }
+        };
+
+        // Prefer device's current subnet first
+        if (deviceIp && deviceIp !== '0.0.0.0') {
+          addSubnet(deviceIp);
         }
-        subnetsToSweep.push(currentIp);
+        addSubnet(currentIp);
+
+        // Add candidate subnets from saved servers
+        candidateList.forEach((cand) => {
+          if (ipv4Octets(cand)) addSubnet(cand);
+        });
+        savedServers.forEach((s) => {
+          if (s.ip && ipv4Octets(s.ip)) addSubnet(s.ip);
+          if (Array.isArray(s.candidateIps)) {
+            s.candidateIps.forEach((cip) => { if (ipv4Octets(cip)) addSubnet(cip); });
+          }
+        });
 
         for (const baseIp of subnetsToSweep) {
-          // subnetSweep mutates sweptExclude, so each subsequent sweep
-          // automatically skips IPs already probed in earlier sweeps.
           const swept = await subnetSweep(baseIp, port, sweptExclude, expectedServerId);
           if (swept) {
             const newIp = swept.ip;
@@ -990,9 +1014,6 @@ export async function resolveReachableServer(options = {}) {
       console.warn('[resolveReachableServer] Error resolving server:', e?.message);
       return { ok: false, ip: '', reconnected: false };
     } finally {
-      // Only the most recent resolution clears _resolvingPromise. An older
-      // force-superseded resolution whose generation is stale deliberately
-      // leaves _resolvingPromise alone so the newer one can clean up.
       if (generation === _resolveGeneration) {
         _resolvingPromise = null;
       }
