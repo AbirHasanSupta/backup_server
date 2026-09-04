@@ -1021,8 +1021,8 @@ function CommentsSheet({
   mediaId?: number | null;
   colors: AppColors;
   onClose: () => void;
-  onCommentAdded: () => void;
-  onCommentDeleted: () => void;
+  onCommentAdded: (count: number) => void;
+  onCommentDeleted: (count: number) => void;
 }) {
   const insets = useSafeAreaInsets();
   const { keyboardHeight } = useModalKeyboardHeight();
@@ -1050,8 +1050,9 @@ function CommentsSheet({
       await addComment(mediaId, text.trim());
       setText('');
       const res = await getComments(mediaId);
-      setComments(Array.isArray(res?.comments) ? res.comments : []);
-      onCommentAdded();
+      const nextComments = Array.isArray(res?.comments) ? res.comments : [];
+      setComments(nextComments);
+      onCommentAdded(nextComments.length);
       hapticSuccess();
     } catch { hapticError(); }
     finally { setSubmitting(false); }
@@ -1060,8 +1061,9 @@ function CommentsSheet({
   const handleDelete = async (id: number) => {
     try {
       await deleteComment(id);
-      setComments(prev => prev.filter(c => c.id !== id));
-      onCommentDeleted();
+      const nextComments = comments.filter(c => c.id !== id);
+      setComments(nextComments);
+      onCommentDeleted(nextComments.length);
     } catch { hapticError(); }
   };
 
@@ -1343,12 +1345,15 @@ export default function ReelsScreen() {
       ));
     });
 
-    const commentSub = DeviceEventEmitter.addListener('reel-comment-changed', (data: { reelId?: string; mediaId?: number | null; delta: number }) => {
-      setReels(prev => prev.map(r =>
-        ((data.reelId && r.reel_id === data.reelId) || (data.mediaId != null && r.media_id === data.mediaId))
-          ? { ...r, comment_count: Math.max(0, r.comment_count + data.delta) }
-          : r
-      ));
+    const commentSub = DeviceEventEmitter.addListener('reel-comment-changed', (data: { reelId?: string; mediaId?: number | null; count?: number; delta?: number }) => {
+      setReels(prev => prev.map(r => {
+        const isMatch = (data.reelId && r.reel_id === data.reelId) || (data.mediaId != null && r.media_id === data.mediaId);
+        if (!isMatch) return r;
+        const nextCount = data.count !== undefined
+          ? data.count
+          : Math.max(0, r.comment_count + (data.delta || 0));
+        return { ...r, comment_count: nextCount };
+      }));
     });
 
     return () => {
@@ -1493,35 +1498,37 @@ export default function ReelsScreen() {
     }
   }, [repostTarget]);
 
-  const handleCommentAdded = useCallback((reelId: string) => {
+  const handleCommentAdded = useCallback((reelId: string, count?: number) => {
     const targetItem = reelsRef.current.find(r => r.reel_id === reelId);
     if (targetItem) {
       const creatorKey = targetItem.original_author?.device_id || targetItem.shared_by_device_id || targetItem.shared_by;
       recordAffinity(creatorKey, 2).catch(() => {});
     }
+    const nextCount = count !== undefined ? count : (targetItem ? targetItem.comment_count + 1 : 1);
     setReels(prev => prev.map(r =>
       (r.reel_id === reelId || (targetItem?.media_id != null && r.media_id === targetItem.media_id))
-        ? { ...r, comment_count: r.comment_count + 1 }
+        ? { ...r, comment_count: nextCount }
         : r
     ));
     DeviceEventEmitter.emit('reel-comment-changed', {
       reelId,
       mediaId: targetItem?.media_id,
-      delta: 1,
+      count: nextCount,
     });
   }, []);
 
-  const handleCommentDeleted = useCallback((reelId: string) => {
+  const handleCommentDeleted = useCallback((reelId: string, count?: number) => {
     const targetItem = reelsRef.current.find(r => r.reel_id === reelId);
+    const nextCount = count !== undefined ? count : Math.max(0, (targetItem ? targetItem.comment_count - 1 : 0));
     setReels(prev => prev.map(r =>
       (r.reel_id === reelId || (targetItem?.media_id != null && r.media_id === targetItem.media_id))
-        ? { ...r, comment_count: Math.max(0, r.comment_count - 1) }
+        ? { ...r, comment_count: nextCount }
         : r
     ));
     DeviceEventEmitter.emit('reel-comment-changed', {
       reelId,
       mediaId: targetItem?.media_id,
-      delta: -1,
+      count: nextCount,
     });
   }, []);
 
@@ -1669,8 +1676,8 @@ export default function ReelsScreen() {
         mediaId={commentsTarget?.media_id}
         colors={colors}
         onClose={() => setCommentsTarget(null)}
-        onCommentAdded={() => commentsTarget && handleCommentAdded(commentsTarget.reel_id)}
-        onCommentDeleted={() => commentsTarget && handleCommentDeleted(commentsTarget.reel_id)}
+        onCommentAdded={(count) => commentsTarget && handleCommentAdded(commentsTarget.reel_id, count)}
+        onCommentDeleted={(count) => commentsTarget && handleCommentDeleted(commentsTarget.reel_id, count)}
       />
 
       <ShareModal
