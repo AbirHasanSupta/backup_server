@@ -4656,7 +4656,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                                 "server_id": cfg.get("SERVER_ID", ""),
                                 "name": cfg.get("DESKTOP_NAME") or socket.gethostname(),
                                 "hostname": f"{socket.gethostname()}.local",
-                                "version": "4.3.1",
+                                "version": "4.3.2",
                                 "all_ips": get_all_local_ips(),
                                 "port": port,
                             }).encode("utf-8")

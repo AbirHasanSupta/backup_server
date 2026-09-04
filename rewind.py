@@ -446,7 +446,7 @@ def _get_or_fetch_background_music(ffmpeg: str, chosen_index: int | None = None)
             try:
                 req = urllib.request.Request(
                     track["url"],
-                    headers={"User-Agent": "PhoneBackupServer/4.3.1 (https://github.com/AbirHasanSupta/backup_server; supta@local.net)"},
+                    headers={"User-Agent": "PhoneBackupServer/4.3.2 (https://github.com/AbirHasanSupta/backup_server; supta@local.net)"},
                 )
                 with urllib.request.urlopen(req, timeout=15) as response:
                     if response.status == 200:
