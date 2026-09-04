@@ -237,15 +237,21 @@ async def ping():
     local_ips = get_all_local_ips()
     hostname = socket.gethostname()
     cfg = load_config()
-    return {
-        "status": "ok",
-        "server_id": cfg.get("SERVER_ID", ""),
-        "name": cfg.get("DESKTOP_NAME") or hostname,
-        "hostname": f"{hostname}.local",
-        "version": APP_VERSION,
-        "all_ips": local_ips,
-        "port": int(cfg.get("PORT", 8000)),
-    }
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "server_id": cfg.get("SERVER_ID", ""),
+            "name": cfg.get("DESKTOP_NAME") or hostname,
+            "hostname": f"{hostname}.local",
+            "version": APP_VERSION,
+            "all_ips": local_ips,
+            "port": int(cfg.get("PORT", 8000)),
+        },
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

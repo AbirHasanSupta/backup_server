@@ -1,7 +1,7 @@
 import { getServerPort, getSavedServers } from './settings';
 
-const TIMEOUT_MS = 1200;
-const BATCH_SIZE = 45;
+const TIMEOUT_MS = 2500;
+const BATCH_SIZE = 15;
 
 // Common mesh node & router subnets across various manufacturers:
 // TP-Link Deco = 192.168.68.x, Google Nest = 192.168.86.x, Asus = 192.168.50.x,
@@ -72,20 +72,28 @@ function extractSubnet(ip) {
   return parts.length === 4 ? parts.slice(0, 3).join('.') : null;
 }
 
-async function probeServer(ip, port, timeoutMs = TIMEOUT_MS) {
-  const data = await fetchWithTimeout(`http://${ip}:${port}/ping`, timeoutMs);
+async function probeServer(ip, port, timeoutMs = TIMEOUT_MS, retry = false) {
+  const host = String(ip || '').replace(/^https?:\/\//i, '').replace(/:\d+$/, '').trim();
+  if (!host) return null;
+  const target = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  let data = await fetchWithTimeout(`http://${target}:${port}/ping`, timeoutMs);
+  // Optional retry for known candidates to tolerate transient Wi-Fi roaming latency
+  if (!data && retry) {
+    await new Promise((r) => setTimeout(r, 300));
+    data = await fetchWithTimeout(`http://${target}:${port}/ping`, timeoutMs);
+  }
   if (data && data.status === 'ok') {
-    const allIps = Array.isArray(data.all_ips) && data.all_ips.length > 0 ? data.all_ips : [ip];
+    const allIps = Array.isArray(data.all_ips) && data.all_ips.length > 0 ? data.all_ips : [host];
     return {
       serverId: data.server_id || '',
-      ip,
+      ip: host,
       port,
-      name: (data.name && String(data.name).trim()) || ip,
+      name: (data.name && String(data.name).trim()) || host,
       hostname: data.hostname || '',
       version: data.version || '?',
       certFingerprint: data.cert_fingerprint || '',
       all_ips: allIps,
-      candidateIps: Array.from(new Set([ip, ...allIps].filter(Boolean))),
+      candidateIps: Array.from(new Set([host, ...allIps].filter(Boolean))),
     };
   }
   return null;
@@ -94,7 +102,7 @@ async function probeServer(ip, port, timeoutMs = TIMEOUT_MS) {
 /**
  * Builds prioritized waves of target IPs to discover servers across mesh nodes and multi-subnets.
  */
-export function buildMultiSubnetIps(deviceIp, savedServers = []) {
+export function buildMultiSubnetWaves(deviceIp, savedServers = []) {
   const seen = new Set();
   const waves = {
     wave1: [], // Exact saved IPs, candidate IPs, hostnames, and known gateways (.1)
@@ -159,6 +167,11 @@ export function buildMultiSubnetIps(deviceIp, savedServers = []) {
     }
   }
 
+  return waves;
+}
+
+export function buildMultiSubnetIps(deviceIp, savedServers = []) {
+  const waves = buildMultiSubnetWaves(deviceIp, savedServers);
   return [...waves.wave1, ...waves.wave2, ...waves.wave3];
 }
 
@@ -182,27 +195,29 @@ export async function discoverServers(onProgress, options = {}) {
   const state = await Network.getNetworkStateAsync();
   if (!state.isConnected) throw new Error('Not connected to a network');
 
-  const deviceIp = await Network.getIpAddressAsync();
-  if (!deviceIp || deviceIp === '0.0.0.0') {
-    throw new Error('Could not determine device IP address');
-  }
-
+  let deviceIp = await getDeviceIp();
   const [port, savedServers] = await Promise.all([
     getServerPort(),
     getSavedServers(),
   ]);
 
-  const ips = buildMultiSubnetIps(deviceIp, savedServers);
+  if (!deviceIp || deviceIp === '0.0.0.0') {
+    // If device IP isn't available yet during Wi-Fi roaming handover, fallback to saved server's IP
+    const fallbackIp = savedServers.find((s) => s.ip)?.ip;
+    if (fallbackIp) {
+      deviceIp = fallbackIp;
+    } else {
+      throw new Error('Could not determine device IP address');
+    }
+  }
+
+  const waves = buildMultiSubnetWaves(deviceIp, savedServers);
+  const allIps = [...waves.wave1, ...waves.wave2, ...waves.wave3];
   const foundMap = new Map();
   let scanned = 0;
-  const total = ips.length;
+  const total = allIps.length;
 
-  for (let i = 0; i < ips.length; i += BATCH_SIZE) {
-    if (options.shouldStop?.() || options.signal?.aborted) break;
-    const batch = ips.slice(i, i + BATCH_SIZE);
-    const results = await Promise.all(batch.map((ip) => probeServer(ip, port)));
-    if (options.shouldStop?.() || options.signal?.aborted) break;
-
+  const processResults = (results) => {
     results.forEach((r) => {
       if (r) {
         let existingKey = null;
@@ -255,6 +270,28 @@ export async function discoverServers(onProgress, options = {}) {
         }
       }
     });
+  };
+
+  // Phase 1: High priority Wave 1 (saved IPs / candidates) with retry
+  if (waves.wave1.length > 0) {
+    const wave1Results = await Promise.all(
+      waves.wave1.map((ip) => probeServer(ip, port, TIMEOUT_MS, true))
+    );
+    processResults(wave1Results);
+    scanned += waves.wave1.length;
+    const progressPct = Math.min(100, Math.round((scanned / total) * 100));
+    onProgress && onProgress(progressPct, Array.from(foundMap.values()));
+  }
+
+  // Phase 2: Wave 2 (primary subnet & saved server subnets) & Wave 3 in controlled batches
+  const remainingIps = [...waves.wave2, ...waves.wave3];
+  for (let i = 0; i < remainingIps.length; i += BATCH_SIZE) {
+    if (options.shouldStop?.() || options.signal?.aborted) break;
+    const batch = remainingIps.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(batch.map((ip) => probeServer(ip, port, TIMEOUT_MS, false)));
+    if (options.shouldStop?.() || options.signal?.aborted) break;
+
+    processResults(results);
 
     scanned += batch.length;
     const progressPct = Math.min(100, Math.round((scanned / total) * 100));
@@ -264,8 +301,14 @@ export async function discoverServers(onProgress, options = {}) {
   return Array.from(foundMap.values());
 }
 
-export function getDeviceIp() {
-  if (!Network) return Promise.resolve(null);
-  return Network.getIpAddressAsync();
+export async function getDeviceIp() {
+  if (!Network) return null;
+  let ip = await Network.getIpAddressAsync().catch(() => null);
+  if (!ip || ip === '0.0.0.0') {
+    // Mesh roaming delay: retry after 400ms
+    await new Promise((r) => setTimeout(r, 400));
+    ip = await Network.getIpAddressAsync().catch(() => null);
+  }
+  return ip;
 }
 

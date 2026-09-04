@@ -99,9 +99,8 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 15000) {
 
 /**
  * Mesh-aware fetch wrapper.
- * On a network-level failure (not an HTTP error), attempts a fast-path mesh
- * re-discovery (candidate-only, no full subnet sweep) and retries once with
- * the newly resolved IP.
+ * On a network-level failure (not an HTTP error), attempts multi-pass mesh
+ * re-discovery and retries with the newly resolved IP.
  *
  * @param {() => Promise<{url: string, options?: object}>} buildRequest
  *   Async factory that reads the CURRENT config and returns { url, options }.
@@ -118,21 +117,54 @@ async function fetchJsonWithMeshRetry(buildRequest, timeoutMs = 15000) {
   try {
     return await attempt();
   } catch (firstErr) {
-    // Only attempt re-discovery on network failures (not on 4xx / 5xx HTTP).
     if (!isNetworkFailure(firstErr)) throw firstErr;
 
-    // Attempt mesh re-discovery with candidate and sweep fallbacks
-    let resolved;
-    try {
-      resolved = await resolveReachableServer();
-    } catch {
-      throw firstErr; // re-discovery itself failed; surface the original error
+    // Pass 1: Quick mesh failover resolution
+    console.log('[Downloader] Network failure. Attempting mesh failover resolution (pass 1)...');
+    await new Promise((r) => setTimeout(r, 300));
+    let resolved = await resolveReachableServer({ timeoutMs: 2000 }).catch(() => ({ ok: false }));
+    if (resolved.ok) {
+      try {
+        return await attempt();
+      } catch (retryErr) {
+        if (!isNetworkFailure(retryErr)) throw retryErr;
+      }
     }
 
-    if (!resolved.ok) throw firstErr;
+    // Pass 2: Forced mesh failover resolution with sweep
+    console.log('[Downloader] Attempting forced mesh failover resolution (pass 2)...');
+    await new Promise((r) => setTimeout(r, 800));
+    resolved = await resolveReachableServer({ force: true, timeoutMs: 2500, subnetSweep: true }).catch(() => ({ ok: false }));
+    if (resolved.ok) {
+      return await attempt();
+    }
 
-    // Retry once with the freshly resolved IP (buildRequest re-reads AsyncStorage).
-    return attempt();
+    throw firstErr;
+  }
+}
+
+export async function withDownloadMeshRetry(downloadAttempt) {
+  try {
+    return await downloadAttempt();
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await new Promise((r) => setTimeout(r, 300));
+      let resolved = await resolveReachableServer({ timeoutMs: 2000 }).catch(() => ({ ok: false }));
+      if (resolved.ok) {
+        try {
+          return await downloadAttempt();
+        } catch (retryErr) {
+          if (!isNetworkFailure(retryErr)) throw retryErr;
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, 800));
+      resolved = await resolveReachableServer({ force: true, timeoutMs: 2500, subnetSweep: true }).catch(() => ({ ok: false }));
+      if (resolved.ok) {
+        return await downloadAttempt();
+      }
+    }
+    throw err;
   }
 }
 
@@ -221,7 +253,7 @@ export async function browseSharedFiles(sourceId, prefix = '') {
  * @returns {Promise<FileSystem.FileSystemDownloadResult>}
  */
 export async function downloadFile(relativePath, destUri, onProgress) {
-  const attempt = async () => {
+  return withDownloadMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     const url =
       `http://${ip}:${port}/files/download` +
@@ -237,19 +269,7 @@ export async function downloadFile(relativePath, destUri, onProgress) {
       },
     );
     return downloadResumable.downloadAsync();
-  };
-
-  try {
-    return await attempt();
-  } catch (err) {
-    if (isNetworkFailure(err)) {
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
-      if (resolved.ok) {
-        return await attempt();
-      }
-    }
-    throw err;
-  }
+  });
 }
 
 /**
@@ -286,7 +306,7 @@ export async function getFilePreviewUrl(relativePath) {
  * @param {(written: number, total: number) => void} [onProgress]
  */
 export async function downloadSharedFile(sourceId, relativePath, destUri, onProgress) {
-  const attempt = async () => {
+  return withDownloadMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     const url =
       `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/download` +
@@ -302,19 +322,7 @@ export async function downloadSharedFile(sourceId, relativePath, destUri, onProg
       },
     );
     return downloadResumable.downloadAsync();
-  };
-
-  try {
-    return await attempt();
-  } catch (err) {
-    if (isNetworkFailure(err)) {
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
-      if (resolved.ok) {
-        return await attempt();
-      }
-    }
-    throw err;
-  }
+  });
 }
 
 /**
@@ -325,7 +333,7 @@ export async function downloadSharedFile(sourceId, relativePath, destUri, onProg
  * @returns {Promise<FileSystem.FileSystemDownloadResult>}
  */
 export async function downloadShareFile(shareId, destUri, onProgress) {
-  const attempt = async () => {
+  return withDownloadMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     const url =
       `http://${ip}:${port}/share/${encodeURIComponent(shareId)}/download` +
@@ -340,19 +348,7 @@ export async function downloadShareFile(shareId, destUri, onProgress) {
       },
     );
     return downloadResumable.downloadAsync();
-  };
-
-  try {
-    return await attempt();
-  } catch (err) {
-    if (isNetworkFailure(err)) {
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
-      if (resolved.ok) {
-        return await attempt();
-      }
-    }
-    throw err;
-  }
+  });
 }
 
 
@@ -571,7 +567,7 @@ export function buildRewindReelStreamUrl(config, year, month) {
  * @param {(written: number, total: number) => void} [onProgress]
  */
 export async function downloadRewindReel(year, month, destUri, onProgress) {
-  const attempt = async () => {
+  return withDownloadMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     const params = new URLSearchParams({ device_id: deviceId, year: String(year), token: key });
     if (month) params.set('month', String(month));
@@ -586,19 +582,7 @@ export async function downloadRewindReel(year, month, destUri, onProgress) {
       },
     );
     return downloadResumable.downloadAsync();
-  };
-
-  try {
-    return await attempt();
-  } catch (err) {
-    if (isNetworkFailure(err)) {
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
-      if (resolved.ok) {
-        return await attempt();
-      }
-    }
-    throw err;
-  }
+  });
 }
 
 /**

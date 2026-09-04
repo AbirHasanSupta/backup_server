@@ -31,6 +31,10 @@ function isNetworkError(err) {
     msg.includes('failed to connect') ||
     msg.includes('software caused connection abort') ||
     msg.includes('connection refused') ||
+    msg.includes('connection reset') ||
+    msg.includes('econnreset') ||
+    msg.includes('broken pipe') ||
+    msg.includes('unexpected end of stream') ||
     msg.includes('unknownhost') ||
     msg.includes('enotfound')
   );
@@ -41,10 +45,25 @@ async function withAutoFailover(action) {
     return await action();
   } catch (err) {
     if (isNetworkError(err)) {
-      console.log('[Uploader] Network error encountered. Attempting mesh failover re-resolution...');
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
+      console.log('[Uploader] Network error encountered. Attempting mesh failover re-resolution (pass 1)...');
+      // Pass 1: Quick retry after 350ms to allow mesh association to stabilize
+      await new Promise((r) => setTimeout(r, 350));
+      let resolved = await resolveReachableServer({ timeoutMs: 2000 }).catch(() => ({ ok: false }));
       if (resolved.ok) {
-        console.log(`[Uploader] Re-executing request against reachable server IP: ${resolved.ip}`);
+        console.log(`[Uploader] Re-executing request against reachable server IP (pass 1): ${resolved.ip}`);
+        try {
+          return await action();
+        } catch (retryErr) {
+          if (!isNetworkError(retryErr)) throw retryErr;
+        }
+      }
+
+      // Pass 2: Forced resolution with sweep after 1000ms delay
+      console.log('[Uploader] Attempting forced mesh failover re-resolution (pass 2)...');
+      await new Promise((r) => setTimeout(r, 1000));
+      resolved = await resolveReachableServer({ force: true, timeoutMs: 2500, subnetSweep: true }).catch(() => ({ ok: false }));
+      if (resolved.ok) {
+        console.log(`[Uploader] Re-executing request against reachable server IP (pass 2): ${resolved.ip}`);
         return await action();
       }
     }

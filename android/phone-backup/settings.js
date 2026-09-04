@@ -758,11 +758,14 @@ try {
   _Network = require('expo-network');
 } catch (_e) {}
 
-async function quickProbe(target, port, timeoutMs = 1200) {
+async function quickProbe(target, port, timeoutMs = 2500) {
+  const cleanTarget = String(target || '').replace(/^https?:\/\//i, '').replace(/:\d+$/, '').trim();
+  if (!cleanTarget) return { ok: false };
+  const host = cleanTarget.includes(':') && !cleanTarget.startsWith('[') ? `[${cleanTarget}]` : cleanTarget;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`http://${target}:${port}/ping`, { signal: controller.signal });
+    const res = await fetch(`http://${host}:${port}/ping`, { signal: controller.signal });
     // clearTimeout must be called unconditionally before inspecting res.ok —
     // if we returned early on !res.ok without clearing, the timer would fire
     // later and abort an unrelated in-flight request sharing the controller.
@@ -809,13 +812,13 @@ async function subnetSweep(baseIp, port, exclude, expectedServerId = '') {
     if (!exclude.has(ip)) candidates.push(ip);
   }
 
-  const BATCH = 40;
+  const BATCH = 20;
   for (let i = 0; i < candidates.length; i += BATCH) {
     const batch = candidates.slice(i, i + BATCH);
     // Mark as probed before firing so concurrent callers don't duplicate work
     batch.forEach((ip) => exclude.add(ip));
     const results = await Promise.all(
-      batch.map(async (ip) => ({ ip, probe: await quickProbe(ip, port, 1000) }))
+      batch.map(async (ip) => ({ ip, probe: await quickProbe(ip, port, 1500) }))
     );
     const found = results.find((r) => {
       if (!r.probe.ok) return false;
@@ -885,8 +888,14 @@ export async function resolveReachableServer(options = {}) {
         return probe?.data?.server_id === expectedServerId;
       };
 
-      // Step 1: Probe current configured IP first
-      const currentProbe = await quickProbe(currentIp, port, options.timeoutMs || 1000);
+      // Step 1: Probe current configured IP first (with 2-attempt roam tolerance)
+      let currentProbe = await quickProbe(currentIp, port, options.timeoutMs || 1800);
+      if (!currentProbe.ok) {
+        // Brief pause to allow Wi-Fi association to settle on new mesh node
+        await new Promise((r) => setTimeout(r, 300));
+        currentProbe = await quickProbe(currentIp, port, options.timeoutMs || 2500);
+      }
+
       if (currentProbe.ok && matchesExpectedServer(currentProbe)) {
         // Refresh candidate list if server returned all_ips
         if (Array.isArray(currentProbe.data?.all_ips) && currentProbe.data.all_ips.length > 0) {
@@ -904,7 +913,7 @@ export async function resolveReachableServer(options = {}) {
       }
 
       // Step 2: Probe saved profile mesh IPs and hostnames concurrently.
-      const step2TimeoutMs = Math.max(options.timeoutMs || 1200, 2000);
+      const step2TimeoutMs = Math.max(options.timeoutMs || 2000, 2500);
 
       const candidates = new Set();
       if (activeProfile) {
@@ -964,6 +973,10 @@ export async function resolveReachableServer(options = {}) {
         try {
           if (_Network?.getIpAddressAsync) {
             deviceIp = await _Network.getIpAddressAsync();
+            if (!deviceIp || deviceIp === '0.0.0.0') {
+              await new Promise((r) => setTimeout(r, 400));
+              deviceIp = await _Network.getIpAddressAsync();
+            }
           }
         } catch (_e) {}
 

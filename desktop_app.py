@@ -4601,6 +4601,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             fastapi_app, host=HOST, port=PORT,
             log_level="warning",
             log_config=None,
+            timeout_keep_alive=15,
         )
         self._uvicorn_server = uvicorn.Server(ucfg)
 
@@ -4639,28 +4640,58 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         try:
             udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             udp_sock.bind(("0.0.0.0", port))
+            udp_sock.settimeout(2.0)
             self._udp_sock = udp_sock
 
+            def _build_discovery_payload() -> bytes:
+                cfg = load_config()
+                return json.dumps({
+                    "status": "ok",
+                    "server_id": cfg.get("SERVER_ID", ""),
+                    "name": cfg.get("DESKTOP_NAME") or socket.gethostname(),
+                    "hostname": f"{socket.gethostname()}.local",
+                    "version": "4.3.2",
+                    "all_ips": get_all_local_ips(),
+                    "port": port,
+                }).encode("utf-8")
+
             def _udp_loop():
+                last_heartbeat = 0.0
                 while getattr(self, "_server_running", False) and getattr(self, "_udp_sock", None):
+                    now = time.time()
+                    # Periodic mesh network heartbeat (every 25s) to keep switch/bridge MAC tables fresh
+                    if now - last_heartbeat >= 25.0:
+                        last_heartbeat = now
+                        try:
+                            payload = _build_discovery_payload()
+                            local_ips = get_all_local_ips()
+                            targets = {"255.255.255.255", "224.0.0.1"}
+                            for lip in local_ips:
+                                parts = lip.split(".")
+                                if len(parts) == 4 and not lip.startswith("127."):
+                                    prefix = ".".join(parts[:3])
+                                    targets.add(f"{prefix}.255")
+                                    targets.add(f"{prefix}.1")
+                            for tgt in targets:
+                                try:
+                                    udp_sock.sendto(payload, (tgt, port))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
                     try:
                         data, addr = udp_sock.recvfrom(2048)
                         if not data:
                             continue
                         msg = data.decode("utf-8", errors="ignore")
                         if "PING" in msg or "DISCOVER" in msg or "backup" in msg.lower():
-                            cfg = load_config()
-                            resp = json.dumps({
-                                "status": "ok",
-                                "server_id": cfg.get("SERVER_ID", ""),
-                                "name": cfg.get("DESKTOP_NAME") or socket.gethostname(),
-                                "hostname": f"{socket.gethostname()}.local",
-                                "version": "4.3.2",
-                                "all_ips": get_all_local_ips(),
-                                "port": port,
-                            }).encode("utf-8")
+                            resp = _build_discovery_payload()
                             udp_sock.sendto(resp, addr)
+                    except socket.timeout:
+                        continue
                     except (socket.error, OSError):
                         break
                     except Exception:
