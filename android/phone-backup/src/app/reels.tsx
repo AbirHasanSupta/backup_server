@@ -18,6 +18,7 @@ import {
   RefreshControl,
   PanResponder,
   Alert,
+  DeviceEventEmitter,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
@@ -179,40 +180,59 @@ function scoreReel(
     return 100000 + (item.created_at || 0);
   }
 
-  const reactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
-  const comments = item.comment_count || 0;
-  const reposts = item.repost_count || 0;
-  const isSaved = Boolean(item.is_saved);
+  // 1. Calculate public engagement (comments & others' likes/reposts):
+  // Exclude current user's own like and repost from public engagement counts
+  const totalReactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
+  const ownReactionCount = (item.user_reactions && item.user_reactions.length > 0) ? 1 : 0;
+  const othersReactions = Math.max(0, totalReactions - ownReactionCount);
+
+  const totalComments = item.comment_count || 0;
+
+  const totalReposts = item.repost_count || 0;
+  const ownRepostCount = item.user_has_reposted ? 1 : 0;
+  const othersReposts = Math.max(0, totalReposts - ownRepostCount);
+
+  // Public engagement score: comments, others' reactions and reposts boost popularity
+  const publicWeightedEngage = othersReactions * 1.0 + totalComments * 1.8 + othersReposts * 2.5;
+  const engagement = Math.min(1, Math.log1p(publicWeightedEngage) / Math.log1p(25));
+
+  const hasUserInteracted = Boolean(
+    ownReactionCount > 0 ||
+    item.user_has_reposted ||
+    item.is_saved
+  );
+
   const now = sessionSeed > 0 ? sessionSeed : Date.now();
   const ageDays = Math.max(0, now / 1000 - (item.created_at || 0)) / 86400;
 
-  // 1. Recency decay: smooth exponential curve with half-life ~14 days
+  // 2. Recency decay: smooth exponential curve with half-life ~14 days
   const recency = Math.exp(-ageDays / 14);
 
-  // 2. Engagement score: weighted combination of likes, comments, reposts, and saves
-  const weightedEngage = reactions * 1.0 + comments * 1.8 + reposts * 2.5 + (isSaved ? 3.0 : 0);
-  const engagement = Math.min(1, Math.log1p(weightedEngage) / Math.log1p(25));
-
-  // 3. Creator affinity (personalized signal from user's past likes, saves, comments)
+  // 3. Creator affinity: personalized signal to discover NEW/unwatched reels from liked creators.
+  // If the user already watched or interacted with THIS reel, creator affinity should not boost it back.
   const creatorKey = item.original_author?.device_id || item.shared_by_device_id || item.shared_by;
   const rawAffinity = creatorKey ? (affinityMap[creatorKey] || 0) : 0;
-  const affinity = Math.min(1, rawAffinity / 8);
+  const affinity = (!isWatched && !hasUserInteracted) ? Math.min(1, rawAffinity / 8) : 0;
 
-  // 4. Freshness bonus for unviewed reels
-  const freshBonus = isWatched ? 0 : 0.30;
+  // 4. Freshness bonus vs watch & interaction penalty
+  // Unwatched content gets strong priority.
+  // Already-watched and interacted reels get heavily penalized so they don't reappear frequently.
+  const freshBonus = isWatched ? -0.50 : 0.25;
+  const interactionPenalty = hasUserInteracted ? -0.40 : 0;
 
   // 5. Social boost for curated reposted content
-  const socialBoost = item.is_repost ? 0.10 : 0.04;
+  const socialBoost = item.is_repost ? 0.08 : 0.03;
 
   // 6. Controlled deterministic noise for serendipitous discovery per session
-  const noise = ((hashString(item.reel_id + '_' + sessionSeed) % 1000) / 1000) * 0.10;
+  const noise = ((hashString(item.reel_id + '_' + sessionSeed) % 1000) / 1000) * 0.08;
 
   return (
     recency * 0.20 +
-    engagement * 0.25 +
+    engagement * 0.35 +
     affinity * 0.20 +
-    freshBonus * 0.20 +
-    socialBoost * 0.05 +
+    freshBonus +
+    interactionPenalty +
+    socialBoost +
     noise
   );
 }
@@ -223,29 +243,52 @@ function rankReels(
   sessionSeed: number,
   affinityMap: Record<string, number> = {},
 ): ReelItem[] {
-  const scored = [...items].map(item => ({
-    item,
-    score: scoreReel(item, watched, sessionSeed, affinityMap),
-  }));
+  const scored = [...items].map(item => {
+    const hasInteracted = Boolean(
+      (item.user_reactions && item.user_reactions.length > 0) ||
+      item.user_has_reposted ||
+      item.is_saved
+    );
+    const isWatched = watched.has(item.reel_id);
+    return {
+      item,
+      score: scoreReel(item, watched, sessionSeed, affinityMap),
+      isWatched,
+      hasInteracted,
+    };
+  });
+
   scored.sort((a, b) => b.score - a.score);
 
-  const pool = scored.map(s => s.item);
+  // Four-tiered pool separation:
+  // 1. unseenTop: New unread incoming reels
+  // 2. freshUnwatched: Unwatched & uninteracted fresh reels
+  // 3. watchedNotInteracted: Already watched once, but user didn't interact (for replay if fresh runs out)
+  // 4. alreadyInteracted: User already liked/commented/saved/reposted (pushed to end of feed)
   const unseenTop: ReelItem[] = [];
-  const regularPool: ReelItem[] = [];
+  const freshUnwatched: ReelItem[] = [];
+  const watchedNotInteracted: ReelItem[] = [];
+  const alreadyInteracted: ReelItem[] = [];
 
-  for (const item of pool) {
-    if (!watched.has(item.reel_id) && item.is_unseen) {
+  for (const entry of scored) {
+    const { item, isWatched, hasInteracted } = entry;
+    if (!isWatched && item.is_unseen) {
       unseenTop.push(item);
+    } else if (!isWatched && !hasInteracted) {
+      freshUnwatched.push(item);
+    } else if (isWatched && !hasInteracted) {
+      watchedNotInteracted.push(item);
     } else {
-      regularPool.push(item);
+      alreadyInteracted.push(item);
     }
   }
 
   const result: ReelItem[] = [...unseenTop];
 
+  // Interleave and diversify authors across remaining pools
+  const remaining = [...freshUnwatched, ...watchedNotInteracted, ...alreadyInteracted];
   let lastAuthor = '';
   let streak = 0;
-  const remaining = [...regularPool];
 
   while (remaining.length > 0) {
     let pickIndex = 0;
@@ -343,7 +386,7 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
     p.muted = muted;
     p.preservesPitch = true;
     p.bufferOptions = {
-      preferredForwardBufferDuration: 6,
+      preferredForwardBufferDuration: 15,
       minBufferForPlayback: 0.25,
       prioritizeTimeOverSizeThreshold: true,
     };
@@ -367,11 +410,16 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
   }, [onReady, onProgress]);
 
   useEffect(() => {
-    if (status === 'readyToPlay' && !readyFiredRef.current) {
-      readyFiredRef.current = true;
-      onReadyRef.current();
+    if (status === 'readyToPlay') {
+      if (!readyFiredRef.current) {
+        readyFiredRef.current = true;
+        onReadyRef.current();
+      }
+      if (isActive && isPlaying) {
+        try { player.play(); } catch {}
+      }
     }
-  }, [status]);
+  }, [status, isActive, isPlaying, player]);
 
   // Reset ready flag per source so that swiping back to a cached reel fires
   // onReady again if needed (e.g. the card was recycled while off-screen).
@@ -406,8 +454,11 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
     try {
       player.preservesPitch = true;
       player.playbackRate = speed;
+      if (isActive && isPlaying) {
+        player.play();
+      }
     } catch {}
-  }, [speed, player]);
+  }, [speed, player, isActive, isPlaying]);
 
   useEffect(() => {
     try { player.muted = muted; } catch {}
@@ -425,11 +476,12 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
 
 // ─── Single reel card ─────────────────────────────────────────────────────────
 
-const REACTION_EMOJIS = ['❤️', '😂', '😮', '👍', '🔥', '👏'] as const;
+const REACTION_EMOJIS = ['❤️', '😂', '😮', '👍'] as const;
 
 type ReelCardProps = {
   item: ReelItem;
   isActive: boolean;
+  isMounted?: boolean;
   cardWidth: number;
   cardHeight: number;
   serverConfig: ServerConfig;
@@ -442,9 +494,10 @@ type ReelCardProps = {
   colors: AppColors;
 };
 
-function ReelCard({
+function ReelCardBase({
   item,
   isActive,
+  isMounted = true,
   cardWidth,
   cardHeight,
   serverConfig,
@@ -469,7 +522,8 @@ function ReelCard({
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const singleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTapRef = useRef(0);
-  const longPressRef = useRef(false);
+  const isLongPressingRef = useRef(false);
+  const lastLongPressEndRef = useRef(0);
   const readyOnceRef = useRef(false);
 
   // Draggable seek state
@@ -503,7 +557,10 @@ function ReelCard({
   }, []);
 
   const handlePress = useCallback(() => {
-    if (longPressRef.current) { longPressRef.current = false; return; }
+    // Suppress tap if coming out of a long press (within 400ms) or if currently long pressing
+    if (isLongPressingRef.current || (Date.now() - lastLongPressEndRef.current < 400)) {
+      return;
+    }
     if (showEmojiPicker) { setShowEmojiPicker(false); return; }
     const now = Date.now();
     const isDouble = now - lastTapRef.current < 300;
@@ -520,7 +577,17 @@ function ReelCard({
       ]).start(() => setShowHeart(false));
     } else {
       singleTapTimerRef.current = setTimeout(() => {
-        setIsPlaying(p => !p);
+        setIsPlaying(p => {
+          const next = !p;
+          const pl = playerRef.current;
+          if (pl) {
+            try {
+              if (next) pl.play();
+              else pl.pause();
+            } catch {}
+          }
+          return next;
+        });
         flashControls();
       }, 300);
     }
@@ -531,16 +598,19 @@ function ReelCard({
       clearTimeout(singleTapTimerRef.current);
       singleTapTimerRef.current = null;
     }
-    longPressRef.current = true;
+    isLongPressingRef.current = true;
     hapticLongPress();
     setSpeed(2.0);
     setShow2x(true);
   }, []);
 
   const handlePressOut = useCallback(() => {
+    if (isLongPressingRef.current) {
+      isLongPressingRef.current = false;
+      lastLongPressEndRef.current = Date.now();
+    }
     setSpeed(1.0);
     setShow2x(false);
-    setTimeout(() => { longPressRef.current = false; }, 50);
   }, []);
 
   useEffect(() => {
@@ -667,7 +737,7 @@ function ReelCard({
   return (
     <View style={[s.reel, { width: cardWidth, height: cardHeight }]}>
       {/* Solid Black letterbox background with contain thumbnail placeholder */}
-      {(!expoVideoModule || !videoUrl || isLoading) && thumbUrl ? (
+      {(!expoVideoModule || !videoUrl || !isMounted || isLoading) && thumbUrl ? (
         <Image
           source={{ uri: thumbUrl }}
           style={StyleSheet.absoluteFill}
@@ -677,7 +747,7 @@ function ReelCard({
       ) : null}
 
       {/* Video View with contain fit and solid black letterboxing */}
-      {expoVideoModule && videoUrl ? (
+      {expoVideoModule && videoUrl && isMounted ? (
         <VideoReelPlayer
           uri={videoUrl}
           isActive={isActive}
@@ -729,7 +799,7 @@ function ReelCard({
       )}
 
       {/* Loading spinner */}
-      {isLoading && isActive && (
+      {isLoading && isActive && isMounted && (
         <View style={s.loadingOverlay} pointerEvents="none">
           <ActivityIndicator color="#fff" size="large" />
         </View>
@@ -926,6 +996,8 @@ function ReelCard({
     </View>
   );
 }
+
+const ReelCard = React.memo(ReelCardBase);
 
 // ─── Comments sheet ───────────────────────────────────────────────────────────
 
@@ -1235,17 +1307,77 @@ export default function ReelsScreen() {
 
   const viewabilityConfig = useMemo(() => ({ itemVisiblePercentThreshold: 60, minimumViewTime: 50 }), []);
 
+  // Global event synchronization for reel interactions (e.g. from Saved Reels screen)
+  useEffect(() => {
+    const saveSub = DeviceEventEmitter.addListener('reel-save-changed', (data: { reelId: string; shareId?: number; isSaved: boolean }) => {
+      setReels(prev => prev.map(r =>
+        (r.reel_id === data.reelId || (data.shareId != null && r.share_id === data.shareId))
+          ? { ...r, is_saved: data.isSaved }
+          : r
+      ));
+    });
+
+    const reactionSub = DeviceEventEmitter.addListener('reel-reaction-changed', (data: { mediaId?: number | null; reelId?: string; counts?: Record<string, number>; userReactions?: string[] }) => {
+      setReels(prev => prev.map(r =>
+        (r.reel_id === data.reelId || (data.mediaId != null && r.media_id === data.mediaId))
+          ? {
+              ...r,
+              reaction_counts: data.counts ?? r.reaction_counts,
+              user_reactions: data.userReactions ?? r.user_reactions,
+            }
+          : r
+      ));
+    });
+
+    const repostSub = DeviceEventEmitter.addListener('reel-repost-changed', (data: { shareId: number; reelId?: string; mediaId?: number | null; userHasReposted: boolean; repostCount?: number }) => {
+      setReels(prev => prev.map(r =>
+        (r.share_id === data.shareId || r.reel_id === data.reelId || (data.mediaId != null && r.media_id === data.mediaId))
+          ? {
+              ...r,
+              user_has_reposted: data.userHasReposted,
+              repost_count: data.repostCount !== undefined
+                ? data.repostCount
+                : Math.max(0, (r.repost_count || 0) + (data.userHasReposted ? 1 : -1)),
+            }
+          : r
+      ));
+    });
+
+    const commentSub = DeviceEventEmitter.addListener('reel-comment-changed', (data: { reelId?: string; mediaId?: number | null; delta: number }) => {
+      setReels(prev => prev.map(r =>
+        ((data.reelId && r.reel_id === data.reelId) || (data.mediaId != null && r.media_id === data.mediaId))
+          ? { ...r, comment_count: Math.max(0, r.comment_count + data.delta) }
+          : r
+      ));
+    });
+
+    return () => {
+      saveSub.remove();
+      reactionSub.remove();
+      repostSub.remove();
+      commentSub.remove();
+    };
+  }, []);
+
   const handleReact = useCallback(async (item: ReelItem, emoji: string) => {
     if (item.media_id == null) return;
     const creatorKey = item.original_author?.device_id || item.shared_by_device_id || item.shared_by;
     recordAffinity(creatorKey, 1).catch(() => {});
     try {
       const res = await reactToMedia(item.media_id, emoji);
+      const nextCounts = res.counts ?? item.reaction_counts;
+      const nextUserReactions = res.user_reactions ?? item.user_reactions;
       setReels(prev => prev.map(r =>
-        r.reel_id === item.reel_id
-          ? { ...r, reaction_counts: res.counts ?? r.reaction_counts, user_reactions: res.user_reactions ?? r.user_reactions }
+        r.reel_id === item.reel_id || (item.media_id != null && r.media_id === item.media_id)
+          ? { ...r, reaction_counts: nextCounts, user_reactions: nextUserReactions }
           : r
       ));
+      DeviceEventEmitter.emit('reel-reaction-changed', {
+        mediaId: item.media_id,
+        reelId: item.reel_id,
+        counts: nextCounts,
+        userReactions: nextUserReactions,
+      });
     } catch { hapticError(); }
   }, []);
 
@@ -1259,15 +1391,32 @@ export default function ReelsScreen() {
     setReels(prev => prev.map(r =>
       r.reel_id === item.reel_id ? { ...r, is_saved: nextSaved } : r
     ));
+    DeviceEventEmitter.emit('reel-save-changed', {
+      reelId: item.reel_id,
+      shareId: item.share_id,
+      isSaved: nextSaved,
+    });
     try {
       const res = await toggleSaveReel(item.reel_id, item.share_id, item.media_id ?? undefined);
       setReels(prev => prev.map(r =>
         r.reel_id === item.reel_id ? { ...r, is_saved: res.saved } : r
       ));
+      if (res.saved !== nextSaved) {
+        DeviceEventEmitter.emit('reel-save-changed', {
+          reelId: item.reel_id,
+          shareId: item.share_id,
+          isSaved: res.saved,
+        });
+      }
     } catch {
       setReels(prev => prev.map(r =>
         r.reel_id === item.reel_id ? { ...r, is_saved: item.is_saved } : r
       ));
+      DeviceEventEmitter.emit('reel-save-changed', {
+        reelId: item.reel_id,
+        shareId: item.share_id,
+        isSaved: Boolean(item.is_saved),
+      });
       hapticError();
     }
   }, []);
@@ -1276,20 +1425,35 @@ export default function ReelsScreen() {
     if (item.user_has_reposted) {
       hapticLight();
       const prevReels = reelsRef.current;
+      const nextCount = Math.max(0, (item.repost_count || 1) - 1);
       setReels(prev => prev.map(r =>
         r.reel_id === item.reel_id || r.share_id === item.share_id
           ? {
               ...r,
               user_has_reposted: false,
-              repost_count: Math.max(0, (r.repost_count || 1) - 1),
+              repost_count: nextCount,
             }
           : r
       ));
+      DeviceEventEmitter.emit('reel-repost-changed', {
+        shareId: item.share_id,
+        reelId: item.reel_id,
+        mediaId: item.media_id,
+        userHasReposted: false,
+        repostCount: nextCount,
+      });
       try {
         await cancelRepostReel(item.share_id);
         hapticSuccess();
       } catch (err: any) {
         setReels(prevReels);
+        DeviceEventEmitter.emit('reel-repost-changed', {
+          shareId: item.share_id,
+          reelId: item.reel_id,
+          mediaId: item.media_id,
+          userHasReposted: true,
+          repostCount: item.repost_count,
+        });
         hapticError();
         Alert.alert('Could not cancel repost', err?.message || 'Failed to remove repost.');
       }
@@ -1302,6 +1466,7 @@ export default function ReelsScreen() {
     if (!repostTarget) return;
     const creatorKey = repostTarget.original_author?.device_id || repostTarget.shared_by_device_id || repostTarget.shared_by;
     recordAffinity(creatorKey, 3).catch(() => {});
+    const nextCount = (repostTarget.repost_count || 0) + 1;
     try {
       await repostReel(repostTarget.share_id, targetDeviceIds, caption);
       setReels(prev => prev.map(r =>
@@ -1309,10 +1474,17 @@ export default function ReelsScreen() {
           ? {
               ...r,
               user_has_reposted: true,
-              repost_count: (r.repost_count || 0) + 1,
+              repost_count: nextCount,
             }
           : r
       ));
+      DeviceEventEmitter.emit('reel-repost-changed', {
+        shareId: repostTarget.share_id,
+        reelId: repostTarget.reel_id,
+        mediaId: repostTarget.media_id,
+        userHasReposted: true,
+        repostCount: nextCount,
+      });
       hapticSuccess();
       setRepostTarget(null);
     } catch (err: any) {
@@ -1328,14 +1500,29 @@ export default function ReelsScreen() {
       recordAffinity(creatorKey, 2).catch(() => {});
     }
     setReels(prev => prev.map(r =>
-      r.reel_id === reelId ? { ...r, comment_count: r.comment_count + 1 } : r
+      (r.reel_id === reelId || (targetItem?.media_id != null && r.media_id === targetItem.media_id))
+        ? { ...r, comment_count: r.comment_count + 1 }
+        : r
     ));
+    DeviceEventEmitter.emit('reel-comment-changed', {
+      reelId,
+      mediaId: targetItem?.media_id,
+      delta: 1,
+    });
   }, []);
 
   const handleCommentDeleted = useCallback((reelId: string) => {
+    const targetItem = reelsRef.current.find(r => r.reel_id === reelId);
     setReels(prev => prev.map(r =>
-      r.reel_id === reelId ? { ...r, comment_count: Math.max(0, r.comment_count - 1) } : r
+      (r.reel_id === reelId || (targetItem?.media_id != null && r.media_id === targetItem.media_id))
+        ? { ...r, comment_count: Math.max(0, r.comment_count - 1) }
+        : r
     ));
+    DeviceEventEmitter.emit('reel-comment-changed', {
+      reelId,
+      mediaId: targetItem?.media_id,
+      delta: -1,
+    });
   }, []);
 
   const handleLoadMore = useCallback(() => {
@@ -1361,23 +1548,27 @@ export default function ReelsScreen() {
     };
   }, [viewportHeight]);
 
-  const renderItem = useCallback(({ item, index }: { item: ReelItem; index: number }) => (
-    <ReelCard
-      key={item.reel_id}
-      item={item}
-      isActive={index === activeIndex && screenFocused}
-      cardWidth={viewportWidth}
-      cardHeight={viewportHeight}
-      serverConfig={serverConfig}
-      muted={muted}
-      onToggleMute={handleToggleMute}
-      onReact={handleReact}
-      onOpenComments={setCommentsTarget}
-      onOpenRepost={handleOpenRepost}
-      onToggleSave={handleToggleSave}
-      colors={colors}
-    />
-  ), [activeIndex, screenFocused, viewportWidth, viewportHeight, serverConfig, muted, handleToggleMute, handleReact, handleOpenRepost, handleToggleSave, colors]);
+  const renderItem = useCallback(({ item, index }: { item: ReelItem; index: number }) => {
+    const isNearActive = Math.abs(index - activeIndex) <= 1;
+    return (
+      <ReelCard
+        key={item.reel_id}
+        item={item}
+        isActive={index === activeIndex && screenFocused}
+        isMounted={isNearActive && screenFocused}
+        cardWidth={viewportWidth}
+        cardHeight={viewportHeight}
+        serverConfig={serverConfig}
+        muted={muted}
+        onToggleMute={handleToggleMute}
+        onReact={handleReact}
+        onOpenComments={setCommentsTarget}
+        onOpenRepost={handleOpenRepost}
+        onToggleSave={handleToggleSave}
+        colors={colors}
+      />
+    );
+  }, [activeIndex, screenFocused, viewportWidth, viewportHeight, serverConfig, muted, handleToggleMute, handleReact, handleOpenRepost, handleToggleSave, colors]);
 
   return (
     <View
@@ -1456,9 +1647,9 @@ export default function ReelsScreen() {
             viewabilityConfig={viewabilityConfig}
             onEndReached={handleLoadMore}
             onEndReachedThreshold={0.5}
-            windowSize={5}
+            windowSize={3}
             initialNumToRender={2}
-            maxToRenderPerBatch={3}
+            maxToRenderPerBatch={2}
             removeClippedSubviews={false}
             scrollEventThrottle={16}
             refreshControl={

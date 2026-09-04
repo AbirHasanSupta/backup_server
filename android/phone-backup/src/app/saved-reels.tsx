@@ -18,6 +18,7 @@ import {
   PanResponder,
   Alert,
   BackHandler,
+  DeviceEventEmitter,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
@@ -115,7 +116,7 @@ type Comment = {
 };
 
 const MUTED_KEY = 'reels_muted_v1';
-const REACTION_EMOJIS = ['❤️', '😂', '😮', '👍', '🔥', '👏'] as const;
+const REACTION_EMOJIS = ['❤️', '😂', '😮', '👍'] as const;
 
 function formatMediaTime(sec: number): string {
   const s = Math.max(0, Math.floor(sec || 0));
@@ -196,7 +197,7 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
     p.muted = muted;
     p.preservesPitch = true;
     p.bufferOptions = {
-      preferredForwardBufferDuration: 6,
+      preferredForwardBufferDuration: 15,
       minBufferForPlayback: 0.25,
       prioritizeTimeOverSizeThreshold: true,
     };
@@ -217,11 +218,16 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
   }, [onReady, onProgress]);
 
   useEffect(() => {
-    if (status === 'readyToPlay' && !readyFiredRef.current) {
-      readyFiredRef.current = true;
-      onReadyRef.current();
+    if (status === 'readyToPlay') {
+      if (!readyFiredRef.current) {
+        readyFiredRef.current = true;
+        onReadyRef.current();
+      }
+      if (isActive && isPlaying) {
+        try { player.play(); } catch {}
+      }
     }
-  }, [status]);
+  }, [status, isActive, isPlaying, player]);
 
   useEffect(() => {
     readyFiredRef.current = false;
@@ -240,20 +246,13 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
 
   useEffect(() => {
     try {
-      if (isActive && isPlaying) {
-        player.play();
-      } else {
-        player.pause();
-      }
-    } catch {}
-  }, [isActive, isPlaying, player]);
-
-  useEffect(() => {
-    try {
       player.preservesPitch = true;
       player.playbackRate = speed;
+      if (isActive && isPlaying) {
+        player.play();
+      }
     } catch {}
-  }, [speed, player]);
+  }, [speed, player, isActive, isPlaying]);
 
   useEffect(() => {
     try { player.muted = muted; } catch {}
@@ -274,6 +273,7 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
 type SavedReelCardProps = {
   item: SavedReelItem;
   isActive: boolean;
+  isMounted?: boolean;
   serverConfig: ServerConfig;
   muted: boolean;
   segmentTitle?: string;
@@ -286,9 +286,10 @@ type SavedReelCardProps = {
   onCloseViewer: () => void;
 };
 
-function SavedReelCard({
+function SavedReelCardBase({
   item,
   isActive,
+  isMounted = true,
   serverConfig,
   muted,
   segmentTitle,
@@ -315,7 +316,8 @@ function SavedReelCard({
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const singleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTapRef = useRef(0);
-  const longPressRef = useRef(false);
+  const isLongPressingRef = useRef(false);
+  const lastLongPressEndRef = useRef(0);
   const readyOnceRef = useRef(false);
 
   const playerRef = useRef<any>(null);
@@ -346,7 +348,9 @@ function SavedReelCard({
   }, []);
 
   const handlePress = useCallback(() => {
-    if (longPressRef.current) { longPressRef.current = false; return; }
+    if (isLongPressingRef.current || (Date.now() - lastLongPressEndRef.current < 400)) {
+      return;
+    }
     if (showEmojiPicker) { setShowEmojiPicker(false); return; }
     const now = Date.now();
     const isDouble = now - lastTapRef.current < 300;
@@ -363,7 +367,17 @@ function SavedReelCard({
       ]).start(() => setShowHeart(false));
     } else {
       singleTapTimerRef.current = setTimeout(() => {
-        setIsPlaying(p => !p);
+        setIsPlaying(p => {
+          const next = !p;
+          const pl = playerRef.current;
+          if (pl) {
+            try {
+              if (next) pl.play();
+              else pl.pause();
+            } catch {}
+          }
+          return next;
+        });
         flashControls();
       }, 300);
     }
@@ -374,16 +388,19 @@ function SavedReelCard({
       clearTimeout(singleTapTimerRef.current);
       singleTapTimerRef.current = null;
     }
-    longPressRef.current = true;
+    isLongPressingRef.current = true;
     hapticLongPress();
     setSpeed(2.0);
     setShow2x(true);
   }, []);
 
   const handlePressOut = useCallback(() => {
+    if (isLongPressingRef.current) {
+      isLongPressingRef.current = false;
+      lastLongPressEndRef.current = Date.now();
+    }
     setSpeed(1.0);
     setShow2x(false);
-    setTimeout(() => { longPressRef.current = false; }, 50);
   }, []);
 
   useEffect(() => {
@@ -504,8 +521,7 @@ function SavedReelCard({
 
   return (
     <View style={[s.fullReel, { width: SCREEN_W, height: SCREEN_H }]}>
-      {/* Thumbnail placeholder */}
-      {(!expoVideoModule || !videoUrl || isLoading) && thumbUrl ? (
+      {(!expoVideoModule || !videoUrl || !isMounted || isLoading) && thumbUrl ? (
         <Image
           source={{ uri: thumbUrl }}
           style={StyleSheet.absoluteFill}
@@ -514,8 +530,7 @@ function SavedReelCard({
         />
       ) : null}
 
-      {/* Video View */}
-      {expoVideoModule && videoUrl ? (
+      {expoVideoModule && videoUrl && isMounted ? (
         <VideoPlayer
           uri={videoUrl}
           isActive={isActive}
@@ -528,7 +543,6 @@ function SavedReelCard({
         />
       ) : null}
 
-      {/* Full transparent touch receiver overlay */}
       <Pressable
         style={StyleSheet.absoluteFill}
         onPress={handlePress}
@@ -537,7 +551,6 @@ function SavedReelCard({
         delayLongPress={350}
       />
 
-      {/* Top Header Overlay Bar */}
       <View style={[s.viewerTopBar, { top: insets.top + Spacing.two }]} pointerEvents="box-none">
         <TouchableOpacity
           style={s.viewerCloseBtn}
@@ -558,14 +571,12 @@ function SavedReelCard({
         <View style={{ width: 38 }} />
       </View>
 
-      {/* 2x speed badge */}
       {show2x && (
         <View style={s.speedBadge} pointerEvents="none">
           <Text style={s.speedText}>2x speed</Text>
         </View>
       )}
 
-      {/* Play/Pause flash badge */}
       {showControls && (
         <View style={s.playPauseBadge} pointerEvents="none">
           <AppIcon
@@ -577,7 +588,6 @@ function SavedReelCard({
         </View>
       )}
 
-      {/* Double tap heart */}
       {showHeart && (
         <Animated.View
           pointerEvents="none"
@@ -587,17 +597,19 @@ function SavedReelCard({
         </Animated.View>
       )}
 
-      {/* Loading spinner */}
-      {isLoading && isActive && (
+      {isLoading && isActive && isMounted && (
         <View style={s.loadingOverlay} pointerEvents="none">
           <ActivityIndicator color="#fff" size="large" />
         </View>
       )}
 
-      {/* Right Action Bar (Instagram clean style) */}
       <View style={s.rightActions} pointerEvents="box-none">
-        {/* Like */}
-        <TouchableOpacity style={s.actionBtn} onPress={toggleHeartLike} activeOpacity={0.75}>
+        <TouchableOpacity
+          style={s.actionBtn}
+          onPress={toggleHeartLike}
+          onLongPress={() => { hapticLongPress(); setShowEmojiPicker(p => !p); }}
+          activeOpacity={0.75}
+        >
           <View style={s.actionIconWrap}>
             {myReaction && myReaction !== '❤️' ? (
               <Text style={s.actionEmojiText}>{myReaction}</Text>
@@ -613,24 +625,38 @@ function SavedReelCard({
           <Text style={s.actionCount}>{totalReactions > 0 ? totalReactions : 'Like'}</Text>
         </TouchableOpacity>
 
-        {/* Comments */}
-        <TouchableOpacity style={s.actionBtn} onPress={() => { hapticLight(); onOpenComments(item); }} activeOpacity={0.75}>
+        <TouchableOpacity
+          style={s.actionBtn}
+          onPress={() => { hapticLight(); onOpenComments(item); }}
+          activeOpacity={0.75}
+        >
           <View style={s.actionIconWrap}>
             <AppIcon androidName="chat_bubble_outline" iosName="bubble.right.fill" color="#FFFFFF" size={23} />
           </View>
           <Text style={s.actionCount}>{item.comment_count > 0 ? item.comment_count : 'Comment'}</Text>
         </TouchableOpacity>
 
-        {/* Repost */}
-        <TouchableOpacity style={s.actionBtn} onPress={() => { hapticLight(); onOpenRepost(item); }} activeOpacity={0.75}>
+        <TouchableOpacity
+          style={s.actionBtn}
+          onPress={() => { hapticLight(); onOpenRepost(item); }}
+          activeOpacity={0.75}
+        >
           <View style={s.actionIconWrap}>
-            <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color={item.user_has_reposted ? '#38BDF8' : '#FFFFFF'} size={23} />
+            <AppIcon
+              androidName="repeat"
+              iosName="arrow.2.squarepath"
+              color={item.user_has_reposted ? '#38BDF8' : '#FFFFFF'}
+              size={23}
+            />
           </View>
           <Text style={s.actionCount}>{(item.repost_count || 0) > 0 ? item.repost_count : 'Repost'}</Text>
         </TouchableOpacity>
 
-        {/* Save / Bookmark Toggle */}
-        <TouchableOpacity style={s.actionBtn} onPress={() => onToggleSave(item)} activeOpacity={0.75}>
+        <TouchableOpacity
+          style={s.actionBtn}
+          onPress={() => { onToggleSave(item); }}
+          activeOpacity={0.75}
+        >
           <View style={s.actionIconWrap}>
             <AppIcon
               androidName={item.is_saved ? 'bookmark' : 'bookmark_border'}
@@ -642,8 +668,11 @@ function SavedReelCard({
           <Text style={s.actionCount}>{item.is_saved ? 'Saved' : 'Save'}</Text>
         </TouchableOpacity>
 
-        {/* Sound / Mute */}
-        <TouchableOpacity style={s.actionBtn} onPress={() => { hapticSelection(); onToggleMute(); }} activeOpacity={0.75}>
+        <TouchableOpacity
+          style={s.actionBtn}
+          onPress={() => { hapticSelection(); onToggleMute(); }}
+          activeOpacity={0.75}
+        >
           <View style={s.actionIconWrap}>
             <AppIcon
               androidName={muted ? 'volume_off' : 'volume_up'}
@@ -659,20 +688,22 @@ function SavedReelCard({
       {/* Floating Emoji Picker */}
       {showEmojiPicker && (
         <View style={s.emojiPicker}>
-          {REACTION_EMOJIS.map(emoji => (
-            <TouchableOpacity
-              key={emoji}
-              onPress={() => { hapticSuccess(); onReact(item, emoji); setShowEmojiPicker(false); }}
-              style={[s.emojiBtn, item.user_reactions?.includes(emoji) && s.emojiBtnActive]}
-              activeOpacity={0.75}
-            >
-              <Text style={s.emojiText}>{emoji}</Text>
-            </TouchableOpacity>
-          ))}
+          {REACTION_EMOJIS.map(emoji => {
+            const active = item.user_reactions?.includes(emoji);
+            return (
+              <TouchableOpacity
+                key={emoji}
+                onPress={() => { hapticSuccess(); onReact(item, emoji); setShowEmojiPicker(false); }}
+                style={[s.emojiBtn, active && s.emojiBtnActive]}
+                activeOpacity={0.75}
+              >
+                <Text style={s.emojiText}>{emoji}</Text>
+              </TouchableOpacity>
+            );
+          })}
         </View>
       )}
 
-      {/* Author & Caption Info (Bottom Left) */}
       <View style={s.authorInfo} pointerEvents="none">
         {item.is_repost && (
           <View style={s.repostBadge}>
@@ -701,7 +732,6 @@ function SavedReelCard({
         )}
       </View>
 
-      {/* Draggable Progress / Seek Bar */}
       <View style={s.progressWrap} {...seekPanResponder.panHandlers}>
         {isSeeking && (
           <View style={s.seekTimeBubble} pointerEvents="none">
@@ -731,6 +761,8 @@ function SavedReelCard({
     </View>
   );
 }
+
+const SavedReelCard = React.memo(SavedReelCardBase);
 
 // ─── Comments Sheet ───────────────────────────────────────────────────────────
 
@@ -953,6 +985,93 @@ export default function SavedReelsScreen() {
     AsyncStorage.getItem(MUTED_KEY).then(v => { if (v != null) setMuted(v === '1'); }).catch(() => {});
   }, []);
 
+  // Sync state changes across screens (e.g. actions done on the main reels feed)
+  useEffect(() => {
+    const saveSub = DeviceEventEmitter.addListener('reel-save-changed', (data: { reelId: string; shareId?: number; isSaved: boolean }) => {
+      setSavedReels(prev => {
+        if (!data.isSaved) {
+          return prev.filter(r => r.reel_id !== data.reelId && r.share_id !== data.shareId);
+        }
+        return prev.map(r =>
+          (r.reel_id === data.reelId || (data.shareId != null && r.share_id === data.shareId))
+            ? { ...r, is_saved: true }
+            : r
+        );
+      });
+      setLikedReels(prev => prev.map(r =>
+        (r.reel_id === data.reelId || (data.shareId != null && r.share_id === data.shareId))
+          ? { ...r, is_saved: data.isSaved }
+          : r
+      ));
+      setRepostedReels(prev => prev.map(r =>
+        (r.reel_id === data.reelId || (data.shareId != null && r.share_id === data.shareId))
+          ? { ...r, is_saved: data.isSaved }
+          : r
+      ));
+    });
+
+    const reactionSub = DeviceEventEmitter.addListener('reel-reaction-changed', (data: { mediaId?: number | null; reelId?: string; counts?: Record<string, number>; userReactions?: string[] }) => {
+      const isNowReacted = (data.userReactions?.length ?? 0) > 0;
+      const updater = (prev: SavedReelItem[]) => prev.map(r =>
+        (r.reel_id === data.reelId || (data.mediaId != null && r.media_id === data.mediaId))
+          ? {
+              ...r,
+              reaction_counts: data.counts ?? r.reaction_counts,
+              user_reactions: data.userReactions ?? r.user_reactions,
+            }
+          : r
+      );
+      setSavedReels(updater);
+      setRepostedReels(updater);
+      setLikedReels(prev => {
+        if (!isNowReacted) {
+          return prev.filter(r => r.reel_id !== data.reelId && (data.mediaId == null || r.media_id !== data.mediaId));
+        }
+        return updater(prev);
+      });
+    });
+
+    const repostSub = DeviceEventEmitter.addListener('reel-repost-changed', (data: { shareId: number; reelId?: string; mediaId?: number | null; userHasReposted: boolean; repostCount?: number }) => {
+      const updater = (prev: SavedReelItem[]) => prev.map(r =>
+        (r.share_id === data.shareId || r.reel_id === data.reelId || (data.mediaId != null && r.media_id === data.mediaId))
+          ? {
+              ...r,
+              user_has_reposted: data.userHasReposted,
+              repost_count: data.repostCount !== undefined
+                ? data.repostCount
+                : Math.max(0, (r.repost_count || 0) + (data.userHasReposted ? 1 : -1)),
+            }
+          : r
+      );
+      setSavedReels(updater);
+      setLikedReels(updater);
+      setRepostedReels(prev => {
+        if (!data.userHasReposted) {
+          return prev.filter(r => r.share_id !== data.shareId && r.reel_id !== data.reelId && (data.mediaId == null || r.media_id !== data.mediaId));
+        }
+        return updater(prev);
+      });
+    });
+
+    const commentSub = DeviceEventEmitter.addListener('reel-comment-changed', (data: { reelId?: string; mediaId?: number | null; delta: number }) => {
+      const updater = (prev: SavedReelItem[]) => prev.map(r =>
+        ((data.reelId && r.reel_id === data.reelId) || (data.mediaId != null && r.media_id === data.mediaId))
+          ? { ...r, comment_count: Math.max(0, r.comment_count + data.delta) }
+          : r
+      );
+      setSavedReels(updater);
+      setLikedReels(updater);
+      setRepostedReels(updater);
+    });
+
+    return () => {
+      saveSub.remove();
+      reactionSub.remove();
+      repostSub.remove();
+      commentSub.remove();
+    };
+  }, []);
+
   const handleToggleMute = useCallback(() => {
     setMuted(prev => {
       const next = !prev;
@@ -996,6 +1115,12 @@ export default function SavedReelsScreen() {
       (r.reel_id === item.reel_id || r.share_id === item.share_id) ? { ...r, is_saved: willBeSaved } : r
     ));
 
+    DeviceEventEmitter.emit('reel-save-changed', {
+      reelId: item.reel_id,
+      shareId: item.share_id,
+      isSaved: willBeSaved,
+    });
+
     try {
       await toggleSaveReel(item.reel_id, item.share_id, item.media_id ?? undefined);
     } catch {
@@ -1006,37 +1131,60 @@ export default function SavedReelsScreen() {
         }
         return [{ ...item, is_saved: true }, ...prev];
       });
+      DeviceEventEmitter.emit('reel-save-changed', {
+        reelId: item.reel_id,
+        shareId: item.share_id,
+        isSaved: !willBeSaved,
+      });
       hapticError();
     }
   }, [activeSegment]);
 
   const handleCommentAdded = useCallback((reelId: string) => {
+    const targetItem = [...savedReels, ...likedReels, ...repostedReels].find(r => r.reel_id === reelId);
     const updater = (prev: SavedReelItem[]) => prev.map(r =>
-      r.reel_id === reelId ? { ...r, comment_count: r.comment_count + 1 } : r
+      (r.reel_id === reelId || (targetItem?.media_id != null && r.media_id === targetItem.media_id))
+        ? { ...r, comment_count: r.comment_count + 1 }
+        : r
     );
     setSavedReels(updater);
     setLikedReels(updater);
     setRepostedReels(updater);
-  }, []);
+    DeviceEventEmitter.emit('reel-comment-changed', {
+      reelId,
+      mediaId: targetItem?.media_id,
+      delta: 1,
+    });
+  }, [savedReels, likedReels, repostedReels]);
 
   const handleCommentDeleted = useCallback((reelId: string) => {
+    const targetItem = [...savedReels, ...likedReels, ...repostedReels].find(r => r.reel_id === reelId);
     const updater = (prev: SavedReelItem[]) => prev.map(r =>
-      r.reel_id === reelId ? { ...r, comment_count: Math.max(0, r.comment_count - 1) } : r
+      (r.reel_id === reelId || (targetItem?.media_id != null && r.media_id === targetItem.media_id))
+        ? { ...r, comment_count: Math.max(0, r.comment_count - 1) }
+        : r
     );
     setSavedReels(updater);
     setLikedReels(updater);
     setRepostedReels(updater);
-  }, []);
+    DeviceEventEmitter.emit('reel-comment-changed', {
+      reelId,
+      mediaId: targetItem?.media_id,
+      delta: -1,
+    });
+  }, [savedReels, likedReels, repostedReels]);
 
   const handleReact = useCallback(async (item: SavedReelItem, emoji: string) => {
     if (item.media_id == null) return;
     try {
       const res = await reactToMedia(item.media_id, emoji);
       const isNowReacted = (res.user_reactions?.length ?? 0) > 0;
+      const nextCounts = res.counts ?? item.reaction_counts;
+      const nextUserReactions = res.user_reactions ?? item.user_reactions;
 
       const updater = (prev: SavedReelItem[]) => prev.map(r =>
-        r.reel_id === item.reel_id || r.media_id === item.media_id
-          ? { ...r, reaction_counts: res.counts ?? r.reaction_counts, user_reactions: res.user_reactions ?? r.user_reactions }
+        (r.reel_id === item.reel_id || r.media_id === item.media_id)
+          ? { ...r, reaction_counts: nextCounts, user_reactions: nextUserReactions }
           : r
       );
 
@@ -1044,12 +1192,23 @@ export default function SavedReelsScreen() {
       setRepostedReels(updater);
 
       setLikedReels(prev => {
-        if (!isNowReacted && activeSegment === 'liked') {
-          const filtered = prev.filter(r => r.reel_id !== item.reel_id && r.media_id !== item.media_id);
-          if (filtered.length === 0) setViewerIndex(null);
+        if (!isNowReacted) {
+          const filtered = prev.filter(r => r.reel_id !== item.reel_id && (item.media_id == null || r.media_id !== item.media_id));
+          if (activeSegment === 'liked' && filtered.length === 0) setViewerIndex(null);
           return filtered;
         }
+        const exists = prev.some(r => r.reel_id === item.reel_id || (item.media_id != null && r.media_id === item.media_id));
+        if (!exists) {
+          return [{ ...item, reaction_counts: nextCounts, user_reactions: nextUserReactions }, ...prev];
+        }
         return updater(prev);
+      });
+
+      DeviceEventEmitter.emit('reel-reaction-changed', {
+        mediaId: item.media_id,
+        reelId: item.reel_id,
+        counts: nextCounts,
+        userReactions: nextUserReactions,
       });
     } catch {
       hapticError();
@@ -1062,13 +1221,14 @@ export default function SavedReelsScreen() {
       const prevSaved = savedReels;
       const prevLiked = likedReels;
       const prevReposted = repostedReels;
+      const nextCount = Math.max(0, (item.repost_count || 1) - 1);
 
       const updater = (prev: SavedReelItem[]) => prev.map(r =>
         r.reel_id === item.reel_id || r.share_id === item.share_id
           ? {
               ...r,
               user_has_reposted: false,
-              repost_count: Math.max(0, (r.repost_count || 1) - 1),
+              repost_count: nextCount,
             }
           : r
       );
@@ -1083,6 +1243,14 @@ export default function SavedReelsScreen() {
         return filtered;
       });
 
+      DeviceEventEmitter.emit('reel-repost-changed', {
+        shareId: item.share_id,
+        reelId: item.reel_id,
+        mediaId: item.media_id,
+        userHasReposted: false,
+        repostCount: nextCount,
+      });
+
       try {
         await cancelRepostReel(item.share_id);
         hapticSuccess();
@@ -1090,6 +1258,13 @@ export default function SavedReelsScreen() {
         setSavedReels(prevSaved);
         setLikedReels(prevLiked);
         setRepostedReels(prevReposted);
+        DeviceEventEmitter.emit('reel-repost-changed', {
+          shareId: item.share_id,
+          reelId: item.reel_id,
+          mediaId: item.media_id,
+          userHasReposted: true,
+          repostCount: item.repost_count,
+        });
         hapticError();
         Alert.alert('Could not cancel repost', err?.message || 'Failed to remove repost.');
       }
@@ -1100,6 +1275,7 @@ export default function SavedReelsScreen() {
 
   const handleRepostSubmit = useCallback(async (targetDeviceIds: string[], caption: string) => {
     if (!repostTarget) return;
+    const nextCount = (repostTarget.repost_count || 0) + 1;
     try {
       await repostReel(repostTarget.share_id, targetDeviceIds, caption);
       const updater = (prev: SavedReelItem[]) => prev.map(r =>
@@ -1107,13 +1283,20 @@ export default function SavedReelsScreen() {
           ? {
               ...r,
               user_has_reposted: true,
-              repost_count: (r.repost_count || 0) + 1,
+              repost_count: nextCount,
             }
           : r
       );
       setSavedReels(updater);
       setLikedReels(updater);
-      setRepostedReels(prev => [{ ...repostTarget, user_has_reposted: true, is_repost: true }, ...prev]);
+      setRepostedReels(prev => [{ ...repostTarget, user_has_reposted: true, is_repost: true, repost_count: nextCount }, ...prev]);
+      DeviceEventEmitter.emit('reel-repost-changed', {
+        shareId: repostTarget.share_id,
+        reelId: repostTarget.reel_id,
+        mediaId: repostTarget.media_id,
+        userHasReposted: true,
+        repostCount: nextCount,
+      });
       hapticSuccess();
       setRepostTarget(null);
     } catch (err: any) {
@@ -1406,6 +1589,9 @@ export default function SavedReelsScreen() {
               getItemLayout={(_, index) => ({ length: SCREEN_H, offset: SCREEN_H * index, index })}
               pagingEnabled
               showsVerticalScrollIndicator={false}
+              windowSize={3}
+              initialNumToRender={2}
+              maxToRenderPerBatch={2}
               onViewableItemsChanged={onViewerItemsChanged}
               viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
               onScrollToIndexFailed={info => {
@@ -1418,6 +1604,7 @@ export default function SavedReelsScreen() {
                   key={`${activeSegment}_card_${item.reel_id}`}
                   item={item}
                   isActive={index === activeViewerIndex}
+                  isMounted={Math.abs(index - activeViewerIndex) <= 1}
                   serverConfig={serverConfig}
                   muted={muted}
                   segmentTitle={segmentTitle}

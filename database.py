@@ -635,6 +635,9 @@ def init_db():
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_comments_media ON comments(media_id, created_at)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_comments_source ON comments(source_id)"
+    )
 
     # 14. device_shares table for device-to-device file sharing (references to origin media)
     conn.execute(
