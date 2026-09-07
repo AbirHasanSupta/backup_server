@@ -401,7 +401,7 @@ export async function getRecentMemories(days = 7) {
  * Parse JSON body; treat empty / literal null as null (flashback & roulette).
  * @param {Response} res
  */
-async function readJsonOrNull(res) {
+export async function readJsonOrNull(res) {
   const text = await res.text();
   if (!text || text === 'null') return null;
   return JSON.parse(text);
@@ -951,6 +951,35 @@ export async function getReelsFeed(offset = 0, limit = 30, seed = 0) {
     };
   });
 }
+
+/**
+ * Send batch playback telemetry to the server (fire-and-forget).
+ * @param {Array<any>} events
+ * @returns {Promise<{ok: boolean, recorded?: number}>}
+ */
+export async function sendReelTelemetry(events) {
+  if (!events || events.length === 0) return { ok: true, recorded: 0 };
+  try {
+    const { ip, port, key, deviceId } = await getConfig();
+    if (!ip || !port || !deviceId) return { ok: false };
+    const res = await fetch(`http://${ip}:${port}/api/reels/telemetry`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${key}`,
+      },
+      body: JSON.stringify({
+        device_id: deviceId,
+        events,
+      }),
+    });
+    if (!res.ok) return { ok: false };
+    return await res.json();
+  } catch {
+    return { ok: false };
+  }
+}
+
 
 /**
  * Repost an existing reel to selected devices with access control.

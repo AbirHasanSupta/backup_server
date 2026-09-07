@@ -3,6 +3,7 @@ import base64
 from email.utils import formatdate
 from mimetypes import guess_type
 import json
+import math
 import os
 import platform
 import random
@@ -84,6 +85,9 @@ from database import (
     get_repost_counts_for_media_ids,
     get_user_reposted_media_ids,
     get_user_reposted_info,
+    get_reel_view_counts,
+    get_reel_durations,
+    record_reel_telemetry,
     MAX_COMMENT_LENGTH,
 )
 from trips import cluster_source_media, trigger_background_clustering
@@ -2559,6 +2563,59 @@ async def get_unified_feed(
     return {"items": page, "has_more": has_more, "total": total}
 
 
+_REEL_HASHTAG_RE = re.compile(r"#[\w\d_-]+", re.UNICODE)
+_REEL_EMOJI_RE = re.compile(
+    r"[\U0001F300-\U0001F9FF]|[\U0001FA00-\U0001FAFF]|[\U00002700-\U000027BF]|[\U0001F600-\U0001F64F]|[\U0001F680-\U0001F6FF]",
+    re.UNICODE,
+)
+_REEL_WORD_RE = re.compile(r"\b[a-zA-Z]{3,15}\b")
+_REEL_STOPWORDS = {
+    "the", "and", "this", "that", "with", "from", "for", "have", "you", "your",
+    "was", "were", "are", "been", "will", "what", "when", "where", "who", "which",
+    "there", "here", "just", "some", "like", "into", "than", "then", "more", "also",
+    "about", "would", "could", "should", "their", "them", "these", "those", "post", "reel"
+}
+
+
+def extract_reel_tokens(caption: str | None) -> list[str]:
+    """Extract hashtags, emojis, and key semantic words locally without AI."""
+    if not caption:
+        return []
+    tokens: set[str] = set()
+    for ht in _REEL_HASHTAG_RE.findall(caption):
+        tokens.add(ht.lower())
+    for em in _REEL_EMOJI_RE.findall(caption):
+        tokens.add(em)
+    for w in _REEL_WORD_RE.findall(caption.lower()):
+        if w not in _REEL_STOPWORDS:
+            tokens.add(w)
+    return sorted(tokens)[:15]
+
+
+def calculate_bayesian_quality(reactions: int, comments: int, reposts: int, views: int) -> float:
+    """Compute smoothed Bayesian quality score between 0.0 and 1.0, blending volume and view conversion."""
+    weighted_engage = (reactions * 1.0) + (comments * 1.8) + (reposts * 2.5)
+    volume_score = min(1.0, math.log1p(weighted_engage) / math.log1p(30.0))
+    if views <= 0:
+        return volume_score
+    # Bayesian engagement rate with prior k=5, prior_rate=0.08
+    k_prior = 5.0
+    prior_rate = 0.08
+    smoothed_rate = (weighted_engage + k_prior * prior_rate) / (views + k_prior)
+    # Rate normalized (rate of 0.25 is considered exceptional)
+    rate_score = min(1.0, smoothed_rate / 0.25)
+    return round(0.55 * volume_score + 0.45 * rate_score, 4)
+
+
+def deterministic_seed_jitter(key: str, seed: int) -> float:
+    """32-bit FNV-1a hash to produce a deterministic jitter in [0.0, 1.0)."""
+    h = 2166136261
+    combined = f"{key}_{seed}"
+    for b in combined.encode("utf-8"):
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return ((h % 10000) / 10000.0)
+
+
 @router.get("/api/reels")
 @router.get("/reels")
 async def get_reels_feed(
@@ -2571,6 +2628,10 @@ async def get_reels_feed(
 ):
     """Every video shared with/by this device (including reposts), flattened out of its
     post group and served with rich author, reposter, saved, and engagement metadata."""
+    device_id = (device_id or "").strip()
+    offset = max(0, offset)
+    limit = max(1, min(100, limit))
+
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
 
@@ -2600,6 +2661,10 @@ async def get_reels_feed(
         comment_counts = get_comment_counts_for_media_ids(media_ids)
         repost_counts = get_repost_counts_for_media_ids(media_ids)
         user_reposted_media, user_reposted_shares = get_user_reposted_info(device_id)
+        share_ids = [s["share_id"] for s in reel_shares]
+        view_counts = get_reel_view_counts(share_ids)
+        durations_map = get_reel_durations(share_ids)
+        now_ts = int(time.time())
 
         reels = []
         for s in reel_shares:
@@ -2615,6 +2680,14 @@ async def get_reels_feed(
                 or (s["share_id"] in user_reposted_shares)
                 or (s.get("post_kind") == "reel_repost" and s.get("shared_by_device_id") == device_id)
             )
+
+            total_rx = sum(counts_map.get(s["media_id"], {}).values()) if s.get("media_id") else 0
+            comm_cnt = comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0
+            rep_cnt = repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0
+            v_cnt = view_counts.get(s["share_id"], 0)
+            q_score = calculate_bayesian_quality(total_rx, comm_cnt, rep_cnt, v_cnt)
+            cap_text = s.get("group_caption") or s.get("caption")
+            tokens = extract_reel_tokens(cap_text)
 
             reels.append({
                 "reel_id": str(s["share_id"]),
@@ -2637,19 +2710,41 @@ async def get_reels_feed(
                     "username": reposter_username,
                     "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
                 } if is_repost else None,
-                "caption": s.get("group_caption") or s.get("caption"),
+                "caption": cap_text,
                 "created_at": s["created_at"],
                 "reaction_counts": counts_map.get(s["media_id"], {}) if s.get("media_id") else {},
                 "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
-                "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
-                "repost_count": repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+                "comment_count": comm_cnt,
+                "repost_count": rep_cnt,
+                "view_count": v_cnt,
+                "duration": durations_map.get(s["share_id"], 0.0),
+                "quality_score": round(q_score, 4),
+                "tokens": tokens,
+                "size": s.get("size") or 0,
                 "is_own_post": s["is_own_post"],
                 "is_saved": str(s["share_id"]) in saved_ids,
                 "is_unseen": not bool(s.get("seen", 1)),
                 "group_id": s.get("share_group_id"),
             })
 
-        random.Random(seed).shuffle(reels)
+        # HyperPulse Candidate Pre-Ranking:
+        # 1. Direct incoming unseen reels (is_unseen = True) always appear first
+        # 2. Recency and Bayesian public quality blend with deterministic session seed jitter
+        # 3. Ensures pagination does not leave high-value unwatched content buried on later pages
+        def _candidate_rank(r):
+            is_unseen = 1 if r["is_unseen"] else 0
+            created_at = r.get("created_at") or now_ts
+            age_days = max(0.0, (now_ts - created_at) / 86400.0)
+            recency = math.exp(-age_days / 14.0)
+            q = r.get("quality_score", 0.0)
+
+            # Deterministic pseudo-random jitter derived from seed and reel_id (FNV-1a)
+            jitter = deterministic_seed_jitter(str(r["reel_id"]), seed) * 0.30
+            social_boost = 0.08 if r.get("is_repost") else 0.0
+
+            return (10000.0 if is_unseen else 0.0) + (recency * 0.40) + (q * 0.35) + social_boost + jitter
+
+        reels.sort(key=_candidate_rank, reverse=True)
 
         total = len(reels)
         page = reels[offset: offset + limit]
@@ -2658,6 +2753,35 @@ async def get_reels_feed(
 
     page, has_more, total = await asyncio.to_thread(_build)
     return {"reels": page, "has_more": has_more, "total": total}
+
+
+@router.post("/api/reels/telemetry")
+@router.post("/reels/telemetry")
+async def record_reels_telemetry_endpoint(
+    request: Request,
+    authorization: str = Header(None),
+    token: str = None,
+):
+    """Record batch playback telemetry (watch time, loops, skips) for reels."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+    device_id = str(body.get("device_id") or "").strip()
+    events = body.get("events") or []
+
+    if not device_id:
+        raise HTTPException(status_code=400, detail="device_id is required")
+    if not isinstance(events, list):
+        raise HTTPException(status_code=400, detail="events must be a list")
+
+    verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
+    verify_known_device_by_id(device_id)
+
+    inserted = await asyncio.to_thread(record_reel_telemetry, device_id, events)
+    return {"ok": True, "recorded": inserted}
+
 
 
 @router.post("/api/reels/repost")

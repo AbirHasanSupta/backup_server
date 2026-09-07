@@ -12,3 +12,7 @@ server_config.json
 cert.pem
 key.pem
 *.pem
+
+# PyInstaller build artifacts
+*.exe
+*.spec

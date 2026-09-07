@@ -741,6 +741,27 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_reels_device ON saved_reels(device_id, created_at DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_reels_share ON saved_reels(share_id)")
 
+    # 18. reel_telemetry table for local analytics & view count estimation
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reel_telemetry
+        (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id       TEXT    NOT NULL,
+            share_id        INTEGER NOT NULL,
+            media_id        INTEGER,
+            watch_time_sec  REAL    NOT NULL DEFAULT 0.0,
+            duration_sec    REAL    NOT NULL DEFAULT 0.0,
+            completion_rate REAL    NOT NULL DEFAULT 0.0,
+            loops           INTEGER NOT NULL DEFAULT 0,
+            skipped         INTEGER NOT NULL DEFAULT 0,
+            created_at      INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reel_telem_share ON reel_telemetry(share_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reel_telem_device ON reel_telemetry(device_id)")
+
     conn.commit()
     conn.close()
 
@@ -3789,4 +3810,112 @@ def get_reposted_reels(device_id: str, offset: int = 0, limit: int = 50) -> list
         (device_id, device_id, limit, offset),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [dict(r) for r in rows]
+
+
+def record_reel_telemetry(device_id: str, events: list[dict]) -> int:
+    """Record batch of reel playback telemetry events from a device."""
+    if not device_id or not events:
+        return 0
+    conn = get_conn()
+    now_ts = int(_time.time())
+    inserted = 0
+    try:
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            share_id = ev.get("share_id")
+            if not share_id:
+                continue
+            try:
+                share_id = int(share_id)
+            except (ValueError, TypeError):
+                continue
+            media_id = ev.get("media_id")
+            if media_id is not None:
+                try:
+                    media_id = int(media_id)
+                except (ValueError, TypeError):
+                    media_id = None
+            try:
+                watch_time = float(ev.get("watch_time") or ev.get("watch_time_sec") or 0.0)
+            except (ValueError, TypeError):
+                watch_time = 0.0
+            try:
+                duration = float(ev.get("duration") or ev.get("duration_sec") or 0.0)
+            except (ValueError, TypeError):
+                duration = 0.0
+            try:
+                completion_rate = float(ev.get("completion_rate") or 0.0)
+            except (ValueError, TypeError):
+                completion_rate = 0.0
+            try:
+                loops = int(ev.get("loops") or 0)
+            except (ValueError, TypeError):
+                loops = 0
+            skipped = 1 if ev.get("skipped") else 0
+            try:
+                raw_ts = ev.get("timestamp")
+                ts = int(raw_ts) if raw_ts is not None else now_ts
+                if ts > 10000000000:  # Convert JS millisecond timestamp to seconds
+                    ts = int(ts / 1000)
+            except (ValueError, TypeError):
+                ts = now_ts
+
+            conn.execute(
+                """
+                INSERT INTO reel_telemetry
+                    (device_id, share_id, media_id, watch_time_sec, duration_sec, completion_rate, loops, skipped, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (device_id, share_id, media_id, watch_time, duration, completion_rate, loops, skipped, ts),
+            )
+            inserted += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return inserted
+
+
+def get_reel_view_counts(share_ids: list[int]) -> dict[int, int]:
+    """Return dict mapping share_id -> total view count (non-skipped plays)."""
+    if not share_ids:
+        return {}
+    conn = get_conn()
+    try:
+        placeholders = ",".join(["?"] * len(share_ids))
+        rows = conn.execute(
+            f"""
+            SELECT share_id, COUNT(*) AS view_count
+            FROM reel_telemetry
+            WHERE share_id IN ({placeholders}) AND skipped = 0
+            GROUP BY share_id
+            """,
+            share_ids,
+        ).fetchall()
+        return {r["share_id"]: r["view_count"] for r in rows}
+    finally:
+        conn.close()
+
+
+def get_reel_durations(share_ids: list[int]) -> dict[int, float]:
+    """Return dict mapping share_id -> max duration_sec recorded in telemetry."""
+    if not share_ids:
+        return {}
+    conn = get_conn()
+    try:
+        placeholders = ",".join(["?"] * len(share_ids))
+        rows = conn.execute(
+            f"""
+            SELECT share_id, MAX(duration_sec) AS max_duration
+            FROM reel_telemetry
+            WHERE share_id IN ({placeholders}) AND duration_sec > 0
+            GROUP BY share_id
+            """,
+            share_ids,
+        ).fetchall()
+        return {r["share_id"]: round(float(r["max_duration"]), 2) for r in rows if r["max_duration"]}
+    finally:
+        conn.close()
+
+
