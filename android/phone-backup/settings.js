@@ -812,13 +812,13 @@ async function subnetSweep(baseIp, port, exclude, expectedServerId = '') {
     if (!exclude.has(ip)) candidates.push(ip);
   }
 
-  const BATCH = 20;
+  const BATCH = 30;
   for (let i = 0; i < candidates.length; i += BATCH) {
     const batch = candidates.slice(i, i + BATCH);
     // Mark as probed before firing so concurrent callers don't duplicate work
     batch.forEach((ip) => exclude.add(ip));
     const results = await Promise.all(
-      batch.map(async (ip) => ({ ip, probe: await quickProbe(ip, port, 1500) }))
+      batch.map(async (ip) => ({ ip, probe: await quickProbe(ip, port, 1000) }))
     );
     const found = results.find((r) => {
       if (!r.probe.ok) return false;

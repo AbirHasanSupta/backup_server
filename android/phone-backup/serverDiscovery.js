@@ -1,7 +1,10 @@
 import { getServerPort, getSavedServers } from './settings';
 
+// Wave 1 (known candidates + retry): roam-tolerance headroom
 const TIMEOUT_MS = 2500;
-const BATCH_SIZE = 15;
+// Wave 2/3 (blind subnet sweep, no retry): same-subnet dead hosts refuse/RST in <10ms
+const SWEEP_TIMEOUT_MS = 1000;
+const BATCH_SIZE = 25;
 
 // Common mesh node & router subnets across various manufacturers:
 // TP-Link Deco = 192.168.68.x, Google Nest = 192.168.86.x, Asus = 192.168.50.x,
@@ -148,6 +151,12 @@ export function buildMultiSubnetWaves(deviceIp, savedServers = []) {
     add('wave1', `${sub}.1`);
   });
 
+  // Low-IP quick-hit: desktop/NAS servers are often statically or DHCP-assigned to .2–.20.
+  // Probing them in wave 1 (alongside saved IPs, with retry) avoids waiting for the wave 2 sweep.
+  if (primarySubnet) {
+    for (let i = 2; i <= 20; i++) add('wave1', `${primarySubnet}.${i}`);
+  }
+
   // 2. Wave 2: Full host sweeps of primary subnet and saved server subnets
   knownSubnets.forEach((sub) => {
     // Probe common host ranges first (.100-.150, .2-.99, .151-.254)
@@ -283,12 +292,21 @@ export async function discoverServers(onProgress, options = {}) {
     onProgress && onProgress(progressPct, Array.from(foundMap.values()));
   }
 
-  // Phase 2: Wave 2 (primary subnet & saved server subnets) & Wave 3 in controlled batches
+  // Early exit: if wave 1 already found at least one server, skip the slow subnet sweep.
+  // Disable with options.stopEarlyIfFound = false when a full network sweep is desired
+  // (e.g. showing all available servers to the user).
+  if (foundMap.size > 0 && options.stopEarlyIfFound !== false) {
+    return Array.from(foundMap.values());
+  }
+
+  // Phase 2: Wave 2 (primary subnet & saved server subnets) & Wave 3 in controlled batches.
+  // Uses SWEEP_TIMEOUT_MS (1000ms) — dead hosts TCP-refuse in <10ms on a LAN, so 2500ms
+  // per-probe would just be dead time. Active servers respond in <50ms.
   const remainingIps = [...waves.wave2, ...waves.wave3];
   for (let i = 0; i < remainingIps.length; i += BATCH_SIZE) {
     if (options.shouldStop?.() || options.signal?.aborted) break;
     const batch = remainingIps.slice(i, i + BATCH_SIZE);
-    const results = await Promise.all(batch.map((ip) => probeServer(ip, port, TIMEOUT_MS, false)));
+    const results = await Promise.all(batch.map((ip) => probeServer(ip, port, SWEEP_TIMEOUT_MS, false)));
     if (options.shouldStop?.() || options.signal?.aborted) break;
 
     processResults(results);

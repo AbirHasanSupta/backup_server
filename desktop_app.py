@@ -4663,11 +4663,15 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
             def _udp_loop():
                 last_heartbeat = 0.0
+                _heartbeat_count = 0
                 while getattr(self, "_server_running", False) and getattr(self, "_udp_sock", None):
                     now = time.time()
-                    # Periodic mesh network heartbeat (every 25s) to keep switch/bridge MAC tables fresh
-                    if now - last_heartbeat >= 25.0:
+                    # Burst mode for the first 3 heartbeats (at 0s, ~6s, ~12s after start),
+                    # then settle to a steady 12s interval to keep mesh bridge MAC tables fresh.
+                    next_interval = 6.0 if _heartbeat_count < 3 else 12.0
+                    if now - last_heartbeat >= next_interval:
                         last_heartbeat = now
+                        _heartbeat_count += 1
                         try:
                             payload = _build_discovery_payload()
                             local_ips = get_all_local_ips()
