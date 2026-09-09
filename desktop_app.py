@@ -4647,12 +4647,16 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
             def _build_discovery_payload() -> bytes:
                 cfg = load_config()
+                try:
+                    from upload import APP_VERSION as _app_version
+                except Exception:
+                    _app_version = "4.3.2"
                 return json.dumps({
                     "status": "ok",
                     "server_id": cfg.get("SERVER_ID", ""),
                     "name": cfg.get("DESKTOP_NAME") or socket.gethostname(),
                     "hostname": f"{socket.gethostname()}.local",
-                    "version": "4.3.2",
+                    "version": _app_version,
                     "all_ips": get_all_local_ips(),
                     "port": port,
                 }).encode("utf-8")
