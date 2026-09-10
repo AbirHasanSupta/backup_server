@@ -275,7 +275,7 @@ type ReelCardProps = {
   onOpenComments: (item: ReelItem) => void;
   onOpenRepost: (item: ReelItem) => void;
   onToggleSave: (item: ReelItem) => void;
-  onSpeedModeChange?: (isFastForwarding: boolean) => void;
+  onSpeedModeChange?: (reelId: string, isFastForwarding: boolean) => void;
   onPlaybackTelemetry?: (ev: PlaybackTelemetryEvent) => void;
   colors: AppColors;
 };
@@ -482,8 +482,8 @@ function ReelCardBase({
     setShowEmojiPicker(false);
     setSpeed(2.0);
     setShow2x(true);
-    onSpeedModeChange?.(true);
-  }, [onSpeedModeChange]);
+    onSpeedModeChange?.(item.reel_id, true);
+  }, [item.reel_id, onSpeedModeChange]);
 
   const handlePressOut = useCallback(() => {
     if (isLongPressingRef.current) {
@@ -492,8 +492,8 @@ function ReelCardBase({
     }
     setSpeed(1.0);
     setShow2x(false);
-    onSpeedModeChange?.(false);
-  }, [onSpeedModeChange]);
+    onSpeedModeChange?.(item.reel_id, false);
+  }, [item.reel_id, onSpeedModeChange]);
 
   useEffect(() => {
     if (isActive) {
@@ -510,20 +510,20 @@ function ReelCardBase({
       setShowEmojiPicker(false);
       setShow2x(false);
       setSpeed(1.0);
-      onSpeedModeChange?.(false);
+      onSpeedModeChange?.(item.reel_id, false);
       setIsSeeking(false);
       isSeekingRef.current = false;
       seekProgressRef.current = 0;
       if (controlsTimer.current) clearTimeout(controlsTimer.current);
       setShowControls(false);
     }
-  }, [isActive, onSpeedModeChange]);
+  }, [isActive, item.reel_id, onSpeedModeChange]);
 
   useEffect(() => () => {
     if (controlsTimer.current) clearTimeout(controlsTimer.current);
     if (singleTapTimerRef.current) clearTimeout(singleTapTimerRef.current);
-    onSpeedModeChange?.(false);
-  }, [onSpeedModeChange]);
+    onSpeedModeChange?.(item.reel_id, false);
+  }, [item.reel_id, onSpeedModeChange]);
 
   const handleProgress = useCallback((cur: number, dur: number) => {
     if (!isSeekingRef.current) {
@@ -1088,9 +1088,10 @@ export default function ReelsScreen() {
   const [commentsTarget, setCommentsTarget] = useState<ReelItem | null>(null);
   const [repostTarget, setRepostTarget] = useState<ReelItem | null>(null);
   const [muted, setMuted] = useState(false);
-  const [isFastForwarding, setIsFastForwarding] = useState(false);
+  const [fastForwardingReelId, setFastForwardingReelId] = useState<string | null>(null);
   const [reelSection, setReelSection] = useState<ReelSection>('for-you');
   const [sectionPickerVisible, setSectionPickerVisible] = useState(false);
+  const isFastForwarding = fastForwardingReelId !== null;
 
   // Dynamic layout measurement to cleanly fit between status bar and floating bottom tab bar
   const defaultCardHeight = Math.round(Math.max(300, SCREEN_H - insets.top - TAB_BAR_TOTAL_CLEARANCE));
@@ -1245,7 +1246,7 @@ export default function ReelsScreen() {
     setScreenFocused(true);
     return () => {
       setScreenFocused(false);
-      setIsFastForwarding(false);
+      setFastForwardingReelId(null);
       void flushTelemetry();
     };
   }, [flushTelemetry]));
@@ -1654,8 +1655,13 @@ export default function ReelsScreen() {
     };
   }, [viewportHeight]);
 
-  const handleSpeedModeChange = useCallback((isFastForwarding: boolean) => {
-    setIsFastForwarding(isFastForwarding);
+  const handleSpeedModeChange = useCallback((reelId: string, isFastForwarding: boolean) => {
+    setFastForwardingReelId(current => {
+      if (isFastForwarding) return reelId;
+      // A recycled/off-screen card must not clear fast-forward owned by the
+      // currently pressed card.
+      return current === reelId ? null : current;
+    });
   }, []);
 
   const renderItem = useCallback(({ item, index }: { item: ReelItem; index: number }) => {
@@ -1695,42 +1701,49 @@ export default function ReelsScreen() {
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
 
       {/* Top Header Bar */}
-      {!isFastForwarding && (
-        <View style={s.topBar} pointerEvents="box-none">
+      {/*
+       * Do not unmount this while holding for 2x. The list below pages by its
+       * measured height, so removing the header changes every item offset while
+       * the Pressable still owns the touch gesture.
+       */}
+      <View
+        style={[s.topBar, isFastForwarding && s.fastForwardHidden]}
+        pointerEvents={isFastForwarding ? 'none' : 'box-none'}
+        importantForAccessibility={isFastForwarding ? 'no-hide-descendants' : 'auto'}
+      >
+        <TouchableOpacity
+          style={s.headerTitleButton}
+          onPress={() => { hapticLight(); setSectionPickerVisible(true); }}
+          hitSlop={10}
+          accessibilityLabel="Choose reels section"
+          accessibilityHint="Opens the Reels and Shared and Backups selector"
+        >
+          <Text style={s.headerTitle}>{reelSection === 'shared-backups' ? 'Shared and Backups' : 'Reels'}</Text>
+          <AppIcon androidName="arrow_drop_down" iosName="chevron.down" color="#fff" size={20} />
+        </TouchableOpacity>
+
+        <View style={s.headerRightActions}>
+          {/* Reels Library Screen Redirect (Saved, Liked, Reposts) */}
           <TouchableOpacity
-            style={s.headerTitleButton}
-            onPress={() => { hapticLight(); setSectionPickerVisible(true); }}
-            hitSlop={10}
-            accessibilityLabel="Choose reels section"
-            accessibilityHint="Opens the Reels and Shared and Backups selector"
+            style={s.headerBtn}
+            onPress={() => { hapticLight(); router.push('/saved-reels'); }}
+            hitSlop={12}
+            accessibilityLabel="Reels Library"
           >
-            <Text style={s.headerTitle}>{reelSection === 'shared-backups' ? 'Shared and Backups' : 'Reels'}</Text>
-            <AppIcon androidName="arrow_drop_down" iosName="chevron.down" color="#fff" size={20} />
+            <AppIcon androidName="video_library" iosName="play.square.stack.fill" color="#fff" size={18} />
           </TouchableOpacity>
 
-          <View style={s.headerRightActions}>
-            {/* Reels Library Screen Redirect (Saved, Liked, Reposts) */}
-            <TouchableOpacity
-              style={s.headerBtn}
-              onPress={() => { hapticLight(); router.push('/saved-reels'); }}
-              hitSlop={12}
-              accessibilityLabel="Reels Library"
-            >
-              <AppIcon androidName="video_library" iosName="play.square.stack.fill" color="#fff" size={18} />
-            </TouchableOpacity>
-
-            {/* Shuffle Reels */}
-            <TouchableOpacity
-              style={s.headerBtn}
-              onPress={() => { hapticSelection(); loadReels(true); }}
-              hitSlop={12}
-              accessibilityLabel="Shuffle Reels"
-            >
-              <AppIcon androidName="shuffle" iosName="shuffle" color="#fff" size={18} />
-            </TouchableOpacity>
-          </View>
+          {/* Shuffle Reels */}
+          <TouchableOpacity
+            style={s.headerBtn}
+            onPress={() => { hapticSelection(); loadReels(true); }}
+            hitSlop={12}
+            accessibilityLabel="Shuffle Reels"
+          >
+            <AppIcon androidName="shuffle" iosName="shuffle" color="#fff" size={18} />
+          </TouchableOpacity>
         </View>
-      )}
+      </View>
 
       {/* Main Reels Viewport Container */}
       <View style={s.listContainer} onLayout={handleContainerLayout}>
