@@ -1336,16 +1336,23 @@ export async function deleteComment(commentId) {
 }
 
 /**
- * Fetch the private reel shelf made from this device's backup and desktop
- * folders that are explicitly tagged for it.  It is intentionally separate
- * from the incoming-share feed.
+ * Fetch one private reel catalogue. Backup videos and videos from desktop
+ * folders shared with this device deliberately remain separate from each other
+ * and from the incoming-share feed.
+ * @param {'backups' | 'shared'} source
+ * @param {number} [offset=0] Zero-based page offset.
+ * @param {number} [limit=30] Maximum number of reels to fetch.
+ * @param {number} [seed=0] Session seed used for deterministic ordering.
  */
-export async function getSharedBackupsReels(offset = 0, limit = 30, seed = 0) {
+export async function getLibraryReels(source, offset = 0, limit = 30, seed = 0) {
+  if (source !== 'backups' && source !== 'shared') {
+    throw new Error('Invalid reel library source.');
+  }
   return fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
     return {
-      url: `http://${ip}:${port}/api/reels/shared-backups?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}&seed=${seed}`,
+      url: `http://${ip}:${port}/api/reels/shared-backups?device_id=${encodeURIComponent(deviceId)}&source=${source}&offset=${offset}&limit=${limit}&seed=${seed}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });

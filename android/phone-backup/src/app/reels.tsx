@@ -32,7 +32,7 @@ import { useAppTheme } from '@/hooks/use-app-theme';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   getReelsFeed,
-  getSharedBackupsReels,
+  getLibraryReels,
   sendReelTelemetry,
   getConfig,
   buildSharePreviewUrl,
@@ -83,7 +83,25 @@ try {
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ServerConfig = { ip: string; port: string; key: string; deviceId: string } | null;
-type ReelSection = 'for-you' | 'shared-backups';
+type ReelSection = 'for-you' | 'backups' | 'shared';
+
+function isLibrarySection(section: ReelSection): section is 'backups' | 'shared' {
+  return section === 'backups' || section === 'shared';
+}
+
+function reelEngineScope(section: ReelSection): 'default' | 'backups' | 'shared' {
+  return section === 'for-you' ? 'default' : section;
+}
+
+function reelSectionTitle(section: ReelSection): string {
+  if (section === 'backups') return 'Backup Folders';
+  if (section === 'shared') return 'Shared Folders';
+  return 'Reels';
+}
+
+function expectedLibrarySource(section: 'backups' | 'shared'): 'reel_backup' | 'reel_shared' {
+  return section === 'backups' ? 'reel_backup' : 'reel_shared';
+}
 
 type Comment = {
   id: number;
@@ -1126,7 +1144,7 @@ export default function ReelsScreen() {
     processPlaybackTelemetry(engineStateRef.current, ev);
     persistHyperPulseState(
       engineStateRef.current,
-      reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default',
+      reelEngineScope(reelSectionRef.current),
     ).catch(() => {});
     telemetryBatchRef.current.push(ev);
     if (telemetryBatchRef.current.length >= 5) {
@@ -1164,7 +1182,7 @@ export default function ReelsScreen() {
         if (!options.skipFullScreenLoading) setLoading(true);
         setActiveIndex(0);
       }
-      const engineScope = requestedSection === 'shared-backups' ? 'shared-backups' : 'default';
+      const engineScope = reelEngineScope(requestedSection);
       const [config, engineState] = await Promise.all([getConfig(), loadHyperPulseState(engineScope)]);
       // Ignore an earlier response after the user has picked another shelf.
       if (requestedSection !== reelSectionRef.current) return;
@@ -1173,15 +1191,17 @@ export default function ReelsScreen() {
 
       if (reset) seedRef.current = Date.now();
       const currentSeed = seedRef.current;
-      const response: { reels: ReelItem[]; has_more: boolean } = requestedSection === 'shared-backups'
-        ? await getSharedBackupsReels(reset ? 0 : offsetRef.current, 30, currentSeed)
+      const response: { reels: ReelItem[]; has_more: boolean } = isLibrarySection(requestedSection)
+        ? await getLibraryReels(requestedSection, reset ? 0 : offsetRef.current, 30, currentSeed)
         : await getReelsFeed(reset ? 0 : offsetRef.current, 30, currentSeed);
       if (requestedSection !== reelSectionRef.current) return;
       const { reels: raw, has_more } = response;
       hasMoreRef.current = has_more && raw.length > 0;
       offsetRef.current = reset ? raw.length : offsetRef.current + raw.length;
-      const filteredRaw = requestedSection === 'shared-backups'
-        ? (raw || [])
+      // Keep the shelves strictly separated even if a stale server does not
+      // yet honour the source query parameter.
+      const filteredRaw = isLibrarySection(requestedSection)
+        ? (raw || []).filter(r => r.library_source === expectedLibrarySource(requestedSection))
         : (raw || []).filter(r => !r.is_own_post && (!config?.deviceId || r.shared_by_device_id !== config.deviceId));
       const ranked = buildDiverseReelSlate(filteredRaw, engineState, currentSeed);
       setReels(prev => {
@@ -1305,7 +1325,7 @@ export default function ReelsScreen() {
             group_id: item.group_id,
             timestamp: Date.now(),
           });
-          persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
+          persistHyperPulseState(engineStateRef.current, reelEngineScope(reelSectionRef.current)).catch(() => {});
         }
       }
     });
@@ -1340,7 +1360,7 @@ export default function ReelsScreen() {
             group_id: item.group_id,
             timestamp: Date.now(),
           });
-          persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
+          persistHyperPulseState(engineStateRef.current, reelEngineScope(reelSectionRef.current)).catch(() => {});
         }
       }
     });
@@ -1376,7 +1396,7 @@ export default function ReelsScreen() {
             group_id: item.group_id,
             timestamp: Date.now(),
           });
-          persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
+          persistHyperPulseState(engineStateRef.current, reelEngineScope(reelSectionRef.current)).catch(() => {});
         }
       }
     });
@@ -1419,7 +1439,7 @@ export default function ReelsScreen() {
         group_id: item.group_id,
         timestamp: Date.now(),
       });
-      persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
+      persistHyperPulseState(engineStateRef.current, reelEngineScope(reelSectionRef.current)).catch(() => {});
     }
     try {
       const res = await reactToMedia(item.media_id, emoji);
@@ -1459,7 +1479,7 @@ export default function ReelsScreen() {
         group_id: item.group_id,
         timestamp: Date.now(),
       });
-      persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
+      persistHyperPulseState(engineStateRef.current, reelEngineScope(reelSectionRef.current)).catch(() => {});
     }
     setReels(prev => prev.map(r =>
       r.reel_id === item.reel_id ? { ...r, is_saved: nextSaved } : r
@@ -1554,7 +1574,7 @@ export default function ReelsScreen() {
         group_id: repostTarget.group_id,
         timestamp: Date.now(),
       });
-      persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
+      persistHyperPulseState(engineStateRef.current, reelEngineScope(reelSectionRef.current)).catch(() => {});
     }
     const nextCount = (repostTarget.repost_count || 0) + 1;
     try {
@@ -1602,7 +1622,7 @@ export default function ReelsScreen() {
         group_id: targetItem.group_id,
         timestamp: Date.now(),
       });
-      persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
+      persistHyperPulseState(engineStateRef.current, reelEngineScope(reelSectionRef.current)).catch(() => {});
     }
     const nextCount = count !== undefined ? count : (targetItem ? targetItem.comment_count + 1 : 1);
     setReels(prev => prev.map(r =>
@@ -1716,9 +1736,9 @@ export default function ReelsScreen() {
           onPress={() => { hapticLight(); setSectionPickerVisible(true); }}
           hitSlop={10}
           accessibilityLabel="Choose reels section"
-          accessibilityHint="Opens the Reels and Shared and Backups selector"
+          accessibilityHint="Opens the Reels, Backup Folders, and Shared Folders selector"
         >
-          <Text style={s.headerTitle}>{reelSection === 'shared-backups' ? 'Shared and Backups' : 'Reels'}</Text>
+          <Text style={s.headerTitle}>{reelSectionTitle(reelSection)}</Text>
           <AppIcon androidName="arrow_drop_down" iosName="chevron.down" color="#fff" size={20} />
         </TouchableOpacity>
 
@@ -1757,9 +1777,11 @@ export default function ReelsScreen() {
             <AppIcon androidName="videocam_off" iosName="video.slash" color="rgba(255,255,255,0.55)" size={52} />
             <Text style={s.emptyTitle}>No Reels Yet</Text>
             <Text style={s.emptyBody}>
-              {error || (reelSection === 'shared-backups'
-                ? 'Videos from your backup and desktop folders shared with this device will appear here.'
-                : 'Post a video to the feed and it will appear here as a reel.')}
+              {error || (reelSection === 'backups'
+                ? 'Videos backed up from this device will appear here.'
+                : reelSection === 'shared'
+                  ? 'Videos from desktop folders shared with this device will appear here.'
+                  : 'Post a video to the feed and it will appear here as a reel.')}
             </Text>
             <TouchableOpacity style={s.retryBtn} onPress={() => loadReels(true)}>
               <Text style={s.retryText}>Retry</Text>
@@ -1851,17 +1873,30 @@ export default function ReelsScreen() {
               {reelSection === 'for-you' && <AppIcon androidName="check" iosName="checkmark" color="#fff" size={18} />}
             </TouchableOpacity>
             <TouchableOpacity
-              style={[s.sectionPickerOption, reelSection === 'shared-backups' && s.sectionPickerOptionSelected]}
-              onPress={() => selectReelSection('shared-backups')}
+              style={[s.sectionPickerOption, reelSection === 'backups' && s.sectionPickerOptionSelected]}
+              onPress={() => selectReelSection('backups')}
+            >
+              <View style={s.sectionPickerOptionIcon}>
+                <AppIcon androidName="backup" iosName="externaldrive.fill" color="#fff" size={19} />
+              </View>
+              <View style={s.sectionPickerOptionText}>
+                <Text style={s.sectionPickerOptionTitle}>Backup Folders</Text>
+                <Text style={s.sectionPickerOptionBody}>Only videos backed up from this device.</Text>
+              </View>
+              {reelSection === 'backups' && <AppIcon androidName="check" iosName="checkmark" color="#fff" size={18} />}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.sectionPickerOption, reelSection === 'shared' && s.sectionPickerOptionSelected]}
+              onPress={() => selectReelSection('shared')}
             >
               <View style={s.sectionPickerOptionIcon}>
                 <AppIcon androidName="folder_shared" iosName="folder.badge.person.crop" color="#fff" size={19} />
               </View>
               <View style={s.sectionPickerOptionText}>
-                <Text style={s.sectionPickerOptionTitle}>Shared and Backups</Text>
-                <Text style={s.sectionPickerOptionBody}>Tagged desktop folders and this device’s backup videos.</Text>
+                <Text style={s.sectionPickerOptionTitle}>Shared Folders</Text>
+                <Text style={s.sectionPickerOptionBody}>Only videos from desktop folders tagged for this device.</Text>
               </View>
-              {reelSection === 'shared-backups' && <AppIcon androidName="check" iosName="checkmark" color="#fff" size={18} />}
+              {reelSection === 'shared' && <AppIcon androidName="check" iosName="checkmark" color="#fff" size={18} />}
             </TouchableOpacity>
           </Pressable>
         </Pressable>

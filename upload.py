@@ -2626,7 +2626,7 @@ def _library_reel_label_for_device(source_type: str, source_key: str, device_id:
     if source_type == "reel_shared":
         entry = _find_shared_dir(source_key)
         if entry and _is_folder_tagged_for_device(entry, device_id):
-            return entry.get("label") or "Shared and Backups"
+            return entry.get("label") or "Shared folder"
     return None
 
 
@@ -2634,13 +2634,14 @@ def _library_reel_label_for_device(source_type: str, source_key: str, device_id:
 @router.get("/reels/shared-backups")
 async def get_shared_and_backups_reels(
     device_id: str,
+    source: str | None = None,
     offset: int = 0,
     limit: int = 50,
     seed: int = 0,
     authorization: str = Header(None),
     token: str = None,
 ):
-    """Return videos from this backup plus desktop folders tagged for this device.
+    """Return private backup or tagged shared-folder videos for this device.
 
     This is a deliberately private catalogue: its rows are materialised as
     ``is_library_reel`` shares without targets, so they are usable by the
@@ -2648,6 +2649,9 @@ async def get_shared_and_backups_reels(
     default reels algorithm.
     """
     device_id = (device_id or "").strip()
+    source = (source or "").strip().lower()
+    if source not in ("", "backups", "shared"):
+        raise HTTPException(status_code=400, detail="source must be 'backups' or 'shared'")
     offset = max(0, offset)
     limit = max(1, min(100, limit))
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
@@ -2659,38 +2663,40 @@ async def get_shared_and_backups_reels(
     def _build():
         candidates: list[dict] = []
 
-        # This device's backed-up copies.  A dedicated source type keeps their
-        # engagement identity separate from an ordinary share of the same file.
-        for f in get_files_for_device(device_id):
-            if not _is_video(f["path"]):
-                continue
-            candidates.append({
-                "source_type": "reel_backup",
-                "source_key": device_id,
-                "path": f["path"],
-                "size": f.get("size", 0),
-                "modified_time": f.get("modified_time", 0),
-                "label": "My backup",
-            })
-
-        # Only folders the desktop app has tagged for this device are scanned.
-        for entry in _get_shared_dirs():
-            if not entry.get("id") or not _is_folder_tagged_for_device(entry, device_id, authorization, token):
-                continue
-            root = os.path.abspath(entry.get("path") or "")
-            if not os.path.isdir(root):
-                continue
-            for f in _collect_shared_media(root):
+        if source != "shared":
+            # This device's backed-up copies. A dedicated source type keeps
+            # their engagement identity separate from a normal share.
+            for f in get_files_for_device(device_id):
                 if not _is_video(f["path"]):
                     continue
                 candidates.append({
-                    "source_type": "reel_shared",
-                    "source_key": entry["id"],
+                    "source_type": "reel_backup",
+                    "source_key": device_id,
                     "path": f["path"],
                     "size": f.get("size", 0),
                     "modified_time": f.get("modified_time", 0),
-                    "label": entry.get("label") or "Shared folder",
+                    "label": "My backup",
                 })
+
+        if source != "backups":
+            # Only folders the desktop app has tagged for this device are scanned.
+            for entry in _get_shared_dirs():
+                if not entry.get("id") or not _is_folder_tagged_for_device(entry, device_id, authorization, token):
+                    continue
+                root = os.path.abspath(entry.get("path") or "")
+                if not os.path.isdir(root):
+                    continue
+                for f in _collect_shared_media(root):
+                    if not _is_video(f["path"]):
+                        continue
+                    candidates.append({
+                        "source_type": "reel_shared",
+                        "source_key": entry["id"],
+                        "path": f["path"],
+                        "size": f.get("size", 0),
+                        "modified_time": f.get("modified_time", 0),
+                        "label": entry.get("label") or "Shared folder",
+                    })
 
         materialized: list[dict] = []
         for candidate in candidates:
@@ -2749,10 +2755,8 @@ async def get_shared_and_backups_reels(
                 "library_source": r["source_type"],
             })
 
-        # This shelf has its own server-side candidate rank before pagination;
-        # the phone then applies its separate Shared-and-Backups HyperPulse
-        # state and diversity slate.  This prevents a large backup from making
-        # the local engine consider only the most recently scanned 30 files.
+        # Each catalogue is ranked server-side before pagination. This prevents
+        # a large source from making the phone consider only its newest files.
         def _catalog_rank(reel: dict) -> float:
             created_at = reel.get("created_at") or now_ts
             age_days = max(0.0, (now_ts - created_at) / 86400.0)

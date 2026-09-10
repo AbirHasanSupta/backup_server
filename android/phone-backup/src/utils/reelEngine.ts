@@ -51,6 +51,8 @@ export type ReelItem = {
   is_saved?: boolean;
   is_unseen?: boolean;
   group_id?: string | null;
+  /** Present only for private backup/shared-folder catalogue reels. */
+  library_source?: 'reel_backup' | 'reel_shared';
 };
 
 export type PlaybackTelemetryEvent = {
@@ -112,7 +114,8 @@ export type HyperPulseState = {
 // ─── Storage Keys & Constants ─────────────────────────────────────────────────
 
 const STATE_STORAGE_KEY = 'reels_hyperpulse_state_v1';
-const SHARED_BACKUPS_STATE_STORAGE_KEY = 'reels_shared_backups_hyperpulse_state_v1';
+const BACKUPS_STATE_STORAGE_KEY = 'reels_backups_hyperpulse_state_v1';
+const SHARED_STATE_STORAGE_KEY = 'reels_shared_hyperpulse_state_v1';
 const LEGACY_WATCHED_KEY = 'reels_watched_v2';
 const LEGACY_AFFINITY_KEY = 'reels_creator_affinity_v2';
 
@@ -192,13 +195,16 @@ export function createDefaultState(): HyperPulseState {
 }
 
 /**
- * Load a feed-specific preference model.  The Shared and Backups catalogue is
- * intentionally isolated from the normal incoming-post recommendation model:
- * skips, watches and affinities in one shelf must not influence the other.
+ * Load a feed-specific preference model. Backup and shared-folder catalogues
+ * are isolated from each other and from the normal incoming-post feed.
  */
-export async function loadHyperPulseState(scope: 'default' | 'shared-backups' = 'default'): Promise<HyperPulseState> {
+export async function loadHyperPulseState(scope: 'default' | 'backups' | 'shared' = 'default'): Promise<HyperPulseState> {
   try {
-    const storageKey = scope === 'shared-backups' ? SHARED_BACKUPS_STATE_STORAGE_KEY : STATE_STORAGE_KEY;
+    const storageKey = scope === 'backups'
+      ? BACKUPS_STATE_STORAGE_KEY
+      : scope === 'shared'
+        ? SHARED_STATE_STORAGE_KEY
+        : STATE_STORAGE_KEY;
     const raw = await AsyncStorage.getItem(storageKey);
     let state: HyperPulseState;
     if (raw) {
@@ -260,12 +266,16 @@ export async function loadHyperPulseState(scope: 'default' | 'shared-backups' = 
 
 export async function persistHyperPulseState(
   state: HyperPulseState,
-  scope: 'default' | 'shared-backups' = 'default',
+  scope: 'default' | 'backups' | 'shared' = 'default',
 ): Promise<void> {
   try {
     // Prune collections before saving to avoid unbounded storage growth
     pruneState(state);
-    const storageKey = scope === 'shared-backups' ? SHARED_BACKUPS_STATE_STORAGE_KEY : STATE_STORAGE_KEY;
+    const storageKey = scope === 'backups'
+      ? BACKUPS_STATE_STORAGE_KEY
+      : scope === 'shared'
+        ? SHARED_STATE_STORAGE_KEY
+        : STATE_STORAGE_KEY;
     await AsyncStorage.setItem(storageKey, JSON.stringify(state));
 
     // Keep legacy keys updated for the original feed only.  Library activity
