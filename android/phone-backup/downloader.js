@@ -1334,3 +1334,19 @@ export async function deleteComment(commentId) {
     };
   });
 }
+
+/**
+ * Fetch the private reel shelf made from this device's backup and desktop
+ * folders that are explicitly tagged for it.  It is intentionally separate
+ * from the incoming-share feed.
+ */
+export async function getSharedBackupsReels(offset = 0, limit = 30, seed = 0) {
+  return fetchJsonWithMeshRetry(async () => {
+    const { ip, port, key, deviceId } = await getConfig();
+    if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
+    return {
+      url: `http://${ip}:${port}/api/reels/shared-backups?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}&seed=${seed}`,
+      options: { headers: { Authorization: `Bearer ${key}` } },
+    };
+  });
+}

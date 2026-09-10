@@ -32,6 +32,7 @@ import { useAppTheme } from '@/hooks/use-app-theme';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   getReelsFeed,
+  getSharedBackupsReels,
   sendReelTelemetry,
   getConfig,
   buildSharePreviewUrl,
@@ -82,6 +83,7 @@ try {
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type ServerConfig = { ip: string; port: string; key: string; deviceId: string } | null;
+type ReelSection = 'for-you' | 'shared-backups';
 
 type Comment = {
   id: number;
@@ -1087,6 +1089,8 @@ export default function ReelsScreen() {
   const [repostTarget, setRepostTarget] = useState<ReelItem | null>(null);
   const [muted, setMuted] = useState(false);
   const [isFastForwarding, setIsFastForwarding] = useState(false);
+  const [reelSection, setReelSection] = useState<ReelSection>('for-you');
+  const [sectionPickerVisible, setSectionPickerVisible] = useState(false);
 
   // Dynamic layout measurement to cleanly fit between status bar and floating bottom tab bar
   const defaultCardHeight = Math.round(Math.max(300, SCREEN_H - insets.top - TAB_BAR_TOTAL_CLEARANCE));
@@ -1095,6 +1099,7 @@ export default function ReelsScreen() {
 
   const listRef = useRef<FlatList<ReelItem>>(null);
   const engineStateRef = useRef<HyperPulseState>(createDefaultState());
+  const reelSectionRef = useRef<ReelSection>('for-you');
   const reelsRef = useRef<ReelItem[]>([]);
   useEffect(() => {
     reelsRef.current = reels;
@@ -1103,6 +1108,7 @@ export default function ReelsScreen() {
   const offsetRef = useRef(0);
   const loadingMoreRef = useRef(false);
   const reloadInFlightRef = useRef(false);
+  const loadingSectionRef = useRef<ReelSection | null>(null);
   const seedRef = useRef(0);
   const telemetryBatchRef = useRef<PlaybackTelemetryEvent[]>([]);
 
@@ -1117,7 +1123,10 @@ export default function ReelsScreen() {
 
   const handlePlaybackTelemetry = useCallback((ev: PlaybackTelemetryEvent) => {
     processPlaybackTelemetry(engineStateRef.current, ev);
-    persistHyperPulseState(engineStateRef.current).catch(() => {});
+    persistHyperPulseState(
+      engineStateRef.current,
+      reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default',
+    ).catch(() => {});
     telemetryBatchRef.current.push(ev);
     if (telemetryBatchRef.current.length >= 5) {
       void flushTelemetry();
@@ -1138,9 +1147,14 @@ export default function ReelsScreen() {
     }
   }, []);
 
-  const loadReels = useCallback(async (reset = true, options: { skipFullScreenLoading?: boolean } = {}) => {
-    if (reloadInFlightRef.current) return;
+  const loadReels = useCallback(async (
+    reset = true,
+    options: { skipFullScreenLoading?: boolean } = {},
+    requestedSection: ReelSection = reelSectionRef.current,
+  ) => {
+    if (reloadInFlightRef.current && loadingSectionRef.current === requestedSection) return;
     reloadInFlightRef.current = true;
+    loadingSectionRef.current = requestedSection;
     if (reset) {
       offsetRef.current = 0;
     }
@@ -1149,16 +1163,25 @@ export default function ReelsScreen() {
         if (!options.skipFullScreenLoading) setLoading(true);
         setActiveIndex(0);
       }
-      const [config, engineState] = await Promise.all([getConfig(), loadHyperPulseState()]);
+      const engineScope = requestedSection === 'shared-backups' ? 'shared-backups' : 'default';
+      const [config, engineState] = await Promise.all([getConfig(), loadHyperPulseState(engineScope)]);
+      // Ignore an earlier response after the user has picked another shelf.
+      if (requestedSection !== reelSectionRef.current) return;
       setServerConfig(config);
       engineStateRef.current = engineState;
 
       if (reset) seedRef.current = Date.now();
       const currentSeed = seedRef.current;
-      const { reels: raw, has_more } = await getReelsFeed(reset ? 0 : offsetRef.current, 30, currentSeed);
+      const response: { reels: ReelItem[]; has_more: boolean } = requestedSection === 'shared-backups'
+        ? await getSharedBackupsReels(reset ? 0 : offsetRef.current, 30, currentSeed)
+        : await getReelsFeed(reset ? 0 : offsetRef.current, 30, currentSeed);
+      if (requestedSection !== reelSectionRef.current) return;
+      const { reels: raw, has_more } = response;
       hasMoreRef.current = has_more && raw.length > 0;
       offsetRef.current = reset ? raw.length : offsetRef.current + raw.length;
-      const filteredRaw = (raw || []).filter(r => !r.is_own_post && (!config?.deviceId || r.shared_by_device_id !== config.deviceId));
+      const filteredRaw = requestedSection === 'shared-backups'
+        ? (raw || [])
+        : (raw || []).filter(r => !r.is_own_post && (!config?.deviceId || r.shared_by_device_id !== config.deviceId));
       const ranked = buildDiverseReelSlate(filteredRaw, engineState, currentSeed);
       setReels(prev => {
         if (reset) return ranked;
@@ -1172,11 +1195,26 @@ export default function ReelsScreen() {
       if (reset) setError(e?.message || 'Failed to load reels');
       else hapticError();
     } finally {
-      reloadInFlightRef.current = false;
-      setLoading(false);
-      setRefreshing(false);
+      if (loadingSectionRef.current === requestedSection) {
+        reloadInFlightRef.current = false;
+        loadingSectionRef.current = null;
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, []);
+
+  const selectReelSection = useCallback((nextSection: ReelSection) => {
+    hapticSelection();
+    setSectionPickerVisible(false);
+    if (nextSection === reelSectionRef.current) return;
+    reelSectionRef.current = nextSection;
+    setReelSection(nextSection);
+    setReels([]);
+    setError(null);
+    setActiveIndex(0);
+    void loadReels(true, {}, nextSection);
+  }, [loadReels]);
 
   const onRefreshReels = useCallback(async () => {
     setRefreshing(true);
@@ -1266,7 +1304,7 @@ export default function ReelsScreen() {
             group_id: item.group_id,
             timestamp: Date.now(),
           });
-          persistHyperPulseState(engineStateRef.current).catch(() => {});
+          persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
         }
       }
     });
@@ -1301,7 +1339,7 @@ export default function ReelsScreen() {
             group_id: item.group_id,
             timestamp: Date.now(),
           });
-          persistHyperPulseState(engineStateRef.current).catch(() => {});
+          persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
         }
       }
     });
@@ -1337,7 +1375,7 @@ export default function ReelsScreen() {
             group_id: item.group_id,
             timestamp: Date.now(),
           });
-          persistHyperPulseState(engineStateRef.current).catch(() => {});
+          persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
         }
       }
     });
@@ -1380,7 +1418,7 @@ export default function ReelsScreen() {
         group_id: item.group_id,
         timestamp: Date.now(),
       });
-      persistHyperPulseState(engineStateRef.current).catch(() => {});
+      persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
     }
     try {
       const res = await reactToMedia(item.media_id, emoji);
@@ -1420,7 +1458,7 @@ export default function ReelsScreen() {
         group_id: item.group_id,
         timestamp: Date.now(),
       });
-      persistHyperPulseState(engineStateRef.current).catch(() => {});
+      persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
     }
     setReels(prev => prev.map(r =>
       r.reel_id === item.reel_id ? { ...r, is_saved: nextSaved } : r
@@ -1515,7 +1553,7 @@ export default function ReelsScreen() {
         group_id: repostTarget.group_id,
         timestamp: Date.now(),
       });
-      persistHyperPulseState(engineStateRef.current).catch(() => {});
+      persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
     }
     const nextCount = (repostTarget.repost_count || 0) + 1;
     try {
@@ -1563,7 +1601,7 @@ export default function ReelsScreen() {
         group_id: targetItem.group_id,
         timestamp: Date.now(),
       });
-      persistHyperPulseState(engineStateRef.current).catch(() => {});
+      persistHyperPulseState(engineStateRef.current, reelSectionRef.current === 'shared-backups' ? 'shared-backups' : 'default').catch(() => {});
     }
     const nextCount = count !== undefined ? count : (targetItem ? targetItem.comment_count + 1 : 1);
     setReels(prev => prev.map(r =>
@@ -1659,7 +1697,16 @@ export default function ReelsScreen() {
       {/* Top Header Bar */}
       {!isFastForwarding && (
         <View style={s.topBar} pointerEvents="box-none">
-          <Text style={s.headerTitle}>Reels</Text>
+          <TouchableOpacity
+            style={s.headerTitleButton}
+            onPress={() => { hapticLight(); setSectionPickerVisible(true); }}
+            hitSlop={10}
+            accessibilityLabel="Choose reels section"
+            accessibilityHint="Opens the Reels and Shared and Backups selector"
+          >
+            <Text style={s.headerTitle}>{reelSection === 'shared-backups' ? 'Shared and Backups' : 'Reels'}</Text>
+            <AppIcon androidName="arrow_drop_down" iosName="chevron.down" color="#fff" size={20} />
+          </TouchableOpacity>
 
           <View style={s.headerRightActions}>
             {/* Reels Library Screen Redirect (Saved, Liked, Reposts) */}
@@ -1697,7 +1744,9 @@ export default function ReelsScreen() {
             <AppIcon androidName="videocam_off" iosName="video.slash" color="rgba(255,255,255,0.55)" size={52} />
             <Text style={s.emptyTitle}>No Reels Yet</Text>
             <Text style={s.emptyBody}>
-              {error || 'Post a video to the feed and it will appear here as a reel.'}
+              {error || (reelSection === 'shared-backups'
+                ? 'Videos from your backup and desktop folders shared with this device will appear here.'
+                : 'Post a video to the feed and it will appear here as a reel.')}
             </Text>
             <TouchableOpacity style={s.retryBtn} onPress={() => loadReels(true)}>
               <Text style={s.retryText}>Retry</Text>
@@ -1765,6 +1814,45 @@ export default function ReelsScreen() {
         onClose={() => setRepostTarget(null)}
         onSubmit={handleRepostSubmit}
       />
+
+      <Modal
+        visible={sectionPickerVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSectionPickerVisible(false)}
+      >
+        <Pressable style={s.sectionPickerBackdrop} onPress={() => setSectionPickerVisible(false)}>
+          <Pressable style={s.sectionPickerSheet} onPress={() => {}}>
+            <Text style={s.sectionPickerTitle}>Choose reels</Text>
+            <TouchableOpacity
+              style={[s.sectionPickerOption, reelSection === 'for-you' && s.sectionPickerOptionSelected]}
+              onPress={() => selectReelSection('for-you')}
+            >
+              <View style={s.sectionPickerOptionIcon}>
+                <AppIcon androidName="smart_display" iosName="sparkles" color="#fff" size={19} />
+              </View>
+              <View style={s.sectionPickerOptionText}>
+                <Text style={s.sectionPickerOptionTitle}>Reels</Text>
+                <Text style={s.sectionPickerOptionBody}>Videos shared with you, ranked for you.</Text>
+              </View>
+              {reelSection === 'for-you' && <AppIcon androidName="check" iosName="checkmark" color="#fff" size={18} />}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.sectionPickerOption, reelSection === 'shared-backups' && s.sectionPickerOptionSelected]}
+              onPress={() => selectReelSection('shared-backups')}
+            >
+              <View style={s.sectionPickerOptionIcon}>
+                <AppIcon androidName="folder_shared" iosName="folder.badge.person.crop" color="#fff" size={19} />
+              </View>
+              <View style={s.sectionPickerOptionText}>
+                <Text style={s.sectionPickerOptionTitle}>Shared and Backups</Text>
+                <Text style={s.sectionPickerOptionBody}>Tagged desktop folders and this device’s backup videos.</Text>
+              </View>
+              {reelSection === 'shared-backups' && <AppIcon androidName="check" iosName="checkmark" color="#fff" size={18} />}
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -1831,6 +1919,12 @@ const s = StyleSheet.create({
     zIndex: 20,
     backgroundColor: 'transparent',
   },
+  headerTitleButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    maxWidth: '72%',
+  },
   headerTitle: {
     color: '#FFFFFF',
     fontSize: TextScale.xl,
@@ -1839,6 +1933,64 @@ const s = StyleSheet.create({
     textShadowColor: 'rgba(0, 0, 0, 0.75)',
     textShadowOffset: { width: 0, height: 1.5 },
     textShadowRadius: 4,
+  },
+  sectionPickerBackdrop: {
+    flex: 1,
+    justifyContent: 'flex-start',
+    paddingTop: Math.max(80, SCREEN_H * 0.12),
+    paddingHorizontal: Spacing.four,
+    backgroundColor: 'rgba(0, 0, 0, 0.52)',
+  },
+  sectionPickerSheet: {
+    borderRadius: Radius.xl,
+    padding: Spacing.three,
+    backgroundColor: '#202020',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    ...Shadows.card,
+  },
+  sectionPickerTitle: {
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: TextScale.xs,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+    paddingHorizontal: Spacing.two,
+    paddingTop: Spacing.one,
+    paddingBottom: Spacing.two,
+  },
+  sectionPickerOption: {
+    minHeight: 66,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.three,
+    padding: Spacing.three,
+    borderRadius: Radius.lg,
+  },
+  sectionPickerOptionSelected: {
+    backgroundColor: 'rgba(255,255,255,0.13)',
+  },
+  sectionPickerOptionIcon: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+  },
+  sectionPickerOptionText: {
+    flex: 1,
+    gap: 2,
+  },
+  sectionPickerOptionTitle: {
+    color: '#fff',
+    fontSize: TextScale.sm,
+    fontWeight: '800',
+  },
+  sectionPickerOptionBody: {
+    color: 'rgba(255,255,255,0.62)',
+    fontSize: TextScale.xs,
+    lineHeight: 16,
   },
   headerRightActions: {
     flexDirection: 'row',

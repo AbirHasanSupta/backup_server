@@ -112,6 +112,7 @@ export type HyperPulseState = {
 // ─── Storage Keys & Constants ─────────────────────────────────────────────────
 
 const STATE_STORAGE_KEY = 'reels_hyperpulse_state_v1';
+const SHARED_BACKUPS_STATE_STORAGE_KEY = 'reels_shared_backups_hyperpulse_state_v1';
 const LEGACY_WATCHED_KEY = 'reels_watched_v2';
 const LEGACY_AFFINITY_KEY = 'reels_creator_affinity_v2';
 
@@ -190,9 +191,15 @@ export function createDefaultState(): HyperPulseState {
   };
 }
 
-export async function loadHyperPulseState(): Promise<HyperPulseState> {
+/**
+ * Load a feed-specific preference model.  The Shared and Backups catalogue is
+ * intentionally isolated from the normal incoming-post recommendation model:
+ * skips, watches and affinities in one shelf must not influence the other.
+ */
+export async function loadHyperPulseState(scope: 'default' | 'shared-backups' = 'default'): Promise<HyperPulseState> {
   try {
-    const raw = await AsyncStorage.getItem(STATE_STORAGE_KEY);
+    const storageKey = scope === 'shared-backups' ? SHARED_BACKUPS_STATE_STORAGE_KEY : STATE_STORAGE_KEY;
+    const raw = await AsyncStorage.getItem(storageKey);
     let state: HyperPulseState;
     if (raw) {
       state = JSON.parse(raw) as HyperPulseState;
@@ -251,13 +258,19 @@ export async function loadHyperPulseState(): Promise<HyperPulseState> {
   }
 }
 
-export async function persistHyperPulseState(state: HyperPulseState): Promise<void> {
+export async function persistHyperPulseState(
+  state: HyperPulseState,
+  scope: 'default' | 'shared-backups' = 'default',
+): Promise<void> {
   try {
     // Prune collections before saving to avoid unbounded storage growth
     pruneState(state);
-    await AsyncStorage.setItem(STATE_STORAGE_KEY, JSON.stringify(state));
+    const storageKey = scope === 'shared-backups' ? SHARED_BACKUPS_STATE_STORAGE_KEY : STATE_STORAGE_KEY;
+    await AsyncStorage.setItem(storageKey, JSON.stringify(state));
 
-    // Keep legacy keys updated for 100% backward compatibility
+    // Keep legacy keys updated for the original feed only.  Library activity
+    // must not overwrite the legacy/default reel model.
+    if (scope !== 'default') return;
     const legacyWatched = Object.keys(state.watched).slice(-500);
     const legacyAffinity: Record<string, number> = {};
     for (const [k, v] of Object.entries(state.creators)) {

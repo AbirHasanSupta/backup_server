@@ -715,6 +715,16 @@ def init_db():
         conn.execute("ALTER TABLE device_shares ADD COLUMN original_shared_by_device_id TEXT")
     if "repost_of_share_id" not in existing_cols:
         conn.execute("ALTER TABLE device_shares ADD COLUMN repost_of_share_id INTEGER")
+    # Library reels are private catalogue entries for a device's backup and its
+    # tagged desktop folders.  They deliberately have no delivery target, so
+    # they can never leak into the normal incoming-share feed.
+    if "is_library_reel" not in existing_cols:
+        conn.execute("ALTER TABLE device_shares ADD COLUMN is_library_reel INTEGER NOT NULL DEFAULT 0")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_library_reel_identity "
+        "ON device_shares(source_type, source_key, relative_path) "
+        "WHERE is_library_reel = 1"
+    )
 
     # Migration: add post_kind/post_title to device_share_groups if not present
     existing_group_cols = {row[1] for row in conn.execute("PRAGMA table_info(device_share_groups)").fetchall()}
@@ -3043,6 +3053,73 @@ def get_device_shares_for_target(target_device_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_or_create_library_reel_share(
+    source_type: str,
+    source_key: str,
+    relative_path: str,
+    size: int = 0,
+    modified_time: int = 0,
+) -> dict:
+    """Materialize a private, non-feed share used by the Shared and Backups reel shelf.
+
+    A distinct source type is supplied by the caller (``reel_backup`` or
+    ``reel_shared``), which gives catalogue media independent media IDs and
+    therefore independent reactions/comments from an identically located
+    normal-feed post.
+    """
+    media_id = get_or_create_media_id(source_type, source_key, relative_path, size, modified_time)
+    conn = get_conn()
+    row = conn.execute(
+        """
+        SELECT id AS share_id, media_id, created_at
+        FROM device_shares
+        WHERE is_library_reel = 1
+          AND source_type = ? AND source_key = ? AND relative_path = ?
+        """,
+        (source_type, source_key, relative_path),
+    ).fetchone()
+    if row:
+        conn.close()
+        return dict(row)
+
+    created_at = int(modified_time or _time.time())
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO device_shares
+                (media_id, source_type, source_key, relative_path, size, modified_time,
+                 shared_by_device_id, created_at, is_library_reel)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                media_id, source_type, source_key, relative_path, int(size or 0),
+                int(modified_time or 0), f"library:{source_type}:{source_key}", created_at,
+            ),
+        )
+        conn.commit()
+        share_id = cur.lastrowid
+    except sqlite3.IntegrityError:
+        # Simultaneous refreshes can race to materialize the same catalogue row.
+        # The partial unique index decides the winner; both callers use it.
+        conn.rollback()
+        existing = conn.execute(
+            """
+            SELECT id AS share_id, media_id, created_at FROM device_shares
+            WHERE is_library_reel = 1
+              AND source_type = ? AND source_key = ? AND relative_path = ?
+            """,
+            (source_type, source_key, relative_path),
+        ).fetchone()
+        if not existing:
+            conn.close()
+            raise
+        result = dict(existing)
+        conn.close()
+        return result
+    conn.close()
+    return {"share_id": share_id, "media_id": media_id, "created_at": created_at}
+
+
 def get_device_shares_by_sharer(sharer_device_id: str) -> list[dict]:
     """Return device-to-device shares sent BY this device, newest first, with group info."""
     conn = get_conn()
@@ -3344,7 +3421,8 @@ def get_device_share_by_id(share_id: int) -> dict | None:
     row = conn.execute(
         """
         SELECT id AS share_id, media_id, source_type, source_key, relative_path,
-               size, modified_time, caption, shared_by_device_id, created_at, share_group_id
+               size, modified_time, caption, shared_by_device_id, created_at, share_group_id,
+               is_library_reel
         FROM device_shares WHERE id = ?
         """,
         (share_id,),
@@ -3466,7 +3544,7 @@ def unsave_reel(device_id: str, reel_id: str) -> bool:
 
 
 def toggle_save_reel(device_id: str, reel_id: str, share_id: int, media_id: int | None = None) -> bool:
-    """Toggle save status. Returns True if now saved, False if unsaved. Prevents saving own reels."""
+    """Toggle save status. Library reels are intentionally saveable by their owner."""
     conn = get_conn()
     row = conn.execute(
         "SELECT 1 FROM saved_reels WHERE device_id = ? AND (reel_id = ? OR share_id = ?) LIMIT 1",
@@ -3482,11 +3560,12 @@ def toggle_save_reel(device_id: str, reel_id: str, share_id: int, media_id: int 
         # Access control: ensure device has permission to view this share before saving, and is not saving its own reel
         access = conn.execute(
             """
-            SELECT ds.shared_by_device_id, ds.original_shared_by_device_id
+            SELECT ds.shared_by_device_id, ds.original_shared_by_device_id, ds.is_library_reel
             FROM device_shares ds
             WHERE ds.id = ?
               AND (
-                ds.shared_by_device_id = ?
+                ds.is_library_reel = 1
+                OR ds.shared_by_device_id = ?
                 OR EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
               )
             """,
@@ -3496,7 +3575,7 @@ def toggle_save_reel(device_id: str, reel_id: str, share_id: int, media_id: int 
             conn.close()
             raise PermissionError("Access denied: You do not have permission to save this reel.")
 
-        if access["shared_by_device_id"] == device_id or access["original_shared_by_device_id"] == device_id:
+        if not access["is_library_reel"] and (access["shared_by_device_id"] == device_id or access["original_shared_by_device_id"] == device_id):
             conn.close()
             raise PermissionError("Cannot save your own reels.")
 
@@ -3526,7 +3605,7 @@ def get_saved_reel_ids(device_id: str) -> set[str]:
 
 
 def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
-    """Return list of saved reels for device_id (excluding own device's reels), newest saved first."""
+    """Return saved regular and private-library reels, newest saved first."""
     conn = get_conn()
     rows = conn.execute(
         """
@@ -3534,7 +3613,7 @@ def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
                ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
                ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
                ds.created_at, ds.share_group_id,
-               ds.original_shared_by_device_id, ds.repost_of_share_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id, ds.is_library_reel,
                d.device_name AS shared_by_name, d.username AS shared_by_username,
                orig_d.device_name AS orig_shared_by_name, orig_d.username AS orig_shared_by_username,
                COALESCE(dsg.caption, ds.caption) AS group_caption,
@@ -3545,9 +3624,14 @@ def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
         LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE sr.device_id = ?
-          AND ds.shared_by_device_id != ?
-          AND (ds.original_shared_by_device_id IS NULL OR ds.original_shared_by_device_id != ?)
-          AND EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
+          AND (
+            ds.is_library_reel = 1
+            OR (
+              ds.shared_by_device_id != ?
+              AND (ds.original_shared_by_device_id IS NULL OR ds.original_shared_by_device_id != ?)
+              AND EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
+            )
+          )
         ORDER BY sr.created_at DESC
         LIMIT ? OFFSET ?
         """,
@@ -3569,7 +3653,7 @@ def repost_reel(shared_by_device_id: str, share_id: int, target_device_ids: list
         """
         SELECT ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
                ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
-               ds.original_shared_by_device_id
+               ds.original_shared_by_device_id, ds.is_library_reel
         FROM device_shares ds
         WHERE ds.id = ?
         """,
@@ -3583,8 +3667,10 @@ def repost_reel(shared_by_device_id: str, share_id: int, target_device_ids: list
     # If already a repost, preserve original author, otherwise sharer is original author
     orig_creator_id = orig["original_shared_by_device_id"] or orig["shared_by_device_id"]
 
-    # Prevent reposting own reel
-    if orig_creator_id == shared_by_device_id or orig["shared_by_device_id"] == shared_by_device_id:
+    # Library reels are privately catalogued source files, not posts authored by
+    # the viewer, so they remain repostable.  Normal own posts keep their
+    # existing restriction.
+    if not orig["is_library_reel"] and (orig_creator_id == shared_by_device_id or orig["shared_by_device_id"] == shared_by_device_id):
         conn.close()
         return {"ok": False, "error": "You cannot repost your own reel."}
 
@@ -3593,7 +3679,7 @@ def repost_reel(shared_by_device_id: str, share_id: int, target_device_ids: list
         "SELECT 1 FROM device_share_targets WHERE share_id = ? AND target_device_id = ?",
         (int(share_id), shared_by_device_id),
     ).fetchone()
-    if not recipient:
+    if not recipient and not orig["is_library_reel"]:
         conn.close()
         return {"ok": False, "error": "You do not have permission to repost this reel."}
 
@@ -3759,7 +3845,7 @@ def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
                ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
                ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
                ds.created_at, ds.share_group_id,
-               ds.original_shared_by_device_id, ds.repost_of_share_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id, ds.is_library_reel,
                d.device_name AS shared_by_name, d.username AS shared_by_username,
                orig_d.device_name AS orig_shared_by_name, orig_d.username AS orig_shared_by_username,
                COALESCE(dsg.caption, ds.caption) AS group_caption,
@@ -3770,9 +3856,14 @@ def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
         LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE r.source_id = ?
-          AND ds.shared_by_device_id != ?
-          AND (ds.original_shared_by_device_id IS NULL OR ds.original_shared_by_device_id != ?)
-          AND EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
+          AND (
+            ds.is_library_reel = 1
+            OR (
+              ds.shared_by_device_id != ?
+              AND (ds.original_shared_by_device_id IS NULL OR ds.original_shared_by_device_id != ?)
+              AND EXISTS (SELECT 1 FROM device_share_targets dst WHERE dst.share_id = ds.id AND dst.target_device_id = ?)
+            )
+          )
         GROUP BY ds.media_id
         ORDER BY MAX(r.created_at) DESC
         LIMIT ? OFFSET ?
