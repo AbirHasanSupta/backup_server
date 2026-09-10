@@ -273,6 +273,7 @@ type ReelCardProps = {
   onOpenComments: (item: ReelItem) => void;
   onOpenRepost: (item: ReelItem) => void;
   onToggleSave: (item: ReelItem) => void;
+  onSpeedModeChange?: (isFastForwarding: boolean) => void;
   onPlaybackTelemetry?: (ev: PlaybackTelemetryEvent) => void;
   colors: AppColors;
 };
@@ -290,6 +291,7 @@ function ReelCardBase({
   onOpenComments,
   onOpenRepost,
   onToggleSave,
+  onSpeedModeChange,
   onPlaybackTelemetry,
 }: ReelCardProps) {
   const [isPlaying, setIsPlaying] = useState(true);
@@ -474,9 +476,12 @@ function ReelCardBase({
     }
     isLongPressingRef.current = true;
     hapticLongPress();
+    setShowControls(false);
+    setShowEmojiPicker(false);
     setSpeed(2.0);
     setShow2x(true);
-  }, []);
+    onSpeedModeChange?.(true);
+  }, [onSpeedModeChange]);
 
   const handlePressOut = useCallback(() => {
     if (isLongPressingRef.current) {
@@ -485,7 +490,8 @@ function ReelCardBase({
     }
     setSpeed(1.0);
     setShow2x(false);
-  }, []);
+    onSpeedModeChange?.(false);
+  }, [onSpeedModeChange]);
 
   useEffect(() => {
     if (isActive) {
@@ -502,18 +508,20 @@ function ReelCardBase({
       setShowEmojiPicker(false);
       setShow2x(false);
       setSpeed(1.0);
+      onSpeedModeChange?.(false);
       setIsSeeking(false);
       isSeekingRef.current = false;
       seekProgressRef.current = 0;
       if (controlsTimer.current) clearTimeout(controlsTimer.current);
       setShowControls(false);
     }
-  }, [isActive]);
+  }, [isActive, onSpeedModeChange]);
 
   useEffect(() => () => {
     if (controlsTimer.current) clearTimeout(controlsTimer.current);
     if (singleTapTimerRef.current) clearTimeout(singleTapTimerRef.current);
-  }, []);
+    onSpeedModeChange?.(false);
+  }, [onSpeedModeChange]);
 
   const handleProgress = useCallback((cur: number, dur: number) => {
     if (!isSeekingRef.current) {
@@ -660,7 +668,7 @@ function ReelCardBase({
       )}
 
       {/* Play/Pause flash indicator */}
-      {showControls && (
+      {!show2x && showControls && (
         <View style={s.playPauseBadge} pointerEvents="none">
           <AppIcon
             androidName={isPlaying ? 'pause' : 'play_arrow'}
@@ -672,7 +680,7 @@ function ReelCardBase({
       )}
 
       {/* Double tap heart animation */}
-      {showHeart && (
+      {!show2x && showHeart && (
         <Animated.View
           pointerEvents="none"
           style={[s.heartOverlay, { transform: [{ scale: heartScale }], opacity: heartScale }]}
@@ -682,14 +690,18 @@ function ReelCardBase({
       )}
 
       {/* Loading spinner */}
-      {isLoading && isActive && isMounted && (
+      {!show2x && isLoading && isActive && isMounted && (
         <View style={s.loadingOverlay} pointerEvents="none">
           <ActivityIndicator color="#fff" size="large" />
         </View>
       )}
 
       {/* Right Action Bar (Instagram-style modern polished buttons) */}
-      <View style={s.rightActions} pointerEvents="box-none">
+      <View
+        style={[s.rightActions, show2x && s.fastForwardHidden]}
+        pointerEvents={show2x ? 'none' : 'box-none'}
+        importantForAccessibility={show2x ? 'no-hide-descendants' : 'auto'}
+      >
         {/* Like / Reaction Button */}
         <TouchableOpacity
           style={s.actionBtn}
@@ -790,7 +802,7 @@ function ReelCardBase({
       </View>
 
       {/* Floating Emoji Picker */}
-      {showEmojiPicker && (
+      {showEmojiPicker && !show2x && (
         <View style={s.emojiPicker}>
           {REACTION_EMOJIS.map(emoji => {
             const active = item.user_reactions?.includes(emoji);
@@ -809,7 +821,11 @@ function ReelCardBase({
       )}
 
       {/* Author & Caption Info (Bottom Left) */}
-      <View style={s.authorInfo} pointerEvents="none">
+      <View
+        style={[s.authorInfo, show2x && s.fastForwardHidden]}
+        pointerEvents="none"
+        importantForAccessibility={show2x ? 'no-hide-descendants' : 'auto'}
+      >
         {item.is_repost && (
           <View style={s.repostBadge}>
             <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color="#FFFFFF" size={13} />
@@ -841,7 +857,9 @@ function ReelCardBase({
 
       {/* Draggable Progress / Seek Bar (YouTube Shorts style) */}
       <View
-        style={s.progressWrap}
+        style={[s.progressWrap, show2x && s.fastForwardHidden]}
+        pointerEvents={show2x ? 'none' : 'auto'}
+        importantForAccessibility={show2x ? 'no-hide-descendants' : 'auto'}
         onLayout={e => {
           const w = e.nativeEvent.layout.width;
           if (w > 0) seekBarWidthRef.current = w;
@@ -1068,6 +1086,7 @@ export default function ReelsScreen() {
   const [commentsTarget, setCommentsTarget] = useState<ReelItem | null>(null);
   const [repostTarget, setRepostTarget] = useState<ReelItem | null>(null);
   const [muted, setMuted] = useState(false);
+  const [isFastForwarding, setIsFastForwarding] = useState(false);
 
   // Dynamic layout measurement to cleanly fit between status bar and floating bottom tab bar
   const defaultCardHeight = Math.round(Math.max(300, SCREEN_H - insets.top - TAB_BAR_TOTAL_CLEARANCE));
@@ -1188,6 +1207,7 @@ export default function ReelsScreen() {
     setScreenFocused(true);
     return () => {
       setScreenFocused(false);
+      setIsFastForwarding(false);
       void flushTelemetry();
     };
   }, [flushTelemetry]));
@@ -1596,6 +1616,10 @@ export default function ReelsScreen() {
     };
   }, [viewportHeight]);
 
+  const handleSpeedModeChange = useCallback((isFastForwarding: boolean) => {
+    setIsFastForwarding(isFastForwarding);
+  }, []);
+
   const renderItem = useCallback(({ item, index }: { item: ReelItem; index: number }) => {
     const isNearActive = Math.abs(index - activeIndex) <= 1;
     return (
@@ -1613,11 +1637,12 @@ export default function ReelsScreen() {
         onOpenComments={setCommentsTarget}
         onOpenRepost={handleOpenRepost}
         onToggleSave={handleToggleSave}
+        onSpeedModeChange={handleSpeedModeChange}
         onPlaybackTelemetry={handlePlaybackTelemetry}
         colors={colors}
       />
     );
-  }, [activeIndex, screenFocused, viewportWidth, viewportHeight, serverConfig, muted, handleToggleMute, handleReact, handleOpenRepost, handleToggleSave, handlePlaybackTelemetry, colors]);
+  }, [activeIndex, screenFocused, viewportWidth, viewportHeight, serverConfig, muted, handleToggleMute, handleReact, handleOpenRepost, handleToggleSave, handleSpeedModeChange, handlePlaybackTelemetry, colors]);
 
   return (
     <View
@@ -1632,31 +1657,33 @@ export default function ReelsScreen() {
       <StatusBar barStyle="light-content" translucent backgroundColor="transparent" />
 
       {/* Top Header Bar */}
-      <View style={s.topBar} pointerEvents="box-none">
-        <Text style={s.headerTitle}>Reels</Text>
+      {!isFastForwarding && (
+        <View style={s.topBar} pointerEvents="box-none">
+          <Text style={s.headerTitle}>Reels</Text>
 
-        <View style={s.headerRightActions}>
-          {/* Reels Library Screen Redirect (Saved, Liked, Reposts) */}
-          <TouchableOpacity
-            style={s.headerBtn}
-            onPress={() => { hapticLight(); router.push('/saved-reels'); }}
-            hitSlop={12}
-            accessibilityLabel="Reels Library"
-          >
-            <AppIcon androidName="video_library" iosName="play.square.stack.fill" color="#fff" size={18} />
-          </TouchableOpacity>
+          <View style={s.headerRightActions}>
+            {/* Reels Library Screen Redirect (Saved, Liked, Reposts) */}
+            <TouchableOpacity
+              style={s.headerBtn}
+              onPress={() => { hapticLight(); router.push('/saved-reels'); }}
+              hitSlop={12}
+              accessibilityLabel="Reels Library"
+            >
+              <AppIcon androidName="video_library" iosName="play.square.stack.fill" color="#fff" size={18} />
+            </TouchableOpacity>
 
-          {/* Shuffle Reels */}
-          <TouchableOpacity
-            style={s.headerBtn}
-            onPress={() => { hapticSelection(); loadReels(true); }}
-            hitSlop={12}
-            accessibilityLabel="Shuffle Reels"
-          >
-            <AppIcon androidName="shuffle" iosName="shuffle" color="#fff" size={18} />
-          </TouchableOpacity>
+            {/* Shuffle Reels */}
+            <TouchableOpacity
+              style={s.headerBtn}
+              onPress={() => { hapticSelection(); loadReels(true); }}
+              hitSlop={12}
+              accessibilityLabel="Shuffle Reels"
+            >
+              <AppIcon androidName="shuffle" iosName="shuffle" color="#fff" size={18} />
+            </TouchableOpacity>
+          </View>
         </View>
-      </View>
+      )}
 
       {/* Main Reels Viewport Container */}
       <View style={s.listContainer} onLayout={handleContainerLayout}>
@@ -1834,6 +1861,9 @@ const s = StyleSheet.create({
     overflow: 'hidden',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  fastForwardHidden: {
+    opacity: 0,
   },
 
   progressWrap: {

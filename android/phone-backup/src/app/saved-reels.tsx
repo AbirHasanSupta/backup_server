@@ -48,6 +48,9 @@ import {
 import { hapticLight, hapticSuccess, hapticError, hapticLongPress, hapticSelection } from '@/utils/haptics';
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
+// Saved reels are shown in a full-screen modal, so unlike the feed there is no
+// tab bar to keep the scrubber out of the system gesture area.
+const SEEK_DOCK_HEIGHT = 48;
 
 // ─── Optional expo-video ──────────────────────────────────────────────────────
 
@@ -328,6 +331,7 @@ function SavedReelCardBase({
   const wasPlayingBeforeSeekRef = useRef(false);
   const grantLocationXRef = useRef(0);
   const grantPageXRef = useRef(0);
+  const seekBarWidthRef = useRef(SCREEN_W);
   const durationRef = useRef(0);
   const isPlayingRef = useRef(isPlaying);
 
@@ -390,6 +394,8 @@ function SavedReelCardBase({
     }
     isLongPressingRef.current = true;
     hapticLongPress();
+    setShowControls(false);
+    setShowEmojiPicker(false);
     setSpeed(2.0);
     setShow2x(true);
   }, []);
@@ -466,7 +472,7 @@ function SavedReelCardBase({
       } else {
         wasPlayingBeforeSeekRef.current = isPlayingRef.current;
       }
-      const width = SCREEN_W;
+      const width = Math.max(1, seekBarWidthRef.current || SCREEN_W);
       const locX = evt.nativeEvent.locationX;
       grantLocationXRef.current = locX;
       grantPageXRef.current = evt.nativeEvent.pageX;
@@ -479,7 +485,7 @@ function SavedReelCardBase({
       }
     },
     onPanResponderMove: (evt) => {
-      const width = SCREEN_W;
+      const width = Math.max(1, seekBarWidthRef.current || SCREEN_W);
       const currentX = grantLocationXRef.current + (evt.nativeEvent.pageX - grantPageXRef.current);
       const ratio = Math.max(0, Math.min(1, currentX / width));
       seekProgressRef.current = ratio;
@@ -518,6 +524,8 @@ function SavedReelCardBase({
 
   const activeProgress = isSeeking ? seekProgress : progress;
   const displaySeekTime = isSeeking ? seekProgress * (duration || 0) : currentTime;
+  const scrubberBottom = Math.max(insets.bottom, Spacing.two) + Spacing.two;
+  const lowerContentBottom = scrubberBottom + SEEK_DOCK_HEIGHT + Spacing.two;
 
   return (
     <View style={[s.fullReel, { width: SCREEN_W, height: SCREEN_H }]}>
@@ -551,33 +559,35 @@ function SavedReelCardBase({
         delayLongPress={350}
       />
 
-      <View style={[s.viewerTopBar, { top: insets.top + Spacing.two }]} pointerEvents="box-none">
-        <TouchableOpacity
-          style={s.viewerCloseBtn}
-          onPress={onCloseViewer}
-          hitSlop={14}
-          accessibilityLabel="Close viewer"
-        >
-          <AppIcon androidName="close" iosName="xmark" color="#fff" size={20} />
-        </TouchableOpacity>
+      {!show2x && (
+        <View style={[s.viewerTopBar, { top: insets.top + Spacing.two }]} pointerEvents="box-none">
+          <TouchableOpacity
+            style={s.viewerCloseBtn}
+            onPress={onCloseViewer}
+            hitSlop={14}
+            accessibilityLabel="Close viewer"
+          >
+            <AppIcon androidName="close" iosName="xmark" color="#fff" size={20} />
+          </TouchableOpacity>
 
-        {segmentTitle ? (
-          <View style={s.viewerSegmentBadge}>
-            <Text style={s.viewerSegmentText}>{segmentTitle}</Text>
-            {segmentIndexText ? <Text style={s.viewerIndexText}>{segmentIndexText}</Text> : null}
-          </View>
-        ) : null}
+          {segmentTitle ? (
+            <View style={s.viewerSegmentBadge}>
+              <Text style={s.viewerSegmentText}>{segmentTitle}</Text>
+              {segmentIndexText ? <Text style={s.viewerIndexText}>{segmentIndexText}</Text> : null}
+            </View>
+          ) : null}
 
-        <View style={{ width: 38 }} />
-      </View>
+          <View style={{ width: 38 }} />
+        </View>
+      )}
 
       {show2x && (
-        <View style={s.speedBadge} pointerEvents="none">
+        <View style={[s.speedBadge, { bottom: scrubberBottom + Spacing.three }]} pointerEvents="none">
           <Text style={s.speedText}>2x speed</Text>
         </View>
       )}
 
-      {showControls && (
+      {!show2x && showControls && (
         <View style={s.playPauseBadge} pointerEvents="none">
           <AppIcon
             androidName={isPlaying ? 'pause' : 'play_arrow'}
@@ -588,7 +598,7 @@ function SavedReelCardBase({
         </View>
       )}
 
-      {showHeart && (
+      {!show2x && showHeart && (
         <Animated.View
           pointerEvents="none"
           style={[s.heartOverlay, { transform: [{ scale: heartScale }], opacity: heartScale }]}
@@ -597,13 +607,17 @@ function SavedReelCardBase({
         </Animated.View>
       )}
 
-      {isLoading && isActive && isMounted && (
+      {!show2x && isLoading && isActive && isMounted && (
         <View style={s.loadingOverlay} pointerEvents="none">
           <ActivityIndicator color="#fff" size="large" />
         </View>
       )}
 
-      <View style={s.rightActions} pointerEvents="box-none">
+      <View
+        style={[s.rightActions, { bottom: lowerContentBottom }, show2x && s.fastForwardHidden]}
+        pointerEvents={show2x ? 'none' : 'box-none'}
+        importantForAccessibility={show2x ? 'no-hide-descendants' : 'auto'}
+      >
         <TouchableOpacity
           style={s.actionBtn}
           onPress={toggleHeartLike}
@@ -686,8 +700,8 @@ function SavedReelCardBase({
       </View>
 
       {/* Floating Emoji Picker */}
-      {showEmojiPicker && (
-        <View style={s.emojiPicker}>
+      {showEmojiPicker && !show2x && (
+        <View style={[s.emojiPicker, { bottom: lowerContentBottom + 101 }]}>
           {REACTION_EMOJIS.map(emoji => {
             const active = item.user_reactions?.includes(emoji);
             return (
@@ -704,7 +718,11 @@ function SavedReelCardBase({
         </View>
       )}
 
-      <View style={s.authorInfo} pointerEvents="none">
+      <View
+        style={[s.authorInfo, { bottom: lowerContentBottom }, show2x && s.fastForwardHidden]}
+        pointerEvents="none"
+        importantForAccessibility={show2x ? 'no-hide-descendants' : 'auto'}
+      >
         {item.is_repost && (
           <View style={s.repostBadge}>
             <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color="#FFFFFF" size={13} />
@@ -732,7 +750,16 @@ function SavedReelCardBase({
         )}
       </View>
 
-      <View style={s.progressWrap} {...seekPanResponder.panHandlers}>
+      <View
+        style={[s.progressWrap, { bottom: scrubberBottom }, show2x && s.fastForwardHidden]}
+        pointerEvents={show2x ? 'none' : 'auto'}
+        importantForAccessibility={show2x ? 'no-hide-descendants' : 'auto'}
+        onLayout={event => {
+          const width = event.nativeEvent.layout.width;
+          if (width > 0) seekBarWidthRef.current = width;
+        }}
+        {...seekPanResponder.panHandlers}
+      >
         {isSeeking && (
           <View style={s.seekTimeBubble} pointerEvents="none">
             <Text style={s.seekTimeText}>
@@ -1900,6 +1927,9 @@ const s = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  fastForwardHidden: {
+    opacity: 0,
+  },
   viewerTopBar: {
     position: 'absolute',
     left: Spacing.four,
@@ -2111,16 +2141,18 @@ const s = StyleSheet.create({
   },
   progressWrap: {
     position: 'absolute',
-    bottom: 0,
     left: 0,
     right: 0,
-    height: 32,
-    justifyContent: 'flex-end',
+    height: SEEK_DOCK_HEIGHT,
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.28)',
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255, 255, 255, 0.18)',
     zIndex: 30,
   },
   seekTimeBubble: {
     position: 'absolute',
-    bottom: 24,
+    bottom: SEEK_DOCK_HEIGHT - Spacing.two,
     alignSelf: 'center',
     backgroundColor: 'rgba(0, 0, 0, 0.8)',
     paddingHorizontal: 12,
