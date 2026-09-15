@@ -2631,7 +2631,7 @@ def _library_reel_label_for_device(source_type: str, source_key: str, device_id:
         return "My backup" if source_key == device_id else None
     if source_type == "reel_shared":
         entry = _find_shared_dir(source_key)
-        if entry and _is_folder_tagged_for_device(entry, device_id):
+        if entry and _is_folder_tagged_for_device(entry, device_id) and entry.get("available_in_reels", entry.get("available_in_reel", True)):
             return entry.get("label") or "Shared folder"
     return None
 
@@ -2685,9 +2685,11 @@ async def get_shared_and_backups_reels(
                 })
 
         if source != "backups":
-            # Only folders the desktop app has tagged for this device are scanned.
+            # Only folders the desktop app has tagged for this device and marked available for reels are scanned.
             for entry in _get_shared_dirs():
                 if not entry.get("id") or not _is_folder_tagged_for_device(entry, device_id, authorization, token):
+                    continue
+                if not entry.get("available_in_reels", entry.get("available_in_reel", True)):
                     continue
                 root = os.path.abspath(entry.get("path") or "")
                 if not os.path.isdir(root):

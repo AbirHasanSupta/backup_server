@@ -3068,6 +3068,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 ).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(0, 2))
 
                 tagged = set(entry.get("device_ids", []))
+                in_reels = entry.get("available_in_reels", entry.get("available_in_reel", True))
                 if "all" in tagged:
                     access_text = f"Access: All paired devices ({len(devices)})"
                     access_color = C_SUCCESS
@@ -3081,6 +3082,9 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                         display_names += f" +{len(names) - 3}"
                     access_text = f"Access: {display_names}"
                     access_color = C_ACCENT
+
+                if not in_reels:
+                    access_text += " • Reels: Off"
 
                 access_lbl = ctk.CTkLabel(
                     row, text=access_text, font=FONT_CAPTION, text_color=access_color, anchor="w",
@@ -3143,8 +3147,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         dialog = ctk.CTkToplevel(self)
         dialog.title("Manage Folder Access")
-        dialog.geometry("480x560")
-        dialog.minsize(400, 420)
+        dialog.geometry("480x600")
+        dialog.minsize(400, 460)
         dialog.transient(self)
         dialog.configure(fg_color=C_BG)
 
@@ -3178,6 +3182,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 return
             live_entry = self._shared_dirs[current_idx]
             current = set(live_entry.get("device_ids", []))
+            reels_enabled = bool(live_entry.get("available_in_reels", live_entry.get("available_in_reel", True)))
 
             ctk.CTkLabel(dialog, text="Folder Access Permissions", font=FONT_TITLE, text_color=C_TEXT, anchor="w").pack(fill="x", padx=22, pady=(18, 0))
             ctk.CTkLabel(dialog, text=live_entry.get("label") or live_entry.get("path") or "Shared folder", font=FONT_SUBTITLE, text_color=C_MUTED, anchor="w").pack(fill="x", padx=22, pady=(2, 12))
@@ -3187,7 +3192,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
             all_var = tk.BooleanVar(value="all" in current)
             all_row = ctk.CTkFrame(panel, fg_color="transparent")
-            all_row.pack(fill="x", padx=14, pady=(12, 6))
+            all_row.pack(fill="x", padx=14, pady=(12, 4))
 
             all_checkbox = ctk.CTkCheckBox(
                 all_row, text="Allow all paired devices to restore this folder", variable=all_var,
@@ -3196,7 +3201,17 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             all_checkbox.pack(side="left")
             ctk.CTkLabel(all_row, text=f"{len(devices)} device{'s' if len(devices) != 1 else ''}", font=FONT_CAPTION, text_color=C_MUTED).pack(side="right")
 
-            ctk.CTkLabel(panel, text="INDIVIDUAL ACCESS", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(fill="x", padx=14, pady=(10, 4))
+            reels_var = tk.BooleanVar(value=reels_enabled)
+            reels_row = ctk.CTkFrame(panel, fg_color="transparent")
+            reels_row.pack(fill="x", padx=14, pady=(4, 8))
+
+            reels_checkbox = ctk.CTkCheckBox(
+                reels_row, text="Available in reel", variable=reels_var,
+                font=FONT_BODY_B, text_color=C_TEXT, border_color=C_BORDER, fg_color=C_ACCENT,
+            )
+            reels_checkbox.pack(side="left")
+
+            ctk.CTkLabel(panel, text="INDIVIDUAL ACCESS", font=FONT_SECTION, text_color=C_MUTED, anchor="w").pack(fill="x", padx=14, pady=(6, 4))
             devices_frame = ctk.CTkScrollableFrame(panel, fg_color=C_ELEVATED, corner_radius=9, border_width=1, border_color=C_BORDER, label_text="")
             devices_frame.pack(fill="both", expand=True, padx=14, pady=(0, 12))
 
@@ -3249,6 +3264,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._shared_dirs[resolved_idx]["device_ids"] = (
                     ["all"] if all_var.get() else [did for did, v in selected_vars.items() if v.get()]
                 )
+                self._shared_dirs[resolved_idx]["available_in_reels"] = bool(reels_var.get())
                 self._save_shared_dirs_to_config()
                 self._refresh_shared_folder_card(entry_id)
                 dialog.destroy()
@@ -3278,6 +3294,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         if not access_lbl or not access_lbl.winfo_exists():
             return
         tagged = set(entry.get("device_ids", []))
+        in_reels = entry.get("available_in_reels", entry.get("available_in_reel", True))
         if "all" in tagged:
             access_text  = f"Access: All paired devices ({len(devices)})"
             access_color = C_SUCCESS
@@ -3291,6 +3308,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 display_names += f" +{len(names) - 3}"
             access_text  = f"Access: {display_names}"
             access_color = C_ACCENT
+
+        if not in_reels:
+            access_text += " • Reels: Off"
+
         try:
             access_lbl.configure(text=access_text, text_color=access_color)
         except Exception:
@@ -3320,7 +3341,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             counter += 1
             new_id = f"shared_{len(self._shared_dirs) + counter}"
         label = os.path.basename(folder) or folder
-        self._shared_dirs.append({"id": new_id, "label": label, "path": folder, "device_ids": []})
+        self._shared_dirs.append({"id": new_id, "label": label, "path": folder, "device_ids": [], "available_in_reels": True})
         self._save_shared_dirs_to_config()
         self._refresh_shared_dirs_list()
 
