@@ -36,6 +36,7 @@ import {
   markUploadedBatch,
   getUploadCacheStorageKey,
   resolveReachableServer,
+  formatHostForUrl,
 } from './settings';
 
 // ─── Persistence keys ─────────────────────────────────────────────────────────
@@ -131,8 +132,9 @@ export async function flushPendingCleanupReports() {
   try {
     const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
     const sendReports = async (ip, port) => {
+      const hostTarget = formatHostForUrl(ip);
       return fetch(
-        `http://${ip}:${port}/cleanup/delete`,
+        `http://${hostTarget}:${port}/cleanup/delete`,
         {
           method: 'POST',
           headers: {
@@ -172,8 +174,9 @@ async function fetchServerCandidates() {
   try {
     const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
     const fetchFrom = async (ip, port) => {
+      const hostTarget = formatHostForUrl(ip);
       return fetch(
-        `http://${ip}:${port}/cleanup/candidates?source_id=${encodeURIComponent(deviceId)}`,
+        `http://${hostTarget}:${port}/cleanup/candidates?source_id=${encodeURIComponent(deviceId)}`,
         {
           headers: {
             Authorization: `Bearer ${apiKey}`,
@@ -515,8 +518,9 @@ export async function reportDeletedFiles(files) {
   try {
     const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
     const sendDelete = async (ip, port) => {
+      const hostTarget = formatHostForUrl(ip);
       return fetch(
-        `http://${ip}:${port}/cleanup/delete`,
+        `http://${hostTarget}:${port}/cleanup/delete`,
         {
           method: 'POST',
           headers: {

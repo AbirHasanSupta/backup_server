@@ -30,7 +30,7 @@ import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
-import { setServerCertFingerprint } from '../../settings';
+import { setServerCertFingerprint, parseServerAddress, isPrivateNetworkAddress } from '../../settings';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 
 const { height: SCREEN_H } = Dimensions.get('window');
@@ -46,58 +46,13 @@ interface Server {
   all_ips?: string[];
   candidateIps?: string[];
   hostname?: string;
+  connectionMode?: 'lan' | 'private-network';
 }
 
 interface Props {
   visible: boolean;
   onSelect: (server: Server) => void;
   onClose: () => void;
-}
-
-function parseManualAddress(rawInput: string): { ip: string; port: number } | null {
-  const raw = rawInput.trim();
-  if (!raw) return null;
-
-  let addr = raw.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-  const slashIdx = addr.indexOf('/');
-  if (slashIdx > 0) addr = addr.slice(0, slashIdx);
-
-  // Bracketed IPv6: [fe80::1]:8000 or [fe80::1]
-  if (addr.startsWith('[')) {
-    const end = addr.indexOf(']');
-    if (end > 1) {
-      const ip = addr.slice(1, end);
-      let port = 8000;
-      const rest = addr.slice(end + 1);
-      if (rest.startsWith(':')) {
-        const maybePort = rest.slice(1);
-        if (/^\d+$/.test(maybePort)) {
-          const parsed = Number.parseInt(maybePort, 10);
-          if (parsed >= 1 && parsed <= 65535) port = parsed;
-          else return null;
-        } else if (rest.length > 1) {
-          return null;
-        }
-      }
-      return ip ? { ip, port } : null;
-    }
-  }
-
-  let ip = addr;
-  let port = 8000;
-  const colonIdx = addr.lastIndexOf(':');
-  if (colonIdx > 0) {
-    const maybePort = addr.slice(colonIdx + 1);
-    if (/^\d+$/.test(maybePort)) {
-      const parsed = Number.parseInt(maybePort, 10);
-      if (parsed >= 1 && parsed <= 65535) {
-        port = parsed;
-        ip = addr.slice(0, colonIdx);
-      }
-    }
-  }
-
-  return ip ? { ip, port } : null;
 }
 
 export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
@@ -232,14 +187,21 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
 
   const handleManualConnect = useCallback(() => {
     if (selectingRef.current) return;
-    const parsed = parseManualAddress(manualUrl);
-    if (!parsed) {
-      Alert.alert('Invalid address', 'Enter an IP, hostname, or URL like 192.168.1.100:8000');
+    const parsed = parseServerAddress(manualUrl, 8000);
+    if (!parsed.host) {
+      Alert.alert('Invalid address', 'Enter an IP, hostname, or URL like 192.168.1.100:8000 or desktop.tailnet.ts.net');
       return;
     }
     selectingRef.current = true;
     setSelecting(true);
-    onSelect({ ip: parsed.ip, port: parsed.port, name: parsed.ip, version: '?' });
+    const isPrivate = isPrivateNetworkAddress(parsed.host);
+    onSelect({
+      ip: parsed.host,
+      port: parsed.port,
+      name: parsed.host,
+      version: '?',
+      connectionMode: isPrivate ? 'private-network' : 'lan',
+    });
     setManualUrl('');
     onClose();
   }, [manualUrl, onSelect, onClose]);

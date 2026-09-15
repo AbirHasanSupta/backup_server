@@ -115,6 +115,88 @@ export async function setServerPort(port)  {
   DeviceEventEmitter.emit('settings-updated');
 }
 
+// Parses any server address string (e.g. "192.168.1.50", "192.168.1.50:8000",
+// "desktop.tailnet.ts.net", "[fd7a:115c:...]:8000", "fd7a:115c:...") and returns { host, port }.
+export function parseServerAddress(rawInput, defaultPort = 8000) {
+  const raw = String(rawInput || '').trim();
+  if (!raw) return { host: '', port: defaultPort };
+
+  let addr = raw.replace(/^https?:\/\//i, '').replace(/\/+$/, '').trim();
+  const slashIdx = addr.indexOf('/');
+  if (slashIdx > 0) addr = addr.slice(0, slashIdx);
+
+  // Bracketed IPv6: [fd7a:...]:8000 or [fd7a:...]
+  if (addr.startsWith('[')) {
+    const closeIdx = addr.indexOf(']');
+    if (closeIdx > 1) {
+      const host = addr.slice(1, closeIdx);
+      let port = defaultPort;
+      const rest = addr.slice(closeIdx + 1);
+      if (rest.startsWith(':')) {
+        const maybePort = rest.slice(1);
+        if (/^\d+$/.test(maybePort)) {
+          const parsed = Number.parseInt(maybePort, 10);
+          if (parsed >= 1 && parsed <= 65535) port = parsed;
+        }
+      }
+      return { host, port };
+    }
+  }
+
+  // Count colons
+  const colonCount = (addr.match(/:/g) || []).length;
+  if (colonCount >= 2) {
+    // Unbracketed IPv6 without port (e.g. fd7a:115c:a1e0::1)
+    return { host: addr, port: defaultPort };
+  }
+  if (colonCount === 1) {
+    // IPv4:port or hostname:port
+    const colonIdx = addr.lastIndexOf(':');
+    const maybePort = addr.slice(colonIdx + 1);
+    let port = defaultPort;
+    let host = addr;
+    if (/^\d+$/.test(maybePort)) {
+      const parsed = Number.parseInt(maybePort, 10);
+      if (parsed >= 1 && parsed <= 65535) {
+        port = parsed;
+        host = addr.slice(0, colonIdx);
+      }
+    }
+    return { host, port };
+  }
+
+  // Plain IPv4 or hostname
+  return { host: addr, port: defaultPort };
+}
+
+// Formats an IPv4, FQDN hostname, or IPv6 address for safe inclusion in an HTTP URL.
+// IPv6 addresses containing colons are enclosed in brackets [::] if not already bracketed.
+export function formatHostForUrl(host) {
+  if (!host) return '';
+  const parsed = parseServerAddress(host);
+  const cleanHost = parsed.host;
+  const colonCount = (cleanHost.match(/:/g) || []).length;
+  if (colonCount >= 2) {
+    return `[${cleanHost}]`;
+  }
+  return cleanHost;
+}
+
+// Determines whether a host string is a private-network address (Tailscale CGNAT, MagicDNS, or IPv6).
+export function isPrivateNetworkAddress(host) {
+  if (!host) return false;
+  const parsed = parseServerAddress(host);
+  const clean = parsed.host.toLowerCase();
+  if (clean.includes('.ts.net')) return true;
+  const m = /^100\.(\d{1,3})\./.exec(clean);
+  if (m) {
+    const second = Number(m[1]);
+    if (second >= 64 && second <= 127) return true;
+  }
+  if (clean.includes(':')) return true;
+  return false;
+}
+
 // LAN profiles are discoverable by subnet scan.  Private-network profiles
 // (Tailscale or a user-managed WireGuard tunnel) use a stable IP/DNS endpoint
 // and must never fall back to scanning the phone's current Wi-Fi subnet.
@@ -644,24 +726,17 @@ const MAX_CANDIDATE_IPS = 20;
 
 export async function saveServerProfile(server) {
   if (!server?.ip) return await getSavedServers();
-  // Preserve the established LAN/mesh behavior of selecting a responding IPv4
-  // address from discovery, but never replace a Tailscale MagicDNS endpoint.
-  if (server.connectionMode !== 'private-network' && !ipv4Octets(server.ip)) {
-    const numeric = (server.all_ips || server.candidateIps || []).find((ip) => ipv4Octets(ip));
-    if (numeric) server = { ...server, ip: numeric };
-  }
+  const parsed = parseServerAddress(server.ip, Number(server.port) || 8000);
+  const cleanIp = parsed.host;
+  const port = Number(server.port) || parsed.port || 8000;
+  if (!cleanIp) return await getSavedServers();
+
   const servers = await getSavedServers();
-  const port = Number(server.port) || 8000;
-  const id = `${server.ip}:${port}`;
+  const id = `${cleanIp}:${port}`;
   const now = Date.now();
 
   // Match by: serverId, exact id, exact ip:port, or candidateIps overlap.
-  // The candidateIps overlap is critical for mesh roaming: after the phone switches
-  // mesh nodes, resolveReachableServer may call saveServerProfile with a new primary IP
-  // that doesn't match the saved id/ip — but it IS in the saved candidateIps list.
   const idx = servers.findIndex((s) => {
-    // Explicit LAN and private-network saves intentionally remain separate
-    // profiles even when they identify the same desktop server.
     if (server.connectionMode && (s.connectionMode || 'lan') !== server.connectionMode) {
       return false;
     }
@@ -671,33 +746,45 @@ export async function saveServerProfile(server) {
     return (
       (server.serverId && s.serverId && s.serverId === server.serverId) ||
       s.id === id ||
-      (s.ip === server.ip && (Number(s.port) || 8000) === port) ||
+      (s.ip === cleanIp && (Number(s.port) || 8000) === port) ||
       (
         Array.isArray(s.candidateIps) &&
-        s.candidateIps.includes(server.ip) &&
+        s.candidateIps.includes(cleanIp) &&
         (Number(s.port) || 8000) === port
       )
     );
   });
   const existing = idx >= 0 ? servers[idx] : null;
 
-  const resolvedName = (server.name && server.name !== server.ip)
+  const isPrivate =
+    server.connectionMode === 'private-network' ||
+    (server.connectionMode == null && existing?.connectionMode === 'private-network') ||
+    isPrivateNetworkAddress(cleanIp);
+
+  let targetIp = cleanIp;
+  // Preserve the established LAN/mesh behavior of selecting a responding IPv4
+  // address from discovery, but NEVER replace a Tailscale/WireGuard/MagicDNS endpoint.
+  if (!isPrivate && !ipv4Octets(targetIp)) {
+    const numeric = (server.all_ips || server.candidateIps || []).find((ip) => ipv4Octets(ip));
+    if (numeric) targetIp = numeric;
+  }
+
+  const resolvedName = (server.name && server.name !== targetIp)
     ? server.name
-    : (existing?.name && existing.name !== server.ip ? existing.name : (server.name || server.ip));
+    : (existing?.name && existing.name !== targetIp ? existing.name : (server.name || targetIp));
 
   const existingCandidates = Array.isArray(existing?.candidateIps) ? existing.candidateIps : [];
   const incomingCandidates = Array.isArray(server.candidateIps)
     ? server.candidateIps
     : (Array.isArray(server.all_ips) ? server.all_ips : []);
-  const candidateSet = new Set([server.ip, ...incomingCandidates, ...existingCandidates].filter(Boolean));
+  const candidateSet = new Set([targetIp, ...incomingCandidates, ...existingCandidates].filter(Boolean));
   // Keep most-recent IPs (first added = highest priority) within cap
   const candidateIps = Array.from(candidateSet).slice(0, MAX_CANDIDATE_IPS);
 
   const profile = {
-    // If matching an existing profile via candidateIps, keep id consistent with new primary IP
-    id,
+    id: `${targetIp}:${port}`,
     serverId: server.serverId || existing?.serverId || '',
-    ip: server.ip,
+    ip: targetIp,
     candidateIps,
     hostname: server.hostname || existing?.hostname || '',
     port,
@@ -705,10 +792,7 @@ export async function saveServerProfile(server) {
     apiKey: server.apiKey || existing?.apiKey || 'YOUR_SECRET_KEY',
     deviceToken: server.deviceToken || existing?.deviceToken || '',
     certFingerprint: server.certFingerprint || existing?.certFingerprint || '',
-    connectionMode: server.connectionMode === 'private-network' ||
-      (server.connectionMode == null && existing?.connectionMode === 'private-network')
-      ? 'private-network'
-      : 'lan',
+    connectionMode: isPrivate ? 'private-network' : 'lan',
     lastConnectedAt: now,
   };
 
@@ -766,7 +850,7 @@ export async function getActiveServerCandidates() {
     }
     if (activeProfile.hostname) {
       candidates.add(activeProfile.hostname);
-      if (!activeProfile.hostname.endsWith('.local')) {
+      if (!activeProfile.hostname.endsWith('.local') && !activeProfile.hostname.includes('.')) {
         candidates.add(`${activeProfile.hostname}.local`);
       }
     }
@@ -785,16 +869,16 @@ try {
 } catch (_e) {}
 
 async function quickProbe(target, port, timeoutMs = 2500) {
-  const cleanTarget = String(target || '').replace(/^https?:\/\//i, '').replace(/:\d+$/, '').trim();
-  if (!cleanTarget) return { ok: false };
-  const host = cleanTarget.includes(':') && !cleanTarget.startsWith('[') ? `[${cleanTarget}]` : cleanTarget;
+  if (!target) return { ok: false };
+  const parsed = parseServerAddress(target, port);
+  const host = formatHostForUrl(parsed.host);
+  const targetPort = parsed.port || port;
+  if (!host) return { ok: false };
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`http://${host}:${port}/ping`, { signal: controller.signal });
-    // clearTimeout must be called unconditionally before inspecting res.ok —
-    // if we returned early on !res.ok without clearing, the timer would fire
-    // later and abort an unrelated in-flight request sharing the controller.
+    const res = await fetch(`http://${host}:${targetPort}/ping`, { signal: controller.signal });
     clearTimeout(timer);
     if (res.ok) {
       const data = await res.json().catch(() => null);
@@ -810,7 +894,8 @@ async function quickProbe(target, port, timeoutMs = 2500) {
 }
 
 function ipv4Octets(ip) {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip || '');
+  const parsed = parseServerAddress(ip);
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(parsed.host || '');
   if (!m) return null;
   const parts = m.slice(1, 5).map(Number);
   return parts.every((n) => n >= 0 && n <= 255) ? parts : null;
@@ -862,17 +947,30 @@ async function subnetSweep(baseIp, port, exclude, expectedServerId = '') {
  * Extracted to avoid copy-paste divergence between the candidate and sweep paths.
  */
 async function _commitReachableServer({ newIp, port, probeData, serverName }) {
-  // Write IP first so that any code triggered by the event sees the new IP.
-  await AsyncStorage.setItem(KEYS.SERVER_IP, newIp);
+  const parsed = parseServerAddress(newIp, port);
+  const cleanIp = parsed.host;
+  const resolvedPort = parsed.port || port;
+
+  await AsyncStorage.setItem(KEYS.SERVER_IP, cleanIp);
+  const configuredMode = await getConnectionMode();
+  const isPrivate = configuredMode === 'private-network' || isPrivateNetworkAddress(cleanIp);
+  const connectionMode = isPrivate ? 'private-network' : 'lan';
+
+  const privateCandidates = isPrivate ? [
+    cleanIp,
+    ...(Array.isArray(probeData?.tailscale?.ips) ? probeData.tailscale.ips : []),
+    probeData?.tailscale?.dns_name || '',
+  ].filter(Boolean) : (probeData?.candidateIps || probeData?.all_ips || [cleanIp]);
+
   await saveServerProfile({
-    ip: newIp,
-    port,
+    ip: cleanIp,
+    port: resolvedPort,
     serverId: probeData?.server_id || '',
-    name: probeData?.name || serverName || newIp,
-    all_ips: probeData?.all_ips || [newIp],
-    candidateIps: probeData?.candidateIps || probeData?.all_ips || [newIp],
+    name: probeData?.name || serverName || cleanIp,
+    all_ips: probeData?.all_ips || [cleanIp],
+    candidateIps: privateCandidates,
     hostname: probeData?.hostname || '',
-    connectionMode: await getConnectionMode(),
+    connectionMode,
   });
   // Emit AFTER both writes so listeners always read a consistent state.
   DeviceEventEmitter.emit('settings-updated');
@@ -906,11 +1004,17 @@ export async function resolveReachableServer(options = {}) {
         return { ok: false, ip: '', reconnected: false };
       }
 
+      const parsedCurrent = parseServerAddress(currentIp, port);
+      const cleanCurrentIp = parsedCurrent.host;
+
       const activeProfile = savedServers.find(
-        (s) => s.ip === currentIp || (Array.isArray(s.candidateIps) && s.candidateIps.includes(currentIp))
+        (s) => s.ip === cleanCurrentIp || (Array.isArray(s.candidateIps) && s.candidateIps.includes(cleanCurrentIp))
       ) || null;
-      const connectionMode = activeProfile?.connectionMode || configuredConnectionMode;
-      const isPrivateNetwork = connectionMode === 'private-network';
+      const isPrivateNetwork =
+        (activeProfile?.connectionMode === 'private-network') ||
+        (configuredConnectionMode === 'private-network') ||
+        isPrivateNetworkAddress(cleanCurrentIp);
+      const connectionMode = isPrivateNetwork ? 'private-network' : 'lan';
       const expectedServerId = activeProfile?.serverId || '';
 
       const matchesExpectedServer = (probe) => {
@@ -919,27 +1023,34 @@ export async function resolveReachableServer(options = {}) {
       };
 
       // Step 1: Probe current configured IP first (with 2-attempt roam tolerance)
-      let currentProbe = await quickProbe(currentIp, port, options.timeoutMs || 1800);
+      let currentProbe = await quickProbe(cleanCurrentIp, port, options.timeoutMs || 1800);
       if (!currentProbe.ok) {
         // Brief pause to allow Wi-Fi association to settle on new mesh node
         await new Promise((r) => setTimeout(r, 300));
-        currentProbe = await quickProbe(currentIp, port, options.timeoutMs || 2500);
+        currentProbe = await quickProbe(cleanCurrentIp, port, options.timeoutMs || 2500);
       }
 
       if (currentProbe.ok && matchesExpectedServer(currentProbe)) {
         // Refresh candidate list if server returned all_ips
         if (Array.isArray(currentProbe.data?.all_ips) && currentProbe.data.all_ips.length > 0) {
+          const privateCandidates = isPrivateNetwork ? [
+            cleanCurrentIp,
+            ...(Array.isArray(currentProbe.data?.tailscale?.ips) ? currentProbe.data.tailscale.ips : []),
+            currentProbe.data?.tailscale?.dns_name || '',
+          ].filter(Boolean) : currentProbe.data.all_ips;
+
           saveServerProfile({
-            ip: currentIp,
+            ip: cleanCurrentIp,
             port,
             serverId: currentProbe.data.server_id || '',
-            name: currentProbe.data.name || serverName || currentIp,
+            name: currentProbe.data.name || serverName || cleanCurrentIp,
             all_ips: currentProbe.data.all_ips,
-            candidateIps: currentProbe.data.all_ips,
+            candidateIps: privateCandidates,
             hostname: currentProbe.data.hostname || '',
+            connectionMode,
           }).catch(() => {});
         }
-        return { ok: true, ip: currentIp, reconnected: false, data: currentProbe.data };
+        return { ok: true, ip: cleanCurrentIp, reconnected: false, data: currentProbe.data };
       }
 
       // Step 2: Probe saved profile mesh IPs and hostnames concurrently.
@@ -949,12 +1060,12 @@ export async function resolveReachableServer(options = {}) {
       if (activeProfile) {
         if (Array.isArray(activeProfile.candidateIps)) {
           activeProfile.candidateIps.forEach((cip) => {
-            if (cip && cip !== currentIp) candidates.add(cip);
+            if (cip && cip !== cleanCurrentIp) candidates.add(cip);
           });
         }
         if (activeProfile.hostname) {
           candidates.add(activeProfile.hostname);
-          if (!activeProfile.hostname.endsWith('.local')) {
+          if (!activeProfile.hostname.endsWith('.local') && !activeProfile.hostname.includes('.')) {
             candidates.add(`${activeProfile.hostname}.local`);
           }
         }
@@ -963,13 +1074,13 @@ export async function resolveReachableServer(options = {}) {
       savedServers.forEach((s) => {
         if (s === activeProfile) return;
         if (!expectedServerId || s.serverId !== expectedServerId) return;
-        if (s.ip && s.ip !== currentIp) candidates.add(s.ip);
+        if (s.ip && s.ip !== cleanCurrentIp) candidates.add(s.ip);
         if (Array.isArray(s.candidateIps)) {
-          s.candidateIps.forEach((cip) => { if (cip && cip !== currentIp) candidates.add(cip); });
+          s.candidateIps.forEach((cip) => { if (cip && cip !== cleanCurrentIp) candidates.add(cip); });
         }
         if (s.hostname) {
           candidates.add(s.hostname);
-          if (!s.hostname.endsWith('.local')) candidates.add(`${s.hostname}.local`);
+          if (!s.hostname.endsWith('.local') && !s.hostname.includes('.')) candidates.add(`${s.hostname}.local`);
         }
       });
 
@@ -987,12 +1098,13 @@ export async function resolveReachableServer(options = {}) {
           const numericAllIp = Array.isArray(found.probe.data?.all_ips)
             ? found.probe.data.all_ips.find((ip) => ipv4Octets(ip))
             : null;
-          // A MagicDNS name is the preferred stable private-network endpoint.
-          // Do not replace it with a LAN address returned by the server.
-          const newIp = isPrivateNetwork
+          // A MagicDNS name or private network address is the preferred stable endpoint.
+          // Do not replace it with a raw LAN address returned by the server.
+          const isCandidatePrivate = isPrivateNetwork || isPrivateNetworkAddress(found.target);
+          const newIp = isCandidatePrivate
             ? found.target
             : (ipv4Octets(found.target) ? found.target : (numericAllIp || found.target));
-          console.log(`[Mesh Roaming] Found server at candidate address: ${newIp} (was ${currentIp})`);
+          console.log(`[Mesh Roaming] Found server at candidate address: ${newIp} (was ${cleanCurrentIp})`);
           await _commitReachableServer({ newIp, port, probeData: found.probe.data, serverName });
           return { ok: true, ip: newIp, reconnected: true, data: found.probe.data };
         }
@@ -1001,7 +1113,7 @@ export async function resolveReachableServer(options = {}) {
       // Step 3: Subnet sweep — sweeps device's current network subnet (if roaming to a new mesh node AP),
       // last-known server IP's subnet, and any known candidate subnets.
       if (!isPrivateNetwork && options.subnetSweep !== false) {
-        const sweptExclude = new Set([currentIp, ...candidateList]);
+        const sweptExclude = new Set([cleanCurrentIp, ...candidateList]);
 
         let deviceIp = null;
         try {
@@ -1032,7 +1144,7 @@ export async function resolveReachableServer(options = {}) {
         if (deviceIp && deviceIp !== '0.0.0.0') {
           addSubnet(deviceIp);
         }
-        addSubnet(currentIp);
+        addSubnet(cleanCurrentIp);
 
         // Add candidate subnets from saved servers
         candidateList.forEach((cand) => {
@@ -1049,14 +1161,14 @@ export async function resolveReachableServer(options = {}) {
           const swept = await subnetSweep(baseIp, port, sweptExclude, expectedServerId);
           if (swept) {
             const newIp = swept.ip;
-            console.log(`[Mesh Roaming] Found server via subnet sweep: ${newIp} (was ${currentIp})`);
+            console.log(`[Mesh Roaming] Found server via subnet sweep: ${newIp} (was ${cleanCurrentIp})`);
             await _commitReachableServer({ newIp, port, probeData: swept.probe.data, serverName });
             return { ok: true, ip: newIp, reconnected: true, data: swept.probe.data };
           }
         }
       }
 
-      return { ok: false, ip: currentIp, reconnected: false };
+      return { ok: false, ip: cleanCurrentIp, reconnected: false };
     } catch (e) {
       console.warn('[resolveReachableServer] Error resolving server:', e?.message);
       return { ok: false, ip: '', reconnected: false };

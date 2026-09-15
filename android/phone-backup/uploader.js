@@ -9,6 +9,9 @@ import {
   resolveReachableServer,
   applyServerUploadCacheRecovery,
   saveServerProfile,
+  formatHostForUrl,
+  isPrivateNetworkAddress,
+  parseServerAddress,
 } from './settings';
 import { getPendingShareNotifications, markShareNotificationsSeen } from './downloader';
 import { showNewSharePostNotification } from './notificationService';
@@ -219,7 +222,8 @@ export async function checkDeviceConnection(options = {}) {
     // already be aborted (e.g. a 6-second UI timeout fired while resolveReachableServer ran).
     const signal = retrying ? undefined : options.signal;
     retrying = true;
-    const res = await fetch(`http://${serverIp}:${serverPort}/status?${params.toString()}`, {
+    const hostTarget = formatHostForUrl(serverIp);
+    const res = await fetch(`http://${hostTarget}:${serverPort}/status?${params.toString()}`, {
       method: 'GET',
       headers: { Authorization: `Bearer ${apiKey}` },
       signal,
@@ -234,6 +238,7 @@ export async function checkDeviceConnection(options = {}) {
     }
     if (Array.isArray(body.all_ips) && body.all_ips.length > 0) {
       const connectionMode = await getConnectionMode();
+      const isPrivate = connectionMode === 'private-network' || isPrivateNetworkAddress(serverIp);
       const privateCandidates = [
         serverIp,
         ...(Array.isArray(body.tailscale?.ips) ? body.tailscale.ips : []),
@@ -244,9 +249,9 @@ export async function checkDeviceConnection(options = {}) {
         port: serverPort,
         serverId: body.server_id || '',
         all_ips: body.all_ips,
-        candidateIps: connectionMode === 'private-network' ? privateCandidates : body.all_ips,
+        candidateIps: isPrivate ? privateCandidates : body.all_ips,
         hostname: body.hostname || '',
-        connectionMode,
+        connectionMode: isPrivate ? 'private-network' : 'lan',
       }).catch(() => {});
     }
     return {
@@ -259,7 +264,8 @@ export async function checkDeviceConnection(options = {}) {
 export async function checkServerFiles(files, options = {}) {
   return withAutoFailover(async () => {
     const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
-    const url = `http://${serverIp}:${serverPort}/files/check`;
+    const hostTarget = formatHostForUrl(serverIp);
+    const url = `http://${hostTarget}:${serverPort}/files/check`;
 
     const res = await fetch(url, {
       method: 'POST',
@@ -314,8 +320,9 @@ export async function fetchServerUploadCache() {
   if (!uploadCachePromise) {
     uploadCachePromise = withAutoFailover(async () => {
       const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
+      const hostTarget = formatHostForUrl(serverIp);
       const params = new URLSearchParams({ device_id: deviceId });
-      const res = await fetch(`http://${serverIp}:${serverPort}/sync/upload-cache?${params.toString()}`, {
+      const res = await fetch(`http://${hostTarget}:${serverPort}/sync/upload-cache?${params.toString()}`, {
         method: 'GET',
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: createFetchTimeoutSignal(120000),
@@ -394,6 +401,7 @@ export async function uploadFile(item, onProgress, options = {}) {
   try {
     const doUpload = async () => {
       const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
+      const hostTarget = formatHostForUrl(serverIp);
       const params = new URLSearchParams({
         relative_path: item.relativePath,
         modified_time: String(item.modifiedTime),
@@ -403,8 +411,8 @@ export async function uploadFile(item, onProgress, options = {}) {
         device_id: deviceId,
         verify_disk: verifyDisk,
       });
-      const rawUrl = `http://${serverIp}:${serverPort}/upload/raw?${params.toString()}`;
-      const multipartUrl = `http://${serverIp}:${serverPort}/upload`;
+      const rawUrl = `http://${hostTarget}:${serverPort}/upload/raw?${params.toString()}`;
+      const multipartUrl = `http://${hostTarget}:${serverPort}/upload`;
 
       const uploadRaw = () => FileSystem.uploadAsync(rawUrl, cacheUri, {
         httpMethod: 'POST',
@@ -490,7 +498,8 @@ export async function uploadFile(item, onProgress, options = {}) {
 export async function postSyncSession(session) {
   try {
     const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
-    await fetch(`http://${serverIp}:${serverPort}/sync/session`, {
+    const hostTarget = formatHostForUrl(serverIp);
+    await fetch(`http://${hostTarget}:${serverPort}/sync/session`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

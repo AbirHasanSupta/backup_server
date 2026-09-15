@@ -45,6 +45,9 @@ import {
   removeSavedServer,
   resolveReachableServer,
   switchToSavedServer,
+  parseServerAddress,
+  formatHostForUrl,
+  isPrivateNetworkAddress,
 } from '../../settings';
 import { hapticMedium, hapticLight, hapticSuccess, hapticError } from '@/utils/haptics';
 import { registerBackgroundTask, runSync, getCurrentSyncState } from '../../backgroundTask';
@@ -63,17 +66,6 @@ import { clearGeocodeCache } from '@/utils/geocode';
 import { invalidateCleanupCache } from '../../freeUpStorage';
 import { invalidatePendingBackupCache } from '../../pendingBackup';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
-
-function normalizeServerAddress(input: string): string {
-  let addr = input.trim();
-  addr = addr.replace(/^https?:\/\//i, '');
-  addr = addr.replace(/\/+$/, '');
-  const slashIdx = addr.indexOf('/');
-  if (slashIdx > 0) {
-    addr = addr.slice(0, slashIdx);
-  }
-  return addr;
-}
 
 function SectionHeader({ title, styles }: { title: string; styles: ReturnType<typeof createStyles> }) {
   return <Text style={styles.sectionHeader}>{title}</Text>;
@@ -190,7 +182,8 @@ export default function SettingsScreen() {
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 2500);
-        const res = await fetch(`http://${ip}:${port || 8000}/ping`, { signal: controller.signal });
+        const hostTarget = formatHostForUrl(ip);
+        const res = await fetch(`http://${hostTarget}:${port || 8000}/ping`, { signal: controller.signal });
         clearTimeout(timeout);
         if (res.ok) {
           const data = await res.json();
@@ -201,6 +194,7 @@ export default function SettingsScreen() {
               ip,
               port: Number(port) || 8000,
               name: data.name,
+              connectionMode: mode,
             });
             setSavedServers(updated);
           }
@@ -246,17 +240,13 @@ export default function SettingsScreen() {
       return;
     }
 
-    let cleanIp = normalizeServerAddress(serverIp);
-    let portNum = Number.parseInt(serverPort, 10);
+    const parsed = parseServerAddress(serverIp, Number.parseInt(serverPort, 10) || 8000);
+    const cleanIp = parsed.host;
+    const portNum = parsed.port;
 
-    const colonIdx = cleanIp.lastIndexOf(':');
-    if (colonIdx > 0) {
-      const maybPort = cleanIp.slice(colonIdx + 1);
-      if (/^\d+$/.test(maybPort)) {
-        portNum = Number.parseInt(maybPort, 10);
-        cleanIp = cleanIp.slice(0, colonIdx);
-        setServerPortState(String(portNum));
-      }
+    if (!cleanIp) {
+      Alert.alert('Invalid IP', 'Please enter a valid server IP or hostname.');
+      return;
     }
 
     if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
@@ -265,6 +255,10 @@ export default function SettingsScreen() {
     }
 
     setServerIpState(cleanIp);
+    setServerPortState(String(portNum));
+    const isPrivate = connectionMode === 'private-network' || isPrivateNetworkAddress(cleanIp);
+    const selectedMode = isPrivate ? 'private-network' : 'lan';
+    setConnectionModeState(selectedMode);
 
     setSavingServer(true);
     try {
@@ -273,7 +267,8 @@ export default function SettingsScreen() {
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 2500);
-        const res = await fetch(`http://${cleanIp}:${portNum}/ping`, { signal: controller.signal });
+        const hostTarget = formatHostForUrl(cleanIp);
+        const res = await fetch(`http://${hostTarget}:${portNum}/ping`, { signal: controller.signal });
         clearTimeout(timeout);
         if (res.ok) {
           const data = await res.json();
@@ -284,7 +279,7 @@ export default function SettingsScreen() {
       await Promise.all([
         setServerIp(cleanIp),
         setServerPort(portNum),
-        setConnectionMode(connectionMode),
+        setConnectionMode(selectedMode),
         setApiKey(key),
         setServerName(discoveredName || cleanIp),
         setDeviceToken(''),
@@ -294,7 +289,7 @@ export default function SettingsScreen() {
           port: portNum,
           name: discoveredName || cleanIp,
           apiKey: key,
-          connectionMode,
+          connectionMode: selectedMode,
         }),
       ]);
 
@@ -304,7 +299,7 @@ export default function SettingsScreen() {
 
       Alert.alert(
         'Saved',
-        connectionMode === 'private-network'
+        selectedMode === 'private-network'
           ? 'Private-network server saved. Connecting through Tailscale or WireGuard…'
           : 'Server settings saved. Connecting…'
       );
@@ -323,7 +318,15 @@ export default function SettingsScreen() {
           checkServer();
         })
         .catch((err: any) => {
-          Alert.alert('Connection Failed', sanitizeErrorMessage(err, 'Could not reach the desktop server. Check Wi-Fi and server status.'));
+          Alert.alert(
+            'Connection Failed',
+            sanitizeErrorMessage(
+              err,
+              selectedMode === 'private-network'
+                ? 'Could not reach the desktop server. Check Tailscale/WireGuard connection and server status.'
+                : 'Could not reach the desktop server. Check Wi-Fi and server status.'
+            )
+          );
           checkServer();
         });
     } finally {
@@ -340,30 +343,49 @@ export default function SettingsScreen() {
     all_ips?: string[];
     candidateIps?: string[];
     hostname?: string;
+    connectionMode?: 'lan' | 'private-network';
+    tailscale?: { available?: boolean; ips?: string[]; dns_name?: string } | null;
   }) => {
-    const cleanIp = normalizeServerAddress(server.ip);
+    const parsed = parseServerAddress(server.ip, server.port);
+    const cleanIp = parsed.host;
+    const port = parsed.port || server.port;
+    if (!cleanIp) return;
+
     setServerIpState(cleanIp);
-    setServerPortState(String(server.port));
+    setServerPortState(String(port));
     setServerNameState(server.name || cleanIp);
-    setConnectionModeState('lan');
+
+    const isPrivate =
+      server.connectionMode === 'private-network' ||
+      connectionMode === 'private-network' ||
+      isPrivateNetworkAddress(cleanIp);
+    const selectedMode = isPrivate ? 'private-network' : 'lan';
+    setConnectionModeState(selectedMode);
+
     const key = apiKey.trim() || 'YOUR_SECRET_KEY';
+    const privateCandidates = isPrivate ? [
+      cleanIp,
+      ...(Array.isArray(server.tailscale?.ips) ? server.tailscale.ips : []),
+      server.tailscale?.dns_name || '',
+    ].filter(Boolean) : (server.candidateIps || server.all_ips || [cleanIp]);
+
     await Promise.all([
       setServerIp(cleanIp),
-      setServerPort(server.port),
-      setConnectionMode('lan'),
+      setServerPort(port),
+      setConnectionMode(selectedMode),
       setServerName(server.name),
       setApiKey(key),
       setDeviceToken(''),
       saveServerProfile({
         serverId: server.serverId || '',
         ip: cleanIp,
-        port: server.port,
+        port,
         name: server.name || cleanIp,
         apiKey: key,
         all_ips: server.all_ips || [cleanIp],
-        candidateIps: server.candidateIps || server.all_ips || [cleanIp],
+        candidateIps: privateCandidates,
         hostname: server.hostname || '',
-        connectionMode: 'lan',
+        connectionMode: selectedMode,
       }),
     ]);
 
@@ -371,10 +393,10 @@ export default function SettingsScreen() {
 
     Alert.alert(
       'Server found',
-      `"${server.name}" (${cleanIp}:${server.port}) was saved. Sending connection request.`
+      `"${server.name}" (${cleanIp}:${port}) was saved. Sending connection request.`
     );
 
-    connectToServer(cleanIp, server.port, key)
+    connectToServer(cleanIp, port, key)
       .then(async (result) => {
         if (result.status === 'accepted') {
           setServerStatus('connected');
@@ -388,7 +410,15 @@ export default function SettingsScreen() {
         checkServer();
       })
       .catch((err: any) => {
-        Alert.alert('Connection Failed', sanitizeErrorMessage(err, 'Could not reach the desktop server. Check Wi-Fi and server status.'));
+        Alert.alert(
+          'Connection Failed',
+          sanitizeErrorMessage(
+            err,
+            selectedMode === 'private-network'
+              ? 'Could not reach the desktop server. Check Tailscale/WireGuard connection and server status.'
+              : 'Could not reach the desktop server. Check Wi-Fi and server status.'
+          )
+        );
         checkServer();
       });
   };

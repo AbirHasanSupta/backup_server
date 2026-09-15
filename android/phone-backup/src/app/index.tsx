@@ -37,6 +37,8 @@ import {
   formatSyncIntervalLabel,
   saveServerProfile,
   resolveReachableServer,
+  getConnectionMode,
+  formatHostForUrl,
 } from '../../settings';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { SyncProgressRing, SyncPhase } from '@/components/SyncProgressRing';
@@ -244,14 +246,16 @@ export default function HomeScreen() {
         const port = await getServerPort();
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 2500);
-        const res = await fetch(`http://${ip}:${port}/ping`, { signal: controller.signal });
+        const hostTarget = formatHostForUrl(ip);
+        const res = await fetch(`http://${hostTarget}:${port}/ping`, { signal: controller.signal });
         clearTimeout(timeout);
         if (res.ok) {
           const data = await res.json();
           if (data?.name) {
             await setServerName(data.name);
             setServerLabel(data.name);
-            await saveServerProfile({ ip, port: Number(port) || 8000, name: data.name }).catch(() => {});
+            const mode = await getConnectionMode();
+            await saveServerProfile({ ip, port: Number(port) || 8000, name: data.name, connectionMode: mode }).catch(() => {});
           }
         }
       } catch {}
@@ -579,10 +583,13 @@ export default function HomeScreen() {
       }
       setServerStatus('connected');
     } catch {
+      const mode = await getConnectionMode();
       setServerStatus('disconnected');
       Alert.alert(
         'Server unreachable',
-        'Make sure the desktop app is running and both devices are on the same Wi-Fi network.',
+        mode === 'private-network'
+          ? 'Make sure the desktop app is running and both devices are connected to Tailscale or WireGuard.'
+          : 'Make sure the desktop app is running and both devices are on the same Wi-Fi network.',
         [{ text: 'OK' }]
       );
       return;

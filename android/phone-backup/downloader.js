@@ -1,51 +1,58 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { getServerIp, getServerPort, getApiKey, getDeviceId, getDeviceToken, resolveReachableServer } from './settings';
+import { getServerIp, getServerPort, getApiKey, getDeviceId, getDeviceToken, resolveReachableServer, formatHostForUrl } from './settings';
 
 export async function getConfig() {
-  const [ip, port, apiKey, deviceId, deviceToken] = await Promise.all([
+  const [rawIp, port, apiKey, deviceId, deviceToken] = await Promise.all([
     getServerIp(), getServerPort(), getApiKey(), getDeviceId(), getDeviceToken(),
   ]);
-  return { ip, port, key: deviceToken || apiKey, deviceId };
+  const ip = formatHostForUrl(rawIp);
+  return { ip, rawIp, port, key: deviceToken || apiKey, deviceId };
 }
 
 export function buildPreviewUrl(config, relativePath, sourceMode, sourceId) {
   if (!config || !config.ip || !config.port) return '';
+  const host = formatHostForUrl(config.ip);
   if (sourceMode === 'shared' && sourceId) {
-    return `http://${config.ip}:${config.port}/shared/${encodeURIComponent(sourceId)}/download?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+    return `http://${host}:${config.port}/shared/${encodeURIComponent(sourceId)}/download?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
   }
-  return `http://${config.ip}:${config.port}/files/download?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+  return `http://${host}:${config.port}/files/download?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
 }
 
 export function buildVideoPreviewUrl(config, relativePath, sourceMode, sourceId) {
   if (!config || !config.ip || !config.port) return '';
+  const host = formatHostForUrl(config.ip);
   if (sourceMode === 'shared' && sourceId) {
-    return `http://${config.ip}:${config.port}/shared/${encodeURIComponent(sourceId)}/preview?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+    return `http://${host}:${config.port}/shared/${encodeURIComponent(sourceId)}/preview?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
   }
-  return `http://${config.ip}:${config.port}/files/preview?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+  return `http://${host}:${config.port}/files/preview?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
 }
 
 export function buildThumbnailUrl(config, relativePath, sourceMode, sourceId) {
   if (!config || !config.ip || !config.port) return '';
+  const host = formatHostForUrl(config.ip);
   if (sourceMode === 'shared' && sourceId) {
-    return `http://${config.ip}:${config.port}/shared/${encodeURIComponent(sourceId)}/thumbnail?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+    return `http://${host}:${config.port}/shared/${encodeURIComponent(sourceId)}/thumbnail?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
   }
-  return `http://${config.ip}:${config.port}/files/thumbnail?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+  return `http://${host}:${config.port}/files/thumbnail?relative_path=${encodeURIComponent(relativePath)}&device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
 }
 
 // Device-to-device share serving — addressed by share_id (no relative_path exposed).
 export function buildShareDownloadUrl(config, shareId) {
   if (!config || !config.ip || !config.port) return '';
-  return `http://${config.ip}:${config.port}/share/${encodeURIComponent(shareId)}/download?device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+  const host = formatHostForUrl(config.ip);
+  return `http://${host}:${config.port}/share/${encodeURIComponent(shareId)}/download?device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
 }
 
 export function buildSharePreviewUrl(config, shareId) {
   if (!config || !config.ip || !config.port) return '';
-  return `http://${config.ip}:${config.port}/share/${encodeURIComponent(shareId)}/preview?device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+  const host = formatHostForUrl(config.ip);
+  return `http://${host}:${config.port}/share/${encodeURIComponent(shareId)}/preview?device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
 }
 
 export function buildShareThumbnailUrl(config, shareId) {
   if (!config || !config.ip || !config.port) return '';
-  return `http://${config.ip}:${config.port}/share/${encodeURIComponent(shareId)}/thumbnail?device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
+  const host = formatHostForUrl(config.ip);
+  return `http://${host}:${config.port}/share/${encodeURIComponent(shareId)}/thumbnail?device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
 }
 
 export async function warmVideoPreviews(relativePaths, sourceMode, sourceId) {
@@ -550,13 +557,14 @@ export async function getRewindReelStatus(year, month) {
  */
 export function buildRewindReelStreamUrl(config, year, month) {
   if (!config || !config.ip || !config.port) return '';
+  const host = formatHostForUrl(config.ip);
   const params = new URLSearchParams({
     device_id: config.deviceId,
     year: String(year),
     token: config.key,
   });
   if (month) params.set('month', String(month));
-  return `http://${config.ip}:${config.port}/memories/rewind/stream?${params.toString()}`;
+  return `http://${host}:${config.port}/memories/rewind/stream?${params.toString()}`;
 }
 
 /**

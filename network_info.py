@@ -22,6 +22,25 @@ _tailscale_cache_until = 0.0
 _tailscale_cache_lock = threading.Lock()
 
 
+def _resolve_tailscale_binary() -> str | None:
+    binary = shutil.which("tailscale")
+    if binary:
+        return binary
+
+    if os.name == "nt":
+        candidates = [
+            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Tailscale", "tailscale.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Tailscale", "tailscale.exe"),
+            os.path.join(os.environ.get("ProgramW6432", r"C:\Program Files"), "Tailscale", "tailscale.exe"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Tailscale", "tailscale.exe"),
+            os.path.join(os.environ.get("APPDATA", ""), "Tailscale", "tailscale.exe"),
+        ]
+        for c in candidates:
+            if c and os.path.isfile(c):
+                return c
+    return None
+
+
 def get_tailscale_network_info() -> dict:
     """Return this node's Tailscale addresses and MagicDNS name when available."""
     global _tailscale_cache, _tailscale_cache_until
@@ -30,17 +49,14 @@ def get_tailscale_network_info() -> dict:
         if now < _tailscale_cache_until:
             return dict(_tailscale_cache)
 
-    binary = shutil.which("tailscale")
-    if not binary and os.name == "nt":
-        installed = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Tailscale", "tailscale.exe")
-        if os.path.isfile(installed):
-            binary = installed
+    binary = _resolve_tailscale_binary()
     if not binary:
         info = {"available": False, "ips": [], "dns_name": ""}
         with _tailscale_cache_lock:
             _tailscale_cache, _tailscale_cache_until = info, now + _TAILSCALE_CACHE_SECONDS
         return dict(info)
 
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
         result = subprocess.run(
             [binary, "status", "--json"],
@@ -48,6 +64,7 @@ def get_tailscale_network_info() -> dict:
             text=True,
             timeout=2,
             check=False,
+            creationflags=creationflags,
         )
         if result.returncode != 0:
             info = {"available": False, "ips": [], "dns_name": ""}
@@ -55,6 +72,13 @@ def get_tailscale_network_info() -> dict:
                 _tailscale_cache, _tailscale_cache_until = info, now + _TAILSCALE_CACHE_SECONDS
             return dict(info)
         status = json.loads(result.stdout)
+        backend_state = status.get("BackendState")
+        if backend_state and backend_state != "Running":
+            info = {"available": False, "ips": [], "dns_name": ""}
+            with _tailscale_cache_lock:
+                _tailscale_cache, _tailscale_cache_until = info, now + _TAILSCALE_CACHE_SECONDS
+            return dict(info)
+
         self_info = status.get("Self") or {}
         ips = [ip for ip in (self_info.get("TailscaleIPs") or []) if isinstance(ip, str) and ip]
         # Tailscale returns a trailing dot in its JSON DNS name.  Android URL
@@ -71,3 +95,4 @@ def get_tailscale_network_info() -> dict:
     with _tailscale_cache_lock:
         _tailscale_cache, _tailscale_cache_until = info, now + _TAILSCALE_CACHE_SECONDS
     return dict(info)
+

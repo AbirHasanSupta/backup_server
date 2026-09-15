@@ -3436,7 +3436,21 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         net_row = ctk.CTkFrame(srv_card, fg_color=C_ELEVATED, corner_radius=8)
         net_row.pack(fill="x", padx=16, pady=(0, 12))
         ips_str = ",  ".join(get_all_local_ips())
-        ctk.CTkLabel(net_row, text=f"Available IPv4 Interfaces:  {ips_str}", font=FONT_CAPTION, text_color=C_MUTED).pack(anchor="w", padx=10, pady=6)
+        ctk.CTkLabel(net_row, text=f"Available IPv4 Interfaces:  {ips_str}", font=FONT_CAPTION, text_color=C_MUTED).pack(anchor="w", padx=10, pady=(6, 2))
+        try:
+            from network_info import get_tailscale_network_info
+            ts_info = get_tailscale_network_info()
+            if ts_info.get("available"):
+                ts_target = ts_info.get("dns_name") or (ts_info.get("ips") or [""])[0]
+                if ts_target:
+                    ctk.CTkLabel(
+                        net_row,
+                        text=f"Tailscale Remote Endpoint:  http://{ts_target}:{cfg.get('PORT', 8000)}",
+                        font=FONT_CAPTION,
+                        text_color=C_HIGHLIGHT,
+                    ).pack(anchor="w", padx=10, pady=(0, 6))
+        except Exception:
+            pass
 
         # ── 3. STORAGE PATHS ──────────────────────────────────────────────────
         stor_card = settings_card("Storage")
@@ -4572,7 +4586,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         for mod_name in (
             "config", "storage", "database", "ffmpeg_utils",
-            "video_preview", "memories", "rewind", "upload", "server",
+            "video_preview", "memories", "rewind", "network_info", "upload", "server",
         ):
             if mod_name in sys.modules:
                 importlib.reload(sys.modules[mod_name])
@@ -4664,6 +4678,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     from upload import APP_VERSION as _app_version
                 except Exception:
                     _app_version = "4.3.2"
+                try:
+                    from network_info import get_tailscale_network_info
+                    _ts_info = get_tailscale_network_info()
+                except Exception:
+                    _ts_info = None
                 return json.dumps({
                     "status": "ok",
                     "server_id": cfg.get("SERVER_ID", ""),
@@ -4672,6 +4691,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     "version": _app_version,
                     "all_ips": get_all_local_ips(),
                     "port": port,
+                    "tailscale": _ts_info,
                 }).encode("utf-8")
 
             def _udp_loop():

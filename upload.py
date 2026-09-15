@@ -307,16 +307,17 @@ async def connect_device(
     device_model = (body.device_model or "").strip() or None
     username = (body.username or "").strip() or None
 
-    def accepted_response() -> dict:
-        local_ips = get_all_local_ips()
+    async def accepted_response() -> dict:
+        local_ips = await asyncio.to_thread(get_all_local_ips)
         hostname = socket.gethostname()
         cfg = load_config()
+        tailscale = await asyncio.to_thread(get_tailscale_network_info)
         resp = {
             "status": "accepted",
             "server_id": cfg.get("SERVER_ID", ""),
             "all_ips": local_ips,
             "hostname": hostname,
-            "tailscale": get_tailscale_network_info(),
+            "tailscale": tailscale,
         }
         if device_id:
             token = ensure_device_token(device_id)
@@ -327,7 +328,7 @@ async def connect_device(
     if is_device_known(device_ip, device_id):
         upsert_device(device_name, device_ip, device_id, device_model, username)
         add_log(f"📱 Re-connected: {device_name} ({device_id or device_ip})")
-        return accepted_response()
+        return await accepted_response()
 
     # ── Reinstall detection ────────────────────────────────────────────────────
     # A new device_id might belong to a phone that already has a backup record
@@ -353,7 +354,7 @@ async def connect_device(
             # Update the name/ip/model in case they changed slightly
             upsert_device(device_name, device_ip, device_id, device_model, username)
             stats = get_device_stats(device_ip, device_id=device_id)
-            resp = accepted_response()
+            resp = await accepted_response()
             resp["recovery_available"] = True
             resp["files_backed_up"] = stats["total_files"]
             return resp
@@ -363,7 +364,7 @@ async def connect_device(
     if not load_config().get("REQUIRE_APPROVAL", True):
         upsert_device(device_name, device_ip, device_id, device_model, username)
         add_log(f"✅ Auto-accepted: {device_name} ({device_id or device_ip})")
-        return accepted_response()
+        return await accepted_response()
 
     # ── Approval flow ─────────────────────────────────────────────────────────
     req_id = str(uuid.uuid4())
@@ -388,7 +389,7 @@ async def connect_device(
 
     if accepted:
         upsert_device(device_name, device_ip, device_id, device_model, username)
-        return accepted_response()
+        return await accepted_response()
 
     return {"status": "rejected"}
 

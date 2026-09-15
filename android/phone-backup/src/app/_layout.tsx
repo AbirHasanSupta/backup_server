@@ -210,14 +210,14 @@ function RootLayoutContent() {
       checkAndNotifyNewShares().catch(() => {});
     })();
 
-    // Background mesh network roaming / Wi-Fi reconnect listener
+    // Background mesh network roaming / network reconnect listener (LAN, Wi-Fi, Cellular, VPN)
     let networkSub: { remove: () => void } | null = null;
     try {
       /* eslint-disable-next-line @typescript-eslint/no-require-imports */
       const Network = require('expo-network');
       if (Network?.addNetworkStateListener) {
         networkSub = Network.addNetworkStateListener((state: any) => {
-          if (state?.isConnected && state?.type === Network.NetworkStateType?.WIFI) {
+          if (state?.isConnected) {
             resolveReachableServer({ force: true }).catch(() => {});
             checkAndNotifyNewShares().catch(() => {});
           }

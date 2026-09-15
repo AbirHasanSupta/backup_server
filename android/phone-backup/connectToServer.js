@@ -1,4 +1,16 @@
-import { getConnectionMode, getDeviceId, getUsername, setDeviceToken, saveServerProfile, setRecoverySyncPending, isUploadCacheInitialized, clearRecoverySyncPending } from './settings';
+import {
+  getConnectionMode,
+  getDeviceId,
+  getUsername,
+  setDeviceToken,
+  saveServerProfile,
+  setRecoverySyncPending,
+  isUploadCacheInitialized,
+  clearRecoverySyncPending,
+  formatHostForUrl,
+  parseServerAddress,
+  isPrivateNetworkAddress,
+} from './settings';
 import { prefetchServerUploadCache } from './uploader';
 
 /**
@@ -49,13 +61,23 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
   // modelName is the hardware model (e.g. "Pixel 7") — stable across reinstalls
   const deviceModel = Device?.modelName || null;
 
+  const parsed = parseServerAddress(serverIp, serverPort);
+  const cleanIp = parsed.host;
+  const port = parsed.port || serverPort;
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS);
+  let isPrivate = false;
 
   try {
+    const configuredMode = await getConnectionMode();
+    isPrivate = configuredMode === 'private-network' || isPrivateNetworkAddress(cleanIp);
+    const connectionMode = isPrivate ? 'private-network' : 'lan';
+
     const deviceId = await getDeviceId();
     const username = await getUsername();
-    const res = await fetch(`http://${serverIp}:${serverPort}/connect`, {
+    const hostTarget = formatHostForUrl(cleanIp);
+    const res = await fetch(`http://${hostTarget}:${port}/connect`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -89,22 +111,21 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
         // Only clear a stale recovery flag once the local cache is already populated.
         await clearRecoverySyncPending();
       }
-      const connectionMode = await getConnectionMode();
       const privateCandidates = [
-        serverIp,
+        cleanIp,
         ...(Array.isArray(result.tailscale?.ips) ? result.tailscale.ips : []),
         result.tailscale?.dns_name || '',
       ].filter(Boolean);
       await saveServerProfile({
         serverId: result.server_id || '',
-        ip: serverIp,
-        port: serverPort,
+        ip: cleanIp,
+        port,
         apiKey,
         deviceToken: result.token || '',
-        all_ips: Array.isArray(result.all_ips) ? result.all_ips : [serverIp],
-        candidateIps: connectionMode === 'private-network'
+        all_ips: Array.isArray(result.all_ips) ? result.all_ips : [cleanIp],
+        candidateIps: isPrivate
           ? privateCandidates
-          : (Array.isArray(result.all_ips) ? result.all_ips : [serverIp]),
+          : (Array.isArray(result.all_ips) ? result.all_ips : [cleanIp]),
         hostname: result.hostname || '',
         connectionMode,
       });
@@ -117,7 +138,12 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
     }
     const msg = (err?.message || String(err || '')).trim();
     if (/NoRouteToHost|ConnectException|SocketException|ECONNREFUSED|Host unreachable|Network request failed/i.test(msg)) {
-      return { status: 'error', reason: 'Server unreachable — check that the desktop server is running and on the same Wi-Fi.' };
+      return {
+        status: 'error',
+        reason: isPrivate
+          ? 'Server unreachable — check that the desktop server is running and connected to Tailscale or WireGuard.'
+          : 'Server unreachable — check that the desktop server is running and on the same Wi-Fi.',
+      };
     }
     return { status: 'error', reason: msg || 'Could not connect to server' };
   }

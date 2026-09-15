@@ -34,6 +34,7 @@ import {
   applyServerUploadCacheRecovery,
   ensureUploadCacheInitialized,
   getFileCacheMatchKey,
+  formatHostForUrl,
 } from './settings';
 import {
   showSyncProgressNotification,
@@ -352,7 +353,8 @@ async function reportServerActivity(message) {
     ]);
     if (!serverIp || !apiKey) return;
 
-    await fetch(`http://${serverIp}:${serverPort}/status/activity`, {
+    const hostTarget = formatHostForUrl(serverIp);
+    await fetch(`http://${hostTarget}:${serverPort}/status/activity`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${deviceToken || apiKey}`,

@@ -135,6 +135,7 @@ def main() -> None:
         "video_preview",
         "ffmpeg_utils",
         "trips",
+        "network_info",
     ]
 
     add_data_files = [
@@ -150,6 +151,7 @@ def main() -> None:
         "video_preview.py",
         "ffmpeg_utils.py",
         "trips.py",
+        "network_info.py",
     ]
 
 

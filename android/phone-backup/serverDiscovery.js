@@ -1,4 +1,4 @@
-import { getServerPort, getSavedServers } from './settings';
+import { getServerPort, getSavedServers, formatHostForUrl, parseServerAddress } from './settings';
 
 // Wave 1 (known candidates + retry): roam-tolerance headroom
 const TIMEOUT_MS = 2500;
@@ -71,32 +71,38 @@ function isNumericIp(str) {
 }
 
 function extractSubnet(ip) {
-  const parts = String(ip || '').replace(/^https?:\/\//i, '').replace(/:\d+$/, '').trim().split('.');
+  const parsed = parseServerAddress(ip);
+  const parts = String(parsed.host || '').split('.');
   return parts.length === 4 ? parts.slice(0, 3).join('.') : null;
 }
 
 async function probeServer(ip, port, timeoutMs = TIMEOUT_MS, retry = false) {
-  const host = String(ip || '').replace(/^https?:\/\//i, '').replace(/:\d+$/, '').trim();
+  if (!ip) return null;
+  const parsed = parseServerAddress(ip, port);
+  const host = parsed.host;
   if (!host) return null;
-  const target = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
-  let data = await fetchWithTimeout(`http://${target}:${port}/ping`, timeoutMs);
+  const targetHost = formatHostForUrl(host);
+  const targetPort = parsed.port || port;
+
+  let data = await fetchWithTimeout(`http://${targetHost}:${targetPort}/ping`, timeoutMs);
   // Optional retry for known candidates to tolerate transient Wi-Fi roaming latency
   if (!data && retry) {
     await new Promise((r) => setTimeout(r, 300));
-    data = await fetchWithTimeout(`http://${target}:${port}/ping`, timeoutMs);
+    data = await fetchWithTimeout(`http://${targetHost}:${targetPort}/ping`, timeoutMs);
   }
   if (data && data.status === 'ok') {
     const allIps = Array.isArray(data.all_ips) && data.all_ips.length > 0 ? data.all_ips : [host];
     return {
       serverId: data.server_id || '',
       ip: host,
-      port,
+      port: targetPort,
       name: (data.name && String(data.name).trim()) || host,
       hostname: data.hostname || '',
       version: data.version || '?',
       certFingerprint: data.cert_fingerprint || '',
       all_ips: allIps,
       candidateIps: Array.from(new Set([host, ...allIps].filter(Boolean))),
+      tailscale: data.tailscale || null,
     };
   }
   return null;
@@ -115,7 +121,8 @@ export function buildMultiSubnetWaves(deviceIp, savedServers = []) {
 
   const add = (waveKey, rawIp) => {
     if (!rawIp) return;
-    const cleanIp = String(rawIp).replace(/^https?:\/\//i, '').replace(/:\d+$/, '').trim();
+    const parsed = parseServerAddress(rawIp);
+    const cleanIp = parsed.host;
     if (cleanIp && !seen.has(cleanIp)) {
       seen.add(cleanIp);
       waves[waveKey].push(cleanIp);
@@ -142,7 +149,7 @@ export function buildMultiSubnetWaves(deviceIp, savedServers = []) {
     }
     if (s.hostname) {
       add('wave1', s.hostname);
-      if (!s.hostname.endsWith('.local')) add('wave1', `${s.hostname}.local`);
+      if (!s.hostname.endsWith('.local') && !s.hostname.includes('.')) add('wave1', `${s.hostname}.local`);
     }
   });
 
