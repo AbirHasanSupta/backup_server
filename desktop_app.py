@@ -4633,6 +4633,19 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         else:
             add_log(f"Server started - {addr}")
 
+        # Tailscale is optional.  When present, make the away-from-home
+        # endpoint visible in the desktop log without exposing it over LAN
+        # broadcast or requiring any router port-forwarding.
+        try:
+            from network_info import get_tailscale_network_info
+            tailscale = get_tailscale_network_info()
+            if tailscale.get("available"):
+                endpoint = tailscale.get("dns_name") or (tailscale.get("ips") or [""])[0]
+                if endpoint:
+                    add_log(f"Tailscale remote endpoint: http://{endpoint}:{PORT}")
+        except Exception:
+            pass
+
         self._start_udp_discovery_responder(PORT)
 
     def _start_udp_discovery_responder(self, port: int):

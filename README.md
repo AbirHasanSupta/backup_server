@@ -30,6 +30,8 @@ A self-hosted, high-performance photo, video, and file backup & restore ecosyste
 ### 📱 Android Client (Expo & React Native)
 - **Differential Backup Engine**: Scans selected phone directories and sends lightweight metadata (`/files/check`) to compare against the server database and physical disk before uploading. Uses pre-fetched server upload cache for instant diffing.
 - **Background Auto-Sync & WakeLock**: Continuous background service loop (`react-native-background-actions`) running on a configurable schedule (15m to 24h) with CPU `WakeLock` to prevent Wi-Fi dropouts during large transfers.
+- **Parallel Upload Engine**: Concurrent native transfers maximize LAN and private-tunnel backup throughput while API handlers continue serving Feed, Reels, and Library requests.
+- **Private Remote Backup**: Tailscale MagicDNS/IP and user-managed WireGuard tunnel endpoints can be saved separately from LAN discovery, so away-from-home backups never trigger a local subnet sweep.
 - **5-Tab Modern Floating Navigation**: Dedicated tabs for **Backup**, **Library**, **Reels**, **Feed**, and **Settings** with fluid reanimated spring tab icons.
 - **Short Video Reels Tab (`reels.tsx`)**: TikTok/Instagram Reels style vertical snap-scrolling video feed (`expo-video`) with double-tap like gesture, inline comment threads, reel bookmarking/saving (`/reels/save`), reposting to peer feeds (`/reels/repost`), and capturing device author tags.
 - **Saved Reels Collection (`saved-reels.tsx`)**: Dedicated tabbed gallery for Saved Reels, Liked Reels, and Reposted Reels with thumbnail grid and full-screen player.
@@ -204,6 +206,17 @@ After installing the APK on your device:
 2. Tap **Scan LAN for Server** or enter your server's IP address and Port manually.
 3. Tap **Connect & Register**.
 4. Approve the connection request on the desktop application's **Devices** tab.
+
+### Backup while away: Tailscale or WireGuard
+
+No public port forwarding is required. Install and sign in to Tailscale on both
+the desktop and phone (or connect both to the same WireGuard tunnel). Start the
+desktop server; when Tailscale is available its MagicDNS endpoint is written to
+the desktop log. In the Android app go to **Settings**, choose **Tailscale /
+WireGuard**, enter that MagicDNS name (for example
+`desktop.example.ts.net`) or tunnel IP and port, then Save. This profile skips
+LAN discovery and subnet scanning, so it remains valid on mobile data or any
+Wi-Fi network. The existing API key and per-device approval still apply.
 
 ---
 

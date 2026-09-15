@@ -23,6 +23,8 @@ import {
   setServerIp,
   getServerPort,
   setServerPort,
+  getConnectionMode,
+  setConnectionMode,
   getApiKey,
   setApiKey,
   getServerName,
@@ -97,6 +99,7 @@ export default function SettingsScreen() {
   const [serverIp, setServerIpState] = useState('');
   const [serverPort, setServerPortState] = useState('8000');
   const [serverName, setServerNameState] = useState('');
+  const [connectionMode, setConnectionModeState] = useState<'lan' | 'private-network'>('lan');
   const [username, setUsernameState] = useState('');
   const [savingUsername, setSavingUsername] = useState(false);
   const [apiKey, setApiKeyState] = useState('');
@@ -161,7 +164,7 @@ export default function SettingsScreen() {
   const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
 
   const loadSettings = useCallback(async () => {
-    const [ip, port, key, interval, paused, saved, name, savedUsername] = await Promise.all([
+    const [ip, port, key, interval, paused, saved, name, savedUsername, mode] = await Promise.all([
       getServerIp(),
       getServerPort(),
       getApiKey(),
@@ -170,6 +173,7 @@ export default function SettingsScreen() {
       getSavedServers(),
       getServerName(),
       getUsername(),
+      getConnectionMode(),
     ]);
     setServerIpState(ip);
     setServerPortState(String(port));
@@ -178,6 +182,7 @@ export default function SettingsScreen() {
     setSyncPausedState(paused);
     setSavedServers(saved);
     setServerNameState(name || '');
+    setConnectionModeState(mode);
     setUsernameState(savedUsername || '');
 
     // If server name is not set or equals the IP, attempt to resolve friendly name from server
@@ -237,7 +242,7 @@ export default function SettingsScreen() {
 
   const handleSaveServer = async () => {
     if (!serverIp.trim()) {
-      Alert.alert('Missing IP', 'Please enter the server IP address.');
+      Alert.alert('Missing server address', 'Please enter the server IP address or private-network hostname.');
       return;
     }
 
@@ -279,6 +284,7 @@ export default function SettingsScreen() {
       await Promise.all([
         setServerIp(cleanIp),
         setServerPort(portNum),
+        setConnectionMode(connectionMode),
         setApiKey(key),
         setServerName(discoveredName || cleanIp),
         setDeviceToken(''),
@@ -288,6 +294,7 @@ export default function SettingsScreen() {
           port: portNum,
           name: discoveredName || cleanIp,
           apiKey: key,
+          connectionMode,
         }),
       ]);
 
@@ -295,7 +302,12 @@ export default function SettingsScreen() {
       const updatedSaved = await getSavedServers();
       setSavedServers(updatedSaved);
 
-      Alert.alert('Saved', 'Server settings saved. Connecting…');
+      Alert.alert(
+        'Saved',
+        connectionMode === 'private-network'
+          ? 'Private-network server saved. Connecting through Tailscale or WireGuard…'
+          : 'Server settings saved. Connecting…'
+      );
 
       connectToServer(cleanIp, portNum, key)
         .then(async (result) => {
@@ -333,10 +345,12 @@ export default function SettingsScreen() {
     setServerIpState(cleanIp);
     setServerPortState(String(server.port));
     setServerNameState(server.name || cleanIp);
+    setConnectionModeState('lan');
     const key = apiKey.trim() || 'YOUR_SECRET_KEY';
     await Promise.all([
       setServerIp(cleanIp),
       setServerPort(server.port),
+      setConnectionMode('lan'),
       setServerName(server.name),
       setApiKey(key),
       setDeviceToken(''),
@@ -349,6 +363,7 @@ export default function SettingsScreen() {
         all_ips: server.all_ips || [cleanIp],
         candidateIps: server.candidateIps || server.all_ips || [cleanIp],
         hostname: server.hostname || '',
+        connectionMode: 'lan',
       }),
     ]);
 
@@ -385,6 +400,7 @@ export default function SettingsScreen() {
       setServerIpState(switched.ip);
       setServerPortState(String(switched.port));
       setServerNameState(switched.name || switched.ip);
+      setConnectionModeState(switched.connectionMode === 'private-network' ? 'private-network' : 'lan');
       setApiKeyState(switched.apiKey || '');
       setSavedServers(await getSavedServers());
       checkServer();
@@ -570,13 +586,36 @@ export default function SettingsScreen() {
               </>
             )}
 
-            <FieldLabel text="Server IP address" styles={styles} />
+            <FieldLabel text="Connection" styles={styles} />
+            <View style={styles.connectionModeRow}>
+              <TouchableOpacity
+                style={[styles.connectionModeBtn, connectionMode === 'lan' && styles.connectionModeBtnActive]}
+                onPress={() => setConnectionModeState('lan')}
+                accessibilityLabel="Use LAN connection"
+              >
+                <Text style={[styles.connectionModeText, connectionMode === 'lan' && styles.connectionModeTextActive]}>LAN</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.connectionModeBtn, connectionMode === 'private-network' && styles.connectionModeBtnActive]}
+                onPress={() => setConnectionModeState('private-network')}
+                accessibilityLabel="Use Tailscale or WireGuard connection"
+              >
+                <Text style={[styles.connectionModeText, connectionMode === 'private-network' && styles.connectionModeTextActive]}>Tailscale / WireGuard</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.hintText}>
+              {connectionMode === 'private-network'
+                ? 'Use the desktop’s Tailscale IP or MagicDNS name, or the WireGuard tunnel address. Both devices must be connected to the same private network.'
+                : 'Use Discover when the phone and desktop are on the same local network.'}
+            </Text>
+
+            <FieldLabel text={connectionMode === 'private-network' ? 'Private-network address' : 'Server IP address'} styles={styles} />
             <TextInput
               id="server-ip-input"
               style={styles.textInput}
               value={serverIp}
               onChangeText={setServerIpState}
-              placeholder="192.168.1.100 or http://myserver"
+              placeholder={connectionMode === 'private-network' ? '100.x.x.x or desktop.tailnet.ts.net' : '192.168.1.100 or http://myserver'}
               placeholderTextColor={colors.textMuted}
               keyboardType="url"
               autoCapitalize="none"
@@ -611,7 +650,7 @@ export default function SettingsScreen() {
             />
 
             <View style={styles.buttonRow}>
-              <AnimatedPressable
+              {connectionMode === 'lan' && <AnimatedPressable
                 id="discover-servers-button"
                 style={styles.outlineBtn}
                 onPress={() => setDiscoveryVisible(true)}
@@ -620,7 +659,7 @@ export default function SettingsScreen() {
               >
                 <AppIcon androidName="search" iosName="magnifyingglass" color={colors.primary} size={18} fallback="S" />
                 <Text style={styles.outlineBtnText}>Discover</Text>
-              </AnimatedPressable>
+              </AnimatedPressable>}
               <AnimatedPressable
                 id="save-server-button"
                 style={styles.primaryBtn}
@@ -1033,6 +1072,34 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
   presetTextActive: {
     color: colors.primary,
     fontWeight: '900',
+  },
+  connectionModeRow: {
+    flexDirection: 'row',
+    gap: Spacing.two,
+    marginBottom: Spacing.two,
+  },
+  connectionModeBtn: {
+    flex: 1,
+    minHeight: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: colors.surfaceBorder,
+    backgroundColor: colors.surfaceSoft,
+    paddingHorizontal: Spacing.two,
+  },
+  connectionModeBtnActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primarySoft,
+  },
+  connectionModeText: {
+    color: colors.textSecondary,
+    fontSize: TextScale.xs,
+    fontWeight: '800',
+  },
+  connectionModeTextActive: {
+    color: colors.primary,
   },
   hintText: {
     fontSize: TextScale.xs,

@@ -101,11 +101,11 @@ from video_preview import (
     is_video_path,
     preview_request_is_active,
 )
+from network_info import get_tailscale_network_info
 
 router = APIRouter()
 
 APP_VERSION = "4.3.2"
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Auth helper
@@ -242,6 +242,7 @@ async def ping():
     local_ips = get_all_local_ips()
     hostname = socket.gethostname()
     cfg = load_config()
+    tailscale = await asyncio.to_thread(get_tailscale_network_info)
     return JSONResponse(
         content={
             "status": "ok",
@@ -251,6 +252,7 @@ async def ping():
             "version": APP_VERSION,
             "all_ips": local_ips,
             "port": int(cfg.get("PORT", 8000)),
+            "tailscale": tailscale,
         },
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -314,6 +316,7 @@ async def connect_device(
             "server_id": cfg.get("SERVER_ID", ""),
             "all_ips": local_ips,
             "hostname": hostname,
+            "tailscale": get_tailscale_network_info(),
         }
         if device_id:
             token = ensure_device_token(device_id)
@@ -443,6 +446,7 @@ async def status(request: Request, device_id: str | None = None, authorization: 
     stats = await asyncio.to_thread(get_stats)
     devices = await asyncio.to_thread(get_devices)
     device_connected = await asyncio.to_thread(is_device_known, request.client.host, device_id) if device_id else None
+    tailscale = await asyncio.to_thread(get_tailscale_network_info)
     return {
         **stats,
         "connected_devices": len(devices),
@@ -452,6 +456,7 @@ async def status(request: Request, device_id: str | None = None, authorization: 
         "current_activity": get_current_activity(),
         "all_ips": get_all_local_ips(),
         "hostname": socket.gethostname(),
+        "tailscale": tailscale,
     }
 
 

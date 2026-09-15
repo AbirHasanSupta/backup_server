@@ -4,6 +4,7 @@ import { DeviceEventEmitter } from 'react-native';
 const KEYS = {
   SERVER_IP:      'server_ip',
   SERVER_PORT:    'server_port',
+  CONNECTION_MODE: 'connection_mode',
   SERVER_NAME:    'server_name',
   API_KEY:        'api_key',
   FOLDERS:        'folders',
@@ -111,6 +112,19 @@ export async function getServerPort() {
 }
 export async function setServerPort(port)  {
   await AsyncStorage.setItem(KEYS.SERVER_PORT, String(port));
+  DeviceEventEmitter.emit('settings-updated');
+}
+
+// LAN profiles are discoverable by subnet scan.  Private-network profiles
+// (Tailscale or a user-managed WireGuard tunnel) use a stable IP/DNS endpoint
+// and must never fall back to scanning the phone's current Wi-Fi subnet.
+export async function getConnectionMode() {
+  return (await AsyncStorage.getItem(KEYS.CONNECTION_MODE)) === 'private-network'
+    ? 'private-network'
+    : 'lan';
+}
+export async function setConnectionMode(mode) {
+  await AsyncStorage.setItem(KEYS.CONNECTION_MODE, mode === 'private-network' ? 'private-network' : 'lan');
   DeviceEventEmitter.emit('settings-updated');
 }
 
@@ -630,7 +644,9 @@ const MAX_CANDIDATE_IPS = 20;
 
 export async function saveServerProfile(server) {
   if (!server?.ip) return await getSavedServers();
-  if (!ipv4Octets(server.ip)) {
+  // Preserve the established LAN/mesh behavior of selecting a responding IPv4
+  // address from discovery, but never replace a Tailscale MagicDNS endpoint.
+  if (server.connectionMode !== 'private-network' && !ipv4Octets(server.ip)) {
     const numeric = (server.all_ips || server.candidateIps || []).find((ip) => ipv4Octets(ip));
     if (numeric) server = { ...server, ip: numeric };
   }
@@ -644,6 +660,11 @@ export async function saveServerProfile(server) {
   // mesh nodes, resolveReachableServer may call saveServerProfile with a new primary IP
   // that doesn't match the saved id/ip — but it IS in the saved candidateIps list.
   const idx = servers.findIndex((s) => {
+    // Explicit LAN and private-network saves intentionally remain separate
+    // profiles even when they identify the same desktop server.
+    if (server.connectionMode && (s.connectionMode || 'lan') !== server.connectionMode) {
+      return false;
+    }
     if (server.serverId && s.serverId && server.serverId !== s.serverId) {
       return false;
     }
@@ -684,6 +705,10 @@ export async function saveServerProfile(server) {
     apiKey: server.apiKey || existing?.apiKey || 'YOUR_SECRET_KEY',
     deviceToken: server.deviceToken || existing?.deviceToken || '',
     certFingerprint: server.certFingerprint || existing?.certFingerprint || '',
+    connectionMode: server.connectionMode === 'private-network' ||
+      (server.connectionMode == null && existing?.connectionMode === 'private-network')
+      ? 'private-network'
+      : 'lan',
     lastConnectedAt: now,
   };
 
@@ -718,6 +743,7 @@ export async function switchToSavedServer(id) {
     [KEYS.API_KEY, server.apiKey || 'YOUR_SECRET_KEY'],
     [KEYS.DEVICE_TOKEN, server.deviceToken || ''],
     [KEYS.CERT_FINGERPRINT, server.certFingerprint || ''],
+    [KEYS.CONNECTION_MODE, server.connectionMode === 'private-network' ? 'private-network' : 'lan'],
   ]);
 
   server.lastConnectedAt = Date.now();
@@ -846,6 +872,7 @@ async function _commitReachableServer({ newIp, port, probeData, serverName }) {
     all_ips: probeData?.all_ips || [newIp],
     candidateIps: probeData?.candidateIps || probeData?.all_ips || [newIp],
     hostname: probeData?.hostname || '',
+    connectionMode: await getConnectionMode(),
   });
   // Emit AFTER both writes so listeners always read a consistent state.
   DeviceEventEmitter.emit('settings-updated');
@@ -867,11 +894,12 @@ export async function resolveReachableServer(options = {}) {
   const generation = ++_resolveGeneration;
   _resolvingPromise = (async () => {
     try {
-      const [currentIp, port, savedServers, serverName] = await Promise.all([
+      const [currentIp, port, savedServers, serverName, configuredConnectionMode] = await Promise.all([
         getServerIp(),
         getServerPort(),
         getSavedServers(),
         getServerName(),
+        getConnectionMode(),
       ]);
 
       if (!currentIp) {
@@ -881,6 +909,8 @@ export async function resolveReachableServer(options = {}) {
       const activeProfile = savedServers.find(
         (s) => s.ip === currentIp || (Array.isArray(s.candidateIps) && s.candidateIps.includes(currentIp))
       ) || null;
+      const connectionMode = activeProfile?.connectionMode || configuredConnectionMode;
+      const isPrivateNetwork = connectionMode === 'private-network';
       const expectedServerId = activeProfile?.serverId || '';
 
       const matchesExpectedServer = (probe) => {
@@ -957,7 +987,11 @@ export async function resolveReachableServer(options = {}) {
           const numericAllIp = Array.isArray(found.probe.data?.all_ips)
             ? found.probe.data.all_ips.find((ip) => ipv4Octets(ip))
             : null;
-          const newIp = ipv4Octets(found.target) ? found.target : (numericAllIp || found.target);
+          // A MagicDNS name is the preferred stable private-network endpoint.
+          // Do not replace it with a LAN address returned by the server.
+          const newIp = isPrivateNetwork
+            ? found.target
+            : (ipv4Octets(found.target) ? found.target : (numericAllIp || found.target));
           console.log(`[Mesh Roaming] Found server at candidate address: ${newIp} (was ${currentIp})`);
           await _commitReachableServer({ newIp, port, probeData: found.probe.data, serverName });
           return { ok: true, ip: newIp, reconnected: true, data: found.probe.data };
@@ -966,7 +1000,7 @@ export async function resolveReachableServer(options = {}) {
 
       // Step 3: Subnet sweep — sweeps device's current network subnet (if roaming to a new mesh node AP),
       // last-known server IP's subnet, and any known candidate subnets.
-      if (options.subnetSweep !== false) {
+      if (!isPrivateNetwork && options.subnetSweep !== false) {
         const sweptExclude = new Set([currentIp, ...candidateList]);
 
         let deviceIp = null;

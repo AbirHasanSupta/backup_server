@@ -1,4 +1,4 @@
-import { getDeviceId, getUsername, setDeviceToken, saveServerProfile, setRecoverySyncPending, isUploadCacheInitialized, clearRecoverySyncPending } from './settings';
+import { getConnectionMode, getDeviceId, getUsername, setDeviceToken, saveServerProfile, setRecoverySyncPending, isUploadCacheInitialized, clearRecoverySyncPending } from './settings';
 import { prefetchServerUploadCache } from './uploader';
 
 /**
@@ -89,6 +89,12 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
         // Only clear a stale recovery flag once the local cache is already populated.
         await clearRecoverySyncPending();
       }
+      const connectionMode = await getConnectionMode();
+      const privateCandidates = [
+        serverIp,
+        ...(Array.isArray(result.tailscale?.ips) ? result.tailscale.ips : []),
+        result.tailscale?.dns_name || '',
+      ].filter(Boolean);
       await saveServerProfile({
         serverId: result.server_id || '',
         ip: serverIp,
@@ -96,8 +102,11 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
         apiKey,
         deviceToken: result.token || '',
         all_ips: Array.isArray(result.all_ips) ? result.all_ips : [serverIp],
-        candidateIps: Array.isArray(result.all_ips) ? result.all_ips : [serverIp],
+        candidateIps: connectionMode === 'private-network'
+          ? privateCandidates
+          : (Array.isArray(result.all_ips) ? result.all_ips : [serverIp]),
         hostname: result.hostname || '',
+        connectionMode,
       });
     }
     return result;

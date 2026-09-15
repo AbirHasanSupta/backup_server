@@ -5,6 +5,7 @@ import {
   getServerPort,
   getDeviceId,
   getDeviceToken,
+  getConnectionMode,
   resolveReachableServer,
   applyServerUploadCacheRecovery,
   saveServerProfile,
@@ -232,13 +233,20 @@ export async function checkDeviceConnection(options = {}) {
       checkAndNotifyNewShares();
     }
     if (Array.isArray(body.all_ips) && body.all_ips.length > 0) {
+      const connectionMode = await getConnectionMode();
+      const privateCandidates = [
+        serverIp,
+        ...(Array.isArray(body.tailscale?.ips) ? body.tailscale.ips : []),
+        body.tailscale?.dns_name || '',
+      ].filter(Boolean);
       saveServerProfile({
         ip: serverIp,
         port: serverPort,
         serverId: body.server_id || '',
         all_ips: body.all_ips,
-        candidateIps: body.all_ips,
+        candidateIps: connectionMode === 'private-network' ? privateCandidates : body.all_ips,
         hostname: body.hostname || '',
+        connectionMode,
       }).catch(() => {});
     }
     return {
