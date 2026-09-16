@@ -105,7 +105,7 @@ from network_info import get_tailscale_network_info
 
 router = APIRouter()
 
-APP_VERSION = "4.3.2"
+APP_VERSION = "4.4.0"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Auth helper
