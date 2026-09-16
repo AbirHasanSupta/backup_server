@@ -47,6 +47,7 @@ interface Server {
   candidateIps?: string[];
   hostname?: string;
   connectionMode?: 'lan' | 'private-network';
+  tailscale?: { available?: boolean; ips?: string[]; dns_name?: string } | null;
 }
 
 interface Props {
@@ -308,31 +309,44 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
 
               {servers.length > 0 && (
                 <View style={styles.serversListContainer}>
-                  {servers.map((item) => (
-                    <AnimatedPressable
-                      key={item.serverId ? `${item.serverId}:${item.port}` : `${item.ip}:${item.port}`}
-                      style={[styles.serverItem, selecting && { opacity: 0.6 }]}
-                      onPress={() => handleSelect(item)}
-                      disabled={selecting}
-                      scaleDown={0.97}
-                      accessibilityLabel={`Connect to ${item.name} at ${item.ip}`}
-                    >
-                      <View style={styles.serverIcon}>
-                        <AppIcon androidName="desktop_windows" iosName="desktopcomputer" color={colors.primary} size={24} fallback="PC" />
-                      </View>
-                      <View style={styles.serverInfo}>
-                        <Text style={styles.serverName}>{item.name}</Text>
-                        <Text style={styles.serverMeta}>
-                          {item.ip}:{item.port} - v{item.version}
-                        </Text>
-                      </View>
-                      {selecting ? (
-                        <ActivityIndicator size="small" color={colors.primary} />
-                      ) : (
-                        <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.primary} size={20} fallback=">" />
-                      )}
-                    </AnimatedPressable>
-                  ))}
+                  {servers.map((item) => {
+                    const hasTailscale = Boolean(
+                      item.tailscale?.available ||
+                      (Array.isArray(item.tailscale?.ips) && item.tailscale.ips.length > 0) ||
+                      item.tailscale?.dns_name
+                    );
+                    return (
+                      <AnimatedPressable
+                        key={item.serverId ? `${item.serverId}:${item.port}` : `${item.ip}:${item.port}`}
+                        style={[styles.serverItem, selecting && { opacity: 0.6 }]}
+                        onPress={() => handleSelect(item)}
+                        disabled={selecting}
+                        scaleDown={0.97}
+                        accessibilityLabel={`Connect to ${item.name} at ${item.ip}`}
+                      >
+                        <View style={styles.serverIcon}>
+                          <AppIcon androidName="desktop_windows" iosName="desktopcomputer" color={colors.primary} size={24} fallback="PC" />
+                        </View>
+                        <View style={styles.serverInfo}>
+                          <Text style={styles.serverName}>{item.name}</Text>
+                          <Text style={styles.serverMeta}>
+                            {item.ip}:{item.port} - v{item.version}
+                          </Text>
+                          {hasTailscale && (
+                            <View style={styles.tailscaleBadge}>
+                              <AppIcon androidName="vpn_key" iosName="network" color={colors.primary} size={11} fallback="TS" />
+                              <Text style={styles.tailscaleBadgeText}>Tailscale ready</Text>
+                            </View>
+                          )}
+                        </View>
+                        {selecting ? (
+                          <ActivityIndicator size="small" color={colors.primary} />
+                        ) : (
+                          <AppIcon androidName="arrow_forward" iosName="arrow.right" color={colors.primary} size={20} fallback=">" />
+                        )}
+                      </AnimatedPressable>
+                    );
+                  })}
                 </View>
               )}
 
@@ -346,7 +360,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
                     onFocus={() => {
                       setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100);
                     }}
-                    placeholder="http://192.168.1.100:8000"
+                    placeholder="192.168.1.100:8000 or 100.x.x.x:8000"
                     placeholderTextColor={colors.textMuted}
                     keyboardType="url"
                     autoCapitalize="none"
@@ -367,7 +381,7 @@ export function ServerDiscoverySheet({ visible, onSelect, onClose }: Props) {
                 </View>
               </View>
 
-              <Text style={styles.hint}>Drag the handle down to dismiss. Enter IP, hostname, or full URL with port.</Text>
+              <Text style={styles.hint}>Drag handle down to dismiss. Enter LAN IP, Tailscale IP, MagicDNS, or WireGuard URL with port.</Text>
             </ScrollView>
           </Animated.View>
         </KeyboardAvoidingView>
@@ -528,6 +542,22 @@ const createStyles = (colors: AppColors) => StyleSheet.create({
     fontSize: TextScale.xs,
     color: colors.textSecondary,
     fontWeight: '600',
+  },
+  tailscaleBadge: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: colors.primarySoft,
+    paddingHorizontal: Spacing.two,
+    paddingVertical: 2,
+    borderRadius: Radius.sm,
+    marginTop: 2,
+  },
+  tailscaleBadgeText: {
+    fontSize: 10,
+    color: colors.primary,
+    fontWeight: '700',
   },
   hint: {
     fontSize: TextScale.xs,

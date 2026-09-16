@@ -264,6 +264,10 @@ export default function SettingsScreen() {
     try {
       const key = apiKey.trim() || 'YOUR_SECRET_KEY';
       let discoveredName = '';
+      let discoveredTailscale = null;
+      let discoveredAllIps: string[] = [];
+      let discoveredServerId = '';
+      let discoveredHostname = '';
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 2500);
@@ -273,8 +277,19 @@ export default function SettingsScreen() {
         if (res.ok) {
           const data = await res.json();
           discoveredName = data?.name || '';
+          discoveredTailscale = data?.tailscale || null;
+          discoveredAllIps = Array.isArray(data?.all_ips) ? data.all_ips : [];
+          discoveredServerId = data?.server_id || '';
+          discoveredHostname = data?.hostname || '';
         }
       } catch {}
+
+      const unifiedCandidates = [
+        cleanIp,
+        ...(Array.isArray(discoveredTailscale?.ips) ? discoveredTailscale.ips : []),
+        discoveredTailscale?.dns_name || '',
+        ...discoveredAllIps,
+      ].filter(Boolean);
 
       await Promise.all([
         setServerIp(cleanIp),
@@ -287,8 +302,13 @@ export default function SettingsScreen() {
         saveServerProfile({
           ip: cleanIp,
           port: portNum,
+          serverId: discoveredServerId,
           name: discoveredName || cleanIp,
           apiKey: key,
+          all_ips: discoveredAllIps.length > 0 ? discoveredAllIps : [cleanIp],
+          candidateIps: unifiedCandidates,
+          tailscale: discoveredTailscale,
+          hostname: discoveredHostname,
           connectionMode: selectedMode,
         }),
       ]);
@@ -363,11 +383,13 @@ export default function SettingsScreen() {
     setConnectionModeState(selectedMode);
 
     const key = apiKey.trim() || 'YOUR_SECRET_KEY';
-    const privateCandidates = isPrivate ? [
+    const unifiedCandidates = [
       cleanIp,
       ...(Array.isArray(server.tailscale?.ips) ? server.tailscale.ips : []),
       server.tailscale?.dns_name || '',
-    ].filter(Boolean) : (server.candidateIps || server.all_ips || [cleanIp]);
+      ...(Array.isArray(server.all_ips) ? server.all_ips : []),
+      ...(Array.isArray(server.candidateIps) ? server.candidateIps : []),
+    ].filter(Boolean);
 
     await Promise.all([
       setServerIp(cleanIp),
@@ -383,7 +405,8 @@ export default function SettingsScreen() {
         name: server.name || cleanIp,
         apiKey: key,
         all_ips: server.all_ips || [cleanIp],
-        candidateIps: privateCandidates,
+        candidateIps: unifiedCandidates,
+        tailscale: server.tailscale || null,
         hostname: server.hostname || '',
         connectionMode: selectedMode,
       }),
@@ -582,7 +605,7 @@ export default function SettingsScreen() {
                             {displayName}
                           </Text>
                           <Text style={styles.savedServerMeta} numberOfLines={1}>
-                            {srv.ip}:{srv.port}
+                            {srv.ip}:{srv.port} • {srv.connectionMode === 'private-network' ? 'Tailscale / WireGuard' : 'LAN'}
                           </Text>
                         </View>
                         {isActive ? (

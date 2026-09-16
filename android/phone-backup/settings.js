@@ -720,9 +720,21 @@ export async function getSavedServers() {
   return Array.isArray(parsed) ? parsed : [];
 }
 
+export function isLocalLanSubnet(ip) {
+  const oct = ipv4Octets(ip);
+  if (!oct) return false;
+  // 192.168.0.0/16
+  if (oct[0] === 192 && oct[1] === 168) return true;
+  // 10.0.0.0/8
+  if (oct[0] === 10) return true;
+  // 172.16.0.0/12
+  if (oct[0] === 172 && oct[1] >= 16 && oct[1] <= 31) return true;
+  return false;
+}
+
 // Max number of candidate IPs to persist per server profile. Prevents unbounded growth
 // when the phone roams across many mesh subnets over time.
-const MAX_CANDIDATE_IPS = 20;
+const MAX_CANDIDATE_IPS = 25;
 
 export async function saveServerProfile(server) {
   if (!server?.ip) return await getSavedServers();
@@ -735,16 +747,15 @@ export async function saveServerProfile(server) {
   const id = `${cleanIp}:${port}`;
   const now = Date.now();
 
-  // Match by: serverId, exact id, exact ip:port, or candidateIps overlap.
+  // Match by: serverId (exact machine match), exact id, exact ip:port, or candidateIps overlap.
   const idx = servers.findIndex((s) => {
-    if (server.connectionMode && (s.connectionMode || 'lan') !== server.connectionMode) {
-      return false;
+    if (server.serverId && s.serverId && server.serverId === s.serverId) {
+      return true;
     }
     if (server.serverId && s.serverId && server.serverId !== s.serverId) {
       return false;
     }
     return (
-      (server.serverId && s.serverId && s.serverId === server.serverId) ||
       s.id === id ||
       (s.ip === cleanIp && (Number(s.port) || 8000) === port) ||
       (
@@ -777,7 +788,20 @@ export async function saveServerProfile(server) {
   const incomingCandidates = Array.isArray(server.candidateIps)
     ? server.candidateIps
     : (Array.isArray(server.all_ips) ? server.all_ips : []);
-  const candidateSet = new Set([targetIp, ...incomingCandidates, ...existingCandidates].filter(Boolean));
+  const tailscaleIps = Array.isArray(server.tailscale?.ips)
+    ? server.tailscale.ips
+    : (Array.isArray(existing?.tailscale?.ips) ? existing.tailscale.ips : []);
+  const tailscaleDns = server.tailscale?.dns_name || existing?.tailscale?.dns_name || '';
+
+  // Dual-facility candidate pool: combines direct target, all incoming candidates,
+  // server-reported Tailscale endpoints, and previously known mesh IPs.
+  const candidateSet = new Set([
+    targetIp,
+    ...incomingCandidates,
+    ...tailscaleIps,
+    tailscaleDns,
+    ...existingCandidates,
+  ].filter(Boolean));
   // Keep most-recent IPs (first added = highest priority) within cap
   const candidateIps = Array.from(candidateSet).slice(0, MAX_CANDIDATE_IPS);
 
@@ -786,6 +810,7 @@ export async function saveServerProfile(server) {
     serverId: server.serverId || existing?.serverId || '',
     ip: targetIp,
     candidateIps,
+    tailscale: server.tailscale || existing?.tailscale || null,
     hostname: server.hostname || existing?.hostname || '',
     port,
     name: resolvedName,
@@ -956,11 +981,13 @@ async function _commitReachableServer({ newIp, port, probeData, serverName }) {
   const isPrivate = configuredMode === 'private-network' || isPrivateNetworkAddress(cleanIp);
   const connectionMode = isPrivate ? 'private-network' : 'lan';
 
-  const privateCandidates = isPrivate ? [
+  const unifiedCandidates = [
     cleanIp,
+    ...(Array.isArray(probeData?.candidateIps) ? probeData.candidateIps : []),
+    ...(Array.isArray(probeData?.all_ips) ? probeData.all_ips : []),
     ...(Array.isArray(probeData?.tailscale?.ips) ? probeData.tailscale.ips : []),
     probeData?.tailscale?.dns_name || '',
-  ].filter(Boolean) : (probeData?.candidateIps || probeData?.all_ips || [cleanIp]);
+  ].filter(Boolean);
 
   await saveServerProfile({
     ip: cleanIp,
@@ -968,7 +995,8 @@ async function _commitReachableServer({ newIp, port, probeData, serverName }) {
     serverId: probeData?.server_id || '',
     name: probeData?.name || serverName || cleanIp,
     all_ips: probeData?.all_ips || [cleanIp],
-    candidateIps: privateCandidates,
+    candidateIps: unifiedCandidates,
+    tailscale: probeData?.tailscale || null,
     hostname: probeData?.hostname || '',
     connectionMode,
   });
@@ -1031,29 +1059,30 @@ export async function resolveReachableServer(options = {}) {
       }
 
       if (currentProbe.ok && matchesExpectedServer(currentProbe)) {
-        // Refresh candidate list if server returned all_ips
-        if (Array.isArray(currentProbe.data?.all_ips) && currentProbe.data.all_ips.length > 0) {
-          const privateCandidates = isPrivateNetwork ? [
-            cleanCurrentIp,
-            ...(Array.isArray(currentProbe.data?.tailscale?.ips) ? currentProbe.data.tailscale.ips : []),
-            currentProbe.data?.tailscale?.dns_name || '',
-          ].filter(Boolean) : currentProbe.data.all_ips;
+        // Refresh candidate list if server returned all_ips or tailscale
+        const unifiedCandidates = [
+          cleanCurrentIp,
+          ...(Array.isArray(currentProbe.data?.candidateIps) ? currentProbe.data.candidateIps : []),
+          ...(Array.isArray(currentProbe.data?.all_ips) ? currentProbe.data.all_ips : []),
+          ...(Array.isArray(currentProbe.data?.tailscale?.ips) ? currentProbe.data.tailscale.ips : []),
+          currentProbe.data?.tailscale?.dns_name || '',
+        ].filter(Boolean);
 
-          saveServerProfile({
-            ip: cleanCurrentIp,
-            port,
-            serverId: currentProbe.data.server_id || '',
-            name: currentProbe.data.name || serverName || cleanCurrentIp,
-            all_ips: currentProbe.data.all_ips,
-            candidateIps: privateCandidates,
-            hostname: currentProbe.data.hostname || '',
-            connectionMode,
-          }).catch(() => {});
-        }
+        saveServerProfile({
+          ip: cleanCurrentIp,
+          port,
+          serverId: currentProbe.data.server_id || '',
+          name: currentProbe.data.name || serverName || cleanCurrentIp,
+          all_ips: currentProbe.data.all_ips || [cleanCurrentIp],
+          candidateIps: unifiedCandidates,
+          tailscale: currentProbe.data.tailscale || null,
+          hostname: currentProbe.data.hostname || '',
+          connectionMode,
+        }).catch(() => {});
         return { ok: true, ip: cleanCurrentIp, reconnected: false, data: currentProbe.data };
       }
 
-      // Step 2: Probe saved profile mesh IPs and hostnames concurrently.
+      // Step 2: Probe saved profile mesh IPs, Tailscale endpoints, and hostnames concurrently.
       const step2TimeoutMs = Math.max(options.timeoutMs || 2000, 2500);
 
       const candidates = new Set();
@@ -1095,15 +1124,7 @@ export async function resolveReachableServer(options = {}) {
 
         const found = probeResults.find((r) => r.probe.ok && matchesExpectedServer(r.probe));
         if (found) {
-          const numericAllIp = Array.isArray(found.probe.data?.all_ips)
-            ? found.probe.data.all_ips.find((ip) => ipv4Octets(ip))
-            : null;
-          // A MagicDNS name or private network address is the preferred stable endpoint.
-          // Do not replace it with a raw LAN address returned by the server.
-          const isCandidatePrivate = isPrivateNetwork || isPrivateNetworkAddress(found.target);
-          const newIp = isCandidatePrivate
-            ? found.target
-            : (ipv4Octets(found.target) ? found.target : (numericAllIp || found.target));
+          const newIp = found.target;
           console.log(`[Mesh Roaming] Found server at candidate address: ${newIp} (was ${cleanCurrentIp})`);
           await _commitReachableServer({ newIp, port, probeData: found.probe.data, serverName });
           return { ok: true, ip: newIp, reconnected: true, data: found.probe.data };
@@ -1130,6 +1151,7 @@ export async function resolveReachableServer(options = {}) {
         const subnetsToSweep = [];
 
         const addSubnet = (ip) => {
+          if (!isLocalLanSubnet(ip)) return;
           const oct = ipv4Octets(ip);
           if (oct) {
             const prefix = `${oct[0]}.${oct[1]}.${oct[2]}`;

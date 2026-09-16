@@ -1,4 +1,4 @@
-import { getServerPort, getSavedServers, formatHostForUrl, parseServerAddress } from './settings';
+import { getServerPort, getSavedServers, formatHostForUrl, parseServerAddress, isLocalLanSubnet } from './settings';
 
 // Wave 1 (known candidates + retry): roam-tolerance headroom
 const TIMEOUT_MS = 2500;
@@ -92,6 +92,8 @@ async function probeServer(ip, port, timeoutMs = TIMEOUT_MS, retry = false) {
   }
   if (data && data.status === 'ok') {
     const allIps = Array.isArray(data.all_ips) && data.all_ips.length > 0 ? data.all_ips : [host];
+    const tailscaleIps = Array.isArray(data.tailscale?.ips) ? data.tailscale.ips : [];
+    const tailscaleDns = data.tailscale?.dns_name || '';
     return {
       serverId: data.server_id || '',
       ip: host,
@@ -101,7 +103,7 @@ async function probeServer(ip, port, timeoutMs = TIMEOUT_MS, retry = false) {
       version: data.version || '?',
       certFingerprint: data.cert_fingerprint || '',
       all_ips: allIps,
-      candidateIps: Array.from(new Set([host, ...allIps].filter(Boolean))),
+      candidateIps: Array.from(new Set([host, ...allIps, ...tailscaleIps, tailscaleDns].filter(Boolean))),
       tailscale: data.tailscale || null,
     };
   }
@@ -131,20 +133,20 @@ export function buildMultiSubnetWaves(deviceIp, savedServers = []) {
 
   const primarySubnet = extractSubnet(deviceIp);
   const knownSubnets = new Set();
-  if (primarySubnet) knownSubnets.add(primarySubnet);
+  if (primarySubnet && isLocalLanSubnet(`${primarySubnet}.1`)) knownSubnets.add(primarySubnet);
 
   // 1. Wave 1: Saved server profiles & known candidate IPs
   savedServers.forEach((s) => {
     if (s.ip) {
       add('wave1', s.ip);
       const sub = extractSubnet(s.ip);
-      if (sub) knownSubnets.add(sub);
+      if (sub && isLocalLanSubnet(`${sub}.1`)) knownSubnets.add(sub);
     }
     if (Array.isArray(s.candidateIps)) {
       s.candidateIps.forEach((cip) => {
         add('wave1', cip);
         const sub = extractSubnet(cip);
-        if (sub) knownSubnets.add(sub);
+        if (sub && isLocalLanSubnet(`${sub}.1`)) knownSubnets.add(sub);
       });
     }
     if (s.hostname) {

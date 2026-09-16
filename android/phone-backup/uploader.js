@@ -239,17 +239,19 @@ export async function checkDeviceConnection(options = {}) {
     if (Array.isArray(body.all_ips) && body.all_ips.length > 0) {
       const connectionMode = await getConnectionMode();
       const isPrivate = connectionMode === 'private-network' || isPrivateNetworkAddress(serverIp);
-      const privateCandidates = [
+      const unifiedCandidates = [
         serverIp,
         ...(Array.isArray(body.tailscale?.ips) ? body.tailscale.ips : []),
         body.tailscale?.dns_name || '',
+        ...(Array.isArray(body.all_ips) ? body.all_ips : []),
       ].filter(Boolean);
       saveServerProfile({
         ip: serverIp,
         port: serverPort,
         serverId: body.server_id || '',
         all_ips: body.all_ips,
-        candidateIps: isPrivate ? privateCandidates : body.all_ips,
+        candidateIps: unifiedCandidates,
+        tailscale: body.tailscale || null,
         hostname: body.hostname || '',
         connectionMode: isPrivate ? 'private-network' : 'lan',
       }).catch(() => {});

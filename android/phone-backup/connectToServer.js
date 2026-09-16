@@ -111,10 +111,11 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
         // Only clear a stale recovery flag once the local cache is already populated.
         await clearRecoverySyncPending();
       }
-      const privateCandidates = [
+      const unifiedCandidates = [
         cleanIp,
         ...(Array.isArray(result.tailscale?.ips) ? result.tailscale.ips : []),
         result.tailscale?.dns_name || '',
+        ...(Array.isArray(result.all_ips) ? result.all_ips : []),
       ].filter(Boolean);
       await saveServerProfile({
         serverId: result.server_id || '',
@@ -123,9 +124,8 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
         apiKey,
         deviceToken: result.token || '',
         all_ips: Array.isArray(result.all_ips) ? result.all_ips : [cleanIp],
-        candidateIps: isPrivate
-          ? privateCandidates
-          : (Array.isArray(result.all_ips) ? result.all_ips : [cleanIp]),
+        candidateIps: unifiedCandidates,
+        tailscale: result.tailscale || null,
         hostname: result.hostname || '',
         connectionMode,
       });
