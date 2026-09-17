@@ -1,3 +1,30 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Fast UI In-Memory SWR Cache (Parallel Instant Navigation)
+// ─────────────────────────────────────────────────────────────────────────────
+const _uiMemoryCache = {
+  feed: null,
+  reelsFeed: {},
+  browse: {},
+  browseShared: {},
+};
+
+export function getCachedFeed() {
+  return _uiMemoryCache.feed;
+}
+
+export function getCachedReelsFeed(section = 'for-you') {
+  return _uiMemoryCache.reelsFeed[section] || null;
+}
+
+export function getCachedBrowseFiles(prefix = '') {
+  return _uiMemoryCache.browse[prefix] || null;
+}
+
+export function getCachedBrowseSharedFiles(sourceId, prefix = '') {
+  const key = `${sourceId}:${prefix}`;
+  return _uiMemoryCache.browseShared[key] || null;
+}
+
 import * as FileSystem from 'expo-file-system/legacy';
 import { getServerIp, getServerPort, getApiKey, getDeviceId, getDeviceToken, resolveReachableServer, formatHostForUrl } from './settings';
 
@@ -232,23 +259,31 @@ export async function searchSharedFiles(sourceId, query) {
 }
 
 export async function browseFiles(prefix = '') {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/files/browse?device_id=${encodeURIComponent(deviceId)}&prefix=${encodeURIComponent(prefix)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  if (res && (Array.isArray(res.folders) || Array.isArray(res.files))) {
+    _uiMemoryCache.browse[prefix] = res;
+  }
+  return res;
 }
 
 export async function browseSharedFiles(sourceId, prefix = '') {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/browse?device_id=${encodeURIComponent(deviceId)}&prefix=${encodeURIComponent(prefix)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  if (res && (Array.isArray(res.folders) || Array.isArray(res.files))) {
+    _uiMemoryCache.browseShared[`${sourceId}:${prefix}`] = res;
+  }
+  return res;
 }
 
 
@@ -934,13 +969,17 @@ export async function createDirectPostShare(targetDeviceIds, caption, files, onP
  * @returns {Promise<{items: Array<any>, has_more: boolean}>}
  */
 export async function getFeed(offset = 0, limit = 50) {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/api/feed?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   }, 20000);
+  if (offset === 0 && res && Array.isArray(res.items)) {
+    _uiMemoryCache.feed = res;
+  }
+  return res;
 }
 
 /**
@@ -950,7 +989,7 @@ export async function getFeed(offset = 0, limit = 50) {
  * @returns {Promise<{reels: Array<any>, has_more: boolean, total: number}>}
  */
 export async function getReelsFeed(offset = 0, limit = 30, seed = 0) {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
     return {
@@ -958,6 +997,10 @@ export async function getReelsFeed(offset = 0, limit = 30, seed = 0) {
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  if (offset === 0 && res && Array.isArray(res.reels)) {
+    _uiMemoryCache.reelsFeed['for-you'] = res;
+  }
+  return res;
 }
 
 /**
@@ -1356,7 +1399,7 @@ export async function getLibraryReels(source, offset = 0, limit = 30, seed = 0) 
   if (source !== 'backups' && source !== 'shared') {
     throw new Error('Invalid reel library source.');
   }
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
     return {
@@ -1364,4 +1407,8 @@ export async function getLibraryReels(source, offset = 0, limit = 30, seed = 0) 
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  if (offset === 0 && res && Array.isArray(res.reels)) {
+    _uiMemoryCache.reelsFeed[source] = res;
+  }
+  return res;
 }

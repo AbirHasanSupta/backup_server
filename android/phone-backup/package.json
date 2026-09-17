@@ -9,7 +9,7 @@
     "expo-asset": "~57.0.12",
     "expo-audio": "~57.0.5",
     "expo-background-fetch": "~57.0.18",
-    "expo-build-properties": "~57.0.18",
+    "expo-build-properties": "~57.0.20",
     "expo-constants": "~57.0.12",
     "expo-dev-client": "~57.0.19",
     "expo-device": "~57.0.2",

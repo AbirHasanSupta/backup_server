@@ -54,6 +54,7 @@ from database import (
     get_reactions_for_media_ids,
     get_or_create_media_id,
     get_or_create_library_reel_share,
+    bulk_get_or_create_library_reel_shares,
     get_comment_counts_for_media_ids,
     add_comment,
     get_comments_for_media,
@@ -563,7 +564,7 @@ def finish_upload_record(
         add_log(f"Error updating DB for {relative_path}: {str(e)}")
         raise
 
-    touch_device(device_ip, device_id=device_id)
+    touch_device(device_ip, device_id=device_id, files_delta=1)
     device_stats = get_device_stats(device_ip, device_id=device_id)
     add_log(f"Uploaded: {relative_path} ({device_id or device_ip})")
     if device_id:
@@ -2706,13 +2707,7 @@ async def get_shared_and_backups_reels(
                         "label": entry.get("label") or "Shared folder",
                     })
 
-        materialized: list[dict] = []
-        for candidate in candidates:
-            share = get_or_create_library_reel_share(
-                candidate["source_type"], candidate["source_key"], candidate["path"],
-                candidate["size"], candidate["modified_time"],
-            )
-            materialized.append({**candidate, **share})
+        materialized: list[dict] = bulk_get_or_create_library_reel_shares(candidates)
 
         media_ids = [r["media_id"] for r in materialized]
         counts_map, user_map = get_reactions_for_media_ids(media_ids, current_source_id=device_id)

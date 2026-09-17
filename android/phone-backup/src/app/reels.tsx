@@ -32,6 +32,7 @@ import { useAppTheme } from '@/hooks/use-app-theme';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   getReelsFeed,
+  getCachedReelsFeed,
   getLibraryReels,
   sendReelTelemetry,
   getConfig,
@@ -1179,7 +1180,25 @@ export default function ReelsScreen() {
     }
     try {
       if (reset) {
-        if (!options.skipFullScreenLoading) setLoading(true);
+        const cached = getCachedReelsFeed(requestedSection);
+        if (cached && Array.isArray(cached.reels) && cached.reels.length > 0) {
+          const engineScope = reelEngineScope(requestedSection);
+          const [cfg, eState] = await Promise.all([getConfig(), loadHyperPulseState(engineScope)]);
+          if (requestedSection === reelSectionRef.current) {
+            setServerConfig(cfg);
+            engineStateRef.current = eState;
+            const filtered = isLibrarySection(requestedSection)
+              ? (cached.reels || []).filter((r: ReelItem) => r.library_source === expectedLibrarySource(requestedSection))
+              : (cached.reels || []).filter((r: ReelItem) => !r.is_own_post && (!cfg?.deviceId || r.shared_by_device_id !== cfg.deviceId));
+            const rankedCached = buildDiverseReelSlate(filtered, eState, Date.now());
+            if (rankedCached.length > 0) {
+              setReels(rankedCached);
+              setLoading(false);
+            }
+          }
+        } else if (!options.skipFullScreenLoading) {
+          setLoading(true);
+        }
         setActiveIndex(0);
       }
       const engineScope = reelEngineScope(requestedSection);
@@ -1231,7 +1250,10 @@ export default function ReelsScreen() {
     if (nextSection === reelSectionRef.current) return;
     reelSectionRef.current = nextSection;
     setReelSection(nextSection);
-    setReels([]);
+    const cached = getCachedReelsFeed(nextSection);
+    if (!cached || !Array.isArray(cached.reels) || cached.reels.length === 0) {
+      setReels([]);
+    }
     setError(null);
     setActiveIndex(0);
     void loadReels(true, {}, nextSection);

@@ -67,6 +67,23 @@ def _create_raw_conn() -> sqlite3.Connection:
     return conn
 
 
+_read_local = threading.local()
+
+
+def _create_raw_read_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA query_only=ON")
+    conn.execute("PRAGMA read_uncommitted=1")
+    conn.execute("PRAGMA cache_size=-262144")
+    conn.execute("PRAGMA mmap_size=2147483648")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    return conn
+
+
 def get_conn() -> _PooledConnection:
     conn = getattr(_local, "conn", None)
     if conn is not None:
@@ -84,6 +101,25 @@ def get_conn() -> _PooledConnection:
     raw_conn = _create_raw_conn()
     pooled = _PooledConnection(raw_conn)
     _local.conn = pooled
+    return pooled
+
+
+def get_read_conn() -> _PooledConnection:
+    conn = getattr(_read_local, "conn", None)
+    if conn is not None:
+        try:
+            conn._conn.total_changes
+            return conn
+        except Exception:
+            try:
+                conn.real_close()
+            except Exception:
+                pass
+            _read_local.conn = None
+
+    raw_conn = _create_raw_read_conn()
+    pooled = _PooledConnection(raw_conn)
+    _read_local.conn = pooled
     return pooled
 
 
@@ -299,6 +335,9 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_files_path_meta ON files(path, size, modified_time)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_files_device_path ON files(device_id, path)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_files_device_ip ON files(device_ip)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_device_only ON files(device_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_device_size ON files(device_id, size)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_files_ip_only ON files(device_ip)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_status_seen ON devices(status, last_seen)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_devices_device_id ON devices(device_id)")
 
@@ -605,6 +644,9 @@ def init_db():
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_reactions_source ON reactions(source_id)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reactions_lookup ON reactions(media_id, source_id)"
+    )
 
     # 12. geocode_cache table for cached reverse geocoding place names
     conn.execute(
@@ -663,6 +705,9 @@ def init_db():
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_device_shares_sharer ON device_shares(shared_by_device_id, created_at)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_device_shares_lib ON device_shares(is_library_reel, source_type, source_key)"
+    )
 
     # 15. device_share_targets: which devices each share is delivered to
     conn.execute(
@@ -679,6 +724,9 @@ def init_db():
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_share_targets_device ON device_share_targets(target_device_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_share_targets_target ON device_share_targets(target_device_id, share_id)"
     )
 
     # Migration: add seen to device_share_targets if not present
@@ -779,7 +827,7 @@ def init_db():
 # ─── File helpers ──────────────────────────────────────────────────────────────
 
 def is_uploaded(path, size, modified_time):
-    conn = get_conn()
+    conn = get_read_conn()
     row = conn.execute(
         "SELECT 1 FROM files WHERE path=? AND size=? AND modified_time=?",
         (path, size, modified_time),
@@ -802,7 +850,7 @@ def _metadata_matches(row, size, modified_time):
 
 
 def is_uploaded_compatible(path, size, modified_time, external_id=None, device_id=None):
-    conn = get_conn()
+    conn = get_read_conn()
     path = (path or "").replace("\\", "/")
 
     # Try by external_id first if available
@@ -846,7 +894,7 @@ def batch_check_files(items: list[dict]):
     if not items:
         return set()
 
-    conn = get_conn()
+    conn = get_read_conn()
     present_keys = set()
 
     # Group by device_id
@@ -957,7 +1005,7 @@ def remove_file_record(path, size, modified_time, device_id=None):
 
 
 def get_stats():
-    conn = get_conn()
+    conn = get_read_conn()
     # To be perfectly accurate, we could check disk here, but for thousands of files it's slow.
     # For now, we rely on the database being the source of truth for "known" files.
     # The sync algorithm already handles missing disk files by re-requesting them.
@@ -976,14 +1024,19 @@ def get_stats():
 
 
 def get_device_stats(device_ip: str, device_id: str | None = None) -> dict:
-    conn = get_conn()
+    conn = get_read_conn()
     if device_id:
-        # Match both current device_id and any legacy records for this IP
         row = conn.execute(
             "SELECT COUNT(*) as total_files, COALESCE(SUM(size), 0) as total_size"
-            " FROM files WHERE device_id = ? OR (device_id IS NULL AND device_ip = ?)",
-            (device_id, device_ip)
+            " FROM files WHERE device_id = ?",
+            (device_id,)
         ).fetchone()
+        if not row or (row["total_files"] == 0 and device_ip):
+            row = conn.execute(
+                "SELECT COUNT(*) as total_files, COALESCE(SUM(size), 0) as total_size"
+                " FROM files WHERE device_id = ? OR (device_id IS NULL AND device_ip = ?)",
+                (device_id, device_ip)
+            ).fetchone()
     else:
         row = conn.execute(
             "SELECT COUNT(*) as total_files, COALESCE(SUM(size), 0) as total_size"
@@ -992,8 +1045,8 @@ def get_device_stats(device_ip: str, device_id: str | None = None) -> dict:
         ).fetchone()
     conn.close()
     return {
-        "total_files": row["total_files"] or 0,
-        "total_size": row["total_size"] or 0,
+        "total_files": row["total_files"] if row else 0,
+        "total_size": row["total_size"] if row else 0,
     }
 
 
@@ -1112,7 +1165,7 @@ def ensure_device_token(device_id: str) -> str:
 def verify_device_token(device_id: str, token: str) -> bool:
     if not device_id or not token:
         return False
-    conn = get_conn()
+    conn = get_read_conn()
     row = conn.execute(
         "SELECT 1 FROM devices WHERE device_id = ? AND token = ? AND status = 'accepted'",
         (device_id, token),
@@ -1122,7 +1175,7 @@ def verify_device_token(device_id: str, token: str) -> bool:
 
 
 def get_files_for_device(device_id: str, prefix: str = "") -> list[dict]:
-    conn = get_conn()
+    conn = get_read_conn()
     if prefix:
         norm = prefix.strip("/")
         norm_dir = f"{norm}/%"
@@ -1140,7 +1193,7 @@ def get_files_for_device(device_id: str, prefix: str = "") -> list[dict]:
 
 
 def get_files_browse(device_id: str, prefix: str) -> tuple[list[dict], list[dict]]:
-    conn = get_conn()
+    conn = get_read_conn()
     like_pattern = f"{prefix}%" if prefix else "%"
     rows = conn.execute(
         "SELECT path, size, modified_time, sha256, uploaded_time FROM files WHERE device_id = ? AND path LIKE ? ORDER BY path",
@@ -1174,7 +1227,7 @@ def get_files_browse(device_id: str, prefix: str) -> tuple[list[dict], list[dict
 
 
 def search_files_for_device(device_id: str, query: str, limit: int = 500) -> list[dict]:
-    conn = get_conn()
+    conn = get_read_conn()
     escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     rows = conn.execute(
         "SELECT path, size, modified_time, sha256, uploaded_time FROM files "
@@ -1187,7 +1240,7 @@ def search_files_for_device(device_id: str, query: str, limit: int = 500) -> lis
 
 def get_device_folder_name(device_id: str) -> str | None:
     """Return the stable on-disk folder_name for a device_id, or None if not found."""
-    conn = get_conn()
+    conn = get_read_conn()
     row = conn.execute(
         "SELECT folder_name FROM devices WHERE device_id = ?", (device_id,)
     ).fetchone()
@@ -1209,7 +1262,7 @@ def find_device_by_name_model(
     if not device_model:
         # Without a model identifier it's unsafe to auto-merge — bail out.
         return None
-    conn = get_conn()
+    conn = get_read_conn()
     row = conn.execute(
         "SELECT * FROM devices WHERE device_name=? AND device_model=? AND status='accepted' LIMIT 1",
         (device_name, device_model),
@@ -1446,8 +1499,8 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
     }
 
 
-def touch_device(device_ip: str, device_id: str | None = None, files_delta: int = 1) -> None:
-    """Update last_seen timestamp and recalculate file counter for a device."""
+def touch_device(device_ip: str, device_id: str | None = None, files_delta: int | None = 1) -> None:
+    """Update last_seen timestamp and file counter for a device efficiently."""
     now = int(_time.time())
     conn = get_conn()
 
@@ -1459,41 +1512,55 @@ def touch_device(device_ip: str, device_id: str | None = None, files_delta: int 
             device_id = row["device_id"]
 
     if device_id:
-        conn.execute(
-            "UPDATE devices SET last_seen = ?, device_ip = ? WHERE device_id = ?",
-            (now, device_ip, device_id),
-        )
-        # Count files matching this device_id OR matching the IP if device_id was missing in old records
-        row = conn.execute(
-            "SELECT COUNT(*) as count FROM files WHERE device_id = ? OR (device_id IS NULL AND device_ip = ?)",
-            (device_id, device_ip)
-        ).fetchone()
-        count = row["count"] or 0
-        conn.execute(
-            "UPDATE devices SET files_backed_up = ? WHERE device_id = ?",
-            (count, device_id),
-        )
+        if files_delta == 0:
+            conn.execute(
+                "UPDATE devices SET last_seen = ?, device_ip = ? WHERE device_id = ?",
+                (now, device_ip, device_id),
+            )
+        elif files_delta is not None and files_delta > 0:
+            conn.execute(
+                "UPDATE devices SET last_seen = ?, device_ip = ?, files_backed_up = files_backed_up + ? WHERE device_id = ?",
+                (now, device_ip, files_delta, device_id),
+            )
+        else:
+            # Full recount
+            row = conn.execute(
+                "SELECT COUNT(*) as count FROM files WHERE device_id = ?",
+                (device_id,)
+            ).fetchone()
+            count = row["count"] if row else 0
+            conn.execute(
+                "UPDATE devices SET last_seen = ?, device_ip = ?, files_backed_up = ? WHERE device_id = ?",
+                (now, device_ip, count, device_id),
+            )
     else:
-        conn.execute(
-            "UPDATE devices SET last_seen = ? WHERE device_ip = ?",
-            (now, device_ip),
-        )
-        row = conn.execute(
-            "SELECT COUNT(*) as count FROM files WHERE device_ip = ?",
-            (device_ip,)
-        ).fetchone()
-        count = row["count"] or 0
-        conn.execute(
-            "UPDATE devices SET files_backed_up = ? WHERE device_ip = ?",
-            (count, device_ip),
-        )
+        if files_delta == 0:
+            conn.execute(
+                "UPDATE devices SET last_seen = ? WHERE device_ip = ?",
+                (now, device_ip),
+            )
+        elif files_delta is not None and files_delta > 0:
+            conn.execute(
+                "UPDATE devices SET last_seen = ?, files_backed_up = files_backed_up + ? WHERE device_ip = ?",
+                (now, files_delta, device_ip),
+            )
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) as count FROM files WHERE device_ip = ?",
+                (device_ip,)
+            ).fetchone()
+            count = row["count"] if row else 0
+            conn.execute(
+                "UPDATE devices SET last_seen = ?, files_backed_up = ? WHERE device_ip = ?",
+                (now, count, device_ip),
+            )
 
     conn.commit()
     conn.close()
 
 
 def get_devices() -> list[dict]:
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         "SELECT * FROM devices WHERE status='accepted' ORDER BY last_seen DESC"
     ).fetchall()
@@ -1509,7 +1576,7 @@ def remove_device(device_id: int) -> None:
 
 
 def is_device_known(device_ip: str, device_id: str | None = None) -> bool:
-    conn = get_conn()
+    conn = get_read_conn()
     if device_id:
         row = conn.execute(
             "SELECT 1 FROM devices WHERE device_id=? AND status='accepted'",
@@ -1542,7 +1609,7 @@ def insert_sync_session(
         total_files: int = 0,
 ) -> int:
     """Insert one sync session record and return its new id."""
-    conn = get_conn()
+    conn = get_read_conn()
     cur = conn.execute(
         """
         INSERT INTO sync_sessions
@@ -1561,7 +1628,7 @@ def insert_sync_session(
 
 def get_sync_sessions(device_id: str | None = None, limit: int = 100) -> list[dict]:
     """Return sync sessions newest-first, optionally filtered by device."""
-    conn = get_conn()
+    conn = get_read_conn()
     if device_id:
         rows = conn.execute(
             "SELECT * FROM sync_sessions WHERE device_id=? ORDER BY started_at DESC LIMIT ?",
@@ -1696,7 +1763,7 @@ def batch_upsert_media_index_rows(rows: list[dict]) -> None:
 
 
 def get_media_index_stats() -> dict:
-    conn = get_conn()
+    conn = get_read_conn()
     row = conn.execute(
         "SELECT COUNT(*) AS c, MAX(indexed_at) AS last FROM media_index"
     ).fetchone()
@@ -1718,7 +1785,7 @@ def clear_media_index() -> int:
 def get_media_index_cache(source_type: str, source_key: str) -> dict[str, tuple[int, int, str | None, float | None, bool]]:
 
     """Return {relative_path: (size, modified_time, capture_source, cap_lat, gps_checked)} for a given source."""
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         "SELECT relative_path, size, modified_time, capture_source, cap_lat, gps_checked FROM media_index WHERE source_type = ? AND source_key = ?",
         (source_type, source_key),
@@ -1735,7 +1802,7 @@ def get_media_for_day(
 ) -> list[dict]:
     if not source_type_and_keys:
         return []
-    conn = get_conn()
+    conn = get_read_conn()
     or_clauses = []
     params: list = []
     for stype, skey in source_type_and_keys:
@@ -1766,7 +1833,7 @@ def get_media_for_days_multi(
     """Fetch media records for multiple (month, day) pairs in a single batched SQL query."""
     if not source_type_and_keys or not month_day_pairs:
         return []
-    conn = get_conn()
+    conn = get_read_conn()
     or_clauses = []
     params: list = []
     for stype, skey in source_type_and_keys:
@@ -1799,7 +1866,7 @@ def get_media_for_year_window(
 ) -> list[dict]:
     if not source_type_and_keys or not month_day_pairs:
         return []
-    conn = get_conn()
+    conn = get_read_conn()
     or_clauses = []
     params: list = []
     for stype, skey in source_type_and_keys:
@@ -1834,7 +1901,7 @@ def get_media_for_ymd_list(
     """Match exact (year, month, day) triples — correct across year boundaries."""
     if not source_type_and_keys or not ymd_list:
         return []
-    conn = get_conn()
+    conn = get_read_conn()
     or_clauses = []
     params: list = []
     for stype, skey in source_type_and_keys:
@@ -1866,7 +1933,7 @@ def get_year_wrapped_stats(
 ) -> list[dict]:
     if not source_type_and_keys:
         return []
-    conn = get_conn()
+    conn = get_read_conn()
     or_clauses = []
     params: list = []
     for stype, skey in source_type_and_keys:
@@ -1900,7 +1967,7 @@ def get_media_for_year_month(
     """
     if not source_type_and_keys:
         return []
-    conn = get_conn()
+    conn = get_read_conn()
     or_clauses = []
     params: list = []
     for stype, skey in source_type_and_keys:
@@ -1937,7 +2004,7 @@ def get_distinct_cap_years(
 ) -> list[int]:
     if not source_type_and_keys:
         return []
-    conn = get_conn()
+    conn = get_read_conn()
     or_clauses = []
     params: list = []
     for stype, skey in source_type_and_keys:
@@ -1961,7 +2028,7 @@ def get_quiz_photo_pool(
 ) -> list[dict]:
     if not source_type_and_keys:
         return []
-    conn = get_conn()
+    conn = get_read_conn()
     or_clauses = []
     params: list = []
     for stype, skey in source_type_and_keys:
@@ -1989,7 +2056,7 @@ def get_random_media_row(
 ) -> dict | None:
     if not source_type_and_keys:
         return None
-    conn = get_conn()
+    conn = get_read_conn()
     or_clauses = []
     params: list = []
     for stype, skey in source_type_and_keys:
@@ -2030,7 +2097,7 @@ def get_geotagged_media(
 ) -> list[dict]:
     if not source_type_and_keys:
         return []
-    conn = get_conn()
+    conn = get_read_conn()
     or_clauses = []
     params: list = []
     for stype, skey in source_type_and_keys:
@@ -2080,7 +2147,7 @@ def prune_media_index(
 
 
 def get_scan_dirs(source_type: str, source_key: str) -> dict[str, int]:
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         "SELECT dir_relpath, dir_mtime_ns FROM scan_dirs WHERE source_type = ? AND source_key = ?",
         (source_type, source_key),
@@ -2130,7 +2197,7 @@ def upsert_scan_dirs(source_type: str, source_key: str, dir_mtimes: dict[str, in
 # ─── Cleanup helpers ───────────────────────────────────────────────────────────
 
 def get_cleaned_paths(source_id: str) -> set[str]:
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         "SELECT path FROM cleanup_log WHERE source_id = ?",
         (source_id,),
@@ -2145,7 +2212,7 @@ def get_upload_cache(device_id: str, device_ip: str | None = None) -> dict:
     Used by the phone after a reinstall to rebuild its local upload cache in one
     round-trip instead of attempting to upload every already-backed-up file.
     """
-    conn = get_conn()
+    conn = get_read_conn()
     if device_ip:
         rows = conn.execute(
             "SELECT path, modified_time, size, device_id FROM files "
@@ -2192,7 +2259,7 @@ def get_cleanup_candidates(source_id: str) -> list[dict]:
     from storage import file_exists
 
     cleaned = get_cleaned_paths(source_id)
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         "SELECT id, path, size, modified_time FROM files WHERE device_id = ?",
         (source_id,),
@@ -2233,7 +2300,7 @@ def get_cleanup_candidates(source_id: str) -> list[dict]:
 
 def log_cleanup_deletions(source_id: str, items: list[dict]) -> dict:
     """Record client-reported deletions. Returns per-file results + total bytes."""
-    conn = get_conn()
+    conn = get_read_conn()
     now_ts = int(_time.time())
     results = []
     total_freed = 0
@@ -2284,7 +2351,7 @@ def log_cleanup_deletions(source_id: str, items: list[dict]) -> dict:
 
 def get_trips(source_id: str) -> list[dict]:
     """Return all trip records for source_id sorted by start_time DESC, with cover details."""
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         """
         SELECT t.id, t.source_id, t.title, t.start_time, t.end_time,
@@ -2360,7 +2427,7 @@ def get_trips(source_id: str) -> list[dict]:
 
 def get_trip_media(trip_id: int) -> tuple[dict | None, list[dict]]:
     """Return the trip metadata and list of media items in the trip."""
-    conn = get_conn()
+    conn = get_read_conn()
     trip_row = conn.execute(
         """
         SELECT id, source_id, title, start_time, end_time,
@@ -2430,7 +2497,7 @@ def save_trip_clusters(source_id: str, clusters: list[dict]) -> None:
     Merges/updates existing trips if they match by time window and proximity,
     inserts new trips, and removes trips that no longer qualify.
     """
-    conn = get_conn()
+    conn = get_read_conn()
     now_ts = int(_time.time())
 
     # Get existing trips for this source_id
@@ -2582,7 +2649,7 @@ def toggle_reaction(media_id: int, source_id: str, emoji: str) -> dict:
 
 def get_media_reactions(media_id: int) -> dict:
     """Return full reaction list and counts for a media item, with reactor display names."""
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         """
         SELECT r.id, r.media_id, r.source_id, r.emoji, r.created_at,
@@ -2615,7 +2682,7 @@ def get_reactions_for_media_ids(
     if not media_ids:
         return {}, {}
 
-    conn = get_conn()
+    conn = get_read_conn()
     counts_map: dict[int, dict[str, int]] = {}
     user_map: dict[int, list[str]] = {}
 
@@ -2655,7 +2722,7 @@ def get_or_create_media_id(
     modified_time: int = 0,
 ) -> int:
     """Return media_index.id for the given file, inserting a row if it doesn't exist."""
-    conn = get_conn()
+    conn = get_read_conn()
     row = conn.execute(
         "SELECT id FROM media_index WHERE source_type = ? AND source_key = ? AND relative_path = ?",
         (source_type, source_key, relative_path),
@@ -2693,7 +2760,7 @@ def get_or_create_media_id(
 def get_cached_geocode(lat: float, lon: float) -> str | None:
     lat_round = round(float(lat), 2)
     lon_round = round(float(lon), 2)
-    conn = get_conn()
+    conn = get_read_conn()
     row = conn.execute(
         "SELECT place_name FROM geocode_cache WHERE lat_round = ? AND lon_round = ?",
         (lat_round, lon_round),
@@ -2755,7 +2822,7 @@ def add_comment(media_id: int, source_id: str, text: str) -> dict:
 
 def get_comments_for_media(media_id: int) -> list[dict]:
     """Return all comments for a media item, oldest first, with commenter device_name."""
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         """
         SELECT c.id, c.media_id, c.source_id, c.text, c.created_at,
@@ -2775,7 +2842,7 @@ def get_comment_counts_for_media_ids(media_ids: list[int]) -> dict[int, int]:
     """Bulk fetch comment counts for a list of media IDs (chunked to stay under SQLite's param cap)."""
     if not media_ids:
         return {}
-    conn = get_conn()
+    conn = get_read_conn()
     counts: dict[int, int] = {}
     chunk_size = 500
     for i in range(0, len(media_ids), chunk_size):
@@ -2795,7 +2862,7 @@ def is_media_or_post_creator(media_id: int, device_id: str | None) -> bool:
     """Return True if device_id created the post or owns the media item."""
     if not device_id:
         return False
-    conn = get_conn()
+    conn = get_read_conn()
     # Check device_shares (shared_by_device_id)
     row = conn.execute(
         "SELECT 1 FROM device_shares WHERE media_id = ? AND shared_by_device_id = ? LIMIT 1",
@@ -2815,7 +2882,7 @@ def is_media_or_post_creator(media_id: int, device_id: str | None) -> bool:
 
 def delete_comment(comment_id: int, source_id: str) -> bool:
     """Delete a comment if source_id is its author OR the creator of the post/media."""
-    conn = get_conn()
+    conn = get_read_conn()
     row = conn.execute(
         "SELECT media_id, source_id FROM comments WHERE id = ?",
         (comment_id,),
@@ -2848,7 +2915,7 @@ DESKTOP_SHARE_DEVICE_ID = "desktop-server"
 
 def get_share_target_devices(exclude_device_id: str | None = None) -> list[dict]:
     """Return accepted devices as share targets. SAFE FIELDS ONLY — never expose token."""
-    conn = get_conn()
+    conn = get_read_conn()
     if exclude_device_id:
         rows = conn.execute(
             """
@@ -3027,7 +3094,7 @@ def edit_device_share_group_caption(group_id: str, requesting_device_id: str, ca
 
 def get_device_shares_for_target(target_device_id: str) -> list[dict]:
     """Return device-to-device shares delivered to a device, newest first, with group info."""
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         """
         SELECT ds.id AS share_id, ds.media_id, ds.source_type, ds.source_key,
@@ -3051,6 +3118,108 @@ def get_device_shares_for_target(target_device_id: str) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def bulk_get_or_create_library_reel_shares(candidates: list[dict]) -> list[dict]:
+    """Bulk materialize private library reel shares for candidate media.
+    Uses batch queries and a single transaction to eliminate SQLite write-lock contention.
+    """
+    if not candidates:
+        return []
+
+    # 1. First attempt to read existing library shares using read connection
+    read_conn = get_read_conn()
+    results: list[dict | None] = [None] * len(candidates)
+    missing_indices: list[int] = []
+
+    for idx, c in enumerate(candidates):
+        st = c.get("source_type") or ""
+        sk = c.get("source_key") or ""
+        rp = c.get("path") or c.get("relative_path") or ""
+        row = read_conn.execute(
+            """
+            SELECT id AS share_id, media_id, created_at
+            FROM device_shares
+            WHERE is_library_reel = 1
+              AND source_type = ? AND source_key = ? AND relative_path = ?
+            """,
+            (st, sk, rp),
+        ).fetchone()
+        if row:
+            results[idx] = {**c, "share_id": row["share_id"], "media_id": row["media_id"], "created_at": row["created_at"]}
+        else:
+            missing_indices.append(idx)
+
+    # 2. If all already exist (fast path), return immediately without touching write locks
+    if not missing_indices:
+        return [r for r in results if r is not None]
+
+    # 3. For missing ones, acquire write conn and insert in a single transaction
+    write_conn = get_conn()
+    now_ts = int(_time.time())
+    for idx in missing_indices:
+        c = candidates[idx]
+        st = c.get("source_type") or ""
+        sk = c.get("source_key") or ""
+        rp = c.get("path") or c.get("relative_path") or ""
+        sz = int(c.get("size") or 0)
+        mt = int(c.get("modified_time") or 0)
+        created_at = mt or now_ts
+
+        # get or create media_id
+        mid_row = write_conn.execute(
+            "SELECT id FROM media_index WHERE source_type = ? AND source_key = ? AND relative_path = ?",
+            (st, sk, rp),
+        ).fetchone()
+        if mid_row:
+            media_id = mid_row["id"]
+        else:
+            cur = write_conn.execute(
+                """
+                INSERT INTO media_index (source_type, source_key, relative_path, size, modified_time, indexed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_type, source_key, relative_path) DO NOTHING
+                """,
+                (st, sk, rp, sz, mt, now_ts),
+            )
+            if cur.rowcount == 1 and cur.lastrowid:
+                media_id = cur.lastrowid
+            else:
+                m2 = write_conn.execute(
+                    "SELECT id FROM media_index WHERE source_type = ? AND source_key = ? AND relative_path = ?",
+                    (st, sk, rp),
+                ).fetchone()
+                media_id = m2["id"] if m2 else 0
+
+        # insert into device_shares
+        try:
+            cur_s = write_conn.execute(
+                """
+                INSERT INTO device_shares
+                    (media_id, source_type, source_key, relative_path, size, modified_time,
+                     shared_by_device_id, created_at, is_library_reel)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (media_id, st, sk, rp, sz, mt, f"library:{st}:{sk}", created_at),
+            )
+            results[idx] = {**c, "share_id": cur_s.lastrowid, "media_id": media_id, "created_at": created_at}
+        except sqlite3.IntegrityError:
+            ex = write_conn.execute(
+                """
+                SELECT id AS share_id, media_id, created_at FROM device_shares
+                WHERE is_library_reel = 1
+                  AND source_type = ? AND source_key = ? AND relative_path = ?
+                """,
+                (st, sk, rp),
+            ).fetchone()
+            if ex:
+                results[idx] = {**c, "share_id": ex["share_id"], "media_id": ex["media_id"], "created_at": ex["created_at"]}
+            else:
+                results[idx] = {**c, "share_id": 0, "media_id": media_id, "created_at": created_at}
+
+    write_conn.commit()
+    write_conn.close()
+    return [r for r in results if r is not None]
 
 
 def get_or_create_library_reel_share(
@@ -3122,7 +3291,7 @@ def get_or_create_library_reel_share(
 
 def get_device_shares_by_sharer(sharer_device_id: str) -> list[dict]:
     """Return device-to-device shares sent BY this device, newest first, with group info."""
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         """
         SELECT ds.id AS share_id, ds.media_id, ds.source_type, ds.source_key,
@@ -3153,7 +3322,7 @@ def get_all_share_targets_for_sharer(sharer_device_id: str) -> dict[str, list[di
     Returns a dict mapping share_group_id -> list of target device dicts.
     Replaces N individual get_share_targets_for_group calls in the desktop UI.
     """
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         """
         SELECT DISTINCT ds.share_group_id,
@@ -3184,7 +3353,7 @@ def get_all_share_targets_for_sharer(sharer_device_id: str) -> dict[str, list[di
 
 def get_unseen_share_notifications(target_device_id: str) -> list[dict]:
     """Return post groups shared TO this device that it has not yet been notified about."""
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         """
         SELECT dsg.id AS group_id, dsg.caption, dsg.post_kind, dsg.post_title,
@@ -3229,7 +3398,7 @@ def mark_share_notifications_seen(target_device_id: str, group_ids: list[str]) -
 
 def get_share_targets_for_group(group_id: str, requesting_device_id: str = None) -> list[dict]:
     """Return all target devices that can see any share in a group. Owner-only if requesting_device_id is provided."""
-    conn = get_conn()
+    conn = get_read_conn()
     if requesting_device_id:
         row = conn.execute(
             "SELECT shared_by_device_id FROM device_share_groups WHERE id = ?",
@@ -3417,7 +3586,7 @@ def remove_share_target(share_id: int, target_device_id: str, requesting_device_
 
 def get_device_share_by_id(share_id: int) -> dict | None:
     """Return a single device share row (for serving/authorization), or None."""
-    conn = get_conn()
+    conn = get_read_conn()
     row = conn.execute(
         """
         SELECT id AS share_id, media_id, source_type, source_key, relative_path,
@@ -3433,7 +3602,7 @@ def get_device_share_by_id(share_id: int) -> dict | None:
 
 def is_share_target(share_id: int, device_id: str) -> bool:
     """Return True if device_id is a delivery target of the given share."""
-    conn = get_conn()
+    conn = get_read_conn()
     row = conn.execute(
         "SELECT 1 FROM device_share_targets WHERE share_id = ? AND target_device_id = ? LIMIT 1",
         (share_id, device_id),
@@ -3595,7 +3764,7 @@ def toggle_save_reel(device_id: str, reel_id: str, share_id: int, media_id: int 
 
 def get_saved_reel_ids(device_id: str) -> set[str]:
     """Return set of reel_ids saved by this device."""
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         "SELECT reel_id FROM saved_reels WHERE device_id = ?",
         (device_id,),
@@ -3606,7 +3775,7 @@ def get_saved_reel_ids(device_id: str) -> set[str]:
 
 def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
     """Return saved regular and private-library reels, newest saved first."""
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         """
         SELECT sr.reel_id, sr.share_id, sr.created_at AS saved_at,
@@ -3744,7 +3913,7 @@ def get_repost_counts_for_media_ids(media_ids: list[int]) -> dict[int, int]:
     """Return dict mapping media_id -> count of reposts."""
     if not media_ids:
         return {}
-    conn = get_conn()
+    conn = get_read_conn()
     placeholders = ",".join(["?"] * len(media_ids))
     rows = conn.execute(
         f"""
@@ -3765,7 +3934,7 @@ def get_user_reposted_info(device_id: str) -> tuple[set[int], set[int]]:
     """Return (set of media_ids, set of repost_of_share_ids) that this device has reposted."""
     if not device_id:
         return set(), set()
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         """
         SELECT ds.media_id, ds.repost_of_share_id
@@ -3838,7 +4007,7 @@ def cancel_repost(reposter_device_id: str, share_id: int) -> dict:
 
 def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
     """Return list of reels liked/reacted to by device_id (excluding own device's reels), newest reaction first."""
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         """
         SELECT ds.id AS share_id, ds.id AS reel_id, MAX(r.created_at) AS liked_at, r.emoji AS liked_emoji,
@@ -3876,7 +4045,7 @@ def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
 
 def get_reposted_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
     """Return list of reels reposted by device_id (excluding own original posts), newest first."""
-    conn = get_conn()
+    conn = get_read_conn()
     rows = conn.execute(
         """
         SELECT ds.id AS share_id, ds.id AS reel_id, ds.created_at AS reposted_at,
@@ -3972,7 +4141,7 @@ def get_reel_view_counts(share_ids: list[int]) -> dict[int, int]:
     """Return dict mapping share_id -> total view count (non-skipped plays)."""
     if not share_ids:
         return {}
-    conn = get_conn()
+    conn = get_read_conn()
     try:
         placeholders = ",".join(["?"] * len(share_ids))
         rows = conn.execute(
@@ -3993,7 +4162,7 @@ def get_reel_durations(share_ids: list[int]) -> dict[int, float]:
     """Return dict mapping share_id -> max duration_sec recorded in telemetry."""
     if not share_ids:
         return {}
-    conn = get_conn()
+    conn = get_read_conn()
     try:
         placeholders = ",".join(["?"] * len(share_ids))
         rows = conn.execute(
@@ -4009,4 +4178,4 @@ def get_reel_durations(share_ids: list[int]) -> dict[int, float]:
     finally:
         conn.close()
 
-
+

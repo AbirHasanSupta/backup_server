@@ -58,6 +58,9 @@ import {
   listSharedFiles,
   reactToMedia,
   getFeed,
+  getCachedFeed,
+  getCachedBrowseFiles,
+  getCachedBrowseSharedFiles,
   createDeviceShare,
   createDirectPostShare,
   DIRECT_POST_MAX_FILES,
@@ -4566,7 +4569,44 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       return;
     }
     fetchingRef.current = true;
-    setIsFetching(true);
+
+    // SWR Fast Rendering: check in-memory cache to render instantly without blocking spinner
+    let hasCachedData = false;
+    if (isFeedMode) {
+      const cached: any = getCachedFeed();
+      if (cached && Array.isArray(cached.items) && cached.items.length > 0) {
+        setFiles(buildFeedDisplayList(cached.items, sortField, sortDir));
+        setFeedOffset(cached.items.length);
+        setFeedHasMore(Boolean(cached.has_more));
+        setTree(null);
+        hasCachedData = true;
+      }
+    } else {
+      const cachedBrowse: any = sourceMode === 'shared'
+        ? (selectedSourceId ? getCachedBrowseSharedFiles(selectedSourceId, '') : null)
+        : getCachedBrowseFiles('');
+      if (cachedBrowse && (Array.isArray(cachedBrowse.folders) || Array.isArray(cachedBrowse.files))) {
+        const rootFiles: RemoteFile[] = (cachedBrowse.files || []).map((f: any) => ({
+          path: f.path,
+          size: f.size,
+          modified_time: f.modified_time,
+          sha256: f.sha256,
+          uploaded_time: f.uploaded_time,
+          media_id: f.media_id,
+          reaction_counts: f.reaction_counts,
+          user_reactions: f.user_reactions,
+          is_video: f.is_video,
+        }));
+        const newRoot = buildRootFromBrowse(cachedBrowse);
+        setTree(newRoot);
+        setFiles(rootFiles);
+        hasCachedData = true;
+      }
+    }
+
+    if (!hasCachedData && !opts?.quiet) {
+      setIsFetching(true);
+    }
     try {
       await loadServerConfig();
       if (isFeedMode) {
