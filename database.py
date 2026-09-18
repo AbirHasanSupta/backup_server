@@ -1609,7 +1609,7 @@ def insert_sync_session(
         total_files: int = 0,
 ) -> int:
     """Insert one sync session record and return its new id."""
-    conn = get_read_conn()
+    conn = get_conn()
     cur = conn.execute(
         """
         INSERT INTO sync_sessions
@@ -2300,7 +2300,7 @@ def get_cleanup_candidates(source_id: str) -> list[dict]:
 
 def log_cleanup_deletions(source_id: str, items: list[dict]) -> dict:
     """Record client-reported deletions. Returns per-file results + total bytes."""
-    conn = get_read_conn()
+    conn = get_conn()
     now_ts = int(_time.time())
     results = []
     total_freed = 0
@@ -2497,7 +2497,7 @@ def save_trip_clusters(source_id: str, clusters: list[dict]) -> None:
     Merges/updates existing trips if they match by time window and proximity,
     inserts new trips, and removes trips that no longer qualify.
     """
-    conn = get_read_conn()
+    conn = get_conn()
     now_ts = int(_time.time())
 
     # Get existing trips for this source_id
@@ -2722,7 +2722,7 @@ def get_or_create_media_id(
     modified_time: int = 0,
 ) -> int:
     """Return media_index.id for the given file, inserting a row if it doesn't exist."""
-    conn = get_read_conn()
+    conn = get_conn()
     row = conn.execute(
         "SELECT id FROM media_index WHERE source_type = ? AND source_key = ? AND relative_path = ?",
         (source_type, source_key, relative_path),
@@ -2882,7 +2882,7 @@ def is_media_or_post_creator(media_id: int, device_id: str | None) -> bool:
 
 def delete_comment(comment_id: int, source_id: str) -> bool:
     """Delete a comment if source_id is its author OR the creator of the post/media."""
-    conn = get_read_conn()
+    conn = get_conn()
     row = conn.execute(
         "SELECT media_id, source_id FROM comments WHERE id = ?",
         (comment_id,),
