@@ -40,12 +40,6 @@ example
 
 # generated native folders
 /ios
+/android
 
-# Android build outputs and caches
-.gradle/
-android/.gradle/
-android/build/
-android/app/build/
-android/.cxx/
-android/local.properties
 

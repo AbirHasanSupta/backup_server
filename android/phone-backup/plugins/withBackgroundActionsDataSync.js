@@ -717,42 +717,138 @@ function writeWidgetResources(projectRoot) {
   );
 }
 
-function addWakeLockPackageToMainApplication(contents, language) {
-  if (contents.includes('BackupWakeLockPackage')) return contents;
+function customizeMainApplication(contents, language) {
+  let modified = contents;
 
   if (language === 'kt') {
-    if (contents.includes('PackageList(this).packages.apply {')) {
-      return contents.replace(
-        /(PackageList\(this\)\.packages\.apply\s*\{\s*)/,
-        '$1\n          add(BackupWakeLockPackage())\n'
-      );
+    // 1. Add OkHttp imports if not present
+    const kotlinImports = [
+      'import com.facebook.react.modules.network.OkHttpClientProvider',
+      'import com.facebook.react.modules.network.OkHttpClientFactory',
+      'import okhttp3.OkHttpClient',
+      'import okhttp3.Dispatcher',
+      'import okhttp3.ConnectionPool',
+      'import java.util.concurrent.TimeUnit',
+    ];
+
+    for (const imp of kotlinImports) {
+      if (!modified.includes(imp)) {
+        modified = modified.replace(
+          /package\s+[^\n]+/,
+          `$&\n\n${imp}`
+        );
+      }
     }
 
-    if (contents.includes('val packages = PackageList(this).packages')) {
-      return contents.replace(
-        'val packages = PackageList(this).packages',
-        'val packages = PackageList(this).packages\n            packages.add(BackupWakeLockPackage())'
-      );
+    // 2. Add BackupWakeLockPackage to package list
+    if (!modified.includes('BackupWakeLockPackage()')) {
+      if (modified.includes('PackageList(this).packages.apply {')) {
+        modified = modified.replace(
+          /(PackageList\(this\)\.packages\.apply\s*\{\s*)/,
+          '$1\n          add(BackupWakeLockPackage())\n'
+        );
+      } else if (modified.includes('val packages = PackageList(this).packages')) {
+        modified = modified.replace(
+          'val packages = PackageList(this).packages',
+          'val packages = PackageList(this).packages\n            packages.add(BackupWakeLockPackage())'
+        );
+      } else if (modified.includes('return PackageList(this).packages')) {
+        modified = modified.replace(
+          'return PackageList(this).packages',
+          'val packages = PackageList(this).packages\n            packages.add(BackupWakeLockPackage())\n            return packages'
+        );
+      }
     }
 
-    if (contents.includes('return PackageList(this).packages')) {
-      return contents.replace(
-        'return PackageList(this).packages',
-        'val packages = PackageList(this).packages\n            packages.add(BackupWakeLockPackage())\n            return packages'
-      );
+    // 3. Add OkHttpClientProvider configuration in onCreate
+    if (!modified.includes('OkHttpClientProvider.setOkHttpClientFactory')) {
+      const okHttpConfigKotlin = `    // Configure high-performance OkHttp connection pool & dispatcher so UI API calls
+    // (Reels, Feed, Library, Thumbnails) execute in parallel without queueing behind active sync uploads.
+    OkHttpClientProvider.setOkHttpClientFactory(object : OkHttpClientFactory {
+      override fun createNewNetworkModuleClient(): OkHttpClient {
+        val dispatcher = Dispatcher().apply {
+          maxRequests = 128
+          maxRequestsPerHost = 64
+        }
+        val connectionPool = ConnectionPool(32, 5, TimeUnit.MINUTES)
+        return OkHttpClientProvider.createClientBuilder()
+          .dispatcher(dispatcher)
+          .connectionPool(connectionPool)
+          .build()
+      }
+    })\n`;
+
+      if (modified.includes('super.onCreate()')) {
+        modified = modified.replace(
+          /super\.onCreate\(\)\s*/,
+          `$&\n${okHttpConfigKotlin}\n`
+        );
+      }
     }
+
+    return modified;
   }
 
   if (language === 'java') {
-    if (contents.includes('new PackageList(this).getPackages()')) {
-      return contents.replace(
-        /(List<ReactPackage> packages = new PackageList\(this\)\.getPackages\(\);\s*)/,
-        '$1\n          packages.add(new BackupWakeLockPackage());\n'
-      );
+    // 1. Add OkHttp imports if not present
+    const javaImports = [
+      'import com.facebook.react.modules.network.OkHttpClientProvider;',
+      'import com.facebook.react.modules.network.OkHttpClientFactory;',
+      'import okhttp3.OkHttpClient;',
+      'import okhttp3.Dispatcher;',
+      'import okhttp3.ConnectionPool;',
+      'import java.util.concurrent.TimeUnit;',
+    ];
+
+    for (const imp of javaImports) {
+      if (!modified.includes(imp)) {
+        modified = modified.replace(
+          /package\s+[^\n]+/,
+          `$&\n\n${imp}`
+        );
+      }
     }
+
+    // 2. Add BackupWakeLockPackage to package list
+    if (!modified.includes('BackupWakeLockPackage')) {
+      if (modified.includes('new PackageList(this).getPackages()')) {
+        modified = modified.replace(
+          /(List<ReactPackage> packages = new PackageList\(this\)\.getPackages\(\);\s*)/,
+          '$1\n          packages.add(new BackupWakeLockPackage());\n'
+        );
+      }
+    }
+
+    // 3. Add OkHttpClientProvider configuration in onCreate
+    if (!modified.includes('OkHttpClientProvider.setOkHttpClientFactory')) {
+      const okHttpConfigJava = `    // Configure high-performance OkHttp connection pool & dispatcher so UI API calls
+    // (Reels, Feed, Library, Thumbnails) execute in parallel without queueing behind active sync uploads.
+    OkHttpClientProvider.setOkHttpClientFactory(new OkHttpClientFactory() {
+      @Override
+      public OkHttpClient createNewNetworkModuleClient() {
+        Dispatcher dispatcher = new Dispatcher();
+        dispatcher.setMaxRequests(128);
+        dispatcher.setMaxRequestsPerHost(64);
+        ConnectionPool connectionPool = new ConnectionPool(32, 5, TimeUnit.MINUTES);
+        return OkHttpClientProvider.createClientBuilder()
+          .dispatcher(dispatcher)
+          .connectionPool(connectionPool)
+          .build();
+      }
+    });\n`;
+
+      if (modified.includes('super.onCreate();')) {
+        modified = modified.replace(
+          /super\.onCreate\(\);\s*/,
+          `$&\n${okHttpConfigJava}\n`
+        );
+      }
+    }
+
+    return modified;
   }
 
-  throw new Error('Could not add BackupWakeLockPackage to MainApplication');
+  return contents;
 }
 
 function withBackupWakeLock(config) {
@@ -768,7 +864,7 @@ function withBackupWakeLock(config) {
   ]);
 
   return withMainApplication(config, (configWithMainApplication) => {
-    configWithMainApplication.modResults.contents = addWakeLockPackageToMainApplication(
+    configWithMainApplication.modResults.contents = customizeMainApplication(
       configWithMainApplication.modResults.contents,
       configWithMainApplication.modResults.language
     );
