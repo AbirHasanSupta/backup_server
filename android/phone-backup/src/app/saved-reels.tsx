@@ -237,15 +237,15 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
   }, [uri]);
 
   useEffect(() => {
+    if (!isActive || !isPlaying) return;
     const interval = setInterval(() => {
-      if (!isActive) return;
       try {
         const dur = player.duration || 0;
         if (dur > 0) onProgressRef.current(player.currentTime || 0, dur);
       } catch {}
-    }, 150);
+    }, 200);
     return () => clearInterval(interval);
-  }, [player, isActive]);
+  }, [player, isActive, isPlaying]);
 
   useEffect(() => {
     try {

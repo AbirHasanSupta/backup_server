@@ -143,7 +143,7 @@ const SMALL_FILE_UPLOAD_CONCURRENCY = 3;
 const LARGE_FILE_UPLOAD_CONCURRENCY = 1;
 const SMALL_FILE_THRESHOLD = 25 * 1024 * 1024;
 const LARGE_FILE_THRESHOLD = 150 * 1024 * 1024;
-const SERVICE_LOOP_TICK_MS = 15000;
+const SERVICE_LOOP_TICK_MS = 45000;
 const APP_PRIMARY_COLOR = '#2563EB';
 const BACKUP_FOREGROUND_SERVICE_TYPE = ['dataSync'];
 
@@ -1240,18 +1240,20 @@ export async function runSync(onProgress, runOptions = {}) {
 
 
 async function persistentSyncLoop(taskDataArguments) {
-  const { delay } = taskDataArguments;
+  const baseDelay = taskDataArguments?.delay || SERVICE_LOOP_TICK_MS;
   await updateIdleNotification(true);
 
   while (BackgroundService.isRunning()) {
+    let nextSleepMs = baseDelay;
     try {
       if (isSyncInProgress) {
-        // Progress notification is updated by reportProgress during sync.
+        nextSleepMs = 5000;
       } else {
         const schedule = await getScheduledSyncState();
 
         if (schedule.paused) {
           await updateIdleNotification();
+          nextSleepMs = Math.max(baseDelay, 60000);
         } else if (schedule.due) {
           const ip = await getServerIp();
           if (ip) {
@@ -1260,16 +1262,22 @@ async function persistentSyncLoop(taskDataArguments) {
             );
           } else {
             await updateIdleNotification();
+            nextSleepMs = Math.max(baseDelay, 60000);
           }
         } else {
           await updateIdleNotification();
+          // Sleep until near the next sync run (bounded between 30s and 2 minutes)
+          const timeUntilDue = (schedule.dueAt || 0) - (schedule.now || Date.now());
+          if (timeUntilDue > 0) {
+            nextSleepMs = Math.min(Math.max(timeUntilDue, 30000), 120000);
+          }
         }
         checkStreakRiskInBackground().catch(() => {});
       }
     } catch (err) {
       console.warn('[BackgroundTask] Persistent loop tick failed:', err?.message);
     }
-    await new Promise((resolve) => setTimeout(resolve, delay));
+    await new Promise((resolve) => setTimeout(resolve, nextSleepMs));
   }
 }
 

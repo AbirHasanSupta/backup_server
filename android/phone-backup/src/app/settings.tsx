@@ -44,7 +44,6 @@ import {
   getSavedServers,
   saveServerProfile,
   removeSavedServer,
-  resolveReachableServer,
   switchToSavedServer,
   parseServerAddress,
   formatHostForUrl,
@@ -133,23 +132,13 @@ export default function SettingsScreen() {
 
     setServerStatus(prev => (prev === 'connected' ? prev : 'checking'));
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
+    const timeout = setTimeout(() => controller.abort(), 5000);
     try {
       const result = await checkDeviceConnection({ signal: controller.signal });
       clearTimeout(timeout);
       setServerStatus(result.connected ? 'connected' : 'disconnected');
     } catch {
       clearTimeout(timeout);
-      // Attempt mesh failover re-discovery before marking offline
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
-      if (resolved.ok && resolved.reconnected) {
-        setServerIpState(resolved.ip);
-        try {
-          const result = await checkDeviceConnection();
-          setServerStatus(result.connected ? 'connected' : 'disconnected');
-          return;
-        } catch {}
-      }
       setServerStatus('disconnected');
     }
   }, []);

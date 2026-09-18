@@ -886,6 +886,10 @@ export async function getActiveServerCandidates() {
 // ─── Mesh Roaming Auto-Failover Resolver ──────────────────────────────────────
 let _resolvingPromise = null;
 let _resolveGeneration = 0;
+let _lastSubnetSweepAt = 0;
+const SUBNET_SWEEP_COOLDOWN_MS = 3 * 60 * 1000; // 3 min cooldown between full /24 sweeps
+let _lastFailedResolveAt = 0;
+const RESOLVE_FAIL_COOLDOWN_MS = 8 * 1000; // 8s cooldown before retrying full candidate probe
 
 /** @type {import('expo-network') | null} */
 let _Network = null;
@@ -1014,6 +1018,11 @@ export async function resolveReachableServer(options = {}) {
     return _resolvingPromise;
   }
 
+  const now = Date.now();
+  if (!options.force && _lastFailedResolveAt && now - _lastFailedResolveAt < RESOLVE_FAIL_COOLDOWN_MS) {
+    return { ok: false, ip: '', reconnected: false };
+  }
+
   // Increment generation BEFORE assigning _resolvingPromise so that any
   // older in-flight resolution that finishes after us sees a stale generation
   // and does NOT clobber our promise in the finally block.
@@ -1050,15 +1059,16 @@ export async function resolveReachableServer(options = {}) {
         return probe?.data?.server_id === expectedServerId;
       };
 
-      // Step 1: Probe current configured IP first (with 2-attempt roam tolerance)
-      let currentProbe = await quickProbe(cleanCurrentIp, port, options.timeoutMs || 1800);
+      // Step 1: Probe current configured IP first (with quick timeout)
+      let currentProbe = await quickProbe(cleanCurrentIp, port, options.timeoutMs || 1500);
       if (!currentProbe.ok) {
         // Brief pause to allow Wi-Fi association to settle on new mesh node
-        await new Promise((r) => setTimeout(r, 300));
-        currentProbe = await quickProbe(cleanCurrentIp, port, options.timeoutMs || 2500);
+        await new Promise((r) => setTimeout(r, 200));
+        currentProbe = await quickProbe(cleanCurrentIp, port, options.timeoutMs || 2000);
       }
 
       if (currentProbe.ok && matchesExpectedServer(currentProbe)) {
+        _lastFailedResolveAt = 0;
         // Refresh candidate list if server returned all_ips or tailscale
         const unifiedCandidates = [
           cleanCurrentIp,
@@ -1083,7 +1093,7 @@ export async function resolveReachableServer(options = {}) {
       }
 
       // Step 2: Probe saved profile mesh IPs, Tailscale endpoints, and hostnames concurrently.
-      const step2TimeoutMs = Math.max(options.timeoutMs || 2000, 2500);
+      const step2TimeoutMs = Math.max(options.timeoutMs || 1800, 2000);
 
       const candidates = new Set();
       if (activeProfile) {
@@ -1124,6 +1134,7 @@ export async function resolveReachableServer(options = {}) {
 
         const found = probeResults.find((r) => r.probe.ok && matchesExpectedServer(r.probe));
         if (found) {
+          _lastFailedResolveAt = 0;
           const newIp = found.target;
           console.log(`[Mesh Roaming] Found server at candidate address: ${newIp} (was ${cleanCurrentIp})`);
           await _commitReachableServer({ newIp, port, probeData: found.probe.data, serverName });
@@ -1131,9 +1142,10 @@ export async function resolveReachableServer(options = {}) {
         }
       }
 
-      // Step 3: Subnet sweep — sweeps device's current network subnet (if roaming to a new mesh node AP),
-      // last-known server IP's subnet, and any known candidate subnets.
-      if (!isPrivateNetwork && options.subnetSweep !== false) {
+      // Step 3: Subnet sweep — only run if explicitly enabled and not in cooldown
+      const sweepPermitted = options.subnetSweep === true && (options.force || (Date.now() - _lastSubnetSweepAt > SUBNET_SWEEP_COOLDOWN_MS));
+      if (!isPrivateNetwork && sweepPermitted) {
+        _lastSubnetSweepAt = Date.now();
         const sweptExclude = new Set([cleanCurrentIp, ...candidateList]);
 
         let deviceIp = null;
@@ -1182,6 +1194,7 @@ export async function resolveReachableServer(options = {}) {
         for (const baseIp of subnetsToSweep) {
           const swept = await subnetSweep(baseIp, port, sweptExclude, expectedServerId);
           if (swept) {
+            _lastFailedResolveAt = 0;
             const newIp = swept.ip;
             console.log(`[Mesh Roaming] Found server via subnet sweep: ${newIp} (was ${cleanCurrentIp})`);
             await _commitReachableServer({ newIp, port, probeData: swept.probe.data, serverName });
@@ -1190,8 +1203,10 @@ export async function resolveReachableServer(options = {}) {
         }
       }
 
+      _lastFailedResolveAt = Date.now();
       return { ok: false, ip: cleanCurrentIp, reconnected: false };
     } catch (e) {
+      _lastFailedResolveAt = Date.now();
       console.warn('[resolveReachableServer] Error resolving server:', e?.message);
       return { ok: false, ip: '', reconnected: false };
     } finally {

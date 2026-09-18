@@ -288,6 +288,7 @@ function RootLayoutContent() {
           tabBarInactiveTintColor: colors.textSecondary,
           tabBarIconStyle: styles.tabIcon,
           tabBarItemStyle: styles.tabItem,
+          freezeOnBlur: true,
         }}
       >
         <Tabs.Screen

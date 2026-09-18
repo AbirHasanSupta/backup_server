@@ -13,7 +13,6 @@ import {
   saveServerProfile,
   formatHostForUrl,
   isPrivateNetworkAddress,
-  parseServerAddress,
 } from './settings';
 import { getPendingShareNotifications, markShareNotificationsSeen } from './downloader';
 import { showNewSharePostNotification } from './notificationService';
@@ -64,10 +63,10 @@ async function withAutoFailover(action) {
         }
       }
 
-      // Pass 2: Forced resolution with sweep after 1000ms delay
-      console.log('[Uploader] Attempting forced mesh failover re-resolution (pass 2)...');
-      await new Promise((r) => setTimeout(r, 1000));
-      resolved = await resolveReachableServer({ force: true, timeoutMs: 2500, subnetSweep: true }).catch(() => ({ ok: false }));
+      // Pass 2: Forced candidate resolution after 600ms delay (no blind subnet sweeps)
+      console.log('[Uploader] Attempting forced mesh failover candidate re-resolution (pass 2)...');
+      await new Promise((r) => setTimeout(r, 600));
+      resolved = await resolveReachableServer({ force: true, timeoutMs: 2000, subnetSweep: false }).catch(() => ({ ok: false }));
       if (resolved.ok) {
         console.log(`[Uploader] Re-executing request against reachable server IP (pass 2): ${resolved.ip}`);
         return await action();

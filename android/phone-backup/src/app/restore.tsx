@@ -21,6 +21,7 @@ import {
   Platform,
   BackHandler,
   ScrollView,
+  AppState,
 } from 'react-native';
 import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
@@ -3318,15 +3319,15 @@ function NativeVideoPreviewPlayer({
   const grantLocationXRef = useRef(0);
 
   useEffect(() => {
+    if (isSeeking || !player.playing) return;
     const interval = setInterval(() => {
-      if (isSeeking) return;
       safeMediaCall(() => {
         setPositionSec(player.currentTime || 0);
         setDurationSec(player.duration || 0);
       });
     }, 250);
     return () => clearInterval(interval);
-  }, [player, isSeeking]);
+  }, [player, player.playing, isSeeking]);
 
   const togglePlay = useCallback(() => {
     if (player.playing) {
@@ -4897,14 +4898,39 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     void handleFetch({ quiet: true, preserveSelection: true });
   }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]));
 
-  // Poll reactions/comments every 30 s while Feed tab is in focus (Fix 4).
+  // Poll reactions/comments every 45 s while Feed tab is in focus, app is active, and server is online.
   useFocusEffect(useCallback(() => {
-    if (!isFeedMode) return;
-    const id = setInterval(() => {
-      void handleSilentFeedUpdate();
-    }, 30_000);
-    return () => clearInterval(id);
-  }, [isFeedMode, handleSilentFeedUpdate]));
+    if (!isFeedMode || isOffline) return;
+    let active = AppState.currentState === 'active';
+    let timerId: ReturnType<typeof setInterval> | null = null;
+
+    if (active) {
+      timerId = setInterval(() => {
+        if (!isOffline && !isDownloading && AppState.currentState === 'active') {
+          void handleSilentFeedUpdate();
+        }
+      }, 45_000);
+    }
+
+    const sub = AppState.addEventListener('change', (state) => {
+      active = state === 'active';
+      if (!active && timerId) {
+        clearInterval(timerId);
+        timerId = null;
+      } else if (active && !timerId) {
+        timerId = setInterval(() => {
+          if (!isOffline && !isDownloading && AppState.currentState === 'active') {
+            void handleSilentFeedUpdate();
+          }
+        }, 45_000);
+      }
+    });
+
+    return () => {
+      sub.remove();
+      if (timerId) clearInterval(timerId);
+    };
+  }, [isFeedMode, isOffline, isDownloading, handleSilentFeedUpdate]));
 
   // Live notification tap listener (Fix 1 edge case: user taps notification while already on feed)
   useEffect(() => {

@@ -357,7 +357,7 @@ export default function MemoriesScreen() {
 
     let elapsed = 0;
     const duration = 4000;
-    const interval = 80;
+    const interval = 100;
 
     photoTimerRef.current = setInterval(() => {
       elapsed += interval;
@@ -1823,14 +1823,15 @@ function NativeStoryVideoPlayer({
   }, [player, onEnded, onProgressRatio]);
 
   useEffect(() => {
+    if (isPaused) return;
     const interval = setInterval(() => {
       if (player.duration > 0) {
         const ratio = Math.min(player.currentTime / player.duration, 1);
         onProgressRatio(ratio);
       }
-    }, 100);
+    }, 200);
     return () => clearInterval(interval);
-  }, [player, onProgressRatio]);
+  }, [player, isPaused, onProgressRatio]);
 
   // Belt-and-suspenders: explicitly pause before the player is released so
   // audio never keeps running behind a transition (next story item, modal

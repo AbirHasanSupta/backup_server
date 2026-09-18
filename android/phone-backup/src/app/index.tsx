@@ -10,6 +10,7 @@ import {
   RefreshControl,
   Modal,
   TouchableOpacity,
+  AppState,
 } from 'react-native';
 import Animated, {
   FadeIn,
@@ -36,7 +37,6 @@ import {
   getFolders,
   formatSyncIntervalLabel,
   saveServerProfile,
-  resolveReachableServer,
   getConnectionMode,
   formatHostForUrl,
 } from '../../settings';
@@ -183,7 +183,6 @@ export default function HomeScreen() {
   const [syncPaused, setSyncPausedState] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
   const [forceStopPressedAt, setForceStopPressedAt] = useState<number | null>(null);
-  const [, setRelativeTimeTick] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [streakData, setStreakData] = useState<{
     currentStreak: number;
@@ -220,6 +219,9 @@ export default function HomeScreen() {
     topInset: insets.top,
   });
 
+  const failureCountRef = useRef(0);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const loadAll = useCallback(async () => {
     const [lt, ts, si, paused, ip, name] = await Promise.all([
       getLastSyncTime(),
@@ -238,6 +240,7 @@ export default function HomeScreen() {
 
     if (!ip) {
       setServerStatus('unknown');
+      failureCountRef.current = 0;
       return;
     }
 
@@ -263,26 +266,25 @@ export default function HomeScreen() {
 
     if (syncingRef.current) {
       setServerStatus('connected');
+      failureCountRef.current = 0;
       return;
     }
 
     setServerStatus(prev => (prev === 'connected' ? prev : 'checking'));
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
+    const timeout = setTimeout(() => controller.abort(), 5000);
     try {
       const result = await checkDeviceConnection({ signal: controller.signal });
       clearTimeout(timeout);
       setServerStatus(result.connected ? 'connected' : 'removed');
+      if (result.connected) {
+        failureCountRef.current = 0;
+      } else {
+        failureCountRef.current += 1;
+      }
     } catch {
       clearTimeout(timeout);
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
-      if (resolved.ok && resolved.reconnected) {
-        try {
-          const result = await checkDeviceConnection();
-          setServerStatus(result.connected ? 'connected' : 'removed');
-          return;
-        } catch {}
-      }
+      failureCountRef.current += 1;
       setServerStatus('disconnected');
     }
   }, []);
@@ -350,8 +352,8 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      // Skip the heavy loadAll() (5 parallel AsyncStorage reads + server probe)
-      // if a sync is actively running. The sync events keep the UI up to date.
+      // Reset backoff so screen immediately refreshes on open
+      failureCountRef.current = 0;
       if (!syncingRef.current) {
         loadAll();
       }
@@ -362,33 +364,47 @@ export default function HomeScreen() {
     }, [applySyncSnapshot, loadAll, loadStreak, loadPendingSummary, loadCleanupSummary])
   );
 
+  // Adaptive health-check polling with exponential backoff and AppState lifecycle awareness
   useEffect(() => {
-    const id = setInterval(() => setRelativeTimeTick((t) => t + 1), 30000);
-    return () => clearInterval(id);
-  }, []);
+    let appActive = AppState.currentState === 'active';
 
-  useEffect(() => {
-    // Do not poll loadAll() while sync is active — it fires 5 parallel AsyncStorage
-    // reads every 15 s and competes with the sync engine's own throttled writes.
-    // The sync-completed / sync-failed events call loadAll() explicitly when needed.
-    if (syncing) return;
-    const id = setInterval(() => {
-      loadAll();
-    }, 15000);
-    return () => clearInterval(id);
-  }, [loadAll, syncing]);
+    const schedulePoll = () => {
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+      if (syncing || !appActive) return;
 
-  useEffect(() => {
-    // During active sync the UI is driven by DeviceEventEmitter events
-    // (sync-started / sync-progress / sync-state / sync-completed).
-    // We only keep a 5 s safety-net poll so cross-context syncs (background
-    // service in a separate JS context) still surface their state without
-    // flooding AsyncStorage on every second.
-    const id = setInterval(() => {
-      getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
-    }, syncing ? 5000 : 3000);
-    return () => clearInterval(id);
-  }, [applySyncSnapshot, syncing]);
+      const step = Math.min(failureCountRef.current, 4);
+      const delay = (serverStatus === 'disconnected' || serverStatus === 'unknown')
+        ? [15000, 30000, 60000, 120000, 180000][step]
+        : 30000;
+
+      pollTimerRef.current = setTimeout(() => {
+        if (appActive && !syncingRef.current) {
+          void loadAll();
+        }
+      }, delay);
+    };
+
+    schedulePoll();
+
+    const sub = AppState.addEventListener('change', (nextState) => {
+      const wasActive = appActive;
+      appActive = nextState === 'active';
+      if (!appActive) {
+        if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+      } else if (!wasActive) {
+        failureCountRef.current = 0;
+        if (!syncingRef.current) {
+          void loadAll();
+        }
+        schedulePoll();
+      }
+    });
+
+    return () => {
+      sub.remove();
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    };
+  }, [loadAll, syncing, serverStatus]);
 
   useEffect(() => {
     const onStarted = () => {

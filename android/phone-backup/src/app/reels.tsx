@@ -19,6 +19,7 @@ import {
   PanResponder,
   Alert,
   DeviceEventEmitter,
+  AppState,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
@@ -231,15 +232,15 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
   }, [uri]);
 
   useEffect(() => {
+    if (!isActive || !isPlaying) return;
     const interval = setInterval(() => {
-      if (!isActive) return;
       try {
         const dur = player.duration || 0;
         if (dur > 0) onProgressRef.current(player.currentTime || 0, dur);
       } catch {}
-    }, 150);
+    }, 200);
     return () => clearInterval(interval);
-  }, [player, isActive]);
+  }, [player, isActive, isPlaying]);
 
   useEffect(() => {
     try {
@@ -1285,8 +1286,18 @@ export default function ReelsScreen() {
   }, [loadReels]);
 
   useFocusEffect(useCallback(() => {
-    setScreenFocused(true);
+    setScreenFocused(AppState.currentState === 'active');
+    const sub = AppState.addEventListener('change', (nextState) => {
+      if (nextState !== 'active') {
+        setScreenFocused(false);
+        setFastForwardingReelId(null);
+        void flushTelemetry();
+      } else {
+        setScreenFocused(true);
+      }
+    });
     return () => {
+      sub.remove();
       setScreenFocused(false);
       setFastForwardingReelId(null);
       void flushTelemetry();
