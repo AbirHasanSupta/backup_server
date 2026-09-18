@@ -2,6 +2,7 @@ import {
   getConnectionMode,
   getDeviceId,
   getUsername,
+  setUsername,
   setDeviceToken,
   saveServerProfile,
   setRecoverySyncPending,
@@ -50,7 +51,7 @@ async function readConnectionResponse(res) {
  * @param {string} serverIp
  * @param {number} serverPort
  * @param {string} apiKey
- * @returns {Promise<{status: string, reason?: string}>}
+ * @returns {Promise<{status: string, reason?: string, username?: string | null, device_name?: string | null, token?: string, server_id?: string, all_ips?: string[], candidateIps?: string[], tailscale?: any, hostname?: string, recovery_available?: boolean, files_backed_up?: number}>}
  */
 export async function connectToServer(serverIp, serverPort, apiKey) {
   const deviceName =
@@ -103,6 +104,9 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
     if (result.status === 'accepted') {
       if (result.token) {
         await setDeviceToken(result.token);
+      }
+      if (result.username) {
+        await setUsername(result.username);
       }
       if (result.recovery_available) {
         await setRecoverySyncPending(true);

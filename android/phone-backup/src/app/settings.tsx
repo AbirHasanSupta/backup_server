@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
   TouchableOpacity,
   RefreshControl,
   Platform,
+  DeviceEventEmitter,
 } from 'react-native';
 import Constants from 'expo-constants';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -213,6 +214,13 @@ export default function SettingsScreen() {
     }
   }, [loadSettings, checkServer, expandHeader]);
 
+  useEffect(() => {
+    const sub = DeviceEventEmitter.addListener('settings-updated', () => {
+      loadSettings();
+    });
+    return () => sub.remove();
+  }, [loadSettings]);
+
   useFocusEffect(
     useCallback(() => {
       loadSettings();
@@ -328,6 +336,9 @@ export default function SettingsScreen() {
         .then(async (result) => {
           if (result.status === 'accepted') {
             setServerStatus('connected');
+            if (result.username) {
+              setUsernameState(result.username);
+            }
             Alert.alert('Connected', 'This device was accepted by the server and is ready to back up.');
           } else if (result.status === 'rejected') {
             Alert.alert('Rejected', 'The server rejected this device. Ask the server owner to approve it.');
@@ -423,6 +434,9 @@ export default function SettingsScreen() {
       .then(async (result) => {
         if (result.status === 'accepted') {
           setServerStatus('connected');
+          if (result.username) {
+            setUsernameState(result.username);
+          }
           Alert.alert('Connected', `"${server.name}" accepted this device. You are ready to back up.`);
         } else if (result.status === 'rejected') {
           Alert.alert('Rejected', 'The server rejected this device. Check the API key or ask for approval.');

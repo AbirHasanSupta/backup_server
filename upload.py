@@ -25,6 +25,7 @@ from config import load_config, APP_DATA_DIR, SHARED_QUIZ_DIR
 from database import (
     batch_check_files,
     find_device_by_name_model,
+    get_device_by_id,
     get_stats,
     get_device_stats,
     get_devices,
@@ -323,6 +324,12 @@ async def connect_device(
         if device_id:
             token = ensure_device_token(device_id)
             resp["token"] = token
+            dev_row = await asyncio.to_thread(get_device_by_id, device_id)
+            if dev_row:
+                if dev_row.get("username"):
+                    resp["username"] = dev_row["username"]
+                if dev_row.get("device_name"):
+                    resp["device_name"] = dev_row["device_name"]
         return resp
 
     # Already registered — just refresh the record, no dialog needed
@@ -345,12 +352,18 @@ async def connect_device(
                 f"Merging {old_id[:12]}… → {device_id[:12]}…"
             )
             merge_result = merge_device_id(old_id, device_id, device_ip)
-            if merge_result["share_targets"] or merge_result["shared_posts"] or merge_result["folder_tags"]:
+            if (
+                merge_result.get("share_targets")
+                or merge_result.get("shared_posts")
+                or merge_result.get("folder_tags")
+                or merge_result.get("saved_reels")
+            ):
                 add_log(
                     "🔄 Reinstall sharing state restored: "
-                    f"{merge_result['share_targets']} received post item(s), "
-                    f"{merge_result['shared_posts']} authored post item(s), "
-                    f"{merge_result['folder_tags']} shared folder tag(s)."
+                    f"{merge_result.get('share_targets', 0)} received post item(s), "
+                    f"{merge_result.get('shared_posts', 0)} authored post item(s), "
+                    f"{merge_result.get('saved_reels', 0)} saved reel(s), "
+                    f"{merge_result.get('folder_tags', 0)} shared folder tag(s)."
                 )
             # Update the name/ip/model in case they changed slightly
             upsert_device(device_name, device_ip, device_id, device_model, username)
@@ -449,7 +462,7 @@ async def status(request: Request, device_id: str | None = None, authorization: 
     devices = await asyncio.to_thread(get_devices)
     device_connected = await asyncio.to_thread(is_device_known, request.client.host, device_id) if device_id else None
     tailscale = await asyncio.to_thread(get_tailscale_network_info)
-    return {
+    resp = {
         **stats,
         "connected_devices": len(devices),
         "devices": devices,
@@ -460,6 +473,14 @@ async def status(request: Request, device_id: str | None = None, authorization: 
         "hostname": socket.gethostname(),
         "tailscale": tailscale,
     }
+    if device_id:
+        dev_row = await asyncio.to_thread(get_device_by_id, device_id)
+        if dev_row:
+            if dev_row.get("username"):
+                resp["username"] = dev_row["username"]
+            if dev_row.get("device_name"):
+                resp["device_name"] = dev_row["device_name"]
+    return resp
 
 
 class ActivityReport(BaseModel):

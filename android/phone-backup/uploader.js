@@ -5,6 +5,8 @@ import {
   getServerPort,
   getDeviceId,
   getDeviceToken,
+  getUsername,
+  setUsername,
   getConnectionMode,
   resolveReachableServer,
   applyServerUploadCacheRecovery,
@@ -235,6 +237,13 @@ export async function checkDeviceConnection(options = {}) {
     const body = await readJsonResponse(res, 'Server status failed');
     if (body.device_connected === true) {
       checkAndNotifyNewShares();
+    }
+    if (body.username) {
+      getUsername().then((localUser) => {
+        if (!localUser && body.username) {
+          setUsername(body.username).catch(() => {});
+        }
+      }).catch(() => {});
     }
     if (Array.isArray(body.all_ips) && body.all_ips.length > 0) {
       const connectionMode = await getConnectionMode();

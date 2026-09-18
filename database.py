@@ -686,16 +686,20 @@ def init_db():
         """
         CREATE TABLE IF NOT EXISTS device_shares
         (
-            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-            media_id            INTEGER NOT NULL,
-            source_type         TEXT    NOT NULL,
-            source_key          TEXT    NOT NULL,
-            relative_path       TEXT    NOT NULL,
-            size                INTEGER NOT NULL DEFAULT 0,
-            modified_time       INTEGER NOT NULL DEFAULT 0,
-            caption             TEXT,
-            shared_by_device_id TEXT    NOT NULL,
-            created_at          INTEGER NOT NULL
+            id                            INTEGER PRIMARY KEY AUTOINCREMENT,
+            media_id                      INTEGER NOT NULL,
+            source_type                   TEXT    NOT NULL,
+            source_key                    TEXT    NOT NULL,
+            relative_path                 TEXT    NOT NULL,
+            size                          INTEGER NOT NULL DEFAULT 0,
+            modified_time                 INTEGER NOT NULL DEFAULT 0,
+            caption                       TEXT,
+            shared_by_device_id           TEXT    NOT NULL,
+            created_at                    INTEGER NOT NULL,
+            share_group_id                TEXT,
+            original_shared_by_device_id  TEXT,
+            repost_of_share_id            INTEGER,
+            is_library_reel               INTEGER NOT NULL DEFAULT 0
         )
         """
     )
@@ -1128,6 +1132,9 @@ def upsert_device(
 
 
 def set_device_username(device_id: str, username: str | None) -> None:
+    device_id = (device_id or "").strip()
+    if not device_id:
+        return
     conn = get_conn()
     conn.execute(
         "UPDATE devices SET username = ? WHERE device_id = ?",
@@ -1248,6 +1255,19 @@ def get_device_folder_name(device_id: str) -> str | None:
     return row["folder_name"] if row else None
 
 
+def get_device_by_id(device_id: str) -> dict | None:
+    """Retrieve full device row by device_id."""
+    if not device_id:
+        return None
+    conn = get_read_conn()
+    row = conn.execute(
+        "SELECT * FROM devices WHERE device_id = ? LIMIT 1",
+        (device_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def find_device_by_name_model(
         device_name: str, device_model: str | None
 ) -> dict | None:
@@ -1264,8 +1284,8 @@ def find_device_by_name_model(
         return None
     conn = get_read_conn()
     row = conn.execute(
-        "SELECT * FROM devices WHERE device_name=? AND device_model=? AND status='accepted' LIMIT 1",
-        (device_name, device_model),
+        "SELECT * FROM devices WHERE TRIM(device_name)=? COLLATE NOCASE AND TRIM(device_model)=? COLLATE NOCASE AND status='accepted' LIMIT 1",
+        (device_name.strip(), device_model.strip()),
     ).fetchone()
     conn.close()
     return dict(row) if row else None
@@ -1275,16 +1295,17 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
     """Transfer every device-owned record to an ID issued after an app reinstall.
 
     A device ID is used for more than backup rows: it is also a share recipient,
-    post author, media source, reaction/comment author, and a shared-folder
-    permission tag.  Moving only ``files.device_id`` made a successfully
-    recovered device appear to lose its feed and folder access.  This function
-    moves those references together, while retaining the original device row
-    (and therefore its stable on-disk backup folder).
+    post author, media source, reaction/comment author, saved reels bookmark,
+    repost creator/original author, and a shared-folder permission tag.
+    Moving only ``files.device_id`` made a successfully recovered device appear
+    to lose its feed, saved reels, and folder access. This function moves those
+    references together, while retaining the original device row (and therefore
+    its stable on-disk backup folder and profile username).
     """
     old_device_id = (old_device_id or "").strip()
     new_device_id = (new_device_id or "").strip()
     if not old_device_id or not new_device_id or old_device_id == new_device_id:
-        return {"folder_tags": 0, "share_targets": 0, "shared_posts": 0}
+        return {"folder_tags": 0, "share_targets": 0, "shared_posts": 0, "saved_reels": 0}
 
     now = int(_time.time())
     conn = get_conn()
@@ -1356,7 +1377,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
              AND new_media.relative_path = old_media.relative_path
             WHERE old_media.source_key = ?
               AND new_media.source_key = ?
-              AND old_media.source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared', 'direct_post_shared', 'device')
+              AND old_media.source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared', 'direct_post_shared', 'device', 'reel_backup')
             """,
             (old_device_id, new_device_id),
         ).fetchall()
@@ -1380,11 +1401,13 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
             )
             conn.execute("DELETE FROM reactions WHERE media_id = ?", (new_id,))
             conn.execute("UPDATE comments SET media_id = ? WHERE media_id = ?", (old_id, new_id))
+            conn.execute("UPDATE saved_reels SET media_id = ? WHERE media_id = ?", (old_id, new_id))
+            conn.execute("UPDATE reel_telemetry SET media_id = ? WHERE media_id = ?", (old_id, new_id))
             conn.execute("DELETE FROM media_index WHERE id = ?", (new_id,))
 
         # The backup/media caches use the device ID as their source key.  Their
         # old entries remain valid because the device's folder_name is retained.
-        source_types = ("phone", "rewind", "rewind_shared", "quiz_shared", "direct_post_shared", "device")
+        source_types = ("phone", "rewind", "rewind_shared", "quiz_shared", "direct_post_shared", "device", "reel_backup")
         placeholders = ",".join("?" for _ in source_types)
         conn.execute(
             f"UPDATE media_index SET source_key = ? WHERE source_key = ? AND source_type IN ({placeholders})",
@@ -1425,7 +1448,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
         # needed to serve phone media after the reconnect.
         shared_posts = conn.execute(
             "SELECT COUNT(*) AS count FROM device_shares "
-            "WHERE shared_by_device_id = ? OR (source_key = ? AND source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared', 'direct_post_shared'))",
+            "WHERE shared_by_device_id = ? OR (source_key = ? AND source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared', 'direct_post_shared', 'device', 'reel_backup'))",
             (old_device_id, old_device_id),
         ).fetchone()["count"]
         conn.execute(
@@ -1433,8 +1456,12 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
             (new_device_id, old_device_id),
         )
         conn.execute(
+            "UPDATE device_shares SET original_shared_by_device_id = ? WHERE original_shared_by_device_id = ?",
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
             "UPDATE device_shares SET source_key = ? WHERE source_key = ? "
-            "AND source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared', 'direct_post_shared')",
+            "AND source_type IN ('phone', 'rewind', 'rewind_shared', 'quiz_shared', 'direct_post_shared', 'device', 'reel_backup')",
             (new_device_id, old_device_id),
         )
         conn.execute(
@@ -1476,8 +1503,41 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
             (old_device_id,),
         )
 
+        # Migrate saved_reels
+        saved_reels_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM saved_reels WHERE device_id = ?",
+            (old_device_id,),
+        ).fetchone()["count"]
+        conn.execute(
+            """
+            DELETE FROM saved_reels AS new_saved
+            WHERE new_saved.device_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM saved_reels AS old_saved
+                  WHERE old_saved.device_id = ? AND old_saved.reel_id = new_saved.reel_id
+              )
+            """,
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "UPDATE saved_reels SET device_id = ? WHERE device_id = ?",
+            (new_device_id, old_device_id),
+        )
+
+        # Migrate reel_telemetry
+        conn.execute(
+            "UPDATE reel_telemetry SET device_id = ? WHERE device_id = ?",
+            (new_device_id, old_device_id),
+        )
+
+        # Avoid collision if new_device_id already has a device entry
+        conn.execute(
+            "DELETE FROM devices WHERE device_id = ? AND device_id != ?",
+            (new_device_id, old_device_id),
+        )
+
         # Update the device row last.  Its stable folder_name and token move
-        # intact to the new ID.
+        # intact to the new ID, preserving username and profile info.
         conn.execute(
             "UPDATE devices SET device_id=?, device_ip=?, last_seen=? WHERE device_id=?",
             (new_device_id, new_device_ip, now, old_device_id),
@@ -1496,6 +1556,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
         "folder_tags": folder_tags,
         "share_targets": share_targets,
         "shared_posts": shared_posts,
+        "saved_reels": saved_reels_count,
     }
 
 
