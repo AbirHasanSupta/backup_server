@@ -3,7 +3,7 @@
     "name": "Phone Backup",
     "slug": "phone-backup",
     "scheme": "phonebackup",
-    "version": "4.4.0",
+    "version": "4.4.1",
     "icon": "./assets/images/icon.png",
     "plugins": [
       "expo-media-library",
@@ -61,7 +61,7 @@
         "android.permission.FOREGROUND_SERVICE_DATA_SYNC"
       ],
       "package": "com.abirsupta.phonebackup",
-      "versionCode": 18
+      "versionCode": 19
     },
     "ios": {
       "bundleIdentifier": "com.abirsupta.phonebackup"
