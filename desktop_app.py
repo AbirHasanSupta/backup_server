@@ -68,6 +68,8 @@ except Exception:
     _PILImage = None
 
 from database import (
+    format_device_display_name,
+    get_device_display_name,
     get_devices,
     get_stats,
     get_sync_sessions,
@@ -92,12 +94,7 @@ DESKTOP_SHARE_DEVICE_ID = "desktop-server"
 
 
 def format_display_name(dev: dict) -> str:
-    username = (dev.get("username") or "").strip()
-    device_name = (dev.get("device_name") or "").strip()
-    device_id = (dev.get("device_id") or dev.get("target_device_id") or "").strip()
-    if username and device_name:
-        return f"{username} ({device_name})"
-    return username or device_name or device_id or "Unknown device"
+    return format_device_display_name(dev)
 
 
 def _ensure_desktop_device(name: str | None = None) -> None:
@@ -1284,7 +1281,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         if result is None:
             return
         set_device_username(device_id, result.strip())
-        add_log(f"Display name updated for {dev.get('device_name')}: {result.strip() or '(cleared)'}")
+        dname = format_display_name(dev)
+        add_log(f"Display name updated for {dname}: {result.strip() or '(cleared)'}")
         did = str(dev.get("id"))
         if did in self._device_card_widgets:
             self._device_card_widgets[did]["outer"].destroy()
@@ -4814,9 +4812,10 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         for req_id, conn in list(pending_connections.items()):
             if not conn.get("_shown", False):
                 conn["_shown"] = True
+                dname = conn.get("display_name") or conn.get("name") or "Device"
                 self.after(
                     0,
-                    lambda r=req_id, n=conn["name"], ip=conn["ip"]:
+                    lambda r=req_id, n=dname, ip=conn["ip"]:
                     self._show_approval_dialog(r, n, ip),
                 )
         self.after(500, self._poll_pending_connections)

@@ -25,7 +25,9 @@ from config import load_config, APP_DATA_DIR, SHARED_QUIZ_DIR
 from database import (
     batch_check_files,
     find_device_by_name_model,
+    format_device_display_name,
     get_device_by_id,
+    get_device_display_name,
     get_stats,
     get_device_stats,
     get_devices,
@@ -113,13 +115,15 @@ APP_VERSION = "4.4.0"
 # Auth helper
 # ──────────────────────────────────────────────────────────────────────────────
 
-def format_display_name(username: str | None, device_name: str | None) -> str | None:
+def format_display_name(username: str | None, device_name: str | None, device_model: str | None = None) -> str | None:
     """Primary: username (device_name). Fallback: device_name only."""
-    username = (username or "").strip() or None
-    device_name = (device_name or "").strip() or None
-    if username and device_name:
-        return f"{username} ({device_name})"
-    return username or device_name
+    res = format_device_display_name(
+        username=username,
+        device_name=device_name,
+        device_model=device_model,
+        fallback="",
+    )
+    return res or None
 
 
 def _extract_bearer(authorization: str | None) -> str | None:
@@ -332,10 +336,17 @@ async def connect_device(
                     resp["device_name"] = dev_row["device_name"]
         return resp
 
+    dev_name = format_device_display_name(
+        username=username,
+        device_name=device_name,
+        device_model=device_model,
+        fallback=device_name,
+    )
+
     # Already registered — just refresh the record, no dialog needed
     if is_device_known(device_ip, device_id):
         upsert_device(device_name, device_ip, device_id, device_model, username)
-        add_log(f"📱 Re-connected: {device_name} ({device_id or device_ip})")
+        add_log(f"📱 Re-connected: {dev_name} ({device_ip})")
         return await accepted_response()
 
     # ── Reinstall detection ────────────────────────────────────────────────────
@@ -348,7 +359,7 @@ async def connect_device(
         if existing and existing.get("device_id") and existing["device_id"] != device_id:
             old_id = existing["device_id"]
             add_log(
-                f"🔄 Reinstall detected for '{device_name}' ({device_model or 'unknown model'}). "
+                f"🔄 Reinstall detected for '{dev_name}' ({device_model or 'unknown model'}). "
                 f"Merging {old_id[:12]}… → {device_id[:12]}…"
             )
             merge_result = merge_device_id(old_id, device_id, device_ip)
@@ -373,11 +384,11 @@ async def connect_device(
             resp["files_backed_up"] = stats["total_files"]
             return resp
 
-    add_log(f"📱 New connection request: {device_name} ({device_id or device_ip})")
+    add_log(f"📱 New connection request: {dev_name} ({device_ip})")
 
     if not load_config().get("REQUIRE_APPROVAL", True):
         upsert_device(device_name, device_ip, device_id, device_model, username)
-        add_log(f"✅ Auto-accepted: {device_name} ({device_id or device_ip})")
+        add_log(f"✅ Auto-accepted: {dev_name} ({device_ip})")
         return await accepted_response()
 
     # ── Approval flow ─────────────────────────────────────────────────────────
@@ -389,6 +400,9 @@ async def connect_device(
         "name": device_name,
         "ip": device_ip,
         "device_id": device_id,
+        "device_model": device_model,
+        "username": username,
+        "display_name": dev_name,
         "future": future,
         "loop": loop,
         "_shown": False,
@@ -398,7 +412,7 @@ async def connect_device(
         accepted = await asyncio.wait_for(asyncio.shield(future), timeout=30.0)
     except asyncio.TimeoutError:
         pending_connections.pop(req_id, None)
-        add_log(f"⏱️ Connection timed out: {device_name} ({device_id or device_ip})")
+        add_log(f"⏱️ Connection timed out: {dev_name} ({device_ip})")
         return {"status": "rejected", "reason": "timeout"}
 
     if accepted:
@@ -418,7 +432,7 @@ async def list_devices(authorization: str = Header(None)):
     verify_auth(authorization)
     devices = await asyncio.to_thread(get_devices)
     for d in devices:
-        d["display_name"] = format_display_name(d.get("username"), d.get("device_name"))
+        d["display_name"] = format_display_name(d.get("username"), d.get("device_name"), d.get("device_model"))
     return {"devices": devices}
 
 
@@ -426,8 +440,9 @@ async def list_devices(authorization: str = Header(None)):
 async def delete_device(device_id: int, authorization: str = Header(None)):
     """Removes a device from the connected-devices list."""
     verify_auth(authorization)
+    dev_name = get_device_display_name(str(device_id))
     await asyncio.to_thread(remove_device, device_id)
-    add_log(f"🗑️ Device #{device_id} removed via API")
+    add_log(f"🗑️ Device '{dev_name}' removed via API")
     return {"status": "removed"}
 
 
@@ -527,7 +542,8 @@ def _check_files_sync(body: FileCheckRequest, device_ip: str, device_id: str | N
     present_in_db = batch_check_files(items)
 
     if len(items) > 0:
-        add_log(f"🔍 Checking {len(items)} files for {device_id or device_ip}. Found in DB: {len(present_in_db)}")
+        dev_name = get_device_display_name(device_id or device_ip)
+        add_log(f"🔍 Checking {len(items)} files for {dev_name}. Found in DB: {len(present_in_db)}")
 
     checked = []
     present = 0
@@ -587,7 +603,8 @@ def finish_upload_record(
 
     touch_device(device_ip, device_id=device_id, files_delta=1)
     device_stats = get_device_stats(device_ip, device_id=device_id)
-    add_log(f"Uploaded: {relative_path} ({device_id or device_ip})")
+    dev_name = get_device_display_name(device_id or device_ip)
+    add_log(f"Uploaded: {relative_path} ({dev_name})")
     if device_id:
         trigger_background_clustering(device_id)
 
@@ -644,7 +661,8 @@ async def upload_file_raw(
         return await asyncio.to_thread(skipped_upload_response, device_ip, device_id)
 
     set_current_activity(f"Uploading {relative_path}", device_ip, device_id)
-    add_log(f"Uploading: {relative_path} ({device_id or device_ip})")
+    dev_name = get_device_display_name(device_id or device_ip)
+    add_log(f"Uploading: {relative_path} ({dev_name})")
     try:
         _, saved_sha256 = await save_upload_stream(
             relative_path,
@@ -687,7 +705,8 @@ async def upload_file(
         return await asyncio.to_thread(skipped_upload_response, device_ip, device_id)
 
     set_current_activity(f"Uploading {relative_path}", device_ip, device_id)
-    add_log(f"Uploading: {relative_path} ({device_id or device_ip})")
+    dev_name = get_device_display_name(device_id or device_ip)
+    add_log(f"Uploading: {relative_path} ({dev_name})")
     try:
         await file.seek(0)
         _, saved_sha256 = await asyncio.to_thread(
@@ -1275,8 +1294,9 @@ async def record_sync_session(
     )
 
     label = {"completed": "✅", "stopped": "⏹", "force_stopped": "⚡", "failed": "❌"}.get(body.outcome, "🔄")
+    dev_name = get_device_display_name(body.device_id) if body.device_id else (device_name or "unknown")
     add_log(
-        f"{label} Sync session from {device_name or body.device_id or 'unknown'}: "
+        f"{label} Sync session from {dev_name}: "
         f"{body.uploaded} uploaded, {body.skipped} skipped, {body.errors} errors — {body.outcome}"
     )
 
@@ -1773,8 +1793,9 @@ async def cleanup_delete(
         for f in body.files
     ]
     result = await asyncio.to_thread(log_cleanup_deletions, body.source_id, items)
+    dev_name = get_device_display_name(body.source_id)
     add_log(
-        f"🗑️  Cleanup: {body.source_id} freed "
+        f"🗑️  Cleanup: {dev_name} freed "
         f"{result['total_bytes_freed'] / (1024 ** 3):.2f} GB "
         f"({len(body.files)} files)"
     )

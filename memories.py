@@ -46,6 +46,7 @@ from database import (
     prune_media_index,
     upsert_media_index_row,
     upsert_scan_dirs,
+    get_device_display_name,
 )
 from state import add_log
 from storage import full_path_in_root, resolve_backup_root
@@ -404,7 +405,7 @@ def _flush_rows(rows: list[dict]) -> None:
         batch_upsert_media_index_rows(rows[i:i + batch_size])
 
 
-def reindex_device(device_id: str) -> None:
+def reindex_device(device_id: str, trigger_cluster: bool = True) -> None:
     files = get_files_for_device(device_id)
     cache = get_media_index_cache("phone", device_id)
     try:
@@ -456,7 +457,8 @@ def reindex_device(device_id: str) -> None:
         _flush_rows(_run_extraction(to_process))
 
     prune_media_index("phone", device_id, seen_paths, existing_paths=set(cache.keys()))
-    trigger_background_clustering(device_id)
+    if trigger_cluster:
+        trigger_background_clustering(device_id)
 
 
 def _rel_dirname(rel_path: str) -> str:
@@ -587,11 +589,11 @@ def _do_reindex_all() -> None:
             kind, key, path = task
             try:
                 if kind == "device":
-                    reindex_device(key)
+                    reindex_device(key, trigger_cluster=False)
                 else:
                     reindex_shared(key, path)
             except Exception as e:
-                add_log(f"[Memories] Error reindexing {kind} {key}: {e}")
+                add_log(f"[Memories] Error reindexing {kind} {get_device_display_name(key)}: {e}")
 
         max_workers = min(4, max(1, len(tasks)))
         if tasks:

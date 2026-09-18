@@ -1130,6 +1130,16 @@ def upsert_device(
     # Recalculate file count immediately
     touch_device(device_ip, device_id)
 
+    try:
+        from state import update_device_display_name_cache
+        disp = get_device_display_name(device_id or device_ip)
+        if device_id:
+            update_device_display_name_cache(identifier=device_id, name=disp)
+        if device_ip:
+            update_device_display_name_cache(identifier=device_ip, name=disp)
+    except Exception:
+        pass
+
 
 def set_device_username(device_id: str, username: str | None) -> None:
     device_id = (device_id or "").strip()
@@ -1142,6 +1152,13 @@ def set_device_username(device_id: str, username: str | None) -> None:
     )
     conn.commit()
     conn.close()
+
+    try:
+        from state import update_device_display_name_cache
+        disp = get_device_display_name(device_id)
+        update_device_display_name_cache(identifier=device_id, name=disp)
+    except Exception:
+        pass
 
 
 def _generate_device_token() -> str:
@@ -1266,6 +1283,92 @@ def get_device_by_id(device_id: str) -> dict | None:
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def format_device_display_name(
+        dev: dict | None = None,
+        *,
+        username: str | None = None,
+        device_name: str | None = None,
+        device_model: str | None = None,
+        device_id: str | None = None,
+        fallback: str | None = None,
+) -> str:
+    """Format a device's display name consistently as 'username (device_name)'.
+
+    If both username and device name/model are available: 'username (device_name)'
+    If only username is available: 'username'
+    If only device name/model is available: 'device_name'
+    Otherwise: fallback or device_id or 'Unknown device'
+    """
+    if dev:
+        username = username if username is not None else dev.get("username")
+        device_name = device_name if device_name is not None else dev.get("device_name")
+        device_model = device_model if device_model is not None else dev.get("device_model")
+        device_id = device_id if device_id is not None else (dev.get("device_id") or dev.get("target_device_id"))
+
+    u = (username or "").strip()
+    d = (device_name or "").strip()
+    m = (device_model or "").strip()
+    did = (device_id or "").strip()
+    fb = (fallback or "").strip()
+
+    name = d or m
+    if u and name:
+        return f"{u} ({name})"
+    if u:
+        return u
+    if name:
+        return name
+    return fb or did or "Unknown device"
+
+
+def get_device_display_name(identifier: str | None, fallback: str | None = None) -> str:
+    """Look up a device or source by device_id, device_ip, or shared folder ID,
+    and return its human-readable display name (e.g. 'Abir (Redmi Note 10s)').
+    """
+    if not identifier:
+        return fallback or "Unknown device"
+
+    identifier_str = str(identifier).strip()
+    if not identifier_str:
+        return fallback or "Unknown device"
+
+    if identifier_str == "desktop-server":
+        try:
+            from config import load_config
+            cfg = load_config()
+            return (cfg.get("DESKTOP_NAME") or "").strip() or "Desktop Server"
+        except Exception:
+            return "Desktop Server"
+
+    # Try lookup in devices table by device_id or device_ip
+    try:
+        conn = get_read_conn()
+        row = conn.execute(
+            "SELECT username, device_name, device_model, device_id, device_ip "
+            "FROM devices WHERE device_id = ? OR device_ip = ? LIMIT 1",
+            (identifier_str, identifier_str),
+        ).fetchone()
+        conn.close()
+        if row:
+            return format_device_display_name(dict(row), fallback=fallback or identifier_str)
+    except Exception:
+        pass
+
+    # Check shared folders
+    try:
+        from config import get_shared_dirs
+        shared_dirs = get_shared_dirs()
+        for entry in shared_dirs:
+            if entry.get("id") == identifier_str:
+                label = entry.get("label") or entry.get("path")
+                return f"Shared: {label}" if label else identifier_str
+    except Exception:
+        pass
+
+    return fallback or identifier_str
+
 
 
 def find_device_by_name_model(
@@ -2864,11 +2967,12 @@ def add_comment(media_id: int, source_id: str, text: str) -> dict:
     conn.close()
     device_name = row["device_name"] if row else None
     username = row["username"] if row else None
-    # Compute display_name: "username (device_name)" or whichever is available
-    if username and device_name:
-        display_name = f"{username} ({device_name})"
-    else:
-        display_name = username or device_name or source_id or "Unknown device"
+    display_name = format_device_display_name(
+        username=username,
+        device_name=device_name,
+        device_id=source_id,
+        fallback=source_id or "Unknown device",
+    )
     return {
         "id": cid,
         "media_id": media_id,

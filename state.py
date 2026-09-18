@@ -40,11 +40,77 @@ _logs_lock = threading.Lock()
 _activity_lock = threading.Lock()
 _active_activities: dict[str, dict[str, Any]] = {}
 
+_device_name_cache: dict[str, str] = {}
+_device_name_cache_lock = threading.Lock()
+_last_cache_refresh = 0.0
+
+
+def update_device_display_name_cache(
+    mapping: dict[str, str] | None = None,
+    identifier: str | None = None,
+    name: str | None = None,
+) -> None:
+    """Update in-memory device display name cache for fast log resolution."""
+    with _device_name_cache_lock:
+        if mapping:
+            _device_name_cache.update(mapping)
+        if identifier and name:
+            _device_name_cache[identifier] = name
+
+
+def _resolve_device_names_in_message(msg: str) -> str:
+    """Safely replace raw device IDs/IPs in log messages with human-readable display names."""
+    if not msg or not isinstance(msg, str):
+        return msg
+
+    global _last_cache_refresh
+    now = time.time()
+    with _device_name_cache_lock:
+        should_refresh = (now - _last_cache_refresh > 5.0) or not _device_name_cache
+
+    if should_refresh:
+        try:
+            from database import format_device_display_name, get_devices
+            devs = get_devices()
+            new_cache = {}
+            for d in devs:
+                did = str(d.get("device_id") or "").strip()
+                dip = str(d.get("device_ip") or "").strip()
+                dname = format_device_display_name(d)
+                if did:
+                    new_cache[did] = dname
+                if dip and dip != "127.0.0.1":
+                    new_cache[dip] = dname
+            with _device_name_cache_lock:
+                _device_name_cache.update(new_cache)
+                _last_cache_refresh = now
+        except Exception:
+            pass
+
+    with _device_name_cache_lock:
+        cache = dict(_device_name_cache)
+
+    if not cache:
+        return msg
+
+    result = msg
+    for raw_id, display_name in sorted(cache.items(), key=lambda x: len(x[0]), reverse=True):
+        if not raw_id or raw_id == display_name:
+            continue
+        if raw_id in result:
+            result = result.replace(f"for source {raw_id}", f"for {display_name}")
+            result = result.replace(f"source {raw_id}", display_name)
+            result = result.replace(raw_id, display_name)
+
+    return result
+
 
 def add_log(message: str) -> None:
+    resolved = _resolve_device_names_in_message(message)
     with _logs_lock:
-        _logs.append({"time": int(time.time()), "message": message})
+        _logs.append({"time": int(time.time()), "message": resolved})
         del _logs[:-_LOG_LIMIT]
+
 
 
 def get_logs() -> list[dict]:

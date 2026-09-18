@@ -17,6 +17,7 @@ from config import load_config
 from database import (
     get_conn,
     get_devices,
+    get_device_display_name,
     get_trips,
     get_trip_media,
     save_trip_clusters,
@@ -291,7 +292,8 @@ def cluster_source_media(source_id: str) -> list[dict]:
     # Save to database idempotently
     save_trip_clusters(source_id, qualifying_clusters)
     if qualifying_clusters:
-        add_log(f"[Trips] Generated {len(qualifying_clusters)} trip album(s) for source {source_id}")
+        dev_name = get_device_display_name(source_id)
+        add_log(f"[Trips] Generated {len(qualifying_clusters)} trip album(s) for {dev_name}")
 
     return qualifying_clusters
 
@@ -305,7 +307,7 @@ def cluster_all_devices() -> None:
             try:
                 cluster_source_media(did)
             except Exception as e:
-                add_log(f"[Trips] Clustering failed for device {did}: {e}")
+                add_log(f"[Trips] Clustering failed for device {get_device_display_name(did)}: {e}")
 
 
 _debounce_timers: dict[str, threading.Timer] = {}
@@ -315,16 +317,29 @@ _timer_lock = threading.Lock()
 def trigger_background_clustering(source_id: str | None = None) -> None:
     """Trigger background clustering with a 3-second debounce window."""
     def _run():
+        with _timer_lock:
+            _debounce_timers.pop(key, None)
         if source_id:
             try:
                 cluster_source_media(source_id)
             except Exception as e:
-                add_log(f"[Trips] Background clustering failed for {source_id}: {e}")
+                add_log(f"[Trips] Background clustering failed for {get_device_display_name(source_id)}: {e}")
         else:
             cluster_all_devices()
 
     with _timer_lock:
-        key = source_id or "__all__"
+        if source_id is None:
+            # Full clustering scheduled: cancel any pending individual device timers
+            for t in _debounce_timers.values():
+                t.cancel()
+            _debounce_timers.clear()
+            key = "__all__"
+        else:
+            # If a full cluster is already scheduled, it will cover this device
+            if "__all__" in _debounce_timers:
+                return
+            key = source_id
+
         if key in _debounce_timers:
             _debounce_timers[key].cancel()
 

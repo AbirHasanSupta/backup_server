@@ -22,7 +22,7 @@ import time
 import urllib.request
 
 from config import APP_DATA_DIR, load_config
-from database import get_media_for_year_month
+from database import get_device_display_name, get_media_for_year_month
 from ffmpeg_utils import resolve_ffmpeg_path
 from memories import VIDEO_EXTS, _shared_sources_for_device
 from state import add_log
@@ -509,7 +509,7 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
 
             items = get_reel_items(device_id, year, month, randomize=True)
             if not items:
-                add_log(f"[Rewind] no items available for {device_id} {year}/{month or 'all'}")
+                add_log(f"[Rewind] no items available for {get_device_display_name(device_id)} {year}/{month or 'all'}")
                 return
 
             nonce = f"{int(time.time())}-{random.randint(1000, 9999)}"
@@ -627,7 +627,7 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                     os.replace(partial_out, out_path)
                     _set_latest_reel_path(device_id, year, month, out_path)
                     success = True
-                    add_log(f"🎬 Built reel for {device_id} {year}/{month or 'all'} ({len(segments)} clips)")
+                    add_log(f"🎬 Built reel for {get_device_display_name(device_id)} {year}/{month or 'all'} ({len(segments)} clips)")
                 else:
                     add_log("[Rewind] final output empty — aborting")
             finally:
