@@ -731,13 +731,12 @@ function customizeMainApplication(contents, language) {
       'import java.util.concurrent.TimeUnit',
     ];
 
-    for (const imp of kotlinImports) {
-      if (!modified.includes(imp)) {
-        modified = modified.replace(
-          /package\s+[^\n]+/,
-          `$&\n\n${imp}`
-        );
-      }
+    const missingKotlinImports = kotlinImports.filter((imp) => !modified.includes(imp));
+    if (missingKotlinImports.length > 0) {
+      modified = modified.replace(
+        /package\s+[^\n]+/,
+        `$&\n\n${missingKotlinImports.join('\n')}`
+      );
     }
 
     // 2. Add BackupWakeLockPackage to package list
@@ -800,13 +799,12 @@ function customizeMainApplication(contents, language) {
       'import java.util.concurrent.TimeUnit;',
     ];
 
-    for (const imp of javaImports) {
-      if (!modified.includes(imp)) {
-        modified = modified.replace(
-          /package\s+[^\n]+/,
-          `$&\n\n${imp}`
-        );
-      }
+    const missingJavaImports = javaImports.filter((imp) => !modified.includes(imp));
+    if (missingJavaImports.length > 0) {
+      modified = modified.replace(
+        /package\s+[^\n]+/,
+        `$&\n\n${missingJavaImports.join('\n')}`
+      );
     }
 
     // 2. Add BackupWakeLockPackage to package list
