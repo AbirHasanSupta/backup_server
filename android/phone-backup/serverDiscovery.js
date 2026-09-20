@@ -94,16 +94,20 @@ async function probeServer(ip, port, timeoutMs = TIMEOUT_MS, retry = false) {
     const allIps = Array.isArray(data.all_ips) && data.all_ips.length > 0 ? data.all_ips : [host];
     const tailscaleIps = Array.isArray(data.tailscale?.ips) ? data.tailscale.ips : [];
     const tailscaleDns = data.tailscale?.dns_name || '';
+    const isPrivate = isPrivateNetworkAddress(host);
+    const chosenIp = (!isPrivate && !isNumericIp(host))
+      ? (allIps.find((ip) => isNumericIp(ip)) || host)
+      : host;
     return {
       serverId: data.server_id || '',
-      ip: host,
+      ip: chosenIp,
       port: targetPort,
       name: (data.name && String(data.name).trim()) || host,
       hostname: data.hostname || '',
       version: data.version || '?',
       certFingerprint: data.cert_fingerprint || '',
       all_ips: allIps,
-      candidateIps: Array.from(new Set([host, ...allIps, ...tailscaleIps, tailscaleDns].filter(Boolean))),
+      candidateIps: Array.from(new Set([chosenIp, host, ...allIps, ...tailscaleIps, tailscaleDns].filter(Boolean))),
       tailscale: data.tailscale || null,
     };
   }
@@ -265,8 +269,12 @@ export async function discoverServers(onProgress, options = {}) {
             ...(r.candidateIps || [r.ip]),
           ].filter(Boolean)));
 
-          // Prioritize the IP that actively responded in the current scan on this mesh node
-          const chosenIp = r.ip || existing.ip;
+          // Prioritize numeric IPv4 on LAN, or responding IP
+          let chosenIp = r.ip || existing.ip;
+          if (!isPrivateNetworkAddress(chosenIp) && !isNumericIp(chosenIp)) {
+            const numeric = mergedCandidates.find((ip) => isNumericIp(ip));
+            if (numeric) chosenIp = numeric;
+          }
 
           const resolvedName = (existing.name && !isNumericIp(existing.name) && existing.name !== existing.ip)
             ? existing.name

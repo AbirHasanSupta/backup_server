@@ -49,6 +49,7 @@ import {
   parseServerAddress,
   formatHostForUrl,
   isPrivateNetworkAddress,
+  ipv4Octets,
 } from '../../settings';
 import { hapticMedium, hapticLight, hapticSuccess, hapticError } from '@/utils/haptics';
 import { registerBackgroundTask, runSync, getCurrentSyncState } from '../../backgroundTask';
@@ -188,13 +189,24 @@ export default function SettingsScreen() {
         clearTimeout(timeout);
         if (res.ok) {
           const data = await res.json();
-          if (data?.name) {
+          if (data?.name && data.name !== name) {
             await setServerName(data.name);
             setServerNameState(data.name);
+            const unifiedCandidates = [
+              ip,
+              ...(Array.isArray(data.all_ips) ? data.all_ips : []),
+              ...(Array.isArray(data.tailscale?.ips) ? data.tailscale.ips : []),
+              data.tailscale?.dns_name || '',
+            ].filter(Boolean);
             const updated = await saveServerProfile({
               ip,
               port: Number(port) || 8000,
+              serverId: data.server_id || '',
               name: data.name,
+              all_ips: Array.isArray(data.all_ips) ? data.all_ips : [ip],
+              candidateIps: unifiedCandidates,
+              tailscale: data.tailscale || null,
+              hostname: data.hostname || '',
               connectionMode: mode,
             });
             setSavedServers(updated);
@@ -249,7 +261,7 @@ export default function SettingsScreen() {
     }
 
     const parsed = parseServerAddress(serverIp, Number.parseInt(serverPort, 10) || 8000);
-    const cleanIp = parsed.host;
+    let cleanIp = parsed.host;
     const portNum = parsed.port;
 
     if (!cleanIp) {
@@ -262,8 +274,6 @@ export default function SettingsScreen() {
       return;
     }
 
-    setServerIpState(cleanIp);
-    setServerPortState(String(portNum));
     const isPrivate = connectionMode === 'private-network' || isPrivateNetworkAddress(cleanIp);
     const selectedMode = isPrivate ? 'private-network' : 'lan';
     setConnectionModeState(selectedMode);
@@ -291,6 +301,14 @@ export default function SettingsScreen() {
           discoveredHostname = data?.hostname || '';
         }
       } catch {}
+
+      if (!isPrivate && !ipv4Octets(cleanIp)) {
+        const numeric = discoveredAllIps.find((ip) => ipv4Octets(ip));
+        if (numeric) cleanIp = numeric;
+      }
+
+      setServerIpState(cleanIp);
+      setServerPortState(String(portNum));
 
       const unifiedCandidates = [
         cleanIp,
@@ -378,13 +396,9 @@ export default function SettingsScreen() {
     tailscale?: { available?: boolean; ips?: string[]; dns_name?: string } | null;
   }) => {
     const parsed = parseServerAddress(server.ip, server.port);
-    const cleanIp = parsed.host;
+    let cleanIp = parsed.host;
     const port = parsed.port || server.port;
     if (!cleanIp) return;
-
-    setServerIpState(cleanIp);
-    setServerPortState(String(port));
-    setServerNameState(server.name || cleanIp);
 
     const isPrivate =
       server.connectionMode === 'private-network' ||
@@ -392,6 +406,15 @@ export default function SettingsScreen() {
       isPrivateNetworkAddress(cleanIp);
     const selectedMode = isPrivate ? 'private-network' : 'lan';
     setConnectionModeState(selectedMode);
+
+    if (!isPrivate && !ipv4Octets(cleanIp)) {
+      const numeric = (server.all_ips || server.candidateIps || []).find((ip: string) => ipv4Octets(ip));
+      if (numeric) cleanIp = numeric;
+    }
+
+    setServerIpState(cleanIp);
+    setServerPortState(String(port));
+    setServerNameState(server.name || cleanIp);
 
     const key = apiKey.trim() || 'YOUR_SECRET_KEY';
     const unifiedCandidates = [
@@ -593,7 +616,13 @@ export default function SettingsScreen() {
                 <FieldLabel text="Saved servers" styles={styles} />
                 <View style={styles.savedServersList}>
                   {savedServers.map((srv) => {
-                    const isActive = srv.ip === serverIp && String(srv.port) === String(serverPort);
+                    const srvPort = String(srv.port || 8000);
+                    const currentPort = String(serverPort || 8000);
+                    const isActive =
+                      srvPort === currentPort &&
+                      (srv.ip === serverIp ||
+                        (Array.isArray(srv.candidateIps) && srv.candidateIps.includes(serverIp)) ||
+                        (srv.hostname && (srv.hostname === serverIp || `${srv.hostname}.local` === serverIp)));
                     const displayName = (isActive && serverName) ? serverName : (srv.name || srv.ip);
                     return (
                       <View

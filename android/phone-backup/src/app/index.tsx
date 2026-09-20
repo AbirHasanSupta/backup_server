@@ -255,7 +255,23 @@ export default function HomeScreen() {
             await setServerName(data.name);
             setServerLabel(data.name);
             const mode = await getConnectionMode();
-            await saveServerProfile({ ip, port: Number(port) || 8000, name: data.name, connectionMode: mode }).catch(() => {});
+            const unifiedCandidates = [
+              ip,
+              ...(Array.isArray(data.all_ips) ? data.all_ips : []),
+              ...(Array.isArray(data.tailscale?.ips) ? data.tailscale.ips : []),
+              data.tailscale?.dns_name || '',
+            ].filter(Boolean);
+            await saveServerProfile({
+              ip,
+              port: Number(port) || 8000,
+              serverId: data.server_id || '',
+              name: data.name,
+              all_ips: Array.isArray(data.all_ips) ? data.all_ips : [ip],
+              candidateIps: unifiedCandidates,
+              tailscale: data.tailscale || null,
+              hostname: data.hostname || '',
+              connectionMode: mode,
+            }).catch(() => {});
           }
         }
       } catch {}

@@ -102,6 +102,8 @@ export const FILE_TYPE_EXTENSIONS = {
 // ─── Server ───────────────────────────────────────────────────────────────────
 export async function getServerIp()   { return (await AsyncStorage.getItem(KEYS.SERVER_IP)) || ''; }
 export async function setServerIp(ip) {
+  const prev = await AsyncStorage.getItem(KEYS.SERVER_IP);
+  if (prev === ip) return;
   await AsyncStorage.setItem(KEYS.SERVER_IP, ip);
   DeviceEventEmitter.emit('settings-updated');
 }
@@ -111,7 +113,10 @@ export async function getServerPort() {
   return port >= 1 && port <= 65535 ? port : 8000;
 }
 export async function setServerPort(port)  {
-  await AsyncStorage.setItem(KEYS.SERVER_PORT, String(port));
+  const str = String(port);
+  const prev = await AsyncStorage.getItem(KEYS.SERVER_PORT);
+  if (prev === str) return;
+  await AsyncStorage.setItem(KEYS.SERVER_PORT, str);
   DeviceEventEmitter.emit('settings-updated');
 }
 
@@ -206,25 +211,37 @@ export async function getConnectionMode() {
     : 'lan';
 }
 export async function setConnectionMode(mode) {
-  await AsyncStorage.setItem(KEYS.CONNECTION_MODE, mode === 'private-network' ? 'private-network' : 'lan');
+  const next = mode === 'private-network' ? 'private-network' : 'lan';
+  const prev = await AsyncStorage.getItem(KEYS.CONNECTION_MODE);
+  if (prev === next) return;
+  await AsyncStorage.setItem(KEYS.CONNECTION_MODE, next);
   DeviceEventEmitter.emit('settings-updated');
 }
 
 export async function getServerName()      { return (await AsyncStorage.getItem(KEYS.SERVER_NAME)) || ''; }
 export async function setServerName(name)  {
-  await AsyncStorage.setItem(KEYS.SERVER_NAME, name);
+  const next = name || '';
+  const prev = (await AsyncStorage.getItem(KEYS.SERVER_NAME)) || '';
+  if (prev === next) return;
+  await AsyncStorage.setItem(KEYS.SERVER_NAME, next);
   DeviceEventEmitter.emit('settings-updated');
 }
 
 export async function getApiKey()          { return (await AsyncStorage.getItem(KEYS.API_KEY)) || 'YOUR_SECRET_KEY'; }
 export async function setApiKey(key)       {
-  await AsyncStorage.setItem(KEYS.API_KEY, key);
+  const next = key || 'YOUR_SECRET_KEY';
+  const prev = (await AsyncStorage.getItem(KEYS.API_KEY)) || 'YOUR_SECRET_KEY';
+  if (prev === next) return;
+  await AsyncStorage.setItem(KEYS.API_KEY, next);
   DeviceEventEmitter.emit('settings-updated');
 }
 
 export async function getUsername()        { return (await AsyncStorage.getItem(KEYS.USERNAME)) || ''; }
 export async function setUsername(name)    {
-  await AsyncStorage.setItem(KEYS.USERNAME, (name || '').trim());
+  const next = (name || '').trim();
+  const prev = (await AsyncStorage.getItem(KEYS.USERNAME)) || '';
+  if (prev === next) return;
+  await AsyncStorage.setItem(KEYS.USERNAME, next);
   DeviceEventEmitter.emit('settings-updated');
 }
 
@@ -717,7 +734,18 @@ export async function setServerCertFingerprint(fp) { await AsyncStorage.setItem(
 export async function getSavedServers() {
   const raw = await AsyncStorage.getItem(KEYS.SAVED_SERVERS).catch(() => null);
   const parsed = safeJsonParse(raw, []);
-  return Array.isArray(parsed) ? parsed : [];
+  if (!Array.isArray(parsed)) return [];
+  const unique = [];
+  const seen = new Set();
+  for (const s of parsed) {
+    if (!s || !s.ip) continue;
+    const key = s.serverId ? `id:${s.serverId}` : `${s.ip}:${s.port || 8000}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(s);
+    }
+  }
+  return unique;
 }
 
 export function isLocalLanSubnet(ip) {
@@ -747,29 +775,9 @@ export async function saveServerProfile(server) {
   const id = `${cleanIp}:${port}`;
   const now = Date.now();
 
-  // Match by: serverId (exact machine match), exact id, exact ip:port, or candidateIps overlap.
-  const idx = servers.findIndex((s) => {
-    if (server.serverId && s.serverId && server.serverId === s.serverId) {
-      return true;
-    }
-    if (server.serverId && s.serverId && server.serverId !== s.serverId) {
-      return false;
-    }
-    return (
-      s.id === id ||
-      (s.ip === cleanIp && (Number(s.port) || 8000) === port) ||
-      (
-        Array.isArray(s.candidateIps) &&
-        s.candidateIps.includes(cleanIp) &&
-        (Number(s.port) || 8000) === port
-      )
-    );
-  });
-  const existing = idx >= 0 ? servers[idx] : null;
-
   const isPrivate =
     server.connectionMode === 'private-network' ||
-    (server.connectionMode == null && existing?.connectionMode === 'private-network') ||
+    (server.connectionMode == null && servers.some((s) => (s.id === id || s.ip === cleanIp) && s.connectionMode === 'private-network')) ||
     isPrivateNetworkAddress(cleanIp);
 
   let targetIp = cleanIp;
@@ -779,6 +787,26 @@ export async function saveServerProfile(server) {
     const numeric = (server.all_ips || server.candidateIps || []).find((ip) => ipv4Octets(ip));
     if (numeric) targetIp = numeric;
   }
+
+  // Match by: serverId (exact machine match), exact id, exact ip:port, hostname:port, or candidateIps overlap.
+  const idx = servers.findIndex((s) => {
+    if (server.serverId && s.serverId && server.serverId === s.serverId) {
+      return true;
+    }
+    if (server.serverId && s.serverId && server.serverId !== s.serverId) {
+      return false;
+    }
+    const sPort = Number(s.port) || 8000;
+    if (sPort !== port) return false;
+
+    if (s.id === id || s.id === `${targetIp}:${port}`) return true;
+    if (s.ip === cleanIp || s.ip === targetIp) return true;
+    if (s.hostname && (s.hostname === cleanIp || s.hostname === targetIp || `${s.hostname}.local` === cleanIp || `${s.hostname}.local` === targetIp)) return true;
+    if (Array.isArray(s.candidateIps) && (s.candidateIps.includes(cleanIp) || s.candidateIps.includes(targetIp))) return true;
+    if (Array.isArray(server.candidateIps) && (server.candidateIps.includes(s.ip) || (s.hostname && server.candidateIps.includes(s.hostname)))) return true;
+    return false;
+  });
+  const existing = idx >= 0 ? servers[idx] : null;
 
   const resolvedName = (server.name && server.name !== targetIp)
     ? server.name
@@ -797,6 +825,7 @@ export async function saveServerProfile(server) {
   // server-reported Tailscale endpoints, and previously known mesh IPs.
   const candidateSet = new Set([
     targetIp,
+    cleanIp,
     ...incomingCandidates,
     ...tailscaleIps,
     tailscaleDns,
@@ -830,31 +859,50 @@ export async function saveServerProfile(server) {
     servers.unshift(profile);
   }
 
-  await AsyncStorage.setItem(KEYS.SAVED_SERVERS, JSON.stringify(servers)).catch(() => {});
-  return servers;
+  // Deduplicate before saving
+  const deduplicated = [];
+  const seenKeys = new Set();
+  for (const s of servers) {
+    const k = s.serverId ? `id:${s.serverId}` : `${s.ip}:${s.port || 8000}`;
+    if (!seenKeys.has(k)) {
+      seenKeys.add(k);
+      deduplicated.push(s);
+    }
+  }
+
+  await AsyncStorage.setItem(KEYS.SAVED_SERVERS, JSON.stringify(deduplicated)).catch(() => {});
+  return deduplicated;
 }
 
 export async function removeSavedServer(id) {
-  const servers = (await getSavedServers()).filter((s) => s.id !== id && s.ip !== id);
+  const servers = (await getSavedServers()).filter((s) => s.id !== id && s.ip !== id && s.serverId !== id);
   await AsyncStorage.setItem(KEYS.SAVED_SERVERS, JSON.stringify(servers)).catch(() => {});
   return servers;
 }
 
 export async function switchToSavedServer(id) {
   const servers = await getSavedServers();
-  const server = servers.find((s) => s.id === id || s.ip === id);
+  const server = servers.find((s) => s.id === id || s.ip === id || (s.serverId && s.serverId === id));
   if (!server) return null;
 
+  let targetIp = server.ip;
+  const isPrivate = server.connectionMode === 'private-network' || isPrivateNetworkAddress(targetIp);
+  if (!isPrivate && !ipv4Octets(targetIp)) {
+    const numeric = (server.all_ips || server.candidateIps || []).find((ip) => ipv4Octets(ip));
+    if (numeric) targetIp = numeric;
+  }
+
   await AsyncStorage.multiSet([
-    [KEYS.SERVER_IP, server.ip],
+    [KEYS.SERVER_IP, targetIp],
     [KEYS.SERVER_PORT, String(server.port || 8000)],
-    [KEYS.SERVER_NAME, server.name || server.ip],
+    [KEYS.SERVER_NAME, server.name || targetIp],
     [KEYS.API_KEY, server.apiKey || 'YOUR_SECRET_KEY'],
     [KEYS.DEVICE_TOKEN, server.deviceToken || ''],
     [KEYS.CERT_FINGERPRINT, server.certFingerprint || ''],
-    [KEYS.CONNECTION_MODE, server.connectionMode === 'private-network' ? 'private-network' : 'lan'],
+    [KEYS.CONNECTION_MODE, isPrivate ? 'private-network' : 'lan'],
   ]);
 
+  server.ip = targetIp;
   server.lastConnectedAt = Date.now();
   await AsyncStorage.setItem(KEYS.SAVED_SERVERS, JSON.stringify(servers)).catch(() => {});
   DeviceEventEmitter.emit('settings-updated');
@@ -918,7 +966,7 @@ async function quickProbe(target, port, timeoutMs = 2500) {
   }
 }
 
-function ipv4Octets(ip) {
+export function ipv4Octets(ip) {
   const parsed = parseServerAddress(ip);
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(parsed.host || '');
   if (!m) return null;
@@ -976,12 +1024,24 @@ async function _commitReachableServer({ newIp, port, probeData, serverName }) {
   const cleanIp = parsed.host;
   const resolvedPort = parsed.port || port;
 
-  await AsyncStorage.setItem(KEYS.SERVER_IP, cleanIp);
   const configuredMode = await getConnectionMode();
   const isPrivate = configuredMode === 'private-network' || isPrivateNetworkAddress(cleanIp);
   const connectionMode = isPrivate ? 'private-network' : 'lan';
 
+  // In LAN mode, normalize hostname/mDNS targets to a responding numeric IPv4 from probeData.all_ips
+  let targetIp = cleanIp;
+  if (!isPrivate && !ipv4Octets(targetIp)) {
+    const numeric = (probeData?.all_ips || probeData?.candidateIps || []).find((ip) => ipv4Octets(ip));
+    if (numeric) targetIp = numeric;
+  }
+
+  await AsyncStorage.multiSet([
+    [KEYS.SERVER_IP, targetIp],
+    [KEYS.SERVER_PORT, String(resolvedPort)],
+  ]);
+
   const unifiedCandidates = [
+    targetIp,
     cleanIp,
     ...(Array.isArray(probeData?.candidateIps) ? probeData.candidateIps : []),
     ...(Array.isArray(probeData?.all_ips) ? probeData.all_ips : []),
@@ -990,11 +1050,11 @@ async function _commitReachableServer({ newIp, port, probeData, serverName }) {
   ].filter(Boolean);
 
   await saveServerProfile({
-    ip: cleanIp,
+    ip: targetIp,
     port: resolvedPort,
     serverId: probeData?.server_id || '',
-    name: probeData?.name || serverName || cleanIp,
-    all_ips: probeData?.all_ips || [cleanIp],
+    name: probeData?.name || serverName || targetIp,
+    all_ips: probeData?.all_ips || [targetIp],
     candidateIps: unifiedCandidates,
     tailscale: probeData?.tailscale || null,
     hostname: probeData?.hostname || '',
@@ -1085,35 +1145,46 @@ export async function resolveReachableServer(options = {}) {
       // Step 2: Probe saved profile mesh IPs, Tailscale endpoints, and hostnames concurrently.
       const step2TimeoutMs = Math.max(options.timeoutMs || 2000, 2500);
 
-      const candidates = new Set();
+      const numericCandidates = new Set();
+      const hostnameCandidates = new Set();
+
+      const addCandidate = (cand) => {
+        if (!cand || cand === cleanCurrentIp) return;
+        const parsed = parseServerAddress(cand);
+        const h = parsed.host;
+        if (!h || h === cleanCurrentIp) return;
+        if (ipv4Octets(h) || (isPrivateNetwork && isPrivateNetworkAddress(h))) {
+          numericCandidates.add(h);
+        } else {
+          hostnameCandidates.add(h);
+          if (!h.endsWith('.local') && !h.includes('.')) {
+            hostnameCandidates.add(`${h}.local`);
+          }
+        }
+      };
+
       if (activeProfile) {
         if (Array.isArray(activeProfile.candidateIps)) {
-          activeProfile.candidateIps.forEach((cip) => {
-            if (cip && cip !== cleanCurrentIp) candidates.add(cip);
-          });
+          activeProfile.candidateIps.forEach(addCandidate);
+        }
+        if (Array.isArray(activeProfile.all_ips)) {
+          activeProfile.all_ips.forEach(addCandidate);
         }
         if (activeProfile.hostname) {
-          candidates.add(activeProfile.hostname);
-          if (!activeProfile.hostname.endsWith('.local') && !activeProfile.hostname.includes('.')) {
-            candidates.add(`${activeProfile.hostname}.local`);
-          }
+          addCandidate(activeProfile.hostname);
         }
       }
 
       savedServers.forEach((s) => {
         if (s === activeProfile) return;
-        if (!expectedServerId || s.serverId !== expectedServerId) return;
-        if (s.ip && s.ip !== cleanCurrentIp) candidates.add(s.ip);
-        if (Array.isArray(s.candidateIps)) {
-          s.candidateIps.forEach((cip) => { if (cip && cip !== cleanCurrentIp) candidates.add(cip); });
-        }
-        if (s.hostname) {
-          candidates.add(s.hostname);
-          if (!s.hostname.endsWith('.local') && !s.hostname.includes('.')) candidates.add(`${s.hostname}.local`);
-        }
+        if (expectedServerId && s.serverId && s.serverId !== expectedServerId) return;
+        if (s.ip && s.ip !== cleanCurrentIp) addCandidate(s.ip);
+        if (Array.isArray(s.candidateIps)) s.candidateIps.forEach(addCandidate);
+        if (Array.isArray(s.all_ips)) s.all_ips.forEach(addCandidate);
+        if (s.hostname) addCandidate(s.hostname);
       });
 
-      const candidateList = Array.from(candidates);
+      const candidateList = [...Array.from(numericCandidates), ...Array.from(hostnameCandidates)];
       if (candidateList.length > 0) {
         const probeResults = await Promise.all(
           candidateList.map(async (cand) => {
@@ -1122,12 +1193,14 @@ export async function resolveReachableServer(options = {}) {
           })
         );
 
-        const found = probeResults.find((r) => r.probe.ok && matchesExpectedServer(r.probe));
-        if (found) {
-          const newIp = found.target;
+        const successful = probeResults.filter((r) => r.probe.ok && matchesExpectedServer(r.probe));
+        if (successful.length > 0) {
+          // Prioritize numeric IPv4 endpoint on LAN
+          const preferred = (!isPrivateNetwork ? successful.find((r) => ipv4Octets(r.target)) : null) || successful[0];
+          const newIp = preferred.target;
           console.log(`[Mesh Roaming] Found server at candidate address: ${newIp} (was ${cleanCurrentIp})`);
-          await _commitReachableServer({ newIp, port, probeData: found.probe.data, serverName });
-          return { ok: true, ip: newIp, reconnected: true, data: found.probe.data };
+          await _commitReachableServer({ newIp, port, probeData: preferred.probe.data, serverName });
+          return { ok: true, ip: newIp, reconnected: true, data: preferred.probe.data };
         }
       }
 
