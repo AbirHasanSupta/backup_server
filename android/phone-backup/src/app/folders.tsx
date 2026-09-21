@@ -16,7 +16,7 @@ import {
   getServerIp,
   resolveReachableServer,
 } from '../../settings';
-import { runSync, getCurrentSyncState } from '../../backgroundTask';
+import { runSync, getCurrentSyncState, setUIPriorityMode } from '../../backgroundTask';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { FolderCard, Folder } from '@/components/FolderCard';
 import { FileTypeSelector } from '@/components/FileTypeSelector';

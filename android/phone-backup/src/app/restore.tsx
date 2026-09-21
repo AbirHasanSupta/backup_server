@@ -32,7 +32,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { addSharedPostTapListener } from '../../notificationService';
-import { setUIPriorityMode } from '../../backgroundTask';
+import { setUIPriorityMode, getCurrentSyncState } from '../../backgroundTask';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
@@ -87,7 +87,6 @@ import {
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp, resolveReachableServer } from '../../settings';
-import { getCurrentSyncState } from '../../backgroundTask';
 import { prunePreviewCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticSelection, hapticLongPress, hapticSuccess, hapticError, hapticLight } from '@/utils/haptics';
