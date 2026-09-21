@@ -62,6 +62,10 @@ def main() -> None:
     python = resolve_python()
     print(f"      Using: {python}")
 
+    # Frozen executables cannot inspect the source checkout at runtime, so
+    # embed a file generated from the current Git tag before packaging.
+    run(python, str(ROOT / "scripts" / "sync_version.py"))
+
     # ── 2. Ensure PyInstaller is installed ───────────────────────────────────
     step(2, 5, "Checking PyInstaller...")
     rc = run(python, "-m", "PyInstaller", "--version", check=False)
@@ -209,6 +213,7 @@ def main() -> None:
         "--windowed",
         "--name", "Phone Backup Server",
         "--icon", str(ROOT / "assets" / "icon.ico"),
+        "--add-data", f"{ROOT / 'VERSION'}{sep}.",
         "--add-data", f"{ROOT / 'assets'}{sep}assets",
         "--collect-all", "customtkinter",
         "--collect-all", "tkinterdnd2",

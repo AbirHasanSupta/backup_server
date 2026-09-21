@@ -1,7 +1,7 @@
 {
   "name": "phone-backup",
   "main": "index.js",
-  "version": "4.4.1",
+  "version": "5.0.0",
   "dependencies": {
     "@expo/ui": "~57.0.19",
     "@react-native-async-storage/async-storage": "2.2.0",
@@ -52,12 +52,19 @@
     "typescript": "~6.0.3"
   },
   "scripts": {
+    "version:sync": "python ../../scripts/sync_version.py",
+    "prestart": "npm run version:sync",
     "start": "expo start",
+    "preandroid": "npm run version:sync",
     "android": "expo run:android",
+    "preios": "npm run version:sync",
     "ios": "expo run:ios",
+    "preweb": "npm run version:sync",
     "web": "expo start --web",
     "lint": "expo lint",
+    "prebuild:apk": "npm run version:sync",
     "build:apk": "eas build -p android --profile preview",
+    "prebuild:apk:prod": "npm run version:sync",
     "build:apk:prod": "eas build -p android --profile production-apk"
   },
   "expo": {

@@ -18,3 +18,6 @@ key.pem
 # PyInstaller build artifacts
 *.exe
 *.spec
+
+# Generated from the current semantic Git tag by scripts/sync_version.py.
+VERSION

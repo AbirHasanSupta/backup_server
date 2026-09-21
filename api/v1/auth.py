@@ -14,11 +14,9 @@ from core.security import verify_api_key_or_device_token
 from repositories import device_repo
 from state import add_log, get_current_activity, pending_connections, set_current_activity
 from network_info import get_all_local_ips, get_tailscale_network_info
+from version import APP_VERSION
 
 router = APIRouter(tags=["Authentication & Devices"])
-
-APP_VERSION = "4.4.1"
-
 
 class ConnectRequest(BaseModel):
     device_name: str

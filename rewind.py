@@ -26,6 +26,7 @@ from database import get_device_display_name, get_media_for_year_month
 from ffmpeg_utils import resolve_ffmpeg_path
 from memories import VIDEO_EXTS, _shared_sources_for_device
 from state import add_log
+from version import APP_VERSION
 
 DEFAULT_REWIND_CACHE_DIR = os.path.join(APP_DATA_DIR, "rewind_cache")
 DEFAULT_MUSIC_CACHE_DIR = os.path.join(APP_DATA_DIR, "music_cache")
@@ -446,7 +447,7 @@ def _get_or_fetch_background_music(ffmpeg: str, chosen_index: int | None = None)
             try:
                 req = urllib.request.Request(
                     track["url"],
-                    headers={"User-Agent": "PhoneBackupServer/4.4.1 (https://github.com/AbirHasanSupta/backup_server; supta@local.net)"},
+                    headers={"User-Agent": f"PhoneBackupServer/{APP_VERSION} (https://github.com/AbirHasanSupta/backup_server; supta@local.net)"},
                 )
                 with urllib.request.urlopen(req, timeout=15) as response:
                     if response.status == 200:

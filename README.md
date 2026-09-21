@@ -1,6 +1,23 @@
-# Phone Backup Server (v4.4.1)
+# Phone Backup Server
 
 A self-hosted, high-performance photo, video, and file backup & restore ecosystem over LAN. The project consists of a feature-rich **Windows Desktop Control Center** (FastAPI backend + CustomTkinter GUI) and a **React Native / Expo Android App** that provides automatic background synchronization, differential file transfers, cross-device file restoration, short video Reels with reposting and bookmarking, device-to-device media sharing with comments and reactions, an "On This Day" media memories feed, automated video rewind reels, smart trip albums, photo quizzes, location clusters, safe local storage cleanup, and shared desktop folder access.
+
+The server supports a simple Windows/SQLite installation as well as a
+production-oriented Docker deployment with PostgreSQL, Redis, Celery workers,
+and Nginx. New API routes live in `api/v1/`; the existing routes in `upload.py`
+remain available for installed clients that use the legacy paths.
+
+## Documentation and release version
+
+- Follow the complete, step-by-step [setup and installation guide](SETUP.md)
+  for Windows, headless, Docker, and Android deployments.
+- Release identity comes from the nearest semantic Git tag reachable from
+  `HEAD`; use `git describe --tags --abbrev=0` to inspect it. The server API,
+  OpenAPI metadata, LAN discovery, Android app config, and release builds share
+  that value.
+- Create releases using tags such as `vMAJOR.MINOR.PATCH`; do not manually edit
+  version strings. `python scripts/sync_version.py` prepares generated package
+  metadata, while the Python and Android build commands run it automatically.
 
 ---
 
@@ -55,11 +72,20 @@ A self-hosted, high-performance photo, video, and file backup & restore ecosyste
 
 ## Repository Architecture
 
+The backend is deliberately split into an API layer, service layer, repository
+layer, and storage layer. This makes the PostgreSQL/Redis/Celery deployment
+available without removing the lightweight SQLite desktop mode.
+
 ```
 .
 ├── server.py               FastAPI application entrypoint & uvicorn runner with thread limiter
 ├── desktop_app.py          CustomTkinter GUI (Dashboard, Devices, Post Composer, Manage Posts, Shared Folders, Settings, Logs, History)
-├── upload.py               FastAPI router endpoints (backup, restore, shared folders, memories, rewinds, trips, shares, feed, reels, comments, cleanup, notifications)
+├── api/v1/                 Auth, sync, files, feed, reels, memories, trips, cleanup & WebSocket API routes
+├── services/               Application services for sync, media, feeds, previews, trips, Redis & WebSockets
+├── repositories/           Database access layer for devices, files, social content, reels, trips & media
+├── storage/                Pluggable local/S3 storage providers and resumable-upload cleanup
+├── tasks/                  Celery task entry points for video, rewind & indexing workloads
+├── upload.py               Legacy compatibility router and transfer handlers
 ├── database.py             SQLite schema, pooled connections, device tokens, custom usernames, sync sessions, media index, trips, shares, reels, comments & cleanup logs
 ├── storage.py               Disk storage management, per-device paths, SHA-256 verification & safe path resolution
 ├── trips.py                Spatial-temporal clustering, reverse geocoding (Nominatim cache) & trip album generation
@@ -168,7 +194,12 @@ python server.py
 
 ### Container deployment
 
-For the PostgreSQL, Redis, Celery, and Nginx deployment, copy [`.env.example`](.env.example) to `.env`, replace every placeholder with a unique secret, then run `docker compose up -d --build`. The compose stack deliberately requires those credentials and exposes only HTTP port 80; terminate TLS at a configured reverse proxy/load balancer before allowing non-private-network access.
+For the PostgreSQL, Redis, Celery, and Nginx deployment, copy
+[`.env.example`](.env.example) to `.env`, replace every placeholder with a
+unique secret, run `python scripts/sync_version.py`, then run
+`docker compose up -d --build`. The compose stack deliberately requires those
+credentials and exposes only HTTP port 80; terminate TLS at a configured reverse
+proxy/load balancer before allowing non-private-network access.
 
 ### 3. Building Standalone Windows Executable
 To bundle the GUI server into a standalone `.exe`:
@@ -185,8 +216,8 @@ The compiled binary will be saved in the `dist/` directory.
 
 ```bash
 cd android/phone-backup
-npm install
-npx expo start
+npm ci
+npm run start
 ```
 
 ### Building the Native APK / Dev Client
@@ -226,7 +257,7 @@ Wi-Fi network. The existing API key and per-device approval still apply.
 
 ## API Surface Specification
 
-All endpoints except `/ping` require authentication via `Authorization: Bearer <TOKEN>` (accepting global API Key or issued device token, or a `?token=` query parameter for media streaming clients). All endpoint routes are also accessible via `/api/*` route aliases.
+All endpoints except `/ping` require authentication via `Authorization: Bearer <TOKEN>` (accepting a global API key or issued device token, or a `?token=` query parameter for media streaming clients). Current modular routes are available at their unversioned path and under `/api/v1`; legacy compatibility routes remain at their historical paths. Browser clients must be explicitly allowed with `CORS_ORIGINS`; native Android requests are not subject to browser CORS.
 
 | Endpoint | Method | Description |
 |---|---|---|

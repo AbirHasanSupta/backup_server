@@ -929,7 +929,7 @@ export default function SettingsScreen() {
           <SettingsCard styles={styles}>
             <View style={styles.aboutRow}>
               <Text style={styles.aboutLabel}>App version</Text>
-              <Text style={styles.aboutValue}>{Constants.expoConfig?.version ?? '4.4.1'}</Text>
+              <Text style={styles.aboutValue}>{Constants.expoConfig?.version ?? 'Unknown'}</Text>
             </View>
             <View style={styles.divider} />
             <View style={styles.aboutRow}>

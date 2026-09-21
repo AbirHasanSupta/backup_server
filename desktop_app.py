@@ -4696,7 +4696,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 try:
                     from upload import APP_VERSION as _app_version
                 except Exception:
-                    _app_version = "4.4.1"
+                    _app_version = "0.0.0+unknown"
                 try:
                     from network_info import get_tailscale_network_info
                     _ts_info = get_tailscale_network_info()

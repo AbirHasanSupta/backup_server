@@ -19,6 +19,7 @@ from config import load_config
 from database import init_db
 from upload import router as legacy_router
 from routers.websocket_hub import ws_router
+from version import APP_VERSION
 import memories
 
 logger = logging.getLogger("backup_server")
@@ -95,7 +96,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Phone Backup Server Pro",
     description="High-concurrency, multi-user media backup & social streaming server",
-    version="5.0.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 

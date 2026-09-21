@@ -23,6 +23,15 @@ if exist "%VENV%\Scripts\activate.bat" (
     echo [WARN] No .venv found — using system Python
 )
 
+:: Generate package metadata from the current semantic Git tag.  The resulting
+:: VERSION file is bundled because a frozen executable has no .git directory.
+python "%ROOT%\scripts\sync_version.py"
+if errorlevel 1 (
+    echo [ERROR] Version synchronization failed. Create a semantic Git tag first.
+    pause
+    exit /b 1
+)
+
 :: ── Ensure PyInstaller is installed ───────────────────────────────────────
 echo [2/5] Checking PyInstaller...
 python -m PyInstaller --version >nul 2>&1
@@ -47,6 +56,7 @@ python -m PyInstaller ^
     --windowed ^
     --name "PhoneBackupServer" ^
     --icon "%ROOT%\assets\icon.ico" ^
+    --add-data "%ROOT%\VERSION;." ^
     --add-data "%ROOT%\assets;assets" ^
     --collect-all customtkinter ^
     --hidden-import uvicorn ^

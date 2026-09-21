@@ -107,10 +107,9 @@ from video_preview import (
     preview_request_is_active,
 )
 from network_info import get_tailscale_network_info
+from version import APP_VERSION
 
 router = APIRouter()
-
-APP_VERSION = "4.4.1"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Auth helper

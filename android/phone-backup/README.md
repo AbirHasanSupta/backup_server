@@ -1,6 +1,22 @@
-# Phone Backup - Android Client (v4.4.1)
+# Phone Backup - Android Client
 
 React Native & Expo client app for the **Phone Backup Server**. Built with Expo SDK 57, React Native 0.86, React 19, TypeScript, and Expo Router.
+
+This client connects only to an approved Phone Backup Server device profile. It
+supports LAN discovery and saved Tailscale/WireGuard endpoints, device-scoped
+authentication, resumable large-file uploads, background sync, media restore,
+and the social/memory features provided by the companion server.
+
+## Configuration and release version
+
+- `app.json` is the human-readable base Expo configuration.
+- `app.config.js` loads that base and derives the Expo `version` and Android
+  `versionCode` from the nearest semantic Git tag. Do not add version fields to
+  `app.json`.
+- Run `npm run version:sync` to refresh npm package metadata from the tag. It is
+  already run by `npm run start`, `npm run android`, and the APK build scripts.
+- Use a tag formatted as `vMAJOR.MINOR.PATCH`. Android's version code is derived
+  as `major * 1,000,000 + minor * 1,000 + patch`.
 
 ---
 
@@ -114,12 +130,12 @@ React Native & Expo client app for the **Phone Backup Server**. Built with Expo 
 
 ### 1. Install Dependencies
 ```bash
-npm install
+npm ci
 ```
 
 ### 2. Start Development Server
 ```bash
-npx expo start
+npm run start
 ```
 
 ### 3. Build Native Android Development Client / APK
@@ -142,8 +158,14 @@ npm run build:apk:prod
 
 ## Scripts
 
-- `npm start`: Runs `expo start`
-- `npm run android`: Runs `expo run:android`
+- `npm run version:sync`: Synchronizes package metadata with the Git release tag
+- `npm start`: Synchronizes the version then runs `expo start`
+- `npm run android`: Synchronizes the version then runs `expo run:android`
+- `npm run ios`: Synchronizes the version then runs `expo run:ios`
+- `npm run web`: Synchronizes the version then runs `expo start --web`
 - `npm run lint`: Runs `expo lint`
-- `npm run build:apk`: Builds preview APK via EAS
-- `npm run build:apk:prod`: Builds production standalone APK via EAS
+- `npm run build:apk`: Synchronizes the version then builds a preview APK via EAS
+- `npm run build:apk:prod`: Synchronizes the version then builds a production APK via EAS
+
+For server installation, pairing, and deployment guidance, see the root
+[setup guide](../../SETUP.md).
