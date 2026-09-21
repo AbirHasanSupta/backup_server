@@ -30,6 +30,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { addSharedPostTapListener } from '../../notificationService';
+import { setUIPriorityMode } from '../../backgroundTask';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
@@ -3942,6 +3943,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   useFocusEffect(
     useCallback(() => {
+      setUIPriorityMode(true);
       let active = true;
       getTodaysMemories()
         .then(res => {
@@ -3955,6 +3957,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           if (active) setHasMemories(false);
         });
       return () => {
+        setUIPriorityMode(false);
         active = false;
       };
     }, [])

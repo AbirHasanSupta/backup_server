@@ -343,7 +343,7 @@ def trigger_background_clustering(source_id: str | None = None) -> None:
         if key in _debounce_timers:
             _debounce_timers[key].cancel()
 
-        timer = threading.Timer(3.0, _run)
+        timer = threading.Timer(30.0, _run)
         timer.daemon = True
         _debounce_timers[key] = timer
         timer.start()

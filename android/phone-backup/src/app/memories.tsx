@@ -44,6 +44,7 @@ import {
   downloadRewindReel,
   createDeviceShare,
 } from '../../downloader';
+import { setUIPriorityMode } from '../../backgroundTask';
 import { consumePendingFlashbackItem } from '../../notificationService';
 
 const DAY_CARD_W = 132;
@@ -637,7 +638,9 @@ export default function MemoriesScreen() {
   // opens or closes (which would instantly dismiss the just-opened modal).
   useFocusEffect(
     useCallback(() => {
+      setUIPriorityMode(true);
       return () => {
+        setUIPriorityMode(false);
         stopAllPlaybackRef.current();
       };
     }, []),

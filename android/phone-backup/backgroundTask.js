@@ -54,6 +54,20 @@ import {
 import { setPendingBackupFromSync } from './pendingBackup';
 import { triggerWidgetRefresh } from './widget';
 
+let _isUIPriorityActive = false;
+
+/**
+ * Dynamically yields background upload concurrency and adds network/flash yields
+ * when the user is actively viewing Reels, Feed, Library, or Memories.
+ */
+export function setUIPriorityMode(active) {
+  _isUIPriorityActive = !!active;
+}
+
+export function isUIPriorityMode() {
+  return _isUIPriorityActive;
+}
+
 /**
  * Converts any raw error message to a short, user-readable string.
  * Keeps technical noise (native module names, Java exception classes, stack
@@ -836,11 +850,25 @@ export async function performActualSync(onProgress, runOptions = {}) {
   if (onProgress) await onProgress(0, totalUploads, { phase: 'uploading', currentFile: '' });
   reportServerActivity('Uploading files');
 
-  async function worker() {
+  async function worker(workerId = 0) {
     while (nextIndex < pending.length) {
       if (await shouldAbortSync()) break;
+
+      // In UI Priority mode (user is active in Reels, Feed, Library, Memories),
+      // auxiliary workers yield to keep network sockets and flash I/O free for the UI
+      if (_isUIPriorityActive && workerId > 0) {
+        await new Promise((r) => setTimeout(r, 200));
+        continue;
+      }
+
       let file = pending[nextIndex++];
       if (!file) break;
+
+      // Small pacing yield in UI priority mode
+      if (_isUIPriorityActive) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
       if (onProgress) {
         await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
       }
@@ -897,7 +925,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
   }
 
   const uploadConcurrency = getUploadConcurrency(pending);
-  await Promise.all(Array.from({ length: uploadConcurrency }, () => worker()));
+  await Promise.all(Array.from({ length: uploadConcurrency }, (_, i) => worker(i)));
   await markUploadedBatch(uploadedFiles);
 
   // Match on the stable SAF document `uri` (unique per file and preserved by

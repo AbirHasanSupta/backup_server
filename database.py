@@ -231,6 +231,17 @@ def init_db():
         conn.execute("ALTER TABLE devices ADD COLUMN token TEXT")
     if 'username' not in existing_cols:
         conn.execute("ALTER TABLE devices ADD COLUMN username TEXT")
+    if 'total_bytes' not in existing_cols:
+        conn.execute("ALTER TABLE devices ADD COLUMN total_bytes INTEGER NOT NULL DEFAULT 0")
+        try:
+            conn.execute("""
+                UPDATE devices
+                SET total_bytes = COALESCE((
+                    SELECT SUM(size) FROM files WHERE files.device_id = devices.device_id
+                ), 0)
+            """)
+        except Exception:
+            pass
 
     # 2c. Back-fill folder_name for any pre-existing devices that have NULL there.
     #     We derive it the same way _make_folder_name() does so existing uploads
@@ -1031,6 +1042,16 @@ def get_device_stats(device_ip: str, device_id: str | None = None) -> dict:
     conn = get_read_conn()
     if device_id:
         row = conn.execute(
+            "SELECT files_backed_up as total_files, COALESCE(total_bytes, 0) as total_size FROM devices WHERE device_id = ?",
+            (device_id,)
+        ).fetchone()
+        if row and (row["total_files"] > 0 or row["total_size"] > 0):
+            conn.close()
+            return {
+                "total_files": row["total_files"] or 0,
+                "total_size": row["total_size"] or 0,
+            }
+        row = conn.execute(
             "SELECT COUNT(*) as total_files, COALESCE(SUM(size), 0) as total_size"
             " FROM files WHERE device_id = ?",
             (device_id,)
@@ -1043,15 +1064,77 @@ def get_device_stats(device_ip: str, device_id: str | None = None) -> dict:
             ).fetchone()
     else:
         row = conn.execute(
-            "SELECT COUNT(*) as total_files, COALESCE(SUM(size), 0) as total_size"
-            " FROM files WHERE device_ip = ?",
+            "SELECT files_backed_up as total_files, COALESCE(total_bytes, 0) as total_size FROM devices WHERE device_ip = ?",
             (device_ip,)
         ).fetchone()
+        if not row or (row["total_files"] == 0 and row["total_size"] == 0):
+            row = conn.execute(
+                "SELECT COUNT(*) as total_files, COALESCE(SUM(size), 0) as total_size"
+                " FROM files WHERE device_ip = ?",
+                (device_ip,)
+            ).fetchone()
     conn.close()
     return {
         "total_files": row["total_files"] if row else 0,
         "total_size": row["total_size"] if row else 0,
     }
+
+
+def touch_device_and_get_stats(
+    device_ip: str,
+    device_id: str | None = None,
+    files_delta: int = 1,
+    size_delta: int = 0,
+) -> dict:
+    """Atomically touch device last_seen, increment counters, and return updated stats in O(1) time."""
+    now = int(_time.time())
+    conn = get_conn()
+
+    if not device_id:
+        row = conn.execute(
+            "SELECT device_id FROM devices WHERE device_ip = ? AND device_id IS NOT NULL LIMIT 1",
+            (device_ip,),
+        ).fetchone()
+        if row:
+            device_id = row["device_id"]
+
+    if device_id:
+        if files_delta > 0 or size_delta > 0:
+            conn.execute(
+                """
+                UPDATE devices 
+                SET last_seen = ?, 
+                    device_ip = ?, 
+                    files_backed_up = files_backed_up + ?, 
+                    total_bytes = total_bytes + ? 
+                WHERE device_id = ?
+                """,
+                (now, device_ip, max(0, files_delta), max(0, size_delta), device_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE devices SET last_seen = ?, device_ip = ? WHERE device_id = ?",
+                (now, device_ip, device_id),
+            )
+
+        row = conn.execute(
+            "SELECT files_backed_up, COALESCE(total_bytes, 0) as total_bytes FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        conn.commit()
+        conn.close()
+
+        if row:
+            return {
+                "total_files": row["files_backed_up"] or 0,
+                "total_size": row["total_bytes"] or 0,
+            }
+    else:
+        conn.execute("UPDATE devices SET last_seen = ? WHERE device_ip = ?", (now, device_ip))
+        conn.commit()
+        conn.close()
+
+    return get_device_stats(device_ip, device_id)
 
 
 # ─── Device helpers ────────────────────────────────────────────────────────────

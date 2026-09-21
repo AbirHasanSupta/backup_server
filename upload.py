@@ -43,6 +43,7 @@ from database import (
     remove_device,
     remove_file_record,
     touch_device,
+    touch_device_and_get_stats,
     upsert_device,
     set_device_username,
     ensure_device_token,
@@ -601,8 +602,7 @@ def finish_upload_record(
         add_log(f"Error updating DB for {relative_path}: {str(e)}")
         raise
 
-    touch_device(device_ip, device_id=device_id, files_delta=1)
-    device_stats = get_device_stats(device_ip, device_id=device_id)
+    device_stats = touch_device_and_get_stats(device_ip, device_id=device_id, files_delta=1, size_delta=size)
     dev_name = get_device_display_name(device_id or device_ip)
     add_log(f"Uploaded: {relative_path} ({dev_name})")
     if device_id:
@@ -616,8 +616,7 @@ def finish_upload_record(
 
 
 def skipped_upload_response(device_ip: str, device_id: str | None):
-    touch_device(device_ip, device_id=device_id, files_delta=0)
-    device_stats = get_device_stats(device_ip, device_id=device_id)
+    device_stats = touch_device_and_get_stats(device_ip, device_id=device_id, files_delta=0, size_delta=0)
     return {
         "status": "skipped",
         "device_total_files": device_stats["total_files"],

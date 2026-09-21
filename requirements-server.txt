@@ -1,0 +1,22 @@
+# Core API & Server
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+gunicorn>=21.2.0
+python-multipart>=0.0.9
+websockets>=12.0
+
+# Database & Caching
+psycopg[binary,pool]>=3.1.18
+redis>=5.0.3
+
+# Asynchronous Task Queue
+celery[redis]>=5.3.6
+
+# Image & Media Processing
+pillow>=10.2.0
+pillow-heif>=0.15.0
+
+# Optional GUI components (for local desktop run)
+customtkinter>=5.2.0; platform_system == "Windows"
+pystray>=0.19.5; platform_system == "Windows"
+tkinterdnd2>=0.3.0; platform_system == "Windows"

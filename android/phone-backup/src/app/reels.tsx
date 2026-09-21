@@ -48,6 +48,7 @@ import {
   toggleSaveReel,
   markShareNotificationsSeen,
 } from '../../downloader';
+import { setUIPriorityMode } from '../../backgroundTask';
 import {
   ReelItem,
   ReelAuthorInfo,
@@ -1286,18 +1287,22 @@ export default function ReelsScreen() {
   }, [loadReels]);
 
   useFocusEffect(useCallback(() => {
+    setUIPriorityMode(true);
     setScreenFocused(AppState.currentState === 'active');
     const sub = AppState.addEventListener('change', (nextState) => {
       if (nextState !== 'active') {
+        setUIPriorityMode(false);
         setScreenFocused(false);
         setFastForwardingReelId(null);
         void flushTelemetry();
       } else {
+        setUIPriorityMode(true);
         setScreenFocused(true);
       }
     });
     return () => {
       sub.remove();
+      setUIPriorityMode(false);
       setScreenFocused(false);
       setFastForwardingReelId(null);
       void flushTelemetry();

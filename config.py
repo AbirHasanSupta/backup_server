@@ -63,6 +63,11 @@ _DEFAULTS = {
     # Display name shown on feed cards for posts sent from this desktop server.
     # Defaults to the machine's hostname; can be changed in Settings.
     "DESKTOP_NAME": platform.node() or "Desktop Server",
+    # Database Backend: "sqlite" for standalone desktop, "postgres" for multi-user/server
+    "DATABASE_BACKEND": os.environ.get("DATABASE_BACKEND", "sqlite"),
+    "POSTGRES_URL": os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL") or "postgresql://postgres:postgres@localhost:5432/backup_db",
+    "REDIS_URL": os.environ.get("REDIS_URL") or "redis://localhost:6379/0",
+    "CELERY_ENABLED": os.environ.get("CELERY_ENABLED", "0").lower() in ("1", "true", "yes"),
 }
 
 _AUTOSTART_KEY_NAME = APP_NAME

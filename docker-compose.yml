@@ -1,0 +1,112 @@
+version: '3.8'
+
+services:
+  # 1. Reverse Proxy & Ingress Load Balancer
+  nginx:
+    image: nginx:alpine
+    container_name: backup_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - backup_cache:/app_data
+    depends_on:
+      - api
+    networks:
+      - backup_net
+
+  # 2. FastAPI API Gateway (4 Gunicorn Workers)
+  api:
+    build: .
+    container_name: backup_api
+    restart: unless-stopped
+    environment:
+      - DATABASE_BACKEND=postgres
+      - POSTGRES_URL=postgresql://postgres:postgres_secure_pass@postgres:5432/backup_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_ENABLED=true
+      - BACKUP_ROOT=/backup_storage
+    volumes:
+      - backup_storage:/backup_storage
+      - backup_cache:/app_data
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - backup_net
+
+  # 3. Dedicated Video Transcoding Worker (FFmpeg)
+  celery_worker_video:
+    build: .
+    container_name: backup_celery_video
+    restart: unless-stopped
+    command: ["celery", "-A", "celery_app", "worker", "-Q", "transcode_video", "-c", "2", "-l", "INFO"]
+    environment:
+      - DATABASE_BACKEND=postgres
+      - POSTGRES_URL=postgresql://postgres:postgres_secure_pass@postgres:5432/backup_db
+      - REDIS_URL=redis://redis:6379/0
+      - BACKUP_ROOT=/backup_storage
+    volumes:
+      - backup_storage:/backup_storage
+      - backup_cache:/app_data
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - backup_net
+
+  # 4. General Background Task Worker (Rewind Reels & Trips/EXIF Indexing)
+  celery_worker_general:
+    build: .
+    container_name: backup_celery_general
+    restart: unless-stopped
+    command: ["celery", "-A", "celery_app", "worker", "-Q", "render_rewind,indexing_queue", "-c", "2", "-l", "INFO"]
+    environment:
+      - DATABASE_BACKEND=postgres
+      - POSTGRES_URL=postgresql://postgres:postgres_secure_pass@postgres:5432/backup_db
+      - REDIS_URL=redis://redis:6379/0
+      - BACKUP_ROOT=/backup_storage
+    volumes:
+      - backup_storage:/backup_storage
+      - backup_cache:/app_data
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - backup_net
+
+  # 5. PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: backup_postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres_secure_pass
+      - POSTGRES_DB=backup_db
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - backup_net
+
+  # 6. Redis In-Memory Cache & Pub/Sub Broker
+  redis:
+    image: redis:7-alpine
+    container_name: backup_redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - backup_net
+
+volumes:
+  pg_data:
+  redis_data:
+  backup_storage:
+  backup_cache:
+
+networks:
+  backup_net:
+    driver: bridge
