@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
+import tempfile
 from typing import AsyncGenerator, BinaryIO, Tuple
 
 from core.config import load_config
@@ -34,8 +36,17 @@ class S3StorageBackend(StorageBackend):
         return self._s3_client
 
     def _object_key(self, relative_path: str, device_id: str | None = None) -> str:
-        clean_path = relative_path.replace("\\", "/").strip("/")
-        return f"{device_id}/{clean_path}" if device_id else clean_path
+        parts = []
+        for part in (relative_path or "").replace("\\", "/").split("/"):
+            part = part.strip()
+            if not part or part in (".", ".."):
+                continue
+            parts.append(re.sub(r'[<>:"|?*]', "_", part))
+        clean_path = "/".join(parts) or "unnamed"
+        if not device_id:
+            return clean_path
+        safe_device_id = re.sub(r"[^A-Za-z0-9_-]", "_", device_id).strip("_") or "unknown-device"
+        return f"{safe_device_id}/{clean_path}"
 
     def get_file_path(self, relative_path: str, device_id: str | None = None) -> str:
         # Return S3 URI format
@@ -90,12 +101,31 @@ class S3StorageBackend(StorageBackend):
         device_id: str | None = None,
         expected_size: int | None = None,
         compute_sha256: bool = True,
+        expected_sha256: str | None = None,
     ) -> Tuple[str, str]:
-        client = self._get_client()
-        key = self._object_key(relative_path, device_id)
-        # Stream upload directly to S3
-        client.upload_fileobj(source, self.bucket_name, key)
-        return self.get_file_path(relative_path, device_id), ""
+        # S3's managed upload can retry internally.  Spool first so the
+        # checksum and declared size are verified before an object becomes
+        # visible under its final key.
+        hasher = hashlib.sha256() if (compute_sha256 or expected_sha256) else None
+        bytes_written = 0
+        with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b") as spool:
+            for block in iter(lambda: source.read(4 * 1024 * 1024), b""):
+                spool.write(block)
+                bytes_written += len(block)
+                if hasher:
+                    hasher.update(block)
+            if expected_size is not None and expected_size > 0 and bytes_written != expected_size:
+                raise ValueError(f"Uploaded file size mismatch: expected {expected_size}, wrote {bytes_written}")
+            digest = hasher.hexdigest() if hasher else ""
+            if expected_sha256 and digest.lower() != expected_sha256.lower():
+                raise ValueError("Uploaded file does not match the declared SHA-256")
+            spool.seek(0)
+            upload_args = (spool, self.bucket_name, self._object_key(relative_path, device_id))
+            if digest:
+                self._get_client().upload_fileobj(*upload_args, ExtraArgs={"Metadata": {"sha256": digest}})
+            else:
+                self._get_client().upload_fileobj(*upload_args)
+        return self.get_file_path(relative_path, device_id), digest
 
     async def save_async_stream(
         self,
@@ -104,19 +134,62 @@ class S3StorageBackend(StorageBackend):
         device_id: str | None = None,
         expected_size: int | None = None,
         compute_sha256: bool = True,
+        expected_sha256: str | None = None,
     ) -> Tuple[str, str]:
         # Temporarily spool async stream and upload to S3
         from storage.local import LocalStorageBackend
         local_temp = LocalStorageBackend()
         temp_path, sha = await local_temp.save_async_stream(
-            relative_path, stream, device_id, expected_size, compute_sha256
+            relative_path, stream, device_id, expected_size, compute_sha256, expected_sha256
         )
         try:
             with open(temp_path, "rb") as f:
-                self.save_stream(relative_path, f, device_id, expected_size, False)
+                self.save_stream(relative_path, f, device_id, expected_size, False, expected_sha256)
         finally:
             local_temp.delete(relative_path, device_id)
         return self.get_file_path(relative_path, device_id), sha
+
+    def save_chunk(self, upload_id: str, chunk_index: int, data: bytes, device_id: str | None = None) -> int:
+        from storage.local import LocalStorageBackend
+        local_temp = LocalStorageBackend()
+        return local_temp.save_chunk(upload_id, chunk_index, data, device_id)
+
+    def assemble_chunks(
+        self,
+        upload_id: str,
+        relative_path: str,
+        total_chunks: int,
+        expected_size: int | None = None,
+        device_id: str | None = None,
+        expected_sha256: str | None = None,
+    ) -> Tuple[str, str]:
+        from storage.local import LocalStorageBackend
+        local_temp = LocalStorageBackend()
+        temp_path, sha = local_temp.assemble_chunks(
+            upload_id, relative_path, total_chunks, expected_size, device_id, expected_sha256
+        )
+        try:
+            with open(temp_path, "rb") as f:
+                self.save_stream(relative_path, f, device_id, expected_size, False, expected_sha256)
+        finally:
+            local_temp.delete(relative_path, device_id)
+        return self.get_file_path(relative_path, device_id), sha
+
+    def cleanup_chunks(self, upload_id: str, device_id: str | None = None) -> None:
+        from storage.local import LocalStorageBackend
+        local_temp = LocalStorageBackend()
+        local_temp.cleanup_chunks(upload_id, device_id)
+
+    def get_chunk_status(
+        self, upload_id: str, total_chunks: int, device_id: str | None = None
+    ) -> dict:
+        from storage.local import LocalStorageBackend
+        local_temp = LocalStorageBackend()
+        return local_temp.get_chunk_status(upload_id, total_chunks, device_id)
+
+    def cleanup_expired_chunks(self, max_age_seconds: int) -> int:
+        from storage.local import LocalStorageBackend
+        return LocalStorageBackend().cleanup_expired_chunks(max_age_seconds)
 
     def delete(self, relative_path: str, device_id: str | None = None) -> bool:
         client = self._get_client()

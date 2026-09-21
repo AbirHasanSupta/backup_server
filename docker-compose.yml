@@ -8,12 +8,12 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
-      - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - backup_cache:/app_data
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     networks:
       - backup_net
 
@@ -23,17 +23,27 @@ services:
     container_name: backup_api
     restart: unless-stopped
     environment:
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
       - DATABASE_BACKEND=postgres
-      - POSTGRES_URL=postgresql://postgres:postgres_secure_pass@postgres:5432/backup_db
+      - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
       - REDIS_URL=redis://redis:6379/0
       - CELERY_ENABLED=true
       - BACKUP_ROOT=/backup_storage
+      - APP_DATA_DIR=/app_data
     volumes:
       - backup_storage:/backup_storage
       - backup_cache:/app_data
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $$API_KEY\" http://localhost:8000/ping >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
       - backup_net
 
@@ -44,16 +54,20 @@ services:
     restart: unless-stopped
     command: ["celery", "-A", "celery_app", "worker", "-Q", "transcode_video", "-c", "2", "-l", "INFO"]
     environment:
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
       - DATABASE_BACKEND=postgres
-      - POSTGRES_URL=postgresql://postgres:postgres_secure_pass@postgres:5432/backup_db
+      - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
       - REDIS_URL=redis://redis:6379/0
       - BACKUP_ROOT=/backup_storage
+      - APP_DATA_DIR=/app_data
     volumes:
       - backup_storage:/backup_storage
       - backup_cache:/app_data
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - backup_net
 
@@ -64,16 +78,20 @@ services:
     restart: unless-stopped
     command: ["celery", "-A", "celery_app", "worker", "-Q", "render_rewind,indexing_queue", "-c", "2", "-l", "INFO"]
     environment:
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
       - DATABASE_BACKEND=postgres
-      - POSTGRES_URL=postgresql://postgres:postgres_secure_pass@postgres:5432/backup_db
+      - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
       - REDIS_URL=redis://redis:6379/0
       - BACKUP_ROOT=/backup_storage
+      - APP_DATA_DIR=/app_data
     volumes:
       - backup_storage:/backup_storage
       - backup_cache:/app_data
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - backup_net
 
@@ -84,12 +102,17 @@ services:
     restart: unless-stopped
     environment:
       - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres_secure_pass
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       - POSTGRES_DB=backup_db
     volumes:
       - pg_data:/var/lib/postgresql/data
     networks:
       - backup_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d backup_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # 6. Redis In-Memory Cache & Pub/Sub Broker
   redis:
@@ -100,6 +123,11 @@ services:
       - redis_data:/data
     networks:
       - backup_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   pg_data:

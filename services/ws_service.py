@@ -122,6 +122,23 @@ class WebSocketService:
     def notify_rewind_ready(source_id: str, year: int, month: int | None, path: str) -> None:
         WebSocketService.broadcast_event(f"rewind_ready:{source_id}", {"ready": True, "year": year, "month": month, "path": path})
 
+    @staticmethod
+    def notify_typing(media_id: int, device_id: str, username: str | None, is_typing: bool) -> None:
+        WebSocketService.broadcast_event("typing_status", {
+            "media_id": media_id,
+            "device_id": device_id,
+            "username": username,
+            "is_typing": is_typing,
+        })
+
+    @staticmethod
+    def notify_read_receipt(media_id: int, device_id: str, read_at: int) -> None:
+        WebSocketService.broadcast_event("read_receipt", {
+            "media_id": media_id,
+            "device_id": device_id,
+            "read_at": read_at,
+        })
+
 
 ws_service = WebSocketService()
 

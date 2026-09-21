@@ -14,6 +14,12 @@ _EXE_DIR = os.path.dirname(os.path.abspath(sys.executable)) if _IS_FROZEN else _
 
 
 def _get_app_data_dir() -> str:
+    # Headless/container deployments need an explicit persistent data location.
+    # Keep the historic source-directory default for local development, while
+    # allowing Docker/Kubernetes to mount a durable application-data volume.
+    configured_dir = os.environ.get("APP_DATA_DIR")
+    if configured_dir:
+        return os.path.abspath(configured_dir)
     if not _IS_FROZEN:
         return _MODULE_DIR
 
@@ -31,6 +37,10 @@ os.makedirs(APP_DATA_DIR, exist_ok=True)
 # Persisted quiz-result cards shared to the device feed (deleted with the post).
 SHARED_QUIZ_DIR = os.path.join(APP_DATA_DIR, "shared_quiz_cards")
 os.makedirs(SHARED_QUIZ_DIR, exist_ok=True)
+SHARED_REWIND_DIR = os.path.join(APP_DATA_DIR, "shared_rewind_reels")
+SHARED_DIRECT_POST_DIR = os.path.join(APP_DATA_DIR, "shared_direct_posts")
+os.makedirs(SHARED_REWIND_DIR, exist_ok=True)
+os.makedirs(SHARED_DIRECT_POST_DIR, exist_ok=True)
 
 CONFIG_FILE = os.path.join(APP_DATA_DIR, "server_config.json")
 DB_PATH = os.path.join(APP_DATA_DIR, "backup.db")
@@ -39,10 +49,10 @@ _PORTABLE_CONFIG_FILE = os.path.join(_EXE_DIR, "server_config.json")
 _PORTABLE_DB_PATH = os.path.join(_EXE_DIR, "backup.db")
 
 _DEFAULTS = {
-    "API_KEY": "YOUR_SECRET_KEY",
-    "BACKUP_ROOT": os.path.join("D:\\", "PhoneBackup"),
-    "HOST": "0.0.0.0",
-    "PORT": 8000,
+    "API_KEY": os.environ.get("API_KEY", "YOUR_SECRET_KEY"),
+    "BACKUP_ROOT": os.environ.get("BACKUP_ROOT") or os.path.join("D:\\", "PhoneBackup"),
+    "HOST": os.environ.get("HOST", "0.0.0.0"),
+    "PORT": int(os.environ.get("PORT", 8000)),
     "DB_PATH": DB_PATH,
     "REQUIRE_APPROVAL": True,
     "THEME_MODE": "light",
@@ -68,7 +78,54 @@ _DEFAULTS = {
     "POSTGRES_URL": os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL") or "postgresql://postgres:postgres@localhost:5432/backup_db",
     "REDIS_URL": os.environ.get("REDIS_URL") or "redis://localhost:6379/0",
     "CELERY_ENABLED": os.environ.get("CELERY_ENABLED", "0").lower() in ("1", "true", "yes"),
+    "STORAGE_BACKEND": os.environ.get("STORAGE_BACKEND", "local"),
+    # Resumable uploads are intentionally bounded.  The mobile client sends
+    # 8 MiB chunks, which keeps JS/native bridge memory stable on large videos.
+    "MAX_UPLOAD_CHUNK_BYTES": int(os.environ.get("MAX_UPLOAD_CHUNK_BYTES", 8 * 1024 * 1024)),
+    "MAX_UPLOAD_CHUNKS": int(os.environ.get("MAX_UPLOAD_CHUNKS", 131072)),
+    "UPLOAD_SESSION_TTL_SECONDS": int(os.environ.get("UPLOAD_SESSION_TTL_SECONDS", 24 * 60 * 60)),
+    # Native Android requests are not subject to browser CORS.  Browser
+    # origins must be explicitly allowlisted by a web deployment.
+    "CORS_ORIGINS": os.environ.get("CORS_ORIGINS", ""),
+    "CORS_ALLOW_CREDENTIALS": os.environ.get("CORS_ALLOW_CREDENTIALS", "0").lower() in ("1", "true", "yes"),
 }
+
+# Environment values are deployment-owned secrets/runtime settings.  They take
+# precedence over a persisted desktop configuration when the process runs in a
+# container or service manager, preventing an old volume from silently
+# reverting a rotated API/database credential.
+_ENV_CONFIG_KEYS = {
+    "API_KEY": str,
+    "BACKUP_ROOT": str,
+    "HOST": str,
+    "PORT": int,
+    "DATABASE_BACKEND": str,
+    "POSTGRES_URL": str,
+    "REDIS_URL": str,
+    "STORAGE_BACKEND": str,
+    "MAX_UPLOAD_CHUNK_BYTES": int,
+    "MAX_UPLOAD_CHUNKS": int,
+    "UPLOAD_SESSION_TTL_SECONDS": int,
+    "CORS_ORIGINS": str,
+}
+
+
+def _apply_environment_overrides(cfg: dict) -> dict:
+    for key, converter in _ENV_CONFIG_KEYS.items():
+        value = os.environ.get(key)
+        if value is None:
+            continue
+        try:
+            cfg[key] = converter(value)
+        except (TypeError, ValueError):
+            # Invalid values remain visible in the persisted configuration
+            # rather than preventing the server from starting unexpectedly.
+            pass
+    if "CELERY_ENABLED" in os.environ:
+        cfg["CELERY_ENABLED"] = os.environ["CELERY_ENABLED"].lower() in ("1", "true", "yes")
+    if "CORS_ALLOW_CREDENTIALS" in os.environ:
+        cfg["CORS_ALLOW_CREDENTIALS"] = os.environ["CORS_ALLOW_CREDENTIALS"].lower() in ("1", "true", "yes")
+    return cfg
 
 _AUTOSTART_KEY_NAME = APP_NAME
 _AUTOSTART_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -181,7 +238,7 @@ def load_config() -> dict:
         if data is None and _IS_FROZEN:
             data = _load_json(_PORTABLE_CONFIG_FILE)
 
-        cfg = {**_DEFAULTS, **(data or {})}
+        cfg = _apply_environment_overrides({**_DEFAULTS, **(data or {})})
         if _IS_FROZEN:
             cfg["DB_PATH"] = DB_PATH
 

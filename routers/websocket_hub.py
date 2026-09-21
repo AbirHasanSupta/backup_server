@@ -12,9 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Dict, List
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from core.security import verify_api_key_or_device_token
+from repositories import device_repo
 from services.redis_service import get_redis_client, publish_event
 
 logger = logging.getLogger("backup_server.websocket")
@@ -70,6 +73,20 @@ manager = ConnectionManager()
 @ws_router.websocket("/ws/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
     """Bidirectional WebSocket connection for live telemetry, sync events, and alerts."""
+    # WebSockets do not pass through the HTTP route dependencies.  Authenticate
+    # before accepting so an arbitrary LAN host cannot subscribe to another
+    # device's room or publish live social events.
+    try:
+        verify_api_key_or_device_token(
+            websocket.headers.get("authorization"),
+            websocket.query_params.get("token"),
+            client_id,
+            device_repo.verify_device_token,
+        )
+    except HTTPException:
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+
     await manager.connect(client_id, websocket)
 
     # Subscribe to Redis channels for cross-process event broadcasting
@@ -107,13 +124,26 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             try:
                 data = json.loads(data_text)
                 action = data.get("action")
+                payload = data.get("payload", {})
                 if action == "ping":
-                    await websocket.send_text(json.dumps({"event": "pong", "timestamp": int(asyncio.get_event_loop().time())}))
-                elif action == "broadcast":
-                    if redis_client:
-                        publish_event("channel:broadcast", data.get("payload", {}))
-                    else:
-                        await manager.broadcast(data.get("payload", {}))
+                    await websocket.send_text(json.dumps({"event": "pong", "timestamp": int(time.time())}))
+                elif action == "typing":
+                    media_id = payload.get("media_id")
+                    if not isinstance(media_id, int) or media_id < 0:
+                        continue
+                    is_typing = payload.get("is_typing", True)
+                    username = device_repo.get_device_display_name(client_id)
+                    from services.ws_service import ws_service
+                    ws_service.notify_typing(media_id, client_id, username, bool(is_typing))
+                elif action == "read_receipt":
+                    media_id = payload.get("media_id")
+                    if not isinstance(media_id, int) or media_id < 0:
+                        continue
+                    read_at = payload.get("read_at") or int(time.time())
+                    if not isinstance(read_at, int) or read_at < 0:
+                        read_at = int(time.time())
+                    from services.ws_service import ws_service
+                    ws_service.notify_read_receipt(media_id, client_id, read_at)
             except json.JSONDecodeError:
                 pass
     except WebSocketDisconnect:
@@ -132,4 +162,3 @@ async def websocket_anonymous_endpoint(websocket: WebSocket):
     """Fallback anonymous WebSocket endpoint."""
     anon_id = f"anon_{id(websocket)}"
     await websocket_endpoint(websocket, anon_id)
-

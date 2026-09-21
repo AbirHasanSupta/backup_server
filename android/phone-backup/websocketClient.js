@@ -93,6 +93,21 @@ export function sendWebSocketMessage(action, payload = {}) {
   return false;
 }
 
+export function sendTypingStatus(mediaId, isTyping = true, username = null) {
+  return sendWebSocketMessage('typing', {
+    media_id: mediaId,
+    is_typing: !!isTyping,
+    username,
+  });
+}
+
+export function sendReadReceipt(mediaId) {
+  return sendWebSocketMessage('read_receipt', {
+    media_id: mediaId,
+    read_at: Math.floor(Date.now() / 1000),
+  });
+}
+
 export async function connectWebSocket() {
   if (_socket && (_socket.readyState === WebSocket.OPEN || _socket.readyState === WebSocket.CONNECTING)) {
     return;
@@ -120,7 +135,11 @@ export async function connectWebSocket() {
     const wsUrl = `ws://${host}:${port}/ws/${encodeURIComponent(deviceId)}`;
 
     console.log(`[WebSocket] Connecting to ${wsUrl} (client: ${deviceId})...`);
-    const ws = new WebSocket(wsUrl);
+    // React Native supports custom WebSocket headers.  Keep credentials out
+    // of the URL so they are not retained in proxy/access logs.
+    const ws = new WebSocket(wsUrl, [], {
+      headers: { Authorization: `Bearer ${deviceToken || apiKey}` },
+    });
 
     ws.onopen = () => {
       console.log(`[WebSocket] Connected successfully to ${host}:${port}`);
@@ -160,6 +179,10 @@ export async function connectWebSocket() {
           DeviceEventEmitter.emit('social_updated', data);
         } else if (eventType === 'file_uploaded') {
           DeviceEventEmitter.emit('file_uploaded', data);
+        } else if (eventType === 'typing_status') {
+          DeviceEventEmitter.emit('typing_status', data);
+        } else if (eventType === 'read_receipt') {
+          DeviceEventEmitter.emit('read_receipt', data);
         }
 
         _emitEvent(eventType || 'message', data);

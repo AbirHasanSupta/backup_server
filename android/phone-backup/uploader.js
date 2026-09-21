@@ -179,6 +179,148 @@ function parseUploadBody(body) {
   }
 }
 
+// Native uploadAsync is ideal for small media, while fixed-size pieces make
+// multi-gigabyte videos recoverable after Wi-Fi roaming or process death.
+// This size keeps the base64 bridge allocation below roughly 11 MiB per chunk.
+const RESUMABLE_UPLOAD_THRESHOLD_BYTES = 64 * 1024 * 1024;
+const RESUMABLE_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
+
+function stableUploadId(deviceId, item, size) {
+  // Two independent 32-bit FNV-1a passes give a stable, filesystem-safe
+  // session key without persisting a second client-side upload database.
+  const source = `${deviceId}\u0000${item.relativePath}\u0000${item.modifiedTime}\u0000${size}\u0000${item.id || ''}`;
+  let first = 0x811c9dc5;
+  let second = 0x811c9dc5;
+  for (let index = 0; index < source.length; index += 1) {
+    first ^= source.charCodeAt(index);
+    first = Math.imul(first, 0x01000193) >>> 0;
+    second ^= source.charCodeAt(source.length - 1 - index);
+    second = Math.imul(second, 0x01000193) >>> 0;
+  }
+  return `upload_${first.toString(16).padStart(8, '0')}${second.toString(16).padStart(8, '0')}`;
+}
+
+async function resumableResponse(url, options, context) {
+  const response = await fetch(url, options);
+  const body = await readJsonResponse(response, context);
+  if (!response.ok) {
+    const error = new Error(body.detail || `${context} (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
+  return body;
+}
+
+async function uploadResumableFile(cacheUri, item, size, onProgress) {
+  const { deviceId } = await getServerConfig();
+  const totalChunks = Math.ceil(size / RESUMABLE_UPLOAD_CHUNK_BYTES);
+  const uploadId = stableUploadId(deviceId, item, size);
+  const safeName = (item.name || item.relativePath.split('/').pop() || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+  const chunkUri = `${FileSystem.cacheDirectory}${uploadId}_${safeName}.part`;
+
+  try {
+    const statusBody = await withAutoFailover(async () => {
+      const { serverIp, apiKey, serverPort, deviceId: currentDeviceId } = await getServerConfig();
+      const host = formatHostForUrl(serverIp);
+      const params = new URLSearchParams({
+        total_chunks: String(totalChunks),
+        device_id: currentDeviceId,
+      });
+      return resumableResponse(
+        `http://${host}:${serverPort}/upload/chunk/${encodeURIComponent(uploadId)}?${params.toString()}`,
+        { headers: { Authorization: `Bearer ${apiKey}` } },
+        'Resumable upload status failed'
+      );
+    });
+
+    const received = new Set(
+      Array.isArray(statusBody.received_chunks)
+        ? statusBody.received_chunks.filter((index) => Number.isInteger(index) && index >= 0 && index < totalChunks)
+        : []
+    );
+    let progressBytes = 0;
+
+    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+      const offset = chunkIndex * RESUMABLE_UPLOAD_CHUNK_BYTES;
+      const length = Math.min(RESUMABLE_UPLOAD_CHUNK_BYTES, size - offset);
+      if (received.has(chunkIndex)) {
+        progressBytes += length;
+        continue;
+      }
+
+      // The Expo SDK 57 legacy API supports byte positions and lengths.  We
+      // use it only for bounded pieces; the native upload path sends exact
+      // bytes without converting the entire video through JavaScript.
+      const base64 = await FileSystem.readAsStringAsync(cacheUri, {
+        encoding: FileSystem.EncodingType?.Base64 || 'base64',
+        position: offset,
+        length,
+      });
+      await FileSystem.writeAsStringAsync(chunkUri, base64, {
+        encoding: FileSystem.EncodingType?.Base64 || 'base64',
+      });
+
+      await withAutoFailover(async () => {
+        const { serverIp, apiKey, serverPort, deviceId: currentDeviceId } = await getServerConfig();
+        const host = formatHostForUrl(serverIp);
+        const params = new URLSearchParams({
+          upload_id: uploadId,
+          chunk_index: String(chunkIndex),
+          total_chunks: String(totalChunks),
+          device_id: currentDeviceId,
+        });
+        const response = await FileSystem.uploadAsync(
+          `http://${host}:${serverPort}/upload/chunk?${params.toString()}`,
+          chunkUri,
+          {
+            httpMethod: 'POST',
+            uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+            mimeType: 'application/octet-stream',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/octet-stream',
+            },
+          }
+        );
+        if (response.status < 200 || response.status >= 300) {
+          let detail = '';
+          try { detail = parseUploadBody(response.body).detail || ''; } catch {}
+          const error = new Error(detail || `Chunk upload failed (${response.status})`);
+          error.status = response.status;
+          throw error;
+        }
+      });
+      progressBytes += length;
+      onProgress?.(Math.min(progressBytes, size));
+    }
+
+    return await withAutoFailover(async () => {
+      const { serverIp, apiKey, serverPort, deviceId: currentDeviceId } = await getServerConfig();
+      const host = formatHostForUrl(serverIp);
+      return resumableResponse(
+        `http://${host}:${serverPort}/upload/complete`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            upload_id: uploadId,
+            relative_path: item.relativePath,
+            total_chunks: totalChunks,
+            modified_time: item.modifiedTime,
+            size,
+            external_id: item.id || null,
+            sha256: item.sha256 || null,
+            device_id: currentDeviceId,
+          }),
+        },
+        'Resumable upload completion failed'
+      );
+    });
+  } finally {
+    await FileSystem.deleteAsync(chunkUri, { idempotent: true }).catch(() => {});
+  }
+}
+
 async function getServerConfig() {
   const [serverIp, apiKey, serverPort, deviceId, deviceToken] = await Promise.all([
     getServerIp(),
@@ -409,13 +551,15 @@ export async function uploadFile(item, onProgress, options = {}) {
 
   // ── Step 2: Upload via HTTP (with mesh auto-failover) ───────────────────────
   try {
+    const cachedInfo = await FileSystem.getInfoAsync(cacheUri, { size: true });
+    const uploadSize = Number.isFinite(cachedInfo?.size) && cachedInfo.size >= 0 ? cachedInfo.size : (item.size || 0);
     const doUpload = async () => {
       const { serverIp, apiKey, serverPort, deviceId } = await getServerConfig();
       const hostTarget = formatHostForUrl(serverIp);
       const params = new URLSearchParams({
         relative_path: item.relativePath,
         modified_time: String(item.modifiedTime),
-        size: String(item.size || 0),
+        size: String(uploadSize),
         external_id: item.id || '',
         sha256: item.sha256 || '',
         device_id: deviceId,
@@ -442,7 +586,7 @@ export async function uploadFile(item, onProgress, options = {}) {
         parameters: {
           relative_path: item.relativePath,
           modified_time: String(item.modifiedTime),
-          size: String(item.size || 0),
+          size: String(uploadSize),
           external_id: item.id || '',
           sha256: item.sha256 || '',
           device_id: deviceId,
@@ -463,7 +607,12 @@ export async function uploadFile(item, onProgress, options = {}) {
 
     let res;
     try {
-      res = await withAutoFailover(doUpload);
+      if (uploadSize >= RESUMABLE_UPLOAD_THRESHOLD_BYTES) {
+        const body = await uploadResumableFile(cacheUri, item, uploadSize, onProgress);
+        res = { status: 200, body: JSON.stringify(body) };
+      } else {
+        res = await withAutoFailover(doUpload);
+      }
     } catch (uploadErr) {
       // Raw native rejection from ExponentFileSystem — sanitize before propagating.
       console.warn(
@@ -474,7 +623,7 @@ export async function uploadFile(item, onProgress, options = {}) {
       throw new Error(toUserFriendlyError(uploadErr));
     }
 
-    onProgress && onProgress(item.size || 0);
+    onProgress && onProgress(uploadSize);
 
     // Any 200 response means the server accepted the file successfully
     if (res.status === 200) {

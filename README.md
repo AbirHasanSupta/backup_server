@@ -119,7 +119,7 @@ A self-hosted, high-performance photo, video, and file backup & restore ecosyste
 1. **Server Launch**: The desktop app starts the FastAPI server on `0.0.0.0:8000` (or configured port) and displays server IPs, active devices, and system status.
 2. **Device Pairing & Username Customization**: When connecting for the first time, the Android app sends device details to `/connect`. If `REQUIRE_APPROVAL` is enabled, the desktop app prompts the user to Accept or Reject the connection within 30 seconds and issues a scoped device token upon approval. Custom device usernames can be set via `/devices/{id}/username`.
 3. **Upload Cache & Fast Differential Check**: On sync initialization, the client pre-fetches the server upload cache (`/sync/upload-cache`). The phone recursively scans configured folders and posts metadata (relative path, size, modified time, SHA-256) to `/files/check`. Missing or modified files are returned instantly.
-4. **File Transfer**: The Android client uploads missing files via `/upload` (multipart) or `/upload/raw` (chunked stream with SHA-256 header validation).
+4. **File Transfer**: The Android client uploads normal files through `/upload` (multipart) or `/upload/raw` (streaming). Files of 64 MiB or larger use the resumable `/upload/chunk` and `/upload/complete` flow: 8 MiB chunks are device-scoped, interrupted sessions resume from the server-reported missing indexes, and the final size and SHA-256 are verified before publication. Incomplete sessions expire after 24 hours by default.
 5. **Library & Restore**: Mobile users browse backed-up files or PC-shared directories in the **Library** tab, previewing media and downloading files back to phone storage.
 6. **Short Video Reels**: Users watch full-screen vertical video reels (`/reels`) backed up across devices, like videos, comment, bookmark/save reels (`/reels/save`), or repost reels to peer feeds (`/reels/repost`). Saved and reposted reels can be accessed anytime from **Saved Reels** (`saved-reels.tsx`).
 7. **Device-to-Device Sharing & Feed**: Users select backed-up photos/videos or create direct posts/quiz cards, add a caption, and share them to specific approved devices. Recipients view these in the **Feed** tab, react with emojis, and leave comments. Desktop users can also compose and moderate posts via the Desktop Control Center.
@@ -165,6 +165,10 @@ python server.py
 ```
 
 *Note: On initial launch, `server_config.json` and `backup.db` are created automatically in the application data directory (or alongside the executable in portable mode). The media indexer runs its first full scan on startup, then re-scans daily.*
+
+### Container deployment
+
+For the PostgreSQL, Redis, Celery, and Nginx deployment, copy [`.env.example`](.env.example) to `.env`, replace every placeholder with a unique secret, then run `docker compose up -d --build`. The compose stack deliberately requires those credentials and exposes only HTTP port 80; terminate TLS at a configured reverse proxy/load balancer before allowing non-private-network access.
 
 ### 3. Building Standalone Windows Executable
 To bundle the GUI server into a standalone `.exe`:

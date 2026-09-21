@@ -24,6 +24,14 @@ import memories
 logger = logging.getLogger("backup_server")
 
 
+def _configured_cors_origins() -> list[str]:
+    """Parse an explicit browser-origin allowlist without affecting native clients."""
+    configured = load_config().get("CORS_ORIGINS", "")
+    if isinstance(configured, list):
+        return [str(origin).strip() for origin in configured if str(origin).strip()]
+    return [origin.strip() for origin in str(configured).split(",") if origin.strip()]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # High-throughput thread pool for file I/O and CPU offloading
@@ -58,9 +66,29 @@ async def lifespan(app: FastAPI):
     # Background memory index startup scan
     threading.Thread(target=memories.startup_scan_loop, daemon=True, name="MemoryScanLoop").start()
 
+    async def cleanup_expired_upload_sessions() -> None:
+        """Keep interrupted resumable uploads from becoming permanent cache data."""
+        from storage.manager import get_storage
+        while True:
+            try:
+                ttl = max(60, int(load_config().get("UPLOAD_SESSION_TTL_SECONDS", 24 * 60 * 60)))
+                removed = await asyncio.to_thread(get_storage().cleanup_expired_chunks, ttl)
+                if removed:
+                    logger.info("Removed %s expired resumable upload session(s).", removed)
+            except Exception as exc:
+                logger.warning("Expired upload-session cleanup failed: %s", exc)
+            await asyncio.sleep(60 * 60)
+
+    cleanup_task = asyncio.create_task(cleanup_expired_upload_sessions())
+
     try:
         yield
     finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
         executor.shutdown(wait=False)
 
 
@@ -73,8 +101,11 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    # A wildcard origin combined with credential support is both unsafe and
+    # rejected by browsers.  Android uses native networking, so a secure empty
+    # browser allowlist is the correct standalone default.
+    allow_origins=_configured_cors_origins(),
+    allow_credentials=bool(load_config().get("CORS_ALLOW_CREDENTIALS", False)) and bool(_configured_cors_origins()),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -86,8 +117,11 @@ app.include_router(v1_router, prefix="/api/v1")
 # 2. WebSocket Event Gateway
 app.include_router(ws_router)
 
-# 3. Fallback Legacy Router (ensuring 100% backward compatibility)
-app.include_router(legacy_router)
+# 3. Fallback Legacy Router.  Keep unversioned compatibility endpoints live
+# for existing desktop/mobile installations, but exclude the duplicate route
+# definitions from OpenAPI so generated clients and docs have one operation ID
+# per public v1 operation.
+app.include_router(legacy_router, include_in_schema=False)
 
 
 if __name__ == "__main__":
