@@ -17,6 +17,8 @@ import {
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { getQuizRound, getConfig, buildPreviewUrl, createQuizShare } from '../../downloader';
+import { setUIPriorityMode } from '../../backgroundTask';
+
 
 interface QuizItem {
   source_type: string;
@@ -77,10 +79,13 @@ export default function QuizScreen() {
 
   useEffect(() => {
     mountedRef.current = true;
+    setUIPriorityMode(true);
     return () => {
       mountedRef.current = false;
+      setUIPriorityMode(false);
     };
   }, []);
+
 
   const loadRound = useCallback(async () => {
     cancelCapture();

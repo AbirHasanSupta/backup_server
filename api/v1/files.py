@@ -92,29 +92,37 @@ async def search_files(
 
 @router.get("/files/download")
 async def download_file(
-    path: str,
     request: Request,
+    path: str | None = None,
+    relative_path: str | None = None,
     device_id: str | None = None,
     authorization: str = Header(None),
     token: str = Query(None),
 ):
+    target_path = relative_path or path
+    if not target_path:
+        raise HTTPException(status_code=400, detail="Missing path or relative_path parameter")
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     storage = get_storage()
-    full_path = storage.get_file_path(path, device_id=device_id)
+    full_path = storage.get_file_path(target_path, device_id=device_id)
     return preview_service.stream_file_range(full_path, request)
 
 
 @router.get("/files/preview")
 async def preview_file(
-    path: str,
     request: Request,
+    path: str | None = None,
+    relative_path: str | None = None,
     device_id: str | None = None,
     authorization: str = Header(None),
     token: str = Query(None),
 ):
+    target_path = relative_path or path
+    if not target_path:
+        raise HTTPException(status_code=400, detail="Missing path or relative_path parameter")
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     storage = get_storage()
-    full_path = storage.get_file_path(path, device_id=device_id)
+    full_path = storage.get_file_path(target_path, device_id=device_id)
 
     if not preview_service.is_video(full_path):
         raise HTTPException(status_code=400, detail="Preview is only available for video files")
@@ -126,15 +134,20 @@ async def preview_file(
 
 @router.get("/files/thumbnail")
 async def get_thumbnail(
-    path: str,
+    path: str | None = None,
+    relative_path: str | None = None,
     device_id: str | None = None,
     authorization: str = Header(None),
     token: str = Query(None),
 ):
+    target_path = relative_path or path
+    if not target_path:
+        raise HTTPException(status_code=400, detail="Missing path or relative_path parameter")
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     storage = get_storage()
-    full_path = storage.get_file_path(path, device_id=device_id)
+    full_path = storage.get_file_path(target_path, device_id=device_id)
     return thumbnail_service.get_thumbnail_response(full_path)
+
 
 
 @router.post("/files/warm_previews")

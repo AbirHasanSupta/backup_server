@@ -7,6 +7,7 @@ from database import (
     batch_check_files as db_batch_check_files,
     is_uploaded_compatible as db_is_uploaded_compatible,
     insert_file as db_insert_file,
+    insert_file_and_touch_device as db_insert_file_and_touch_device,
     get_files_for_device as db_get_files_for_device,
     search_files_for_device as db_search_files_for_device,
     get_files_browse as db_get_files_browse,
@@ -46,6 +47,21 @@ def insert_file(
     device_id: str | None = None,
 ) -> None:
     db_insert_file(path, size, modified_time, uploaded_time, device_ip, external_id, sha256, device_id=device_id)
+
+
+def insert_file_and_touch_device(
+    path: str,
+    size: int,
+    modified_time: int,
+    uploaded_time: int,
+    device_ip: str,
+    external_id: str | None = None,
+    sha256: str | None = None,
+    device_id: str | None = None,
+) -> Dict[str, Any]:
+    return db_insert_file_and_touch_device(
+        path, size, modified_time, uploaded_time, device_ip, external_id, sha256, device_id=device_id
+    )
 
 
 def get_files_for_device(device_id: str, prefix: str = "") -> List[Dict[str, Any]]:

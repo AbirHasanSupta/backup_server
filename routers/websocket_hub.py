@@ -86,6 +86,8 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                     msg = await asyncio.to_thread(pubsub.get_message, ignore_subscribe_messages=True, timeout=1.0)
                     if msg and msg.get("type") == "message":
                         raw_data = msg.get("data")
+                        if isinstance(raw_data, bytes):
+                            raw_data = raw_data.decode("utf-8", errors="replace")
                         if isinstance(raw_data, str):
                             await websocket.send_text(raw_data)
                     await asyncio.sleep(0.05)
@@ -106,7 +108,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                 data = json.loads(data_text)
                 action = data.get("action")
                 if action == "ping":
-                    await websocket.send_text(json.dumps({"event": "pong"}))
+                    await websocket.send_text(json.dumps({"event": "pong", "timestamp": int(asyncio.get_event_loop().time())}))
                 elif action == "broadcast":
                     if redis_client:
                         publish_event("channel:broadcast", data.get("payload", {}))
@@ -123,3 +125,11 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
         await manager.disconnect(client_id, websocket)
         if redis_task:
             redis_task.cancel()
+
+
+@ws_router.websocket("/ws")
+async def websocket_anonymous_endpoint(websocket: WebSocket):
+    """Fallback anonymous WebSocket endpoint."""
+    anon_id = f"anon_{id(websocket)}"
+    await websocket_endpoint(websocket, anon_id)
+

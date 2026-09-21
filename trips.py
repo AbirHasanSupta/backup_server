@@ -341,7 +341,7 @@ def trigger_background_clustering(source_id: str | None = None) -> None:
             key = source_id
 
         if key in _debounce_timers:
-            _debounce_timers[key].cancel()
+            return  # Already scheduled to cluster when sync settles
 
         timer = threading.Timer(30.0, _run)
         timer.daemon = True

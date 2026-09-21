@@ -67,4 +67,28 @@ def transcode_video_preview(self, source_path: str, cache_path: str, cache_key: 
             except OSError:
                 pass
         logger.error("FFmpeg transcode failed for %s: %s", source_path, exc)
-        raise self.retry(exc=exc, countdown=5)
+        if hasattr(self, "retry"):
+            raise self.retry(exc=exc, countdown=5)
+        raise exc
+
+
+def dispatch_transcode_video(source_path: str, cache_path: str, cache_key: str):
+    """Safely dispatch transcode job to Celery worker if active, or thread pool."""
+    import threading
+    try:
+        from services.redis_service import get_redis_client
+        if get_redis_client():
+            transcode_video_preview.delay(source_path, cache_path, cache_key)
+            return "celery"
+    except Exception:
+        pass
+
+    def _fallback_run():
+        try:
+            transcode_video_preview(None, source_path, cache_path, cache_key)
+        except Exception:
+            pass
+
+    threading.Thread(target=_fallback_run, daemon=True, name=f"transcode-{cache_key[:8]}").start()
+    return "thread"
+

@@ -27,4 +27,28 @@ def render_rewind_reel(self, source_id: str, year: int, month: int | None = None
         return {"status": "completed", "path": dest_path}
     except Exception as exc:
         logger.error("Rewind reel render failed for %s (%s-%s): %s", source_id, year, month, exc)
-        raise self.retry(exc=exc, countdown=10)
+        if hasattr(self, "retry"):
+            raise self.retry(exc=exc, countdown=10)
+        raise exc
+
+
+def dispatch_rewind_render(source_id: str, year: int, month: int | None = None, music_id: str | None = None):
+    """Safely dispatch rewind build to Celery or async thread pool."""
+    import threading
+    try:
+        from services.redis_service import get_redis_client
+        if get_redis_client():
+            render_rewind_reel.delay(source_id, year, month, music_id)
+            return "celery"
+    except Exception:
+        pass
+
+    def _fallback_run():
+        try:
+            render_rewind_reel(None, source_id, year, month, music_id)
+        except Exception:
+            pass
+
+    threading.Thread(target=_fallback_run, daemon=True, name=f"rewind-{source_id[:8]}").start()
+    return "thread"
+

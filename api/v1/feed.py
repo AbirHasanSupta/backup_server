@@ -199,7 +199,18 @@ async def react_media(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, body.source_id, device_repo.verify_device_token)
-    return social_repo.toggle_reaction(media_id, body.source_id, body.emoji.strip())
+    res = social_repo.toggle_reaction(media_id, body.source_id, body.emoji.strip())
+    try:
+        from services.ws_service import ws_service
+        ws_service.notify_new_reaction(
+            media_id=media_id,
+            reaction=body.emoji.strip(),
+            device_id=body.source_id,
+            counts=res.get("reaction_counts", {}),
+        )
+    except Exception:
+        pass
+    return res
 
 
 @router.get("/api/media/{media_id}/reactions")
@@ -252,7 +263,19 @@ async def add_comment(
     comment["is_own"] = True
     comment["can_delete"] = True
     comment["display_name"] = feed_service.format_display_name(comment.get("username"), comment.get("device_name")) or body.source_id
+
+    try:
+        from services.ws_service import ws_service
+        ws_service.notify_new_comment(
+            media_id=media_id,
+            comment=text[:2000],
+            device_id=body.source_id,
+        )
+    except Exception:
+        pass
+
     return comment
+
 
 
 @router.post("/api/comments/{comment_id}/delete")
@@ -284,7 +307,7 @@ async def create_share_post(
         raise HTTPException(status_code=400, detail="No target devices")
 
     items = [it.model_dump() for it in body.items]
-    return social_repo.create_device_share(
+    res = social_repo.create_device_share(
         body.shared_by_device_id,
         body.target_device_ids,
         body.caption,
@@ -292,6 +315,21 @@ async def create_share_post(
         body.post_kind,
         body.post_title,
     )
+    try:
+        from services.ws_service import ws_service
+        shared_by = device_repo.get_device_display_name(body.shared_by_device_id)
+        ws_service.notify_new_share(
+            target_device_ids=body.target_device_ids,
+            group_id=res.get("group_id", ""),
+            caption=body.caption,
+            shared_by=shared_by,
+            shared_by_device_id=body.shared_by_device_id,
+            post_kind=body.post_kind,
+        )
+    except Exception:
+        pass
+    return res
+
 
 
 @router.post("/api/share/direct-post/create")

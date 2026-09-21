@@ -66,7 +66,7 @@ def upsert_device(
 def touch_device_and_get_stats(
     device_ip: str,
     device_id: str | None = None,
-    files_delta: int = 1,
+    files_delta: int = 0,
     size_delta: int = 0,
 ) -> Dict[str, Any]:
     return db_touch_device_and_get_stats(device_ip, device_id, files_delta, size_delta)

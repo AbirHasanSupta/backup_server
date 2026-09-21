@@ -96,3 +96,69 @@ def get_tailscale_network_info() -> dict:
         _tailscale_cache, _tailscale_cache_until = info, now + _TAILSCALE_CACHE_SECONDS
     return dict(info)
 
+
+def get_all_local_ips() -> list[str]:
+    """Return all discovered IPv4 addresses on LAN interfaces."""
+    import platform
+    import re
+    import socket
+
+    ips: set[str] = set()
+
+    # 1. Outbound socket probes
+    for target in ("8.8.8.8", "1.1.1.1", "224.0.0.1"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((target, 80))
+                outbound_ip = s.getsockname()[0]
+                if outbound_ip and not outbound_ip.startswith("127.") and not outbound_ip.startswith("169.254."):
+                    ips.add(outbound_ip)
+        except Exception:
+            pass
+
+    # 2. Hostname getaddrinfo and gethostbyname_ex
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                ips.add(ip)
+    except Exception:
+        pass
+
+    try:
+        _, _, host_ips = socket.gethostbyname_ex(socket.gethostname())
+        for ip in host_ips:
+            if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                ips.add(ip)
+    except Exception:
+        pass
+
+    # 3. Windows ipconfig parsing / OS interface scanning
+    if platform.system() == "Windows":
+        try:
+            out = subprocess.check_output(
+                ["ipconfig"],
+                text=True,
+                errors="ignore",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                timeout=3,
+            )
+            for ip in re.findall(r"IPv4 Address[.\s]+:\s*([\d.]+)", out):
+                if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                    ips.add(ip)
+        except Exception:
+            pass
+
+    def _sort_key(ip_str: str) -> tuple[int, str]:
+        if ip_str.startswith("192.168."):
+            return (0, ip_str)
+        if ip_str.startswith("10."):
+            return (1, ip_str)
+        if ip_str.startswith("172."):
+            return (2, ip_str)
+        return (3, ip_str)
+
+    return sorted(ips, key=_sort_key)
+
+

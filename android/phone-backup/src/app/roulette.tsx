@@ -12,8 +12,10 @@ import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { ShareModal } from '@/components/ShareModal';
+import { setUIPriorityMode } from '../../backgroundTask';
 import {
   getRouletteItem,
+
   getConfig,
   buildPreviewUrl,
   buildVideoPreviewUrl,
@@ -192,7 +194,9 @@ export default function RouletteScreen() {
   // playing video/animation and reset to a fresh state when it loses focus.
   useFocusEffect(
     useCallback(() => {
+      setUIPriorityMode(true);
       return () => {
+        setUIPriorityMode(false);
         stopSpinAnimation();
         setPhase('idle');
         setItem(null);
@@ -200,6 +204,7 @@ export default function RouletteScreen() {
       };
     }, [stopSpinAnimation]),
   );
+
 
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {

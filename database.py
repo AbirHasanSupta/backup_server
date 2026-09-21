@@ -1003,6 +1003,76 @@ def insert_file(path, size, modified_time, uploaded_time, device_ip=None, extern
     conn.close()
 
 
+def insert_file_and_touch_device(
+    path: str,
+    size: int,
+    modified_time: int,
+    uploaded_time: int,
+    device_ip: str | None = None,
+    external_id: str | None = None,
+    sha256: str | None = None,
+    device_id: str | None = None,
+) -> dict:
+    """Atomically insert file record, touch device timestamp, and increment counters in 1 transaction."""
+    conn = get_conn()
+    path = (path or "").replace("\\", "/")
+    now = uploaded_time or int(_time.time())
+
+    if device_id:
+        if device_ip:
+            conn.execute(
+                "DELETE FROM files WHERE path = ? AND device_ip = ? AND device_id != ?",
+                (path, device_ip, device_id),
+            )
+        conn.execute(
+            "INSERT INTO files (device_id, path, size, modified_time, uploaded_time, device_ip, external_id, sha256)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(device_id, path) DO UPDATE SET"
+            "   size = excluded.size,"
+            "   modified_time = excluded.modified_time,"
+            "   uploaded_time = excluded.uploaded_time,"
+            "   device_ip = excluded.device_ip,"
+            "   external_id = excluded.external_id,"
+            "   sha256 = excluded.sha256",
+            (device_id, path, size, modified_time, uploaded_time, device_ip, external_id, sha256),
+        )
+        conn.execute(
+            """
+            UPDATE devices 
+            SET last_seen = ?, 
+                device_ip = ?, 
+                files_backed_up = files_backed_up + 1, 
+                total_bytes = total_bytes + ? 
+            WHERE device_id = ?
+            """,
+            (now, device_ip or "", max(0, size), device_id),
+        )
+        row = conn.execute(
+            "SELECT files_backed_up, COALESCE(total_bytes, 0) as total_bytes FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        conn.commit()
+        conn.close()
+        return {
+            "total_files": row["files_backed_up"] if row else 0,
+            "total_size": row["total_bytes"] if row else 0,
+        }
+    else:
+        conn.execute(
+            "INSERT OR REPLACE INTO files (path, size, modified_time, uploaded_time, device_ip, external_id, sha256)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (path, size, modified_time, uploaded_time, device_ip, external_id, sha256),
+        )
+        if device_ip:
+            conn.execute(
+                "UPDATE devices SET last_seen = ? WHERE device_ip = ?",
+                (now, device_ip),
+            )
+        conn.commit()
+        conn.close()
+        return get_device_stats(device_ip or "", device_id)
+
+
 def remove_file_record(path, size, modified_time, device_id=None):
     conn = get_conn()
     if device_id:
@@ -1083,7 +1153,7 @@ def get_device_stats(device_ip: str, device_id: str | None = None) -> dict:
 def touch_device_and_get_stats(
     device_ip: str,
     device_id: str | None = None,
-    files_delta: int = 1,
+    files_delta: int = 0,
     size_delta: int = 0,
 ) -> dict:
     """Atomically touch device last_seen, increment counters, and return updated stats in O(1) time."""
@@ -1210,8 +1280,8 @@ def upsert_device(
     if device_id:
         ensure_device_token(device_id)
 
-    # Recalculate file count immediately
-    touch_device(device_ip, device_id)
+    # Recalculate file count accurately
+    touch_device(device_ip, device_id, files_delta=None)
 
     try:
         from state import update_device_display_name_cache
@@ -1746,7 +1816,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
     }
 
 
-def touch_device(device_ip: str, device_id: str | None = None, files_delta: int | None = 1) -> None:
+def touch_device(device_ip: str, device_id: str | None = None, files_delta: int | None = 0) -> None:
     """Update last_seen timestamp and file counter for a device efficiently."""
     now = int(_time.time())
     conn = get_conn()

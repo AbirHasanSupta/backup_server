@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 import uuid
 from pydantic import BaseModel
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
@@ -12,7 +13,7 @@ from core.config import load_config
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo
 from state import add_log, get_current_activity, pending_connections, set_current_activity
-from network_info import get_tailscale_network_info
+from network_info import get_all_local_ips, get_tailscale_network_info
 
 router = APIRouter(tags=["Authentication & Devices"])
 
@@ -59,13 +60,24 @@ async def connect_device(
     verify_api_key_or_device_token(token_str, None, None, None)
 
     device_ip = request.client.host if request.client else "127.0.0.1"
-    device_name = body.device_name.strip()
+    device_name = body.device_name.strip() or device_ip
     device_id = (body.device_id or "").strip() or None
     device_model = (body.device_model or "").strip() or None
     username = (body.username or "").strip() or None
 
     require_approval = cfg.get("REQUIRE_APPROVAL", True)
     is_known = device_repo.is_device_known(device_ip, device_id)
+    recovery_available = False
+
+    # Check for reinstall / migration if device_id changed
+    if device_id and not is_known:
+        existing = device_repo.find_device_by_name_model(device_name, device_model)
+        if existing and existing.get("device_id") and existing["device_id"] != device_id:
+            old_id = existing["device_id"]
+            add_log(f"🔄 Reinstall detected for '{device_name}': merging {old_id[:8]}… → {device_id[:8]}…")
+            device_repo.merge_device_id(old_id, device_id, device_ip)
+            recovery_available = True
+            is_known = True
 
     if require_approval and not is_known:
         req_id = str(uuid.uuid4())
@@ -74,6 +86,10 @@ async def connect_device(
         pending_connections[req_id] = {
             "name": device_name,
             "ip": device_ip,
+            "device_id": device_id,
+            "device_model": device_model,
+            "username": username,
+            "display_name": device_repo.format_device_display_name(username, device_name, device_model),
             "future": future,
             "loop": loop,
             "_shown": False,
@@ -91,19 +107,34 @@ async def connect_device(
     assigned_token = device_repo.ensure_device_token(device_id) if device_id else None
 
     # Broadcast pairing approval via WebSocket
-    try:
-        from services.ws_service import ws_service
-        if device_id and assigned_token:
+    if device_id and assigned_token:
+        try:
+            from services.ws_service import ws_service
             ws_service.notify_pairing_approved(device_id, assigned_token)
-    except Exception:
-        pass
+        except Exception:
+            pass
+
+    local_ips = await asyncio.to_thread(get_all_local_ips)
+    hostname = socket.gethostname()
+    tailscale = await asyncio.to_thread(get_tailscale_network_info)
+    stats = device_repo.get_device_stats(device_ip, device_id=device_id)
 
     return {
-        "status": "connected",
+        "status": "accepted",
+        "server_id": cfg.get("SERVER_ID", ""),
+        "name": cfg.get("DESKTOP_NAME") or hostname,
+        "hostname": f"{hostname}.local",
         "device_name": device_name,
+        "username": username,
         "token": assigned_token,
         "server_version": APP_VERSION,
+        "version": APP_VERSION,
+        "all_ips": local_ips,
+        "tailscale": tailscale,
+        "recovery_available": recovery_available,
+        "files_backed_up": stats.get("total_files", 0),
     }
+
 
 
 @router.get("/devices")

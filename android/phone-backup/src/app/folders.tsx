@@ -109,6 +109,7 @@ export default function FoldersScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      setUIPriorityMode(true);
       let alive = true;
       (async () => {
         await loadData();
@@ -116,10 +117,12 @@ export default function FoldersScreen() {
         await checkServer();
       })();
       return () => {
+        setUIPriorityMode(false);
         alive = false;
       };
     }, [loadData, checkServer])
   );
+
 
   useFocusEffect(
     useCallback(() => {

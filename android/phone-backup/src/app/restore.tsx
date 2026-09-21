@@ -22,7 +22,9 @@ import {
   BackHandler,
   ScrollView,
   AppState,
+  DeviceEventEmitter,
 } from 'react-native';
+
 import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
@@ -4673,7 +4675,38 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
   }, [isOffline, isDownloading, sourceMode, selectedSourceId, isFeedMode, sortField, sortDir, loadServerConfig]);
 
+  // Real-time WebSocket push listener: refresh feed and update social metrics live
+  useEffect(() => {
+    const feedSub = DeviceEventEmitter.addListener('feed_updated', () => {
+      if (isFeedMode && restoreMountedRef.current) {
+        void handleFetch({ quiet: true, preserveSelection: true });
+      }
+    });
+
+    const socialSub = DeviceEventEmitter.addListener('social_updated', (data: any) => {
+      if (!restoreMountedRef.current || !data?.media_id) return;
+      setFiles((prev) =>
+        prev.map((f) => {
+          if (f.media_id === data.media_id) {
+            return {
+              ...f,
+              reaction_counts: data.counts || f.reaction_counts,
+              comment_count: data.total_comments !== undefined ? data.total_comments : f.comment_count,
+            };
+          }
+          return f;
+        })
+      );
+    });
+
+    return () => {
+      feedSub.remove();
+      socialSub.remove();
+    };
+  }, [isFeedMode, handleFetch]);
+
   const handleLoadMoreFeed = useCallback(async () => {
+
     if (feedLoadingMore || !feedHasMore || isFetching || isOffline || isDownloading) return;
     setFeedLoadingMore(true);
     try {

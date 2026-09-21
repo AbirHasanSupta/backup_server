@@ -12,14 +12,18 @@ from config import load_config
 logger = logging.getLogger("backup_server.redis")
 
 _redis_client = None
+_redis_checked = False
 
 
 def get_redis_client():
     """Return a thread-safe Redis client instance with connection pooling."""
-    global _redis_client
+    global _redis_client, _redis_checked
     if _redis_client is not None:
         return _redis_client
+    if _redis_checked:
+        return None
 
+    _redis_checked = True
     try:
         import redis
         cfg = load_config()
@@ -28,8 +32,9 @@ def get_redis_client():
         _redis_client = redis.Redis(connection_pool=pool)
         return _redis_client
     except Exception as exc:
-        logger.warning("Redis client unavailable: %s", exc)
+        logger.info("Redis client unavailable: %s", exc)
         return None
+
 
 
 def publish_event(channel: str, message: dict | str) -> bool:

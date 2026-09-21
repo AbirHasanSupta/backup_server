@@ -81,16 +81,23 @@ class SyncService:
         device_id: str | None = None,
     ) -> Dict[str, Any]:
         now = int(time.time())
-        file_repo.insert_file(
+        # Atomic single-transaction insert and stats update
+        device_stats = file_repo.insert_file_and_touch_device(
             relative_path, size, modified_time, now, device_ip, external_id, sha256, device_id=device_id
         )
-
-        # Atomic O(1) device stats increment
-        device_stats = device_repo.touch_device_and_get_stats(
-            device_ip, device_id=device_id, files_delta=1, size_delta=size
-        )
         dev_name = device_repo.get_device_display_name(device_id or device_ip)
-        add_log(f"Uploaded: {relative_path} ({dev_name})")
+        # Broadcast real-time upload event via WebSocket
+        try:
+            from services.ws_service import ws_service
+            ws_service.notify_file_uploaded(
+                device_id=device_id or device_ip,
+                relative_path=relative_path,
+                size=size,
+                device_total_files=device_stats.get("total_files", 0),
+                device_total_size=device_stats.get("total_size", 0),
+            )
+        except Exception:
+            pass
 
         # Debounced background clustering
         if device_id:
@@ -105,6 +112,7 @@ class SyncService:
             "device_total_files": device_stats.get("total_files", 0),
             "device_total_size": device_stats.get("total_size", 0),
         }
+
 
     def skipped_upload(self, device_ip: str, device_id: str | None = None) -> Dict[str, Any]:
         device_stats = device_repo.touch_device_and_get_stats(

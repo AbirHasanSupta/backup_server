@@ -45,7 +45,9 @@ import {
   cancelRepostReel,
   toggleSaveReel,
 } from '../../downloader';
+import { setUIPriorityMode } from '../../backgroundTask';
 import { hapticLight, hapticSuccess, hapticError, hapticLongPress, hapticSelection } from '@/utils/haptics';
+
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 // Saved reels are shown in a full-screen modal, so unlike the feed there is no
@@ -1007,8 +1009,13 @@ export default function SavedReelsScreen() {
   }, [activeSegment, isNotOwnReel]);
 
   useEffect(() => {
+    setUIPriorityMode(true);
     void loadData();
+    return () => {
+      setUIPriorityMode(false);
+    };
   }, [loadData]);
+
 
   useEffect(() => {
     AsyncStorage.getItem(MUTED_KEY).then(v => { if (v != null) setMuted(v === '1'); }).catch(() => {});

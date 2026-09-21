@@ -32,8 +32,10 @@ import {
   resolveReachableServer,
 } from '../../settings';
 import { getTodaysMemories, getRandomFlashback, generateRewindReel, getRewindReelStatus } from '../../downloader';
+import { connectWebSocket, disconnectWebSocket } from '../../websocketClient';
 import {
   getStreakData,
+
   getLastStreakRiskNotifiedDate,
   setLastStreakRiskNotifiedDate,
   todayStr as streakTodayStr,
@@ -203,6 +205,7 @@ function RootLayoutContent() {
       await registerBackgroundTask();
       syncWidgetServerConfig().catch(() => {});
       resolveReachableServer().catch(() => {});
+      connectWebSocket().catch(() => {});
       checkAndNotifyMemories().catch(() => {});
       checkAndNotifyFlashback().catch(() => {});
       checkAndNotifyStreakRisk().catch(() => {});
@@ -219,6 +222,7 @@ function RootLayoutContent() {
         networkSub = Network.addNetworkStateListener((state: any) => {
           if (state?.isConnected) {
             resolveReachableServer({ force: true }).catch(() => {});
+            connectWebSocket().catch(() => {});
             checkAndNotifyNewShares().catch(() => {});
           }
         });
@@ -227,7 +231,9 @@ function RootLayoutContent() {
 
     return () => {
       networkSub?.remove?.();
+      disconnectWebSocket();
     };
+
   }, []);
 
   useEffect(() => {

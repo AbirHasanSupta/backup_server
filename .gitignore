@@ -6,6 +6,8 @@ dist/
 
 # Server data & config
 backup.db
+backup_server.db
+*.db
 server_config.json
 
 # TLS certificates (generated at runtime, contain private key)

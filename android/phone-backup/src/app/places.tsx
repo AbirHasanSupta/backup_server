@@ -29,6 +29,8 @@ import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticMedium, hapticLight } from '@/utils/haptics';
 import { getPlaceName } from '@/utils/geocode';
 import { ShareModal } from '@/components/ShareModal';
+import { setUIPriorityMode } from '../../backgroundTask';
+
 import {
   getPlaceClusters,
   getPlaceItems,
@@ -206,7 +208,16 @@ export default function PlacesScreen() {
     }
   }, []);
 
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(
+    useCallback(() => {
+      setUIPriorityMode(true);
+      load();
+      return () => {
+        setUIPriorityMode(false);
+      };
+    }, [load])
+  );
+
 
   const refreshTrips = useCallback(async () => {
     setTripsLoading(true);
