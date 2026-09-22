@@ -93,9 +93,18 @@ def get_pg_connection():
 
 
 def init_pg_db():
-    """Create all required tables, partitions, and indexes in PostgreSQL if not exist."""
+    """Create all required tables, partitions, and indexes in PostgreSQL if not exist.
+
+    Multiple Gunicorn workers can enter application startup simultaneously.  The
+    advisory transaction lock prevents their otherwise-racy first-time DDL from
+    causing a worker to incorrectly fall back to SQLite.
+    """
     with get_pg_connection() as conn:
         with conn.cursor() as cur:
+            # This stable, application-specific lock is released automatically
+            # when the schema-initialization transaction commits or rolls back.
+            cur.execute("SELECT pg_advisory_xact_lock(486795553)")
+
             # 1. Devices table
             cur.execute("""
             CREATE TABLE IF NOT EXISTS devices (
