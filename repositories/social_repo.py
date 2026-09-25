@@ -231,7 +231,7 @@ def create_device_share(
                         "INSERT INTO device_share_targets (share_id, target_device_id, seen, notified) VALUES (?, ?, 0, 0) ON CONFLICT DO NOTHING",
                         (sid, tid),
                     )
-        return {"share_group_id": group_id, "shares_created": len(created_shares)}
+        return {"ok": True, "group_id": group_id, "share_group_id": group_id, "shares_created": len(created_shares), "count": len(created_shares)}
     return db_create_device_share(
         shared_by_device_id, target_device_ids, caption, items, post_kind, post_title, share_group_id
     )

@@ -390,7 +390,10 @@ async def create_share_post(
         body.post_kind,
         body.post_title,
     )
-    if not res.get("ok"):
+    # Only clean up persisted reel files on an explicit failure.
+    # Previously this checked `res.get("ok")` which is absent in the Postgres
+    # response shape, causing the reel to be deleted right after a successful share.
+    if res.get("ok") is False:
         for p in persisted_paths:
             try:
                 os.remove(p)
@@ -399,9 +402,11 @@ async def create_share_post(
     try:
         from services.ws_service import ws_service
         shared_by = device_repo.get_device_display_name(body.shared_by_device_id)
+        # Accept both "group_id" (SQLite) and "share_group_id" (legacy Postgres) keys.
+        group_id = res.get("group_id") or res.get("share_group_id") or ""
         ws_service.notify_new_share(
             target_device_ids=body.target_device_ids,
-            group_id=res.get("group_id", ""),
+            group_id=group_id,
             caption=body.caption,
             shared_by=shared_by,
             shared_by_device_id=body.shared_by_device_id,

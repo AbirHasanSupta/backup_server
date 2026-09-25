@@ -2168,7 +2168,7 @@ async def create_share(
         create_device_share, body.shared_by_device_id, targets, body.caption, items,
         body.post_kind, body.post_title,
     )
-    if not result.get("ok"):
+    if result.get("ok") is False:
         for p in persisted_paths:
             try:
                 os.remove(p)
