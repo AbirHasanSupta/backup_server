@@ -67,7 +67,7 @@ def _authorize_share_access(share_id: int, device_id: str) -> dict:
             for entry in get_shared_dirs():
                 if entry.get("id") == share["source_key"]:
                     tags = entry.get("device_ids", ["all"])
-                    if "all" in tags or device_id in tags:
+                    if not tags or "all" in tags or device_id in tags:
                         return share
     if not (share["shared_by_device_id"] == device_id or social_repo.is_share_target(share_id, device_id)):
         raise HTTPException(status_code=403, detail="Share not available for this device")
@@ -81,7 +81,7 @@ def _library_reel_label_for_device(source_type: str, source_key: str, device_id:
         for entry in get_shared_dirs():
             if entry.get("id") == source_key:
                 tags = entry.get("device_ids", ["all"])
-                if ("all" in tags or device_id in tags) and entry.get("available_in_reels", entry.get("available_in_reel", True)):
+                if (not tags or "all" in tags or device_id in tags) and entry.get("available_in_reels", entry.get("available_in_reel", True)):
                     return entry.get("label") or "Shared folder"
     return None
 
@@ -139,7 +139,7 @@ async def get_shared_and_backups_reels(
             if not entry.get("id"):
                 continue
             tags = entry.get("device_ids", ["all"])
-            if "all" not in tags and device_id not in tags:
+            if tags and "all" not in tags and device_id not in tags:
                 continue
             if not entry.get("available_in_reels", entry.get("available_in_reel", True)):
                 continue

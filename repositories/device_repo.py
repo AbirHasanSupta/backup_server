@@ -21,24 +21,26 @@ from database import (
     set_device_username as db_set_device_username,
     is_device_known as db_is_device_known,
     get_device_folder_name as db_get_device_folder_name,
+    find_device_by_name_model as db_find_device_by_name_model,
+    merge_device_id as db_merge_device_id,
 )
 
 
 def format_device_display_name(
     dev: dict | str | None = None,
     device_name: str | None = None,
+    device_model: str | None = None,
     *,
     username: str | None = None,
-    device_model: str | None = None,
     device_id: str | None = None,
     fallback: str | None = None,
 ) -> str:
-    """Flexible device display name formatter supporting (username, device_name), (dict), or kwargs."""
+    """Flexible device display name formatter supporting (username, device_name, device_model), (dict), or kwargs."""
     if isinstance(dev, str):
-        # Called as (username, device_name)
-        u = dev
+        u = username or dev
         dn = device_name
-        return db_format_device_display_name(username=u, device_name=dn, fallback=fallback)
+        dm = device_model
+        return db_format_device_display_name(username=u, device_name=dn, device_model=dm, fallback=fallback)
     elif isinstance(dev, dict):
         return db_format_device_display_name(dev, username=username, device_name=device_name, device_model=device_model, device_id=device_id, fallback=fallback)
     else:
@@ -98,3 +100,11 @@ def set_device_username(device_id: str, username: str | None) -> None:
 
 def remove_device(device_id: str) -> bool:
     return db_remove_device(device_id)
+
+
+def find_device_by_name_model(device_name: str, device_model: str | None) -> Dict[str, Any] | None:
+    return db_find_device_by_name_model(device_name, device_model)
+
+
+def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) -> Dict[str, int]:
+    return db_merge_device_id(old_device_id, new_device_id, new_device_ip)

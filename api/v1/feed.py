@@ -86,7 +86,7 @@ def _authorize_share_access(share_id: int, device_id: str) -> dict:
             for entry in get_shared_dirs():
                 if entry.get("id") == share["source_key"]:
                     tags = entry.get("device_ids", ["all"])
-                    if "all" in tags or device_id in tags:
+                    if not tags or "all" in tags or device_id in tags:
                         return share
     if not (share["shared_by_device_id"] == device_id or social_repo.is_share_target(share_id, device_id)):
         raise HTTPException(status_code=403, detail="Share not available for this device")
@@ -157,6 +157,7 @@ async def get_feed(
     return {"items": posts, "has_more": has_more, "total": total}
 
 
+@router.get("/api/shared/list")
 @router.get("/shared/list")
 async def list_shared_folders(
     device_id: str | None = None,
@@ -166,14 +167,16 @@ async def list_shared_folders(
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     all_dirs = get_shared_dirs()
     if not device_id:
-        return {"shared_dirs": all_dirs}
+        sources = [{"id": d["id"], "label": d.get("label") or d.get("path") or d["id"]} for d in all_dirs if d.get("id")]
+        return {"sources": sources, "shared_dirs": all_dirs}
 
     accessible = []
     for entry in all_dirs:
         tags = entry.get("device_ids", ["all"])
-        if "all" in tags or device_id in tags:
+        if not tags or "all" in tags or device_id in tags:
             accessible.append(entry)
-    return {"shared_dirs": accessible}
+    sources = [{"id": d["id"], "label": d.get("label") or d.get("path") or d["id"]} for d in accessible if d.get("id")]
+    return {"sources": sources, "shared_dirs": accessible}
 
 
 @router.get("/api/share/devices")

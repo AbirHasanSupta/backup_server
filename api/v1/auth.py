@@ -35,16 +35,34 @@ class ActivityRequest(BaseModel):
     device_id: str | None = None
 
 
+@router.get("/api/ping")
 @router.get("/ping")
-async def ping(
-    authorization: str = Header(None),
-    token: str = Query(None),
-    device_id: str = Query(None),
-):
-    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    return {"status": "ok", "version": APP_VERSION}
+async def ping():
+    """LAN discovery endpoint without auth."""
+    local_ips = await asyncio.to_thread(get_all_local_ips)
+    hostname = socket.gethostname()
+    cfg = load_config()
+    tailscale = await asyncio.to_thread(get_tailscale_network_info)
+    cert_fp = ""
+    try:
+        from network_info import get_cert_fingerprint
+        cert_fp = get_cert_fingerprint()
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "server_id": cfg.get("SERVER_ID", ""),
+        "name": cfg.get("DESKTOP_NAME") or hostname,
+        "hostname": f"{hostname}.local",
+        "version": APP_VERSION,
+        "cert_fingerprint": cert_fp,
+        "all_ips": local_ips,
+        "tailscale": tailscale,
+    }
 
 
+@router.post("/api/connect")
 @router.post("/connect")
 async def connect_device(
     request: Request,
@@ -54,12 +72,11 @@ async def connect_device(
 ):
     """Pair new device with optional interactive desktop approval modal."""
     cfg = load_config()
-    token_str = (authorization or f"Bearer {token}" if token else "")
-    verify_api_key_or_device_token(token_str, None, None, None)
+    verify_api_key_or_device_token(authorization, token, None, None)
 
     device_ip = request.client.host if request.client else "127.0.0.1"
     device_name = body.device_name.strip() or device_ip
-    device_id = (body.device_id or "").strip() or None
+    device_id = (body.device_id or "").strip() or str(uuid.uuid4())
     device_model = (body.device_model or "").strip() or None
     username = (body.username or "").strip() or None
 
@@ -102,7 +119,7 @@ async def connect_device(
             raise HTTPException(status_code=403, detail="Connection request rejected by user.")
 
     device_repo.upsert_device(device_name, device_ip, device_id, device_model, username)
-    assigned_token = device_repo.ensure_device_token(device_id) if device_id else None
+    assigned_token = device_repo.ensure_device_token(device_id)
 
     # Broadcast pairing approval via WebSocket
     if device_id and assigned_token:
@@ -119,6 +136,8 @@ async def connect_device(
 
     return {
         "status": "accepted",
+        "ok": True,
+        "device_id": device_id,
         "server_id": cfg.get("SERVER_ID", ""),
         "name": cfg.get("DESKTOP_NAME") or hostname,
         "hostname": f"{hostname}.local",
@@ -134,7 +153,7 @@ async def connect_device(
     }
 
 
-
+@router.get("/api/devices")
 @router.get("/devices")
 async def list_devices(
     device_id: str | None = None,
@@ -148,6 +167,7 @@ async def list_devices(
     return {"devices": devices}
 
 
+@router.delete("/api/devices/{target_device_id}")
 @router.delete("/devices/{target_device_id}")
 async def delete_device(
     target_device_id: str,
@@ -161,6 +181,7 @@ async def delete_device(
     return {"ok": True}
 
 
+@router.post("/api/devices/{target_device_id}/username")
 @router.post("/devices/{target_device_id}/username")
 async def update_username(
     target_device_id: str,
@@ -174,6 +195,7 @@ async def update_username(
     return {"ok": True, "username": new_username}
 
 
+@router.get("/api/status")
 @router.get("/status")
 async def get_server_status(
     request: Request,
@@ -185,6 +207,9 @@ async def get_server_status(
     device_ip = request.client.host if request.client else "127.0.0.1"
     is_known = device_repo.is_device_known(device_ip, device_id)
     dev_obj = device_repo.get_device_by_id(device_id) if device_id else None
+    local_ips = await asyncio.to_thread(get_all_local_ips)
+    hostname = socket.gethostname()
+    tailscale = await asyncio.to_thread(get_tailscale_network_info)
 
     return {
         "status": "online",
@@ -192,10 +217,13 @@ async def get_server_status(
         "device_connected": is_known,
         "username": dev_obj.get("username") if dev_obj else None,
         "current_activity": get_current_activity(),
-        "tailscale": get_tailscale_network_info(),
+        "all_ips": local_ips,
+        "hostname": f"{hostname}.local",
+        "tailscale": tailscale,
     }
 
 
+@router.post("/api/status/activity")
 @router.post("/status/activity")
 async def update_activity(
     body: ActivityRequest,

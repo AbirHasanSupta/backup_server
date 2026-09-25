@@ -7,6 +7,7 @@ import os
 from datetime import date
 from pydantic import BaseModel
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse
 
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo
@@ -18,8 +19,8 @@ router = APIRouter(tags=["Memories & Rewind"])
 
 
 class RewindGenerateRequest(BaseModel):
-    device_id: str
-    year: int
+    device_id: str | None = None
+    year: int | None = None
     month: int | None = None
 
 
@@ -72,9 +73,7 @@ async def get_flashback(
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     res = await asyncio.to_thread(memories.get_random_flashback, device_id)
-    if not res:
-        return {"flashback": None}
-    return {"flashback": res}
+    return res
 
 
 @router.get("/memories/wrapped")
@@ -113,9 +112,7 @@ async def get_roulette(
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     res = await asyncio.to_thread(memories.get_roulette_item, device_id)
-    if not res:
-        return {"item": None}
-    return {"item": res}
+    return res
 
 
 @router.get("/memories/places")
@@ -146,12 +143,20 @@ async def get_place_details(
 @router.post("/memories/rewind/generate")
 @router.post("/api/memories/rewind/generate")
 async def generate_rewind(
-    body: RewindGenerateRequest,
+    device_id: str | None = Query(None),
+    year: int | None = Query(None),
+    month: int | None = Query(None),
+    body: RewindGenerateRequest | None = None,
     authorization: str = Header(None),
     token: str = Query(None),
 ):
-    verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
-    res = await asyncio.to_thread(rewind.start_rewind_build, body.device_id, body.year, body.month)
+    dev_id = (body.device_id if body and body.device_id else device_id)
+    target_year = (body.year if body and body.year is not None else year)
+    target_month = (body.month if body and body.month is not None else month)
+    if not dev_id or target_year is None:
+        raise HTTPException(status_code=400, detail="device_id and year are required")
+    verify_api_key_or_device_token(authorization, token, dev_id, device_repo.verify_device_token)
+    res = await asyncio.to_thread(rewind.start_rewind_build, dev_id, target_year, target_month)
     return res
 
 
@@ -184,3 +189,20 @@ async def stream_rewind(
     if not reel_path or not os.path.isfile(reel_path):
         raise HTTPException(status_code=404, detail="Rewind reel not found or not ready yet")
     return preview_service.stream_file_range(reel_path, request, cache_control="public, max-age=604800, immutable")
+
+
+@router.get("/memories/rewind/download")
+@router.get("/api/memories/rewind/download")
+async def download_rewind(
+    device_id: str,
+    year: int,
+    month: int | None = None,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    reel_path = await asyncio.to_thread(rewind.get_rewind_path, device_id, year, month)
+    if not reel_path or not os.path.isfile(reel_path):
+        raise HTTPException(status_code=404, detail="Rewind reel not found or not ready yet")
+    filename = f"rewind_{device_id}_{year}" + (f"_{month:02d}" if month else "") + ".mp4"
+    return FileResponse(reel_path, media_type="video/mp4", filename=filename)

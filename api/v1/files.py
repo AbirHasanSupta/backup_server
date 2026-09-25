@@ -35,10 +35,11 @@ def _is_folder_tagged_for_device(entry: dict, device_id: str | None) -> bool:
     if not device_id:
         return True
     tags = entry.get("device_ids", ["all"])
-    return "all" in tags or device_id in tags
+    return not tags or "all" in tags or device_id in tags
 
 
 @router.get("/files/list")
+@router.get("/api/files/list")
 async def list_files(
     device_id: str,
     prefix: str = "",
@@ -51,31 +52,22 @@ async def list_files(
 
 
 @router.get("/files/browse")
+@router.get("/api/files/browse")
 async def browse_files(
     device_id: str,
+    prefix: str = "",
     folder_path: str = "",
-    recursive: bool = False,
-    sort_by: str = "date",
-    sort_order: str = "desc",
-    category: str = "all",
-    limit: int | None = None,
-    offset: int = 0,
     authorization: str = Header(None),
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    return file_repo.get_files_browse(
-        device_id=device_id,
-        folder_path=folder_path,
-        recursive=recursive,
-        sort_by=sort_by,
-        sort_order=sort_order,
-        category=category,
-        limit=limit,
-        offset=offset,
-    )
+    norm_prefix = (prefix or folder_path).strip("/")
+    norm_prefix = f"{norm_prefix}/" if norm_prefix else ""
+    folders, files = await asyncio.to_thread(file_repo.get_files_browse, device_id, norm_prefix)
+    return {"folders": folders, "files": files}
 
 
+@router.get("/api/files/search")
 @router.get("/files/search")
 async def search_files(
     device_id: str,
@@ -90,6 +82,7 @@ async def search_files(
     return {"device_id": device_id, "query": q, "files": files}
 
 
+@router.get("/api/files/download")
 @router.get("/files/download")
 async def download_file(
     request: Request,
@@ -108,6 +101,7 @@ async def download_file(
     return preview_service.stream_file_range(full_path, request)
 
 
+@router.get("/api/files/preview")
 @router.get("/files/preview")
 async def preview_file(
     request: Request,
@@ -132,6 +126,7 @@ async def preview_file(
     return preview_service.stream_file_range(cached_preview, request, cache_control=cache_ctrl)
 
 
+@router.get("/api/files/thumbnail")
 @router.get("/files/thumbnail")
 async def get_thumbnail(
     path: str | None = None,
@@ -149,7 +144,7 @@ async def get_thumbnail(
     return thumbnail_service.get_thumbnail_response(full_path)
 
 
-
+@router.post("/api/files/warm_previews")
 @router.post("/files/warm_previews")
 async def warm_previews(
     body: WarmPreviewsRequest,
@@ -170,6 +165,7 @@ async def warm_previews(
 
 
 # Shared Folders endpoints
+@router.get("/api/shared/{source_id}/files")
 @router.get("/shared/{source_id}/files")
 async def list_shared_files(
     source_id: str,
@@ -305,6 +301,7 @@ async def browse_shared_files(
     return await asyncio.to_thread(_scan)
 
 
+@router.get("/api/shared/{source_id}/download")
 @router.get("/shared/{source_id}/download")
 async def download_shared_file(
     source_id: str,
@@ -329,6 +326,7 @@ async def download_shared_file(
     return preview_service.stream_file_range(full_path, request)
 
 
+@router.get("/api/shared/{source_id}/preview")
 @router.get("/shared/{source_id}/preview")
 async def preview_shared_file(
     source_id: str,
@@ -358,6 +356,7 @@ async def preview_shared_file(
     return preview_service.stream_file_range(cached, request, cache_control=cache_ctrl)
 
 
+@router.get("/api/shared/{source_id}/thumbnail")
 @router.get("/shared/{source_id}/thumbnail")
 async def thumbnail_shared_file(
     source_id: str,
@@ -379,3 +378,27 @@ async def thumbnail_shared_file(
     if os.path.commonpath([root, full_path]) != root or not os.path.isfile(full_path):
         raise HTTPException(status_code=404, detail="File not found")
     return thumbnail_service.get_thumbnail_response(full_path)
+
+
+@router.post("/api/shared/{source_id}/warm_previews")
+@router.post("/shared/{source_id}/warm_previews")
+async def warm_shared_previews(
+    source_id: str,
+    body: WarmPreviewsRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
+    entry = _find_shared_dir(source_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Shared source not found")
+    root = os.path.abspath(entry["path"])
+    for rel_path in body.paths[:3]:
+        try:
+            full_path = os.path.abspath(os.path.join(root, rel_path))
+            if preview_service.is_video(full_path):
+                arm_active_video_preview(body.device_id or "shared", full_path)
+                preview_service.get_preview_path(full_path, schedule_missing=True)
+        except Exception:
+            pass
+    return {"ok": True}

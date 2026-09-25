@@ -46,11 +46,11 @@ class CompleteChunkedUploadRequest(BaseModel):
 
 class SyncSessionRequest(BaseModel):
     device_id: str | None = None
-    started_at: int
-    finished_at: int
-    duration_sec: float
-    files_uploaded: int
-    bytes_uploaded: int
+    started_at: int | None = None
+    finished_at: int | None = None
+    duration_sec: float | None = None
+    files_uploaded: int = 0
+    bytes_uploaded: int = 0
     files_skipped: int = 0
     files_failed: int = 0
     status: str = "success"

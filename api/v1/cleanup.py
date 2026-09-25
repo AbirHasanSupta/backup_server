@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, status
 
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo
+from state import add_log
 import database
 
 router = APIRouter(tags=["Cleanup & Storage Optimization"])
@@ -56,7 +57,7 @@ async def cleanup_delete(
     result = await asyncio.to_thread(database.log_cleanup_deletions, body.source_id, items)
     dev_name = device_repo.get_device_display_name(body.source_id)
     freed_gb = result.get("total_bytes_freed", 0) / (1024 ** 3)
-    database.add_log(
+    add_log(
         f"🗑️  Cleanup: {dev_name} freed {freed_gb:.2f} GB ({len(body.files)} files)"
     )
     return result

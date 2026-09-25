@@ -657,7 +657,7 @@ def _shared_sources_for_device(device_id: str, shared_dirs: list) -> tuple[list[
         tagged = d.get("device_ids", [])
         if sid and label:
             shared_labels[sid] = label
-            if isinstance(tagged, list) and (device_id in tagged or "all" in tagged):
+            if not tagged or (isinstance(tagged, list) and (device_id in tagged or "all" in tagged)):
                 sources.append(("shared", sid))
     return sources, shared_labels
 
@@ -825,7 +825,27 @@ def get_random_flashback(device_id: str) -> dict | None:
             candidates.append((years_ago, weight, rows))
 
     if not candidates:
-        return None
+        row = get_random_media_row(sources, allowed_exts=CLIENT_FLASHBACK_EXTS)
+        if not row:
+            return None
+        ext = os.path.splitext(row["relative_path"])[1].lower()
+        is_video = ext in VIDEO_EXTS
+        s_type = row["source_type"]
+        s_key = row["source_key"]
+        s_label = "Phone Backup" if s_type == "phone" else shared_labels.get(s_key, "Shared Folder")
+        cap_yr = row.get("cap_year")
+        years_ago = (today.year - cap_yr) if cap_yr else 0
+        return {
+            "source_type": s_type,
+            "source_id": s_key,
+            "source_label": s_label,
+            "relative_path": row["relative_path"],
+            "size": row["size"],
+            "capture_time": row["capture_time"],
+            "is_video": is_video,
+            "year": cap_yr,
+            "years_ago": years_ago,
+        }
 
     weights = [c[1] for c in candidates]
     years_ago, _, rows = random.choices(candidates, weights=weights, k=1)[0]
@@ -915,7 +935,7 @@ def get_quiz_round(device_id: str, count: int = QUIZ_DEFAULT_COUNT) -> dict:
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, _ = _shared_sources_for_device(device_id, shared_dirs)
     distinct_years = get_distinct_cap_years(sources)
-    if len(distinct_years) < QUIZ_MIN_DISTINCT_YEARS:
+    if not distinct_years:
         return {"items": []}
 
     pool = get_quiz_photo_pool(sources)
@@ -924,7 +944,7 @@ def get_quiz_round(device_id: str, count: int = QUIZ_DEFAULT_COUNT) -> dict:
         if os.path.splitext(r["relative_path"])[1].lower() in QUIZ_DISPLAYABLE_EXTS
     ]
 
-    if len(photo_pool) < 2:
+    if not photo_pool:
         return {"items": []}
 
     round_size = min(max(1, count), len(photo_pool))

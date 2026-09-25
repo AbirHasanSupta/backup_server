@@ -74,32 +74,56 @@ def search_files_for_device(
     category: str = "all",
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
-    return db_search_files_for_device(device_id, query, category, limit)
+    return db_search_files_for_device(device_id, query, limit=limit)
 
 
 def get_files_browse(
     device_id: str,
+    prefix: str = "",
     folder_path: str = "",
-    recursive: bool = False,
-    sort_by: str = "date",
-    sort_order: str = "desc",
-    category: str = "all",
-    limit: int | None = None,
-    offset: int = 0,
-) -> Dict[str, Any]:
-    return db_get_files_browse(device_id, folder_path, recursive, sort_by, sort_order, category, limit, offset)
+    **kwargs,
+) -> tuple[list[dict], list[dict]]:
+    norm_prefix = (prefix or folder_path).strip("/")
+    norm_prefix = f"{norm_prefix}/" if norm_prefix else ""
+    return db_get_files_browse(device_id, norm_prefix)
 
 
-def remove_file_record(device_id: str, relative_path: str) -> bool:
-    return db_remove_file_record(device_id, relative_path)
+def remove_file_record(device_id: str, relative_path: str, size: int = 0, modified_time: int = 0) -> bool:
+    try:
+        from database import get_conn
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM files WHERE (device_id = ? OR device_id IS NULL) AND path = ?",
+            (device_id, relative_path),
+        )
+        conn.commit()
+        deleted = cur.rowcount > 0
+        conn.close()
+        return deleted
+    except Exception:
+        return False
 
 
 def get_upload_cache(device_id: str) -> List[Dict[str, Any]]:
     return db_get_upload_cache(device_id)
 
 
-def insert_sync_session(data: Dict[str, Any]) -> None:
-    db_insert_sync_session(data)
+def insert_sync_session(data: Dict[str, Any]) -> int:
+    return db_insert_sync_session(
+        device_id=data.get("device_id"),
+        device_name=data.get("device_name"),
+        started_at=data.get("started_at", 0),
+        ended_at=data.get("ended_at", data.get("finished_at", 0)),
+        duration_ms=data.get("duration_ms", int(data.get("duration_sec", 0) * 1000)),
+        trigger=data.get("trigger", "manual"),
+        outcome=data.get("outcome", data.get("status", "success")),
+        scanned=data.get("scanned", 0),
+        checked=data.get("checked", 0),
+        uploaded=data.get("uploaded", data.get("files_uploaded", 0)),
+        skipped=data.get("skipped", data.get("files_skipped", 0)),
+        errors=data.get("errors", data.get("files_failed", 0)),
+        total_files=data.get("total_files", 0),
+    )
 
 
 def get_sync_sessions(device_id: str, limit: int = 50) -> List[Dict[str, Any]]:
