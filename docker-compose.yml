@@ -26,6 +26,7 @@ services:
       - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
       - REDIS_URL=redis://redis:6379/0
       - CELERY_ENABLED=true
+      - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
       - BACKUP_ROOT=/backup_storage
       - APP_DATA_DIR=/app_data
     volumes:
@@ -37,7 +38,7 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $$API_KEY\" http://localhost:8000/ping >/dev/null"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/ping >/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -56,6 +57,7 @@ services:
       - DATABASE_BACKEND=postgres
       - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
       - REDIS_URL=redis://redis:6379/0
+      - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
       - BACKUP_ROOT=/backup_storage
       - APP_DATA_DIR=/app_data
     volumes:
@@ -80,6 +82,7 @@ services:
       - DATABASE_BACKEND=postgres
       - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
       - REDIS_URL=redis://redis:6379/0
+      - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
       - BACKUP_ROOT=/backup_storage
       - APP_DATA_DIR=/app_data
     volumes:

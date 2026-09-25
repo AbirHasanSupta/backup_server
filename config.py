@@ -54,7 +54,7 @@ _DEFAULTS = {
     "HOST": os.environ.get("HOST", "0.0.0.0"),
     "PORT": int(os.environ.get("PORT", 8000)),
     "DB_PATH": DB_PATH,
-    "REQUIRE_APPROVAL": True,
+    "REQUIRE_APPROVAL": os.environ.get("REQUIRE_APPROVAL", "true").lower() in ("1", "true", "yes") if "REQUIRE_APPROVAL" in os.environ else True,
     "THEME_MODE": "light",
     "SSL_CERT": os.path.join(APP_DATA_DIR, "cert.pem"),
     "SSL_KEY": os.path.join(APP_DATA_DIR, "key.pem"),
@@ -123,6 +123,8 @@ def _apply_environment_overrides(cfg: dict) -> dict:
             pass
     if "CELERY_ENABLED" in os.environ:
         cfg["CELERY_ENABLED"] = os.environ["CELERY_ENABLED"].lower() in ("1", "true", "yes")
+    if "REQUIRE_APPROVAL" in os.environ:
+        cfg["REQUIRE_APPROVAL"] = os.environ["REQUIRE_APPROVAL"].lower() in ("1", "true", "yes")
     if "CORS_ALLOW_CREDENTIALS" in os.environ:
         cfg["CORS_ALLOW_CREDENTIALS"] = os.environ["CORS_ALLOW_CREDENTIALS"].lower() in ("1", "true", "yes")
     return cfg
