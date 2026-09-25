@@ -1,5 +1,34 @@
+##############################################################################
+# Phone Backup Server — Docker Compose
+#
+# SHARED STORAGE STRATEGY
+# ════════════════════════
+# All containers (API, Celery workers) AND the desktop app share the SAME
+# physical directories on the host.  This means:
+#
+#   • Phone backups (actual media files)  → D:\PhoneBackup  (BACKUP_ROOT)
+#   • App data (DB¹, config, posts, reels, memories, caches)
+#                                         → C:\Users\Abir\AppData\Roaming\PhoneBackupServer
+#
+# ¹ Docker uses PostgreSQL; desktop EXE uses SQLite in the same APP_DATA_DIR.
+#   Both can coexist — the .db file is only written by whichever process holds it.
+#   Run the migration script to seed PG from the SQLite file.
+#
+# HOW TO START:
+#   1. Copy .env.example → .env and fill in secrets
+#   2. docker compose up -d
+#   3. (first time) python scripts/migrate_sqlite_to_postgres.py --merge-both
+#
+# VOLUMES (host-bind-mounts, NOT named Docker volumes):
+#   backup_storage → D:\PhoneBackup                        (phone backup files)
+#   app_data       → %APPDATA%\PhoneBackupServer            (config/db/cache)
+#
+# The web_admin static files are served from the project checkout (read-only).
+##############################################################################
+
 services:
-  # 1. Reverse Proxy & Ingress Load Balancer
+
+  # ── 1. Reverse Proxy & Ingress ────────────────────────────────────────────
   nginx:
     image: nginx:alpine
     container_name: backup_nginx
@@ -8,14 +37,16 @@ services:
       - "80:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - backup_cache:/app_data
+      # Serve shared media + generated assets through nginx for zero-copy downloads
+      - ${BACKUP_ROOT:-D:\PhoneBackup}:/backup_storage:ro
+      - ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}:/app_data:ro
     depends_on:
       api:
         condition: service_healthy
     networks:
       - backup_net
 
-  # 2. FastAPI API Gateway (4 Gunicorn Workers)
+  # ── 2. FastAPI API Gateway (Gunicorn + Uvicorn workers) ───────────────────
   api:
     build: .
     container_name: backup_api
@@ -27,11 +58,21 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_ENABLED=true
       - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
+      # All containers write media here — same physical folder the desktop EXE uses
       - BACKUP_ROOT=/backup_storage
+      # All containers write config/cache/posts/reels/memories here
+      # — same physical folder as the desktop EXE's AppData directory
       - APP_DATA_DIR=/app_data
     volumes:
-      - backup_storage:/backup_storage
-      - backup_cache:/app_data
+      # Phone backup files — bind-mount the same root the desktop app uses
+      - type: bind
+        source: ${BACKUP_ROOT:-D:\PhoneBackup}
+        target: /backup_storage
+      # App data (posts, reels, memories, quiz cards, caches, config)
+      # — bind-mount the same AppData folder the desktop EXE writes to
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
     depends_on:
       postgres:
         condition: service_healthy
@@ -46,7 +87,7 @@ services:
     networks:
       - backup_net
 
-  # 3. Dedicated Video Transcoding Worker (FFmpeg)
+  # ── 3. Video Transcoding Worker (FFmpeg) ──────────────────────────────────
   celery_worker_video:
     build: .
     container_name: backup_celery_video
@@ -61,8 +102,12 @@ services:
       - BACKUP_ROOT=/backup_storage
       - APP_DATA_DIR=/app_data
     volumes:
-      - backup_storage:/backup_storage
-      - backup_cache:/app_data
+      - type: bind
+        source: ${BACKUP_ROOT:-D:\PhoneBackup}
+        target: /backup_storage
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
     depends_on:
       postgres:
         condition: service_healthy
@@ -71,7 +116,7 @@ services:
     networks:
       - backup_net
 
-  # 4. General Background Task Worker (Rewind Reels & Trips/EXIF Indexing)
+  # ── 4. General Worker (Rewind Reels, EXIF Indexing, Trips) ───────────────
   celery_worker_general:
     build: .
     container_name: backup_celery_general
@@ -86,8 +131,12 @@ services:
       - BACKUP_ROOT=/backup_storage
       - APP_DATA_DIR=/app_data
     volumes:
-      - backup_storage:/backup_storage
-      - backup_cache:/app_data
+      - type: bind
+        source: ${BACKUP_ROOT:-D:\PhoneBackup}
+        target: /backup_storage
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
     depends_on:
       postgres:
         condition: service_healthy
@@ -96,7 +145,7 @@ services:
     networks:
       - backup_net
 
-  # 5. PostgreSQL Database
+  # ── 5. PostgreSQL ─────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: backup_postgres
@@ -106,7 +155,11 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       - POSTGRES_DB=backup_db
     volumes:
+      # PG data lives in a named volume (managed by Docker) — no conflict with SQLite
       - pg_data:/var/lib/postgresql/data
+    ports:
+      # Expose to host so the desktop app and migration scripts can connect directly
+      - "5432:5432"
     networks:
       - backup_net
     healthcheck:
@@ -115,7 +168,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # 6. Redis In-Memory Cache & Pub/Sub Broker
+  # ── 6. Redis Broker & Cache ───────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: backup_redis
@@ -130,11 +183,10 @@ services:
       timeout: 5s
       retries: 5
 
+# Named volumes — only for PG & Redis internal data (not shared with desktop)
 volumes:
   pg_data:
   redis_data:
-  backup_storage:
-  backup_cache:
 
 networks:
   backup_net:

@@ -45,6 +45,12 @@ async def lifespan(app: FastAPI):
 
     cfg = load_config()
 
+    # Always initialize base schema so local fallback and direct SQLite calls have tables ready
+    try:
+        init_db()
+    except Exception as e:
+        logger.warning("SQLite schema initialization: %s", e)
+
     # Multi-backend Database Initialization (Postgres with SQLite fallback)
     if cfg.get("DATABASE_BACKEND") == "postgres":
         try:
@@ -53,9 +59,7 @@ async def lifespan(app: FastAPI):
             logger.info("PostgreSQL multi-user database backend initialized.")
         except Exception as e:
             logger.warning("Failed to initialize PostgreSQL (%s), falling back to SQLite.", e)
-            init_db()
-    else:
-        init_db()
+
 
     # Redis Connection Warmup
     try:
