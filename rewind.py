@@ -178,7 +178,11 @@ def _run_options() -> dict:
         "stderr": subprocess.PIPE,
     }
     if os.name == "nt":
-        opts["creationflags"] = subprocess.CREATE_NO_WINDOW
+        opts["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        opts["startupinfo"] = startupinfo
     return opts
 
 

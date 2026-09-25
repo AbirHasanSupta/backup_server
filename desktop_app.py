@@ -31,11 +31,14 @@ import memories
 # None. uvicorn's log formatter calls .isatty() on these streams before we can
 # intercept it, causing a hard crash. Redirect to a silent in-memory sink.
 class _NullStream(io.RawIOBase):
-    """Silent stream: satisfies isatty(), write(), flush(), fileno()."""
+    """Silent stream: satisfies isatty(), write(), flush(), fileno(), read()."""
     def isatty(self)   -> bool: return False
-    def readable(self) -> bool: return False
+    def readable(self) -> bool: return True
     def writable(self) -> bool: return True
     def write(self, b):         return len(b) if isinstance(b, (bytes, bytearray)) else len(b.encode())
+    def read(self, size=-1):    return b""
+    def readinto(self, b):      return 0
+    def readline(self, size=-1): return b""
     def flush(self):            pass
     def fileno(self):           raise io.UnsupportedOperation("fileno")
 
@@ -43,6 +46,8 @@ if sys.stdout is None:
     sys.stdout = io.TextIOWrapper(_NullStream())
 if sys.stderr is None:
     sys.stderr = io.TextIOWrapper(_NullStream())
+if sys.stdin is None:
+    sys.stdin = io.TextIOWrapper(_NullStream())
 
 import customtkinter as ctk
 import uvicorn
@@ -274,13 +279,19 @@ def get_all_local_ips() -> list[str]:
         try:
             import subprocess
             import re
-            out = subprocess.check_output(
-                ["ipconfig"],
-                text=True,
-                errors="ignore",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                timeout=3,
-            )
+            run_opts: dict[str, object] = {
+                "text": True,
+                "errors": "ignore",
+                "timeout": 3,
+                "stdin": subprocess.DEVNULL,
+            }
+            if os.name == "nt":
+                run_opts["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+                run_opts["startupinfo"] = startupinfo
+            out = subprocess.check_output(["ipconfig"], **run_opts)
             for ip in re.findall(r"IPv4 Address[.\s]+:\s*([\d.]+)", out):
                 if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
                     ips.add(ip)

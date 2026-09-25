@@ -394,7 +394,11 @@ def _run_ffmpeg(command: list[str]) -> None:
     }
     # A windowed desktop build must not flash a console when it launches FFmpeg.
     if os.name == "nt":
-        run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+        run_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        run_options["startupinfo"] = startupinfo
     process = subprocess.Popen(command, **run_options)
     with _ffmpeg_process_guard:
         _active_ffmpeg_process = process
@@ -462,7 +466,11 @@ def _probe_streams(source_path: str) -> list[dict[str, object]] | None:
             "timeout": 10,
         }
         if os.name == "nt":
-            run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+            run_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            run_options["startupinfo"] = startupinfo
         result = subprocess.run(
             [
                 ffprobe_path,

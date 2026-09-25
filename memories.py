@@ -208,7 +208,11 @@ def _extract_video_creation_time_and_gps(full_path: str) -> tuple[int | None, tu
             "stdin": subprocess.DEVNULL,
         }
         if os.name == "nt":
-            run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+            run_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            run_options["startupinfo"] = startupinfo
         proc = subprocess.run(cmd, **run_options)
         if proc.returncode != 0 or not proc.stdout:
             return None, None

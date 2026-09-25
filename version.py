@@ -30,15 +30,25 @@ def _normalise(tag: str) -> str | None:
 def _git_tag(project_root: Path) -> str | None:
     """Return the closest semantic release tag without failing app startup."""
     try:
+        run_options: dict[str, object] = {
+            "capture_output": True,
+            "check": False,
+            "text": True,
+            "timeout": 2,
+            "stdin": subprocess.DEVNULL,
+        }
+        if os.name == "nt":
+            run_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            run_options["startupinfo"] = startupinfo
         result = subprocess.run(
             [
                 "git", "-C", str(project_root), "describe", "--tags", "--abbrev=0",
                 "--match", "v[0-9]*", "--match", "[0-9]*",
             ],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=2,
+            **run_options,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -64,6 +74,8 @@ def get_version() -> str:
     configured = _normalise(os.environ.get("PHONE_BACKUP_VERSION", ""))
     if configured:
         return configured
+    if getattr(sys, "frozen", False):
+        return _bundled_version() or _git_tag(Path(__file__).resolve().parent) or _UNKNOWN_VERSION
     project_root = Path(__file__).resolve().parent
     return _git_tag(project_root) or _bundled_version() or _UNKNOWN_VERSION
 

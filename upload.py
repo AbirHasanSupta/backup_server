@@ -208,13 +208,19 @@ def get_all_local_ips() -> list[str]:
     # 3. Windows ipconfig parsing / OS interface scanning
     if platform.system() == "Windows":
         try:
-            out = subprocess.check_output(
-                ["ipconfig"],
-                text=True,
-                errors="ignore",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                timeout=3,
-            )
+            run_opts: dict[str, object] = {
+                "text": True,
+                "errors": "ignore",
+                "timeout": 3,
+                "stdin": subprocess.DEVNULL,
+            }
+            if os.name == "nt":
+                run_opts["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+                run_opts["startupinfo"] = startupinfo
+            out = subprocess.check_output(["ipconfig"], **run_opts)
             for ip in re.findall(r"IPv4 Address[.\s]+:\s*([\d.]+)", out):
                 if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
                     ips.add(ip)

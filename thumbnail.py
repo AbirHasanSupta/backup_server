@@ -40,7 +40,11 @@ def _run_options() -> dict:
         "timeout": 20,
     }
     if os.name == "nt":
-        opts["creationflags"] = subprocess.CREATE_NO_WINDOW
+        opts["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        opts["startupinfo"] = startupinfo
     return opts
 
 
@@ -166,4 +170,4 @@ def clear_thumbnail_cache() -> dict:
                 pass
     except OSError:
         pass
-    return {"files": removed_files, "bytes": removed_bytes}
+    return {"files": removed_files, "bytes": removed_bytes}

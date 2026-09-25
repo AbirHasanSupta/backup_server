@@ -42,12 +42,23 @@ def transcode_video_preview(self, source_path: str, cache_path: str, cache_key: 
         tmp_path,
     ]
 
+    run_options: dict[str, object] = {
+        "check": True,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.PIPE,
+        "stdin": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        run_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        run_options["startupinfo"] = startupinfo
+
     try:
         subprocess.run(
             cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            **run_options,
         )
         os.replace(tmp_path, cache_path)
         logger.info("Transcoded video preview successfully: %s", cache_path)
