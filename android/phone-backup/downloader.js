@@ -21,6 +21,11 @@ export function getCachedFeed() {
   return _uiMemoryCache.feed;
 }
 
+export function invalidateFeedCache() {
+  _uiMemoryCache.feed = null;
+  _uiMemoryCache.reelsFeed = {};
+}
+
 export function getCachedReelsFeed(section = 'for-you') {
   return _uiMemoryCache.reelsFeed[section] || null;
 }
@@ -825,7 +830,7 @@ export async function listShareTargetDevices() {
  * @param {{source_type: string, source_key: string, relative_path: string, size?: number, modified_time?: number}[]} items
  */
 export async function createDeviceShare(targetDeviceIds, caption, items, options = {}) {
-  return fetchJsonWithMeshRetry(async () => {
+  const result = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/api/share/create`,
@@ -843,6 +848,8 @@ export async function createDeviceShare(targetDeviceIds, caption, items, options
       },
     };
   }, 20000);
+  invalidateFeedCache();
+  return result;
 }
 
 /**
@@ -864,7 +871,7 @@ export async function createQuizShare(targetDeviceIds, caption, score, total, qu
     })
   );
 
-  return fetchJsonWithMeshRetry(async () => {
+  const result = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/api/share/quiz/create`,
@@ -886,6 +893,8 @@ export async function createQuizShare(targetDeviceIds, caption, score, total, qu
       },
     };
   }, 30000);
+  invalidateFeedCache();
+  return result;
 }
 
 export const DIRECT_POST_MAX_FILES = 300;
@@ -1021,7 +1030,9 @@ export async function createDirectPostShare(targetDeviceIds, caption, files, onP
     }
     throw new Error(`Failed to create post (${res.status})${detail}`);
   }
-  return await res.json();
+  const result = await res.json();
+  invalidateFeedCache();
+  return result;
 }
 
 /**
@@ -1309,7 +1320,7 @@ export async function addShareGroupTarget(groupId, targetDeviceId) {
  * @param {string|null} caption
  */
 export async function editShareGroupCaption(groupId, caption) {
-  return fetchJsonWithMeshRetry(async () => {
+  const result = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/edit_caption?device_id=${encodeURIComponent(deviceId)}`,
@@ -1320,6 +1331,8 @@ export async function editShareGroupCaption(groupId, caption) {
       },
     };
   });
+  invalidateFeedCache();
+  return result;
 }
 
 /**
@@ -1327,7 +1340,7 @@ export async function editShareGroupCaption(groupId, caption) {
  * @param {string} groupId
  */
 export async function deleteShareGroup(groupId) {
-  return fetchJsonWithMeshRetry(async () => {
+  const result = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/delete?device_id=${encodeURIComponent(deviceId)}`,
@@ -1337,6 +1350,8 @@ export async function deleteShareGroup(groupId) {
       },
     };
   });
+  invalidateFeedCache();
+  return result;
 }
 
 /**
@@ -1344,7 +1359,7 @@ export async function deleteShareGroup(groupId) {
  * @param {number} shareId
  */
 export async function deleteShare(shareId) {
-  return fetchJsonWithMeshRetry(async () => {
+  const result = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/api/share/${encodeURIComponent(shareId)}/delete?device_id=${encodeURIComponent(deviceId)}`,
@@ -1354,6 +1369,8 @@ export async function deleteShare(shareId) {
       },
     };
   });
+  invalidateFeedCache();
+  return result;
 }
 
 /**
@@ -1363,7 +1380,7 @@ export async function deleteShare(shareId) {
  * @param {string} targetDeviceId - The device_id to remove access for
  */
 export async function removeShareTarget(groupId, targetDeviceId) {
-  return fetchJsonWithMeshRetry(async () => {
+  const result = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/remove_target?device_id=${encodeURIComponent(deviceId)}`,
@@ -1374,6 +1391,8 @@ export async function removeShareTarget(groupId, targetDeviceId) {
       },
     };
   });
+  invalidateFeedCache();
+  return result;
 }
 
 /**
@@ -1382,7 +1401,7 @@ export async function removeShareTarget(groupId, targetDeviceId) {
  * @param {string} targetDeviceId
  */
 export async function removeShareTargetByShareId(shareId, targetDeviceId) {
-  return fetchJsonWithMeshRetry(async () => {
+  const result = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/api/share/${encodeURIComponent(shareId)}/remove_target?device_id=${encodeURIComponent(deviceId)}`,
@@ -1393,6 +1412,8 @@ export async function removeShareTargetByShareId(shareId, targetDeviceId) {
       },
     };
   });
+  invalidateFeedCache();
+  return result;
 }
 
 

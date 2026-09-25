@@ -709,6 +709,8 @@ async def preview_share_item(
         raise HTTPException(status_code=404, detail="File not found")
     if not preview_service.is_video(path):
         raise HTTPException(status_code=400, detail="Preview is only available for video files")
+    if share.get("source_type") in ("rewind", "rewind_shared"):
+        return preview_service.stream_file_range(path, request, cache_control="public, max-age=604800, immutable")
     cached = preview_service.get_preview_path(path, schedule_missing=True)
     cache_ctrl = "public, max-age=604800, immutable" if cached != path else "private, max-age=86400"
     return preview_service.stream_file_range(cached, request, cache_control=cache_ctrl)

@@ -3722,6 +3722,8 @@ async def preview_device_share(
         raise HTTPException(status_code=404, detail="File not found")
     if not is_video_path(path):
         raise HTTPException(status_code=400, detail="Preview is only available for video files")
+    if share.get("source_type") in ("rewind", "rewind_shared"):
+        return _file_range_response(path, request, cache_control="public, max-age=604800, immutable")
     try:
         preview_path = get_video_preview_path(
             path,
