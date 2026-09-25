@@ -326,6 +326,61 @@ async def create_share_post(
     if not body.target_device_ids:
         raise HTTPException(status_code=400, detail="No target devices")
 
+    # Persist rewind reel videos from the transient cache into a durable shared
+    # location so the feed post survives server restarts and cache clears.
+    # This mirrors the identical logic in upload.py's create_share endpoint
+    # (which the desktop app uses) but must live here too because the v1 router
+    # is registered first and handles POST /api/share/create in Docker.
+    persisted_paths: list[str] = []
+    try:
+        for it in body.items:
+            if it.source_type != "rewind":
+                continue
+            # relative_path for rewind items is "YEAR-MONTH" (e.g. "2026-8")
+            year_str, _, month_str = it.relative_path.partition("-")
+            try:
+                year_val = int(year_str)
+                month_val = int(month_str) if month_str else None
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid rewind reel path format")
+
+            live_path = await asyncio.to_thread(
+                rewind.get_rewind_path, it.source_key, year_val, month_val
+            )
+            if not live_path or not os.path.isfile(live_path):
+                raise HTTPException(status_code=404, detail="Reel not ready — generate it first")
+
+            dest_path = os.path.join(SHARED_REWIND_DIR, f"{uuid.uuid4().hex}.mp4")
+            await asyncio.to_thread(shutil.copy2, live_path, dest_path)
+            persisted_paths.append(dest_path)
+
+            # Store only the basename so _resolve_share_path works regardless of
+            # which absolute path APP_DATA_DIR is mounted at in Docker.
+            it.relative_path = os.path.basename(dest_path)
+            it.source_type = "rewind_shared"
+            # Record the real file size — the client sends 0 because it does not
+            # know the server-generated video's size.
+            try:
+                st = os.stat(dest_path)
+                it.size = st.st_size
+                it.modified_time = int(st.st_mtime)
+            except OSError:
+                pass
+    except HTTPException:
+        for p in persisted_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        raise
+    except Exception as exc:
+        for p in persisted_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        raise HTTPException(status_code=500, detail=f"Failed to persist rewind reel: {exc}") from exc
+
     items = [it.model_dump() for it in body.items]
     res = social_repo.create_device_share(
         body.shared_by_device_id,
@@ -335,6 +390,12 @@ async def create_share_post(
         body.post_kind,
         body.post_title,
     )
+    if not res.get("ok"):
+        for p in persisted_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
     try:
         from services.ws_service import ws_service
         shared_by = device_repo.get_device_display_name(body.shared_by_device_id)

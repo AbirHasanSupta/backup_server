@@ -2131,8 +2131,21 @@ async def create_share(
                     _persist_shared_rewind_reel, it.source_key, it.relative_path
                 )
                 persisted_paths.append(persisted)
-                it.relative_path = persisted
+                # Store only the basename so that api/v1/feed.py's basename-first
+                # _resolve_share_path works correctly even when the Docker container
+                # mounts APP_DATA_DIR at a different absolute path than what was
+                # recorded at share-creation time.
+                it.relative_path = os.path.basename(persisted)
                 it.source_type = "rewind_shared"
+                # Populate real file size/mtime from the persisted copy — the phone
+                # client sends size=0 because it does not know the server-generated
+                # video's file size.
+                try:
+                    st = os.stat(persisted)
+                    it.size = st.st_size
+                    it.modified_time = int(st.st_mtime)
+                except OSError:
+                    pass
     except Exception:
         for p in persisted_paths:
             try:
@@ -3649,10 +3662,18 @@ def _resolve_share_path(share: dict) -> str:
             raise HTTPException(status_code=404, detail="Reel not ready")
         return path
     if source_type == "rewind_shared":
+        # Prefer basename-first resolution so paths stored as bare filenames
+        # (new shares) work correctly, and fall back to the full stored path
+        # for legacy rows that recorded the absolute path before this fix.
+        fname = os.path.basename(relative_path.replace("\\", "/"))
+        candidate = os.path.join(SHARED_REWIND_DIR, fname)
+        if os.path.isfile(candidate):
+            return candidate
+        # Legacy fallback: relative_path was an absolute path
         full_path = os.path.abspath(relative_path)
-        if os.path.commonpath([SHARED_REWIND_DIR, full_path]) != SHARED_REWIND_DIR:
-            raise HTTPException(status_code=400, detail="Invalid path")
-        return full_path
+        if os.path.isfile(full_path):
+            return full_path
+        raise HTTPException(status_code=404, detail="Rewind reel file not found")
     if source_type == "quiz_shared":
         full_path = os.path.abspath(relative_path)
         if os.path.commonpath([SHARED_QUIZ_DIR, full_path]) != SHARED_QUIZ_DIR:
