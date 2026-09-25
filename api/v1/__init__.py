@@ -13,6 +13,7 @@ from api.v1.memories import router as memories_router
 from api.v1.trips import router as trips_router
 from api.v1.cleanup import router as cleanup_router
 from api.v1.websockets import router as ws_router
+from api.v1.admin import router as admin_router
 
 v1_router = APIRouter()
 
@@ -26,3 +27,4 @@ v1_router.include_router(memories_router)
 v1_router.include_router(trips_router)
 v1_router.include_router(cleanup_router)
 v1_router.include_router(ws_router)
+v1_router.include_router(admin_router)

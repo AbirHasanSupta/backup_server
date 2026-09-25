@@ -13,6 +13,8 @@ import anyio
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from api.v1 import v1_router
 from config import load_config
@@ -123,6 +125,15 @@ app.include_router(ws_router)
 # definitions from OpenAPI so generated clients and docs have one operation ID
 # per public v1 operation.
 app.include_router(legacy_router, include_in_schema=False)
+
+# 4. Web Admin Panel — zero-build SPA served at /admin
+_WEB_ADMIN_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_admin")
+if os.path.isdir(_WEB_ADMIN_DIR):
+    app.mount("/admin", StaticFiles(directory=_WEB_ADMIN_DIR, html=True), name="web_admin")
+
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        return RedirectResponse(url="/admin", status_code=302)
 
 
 if __name__ == "__main__":

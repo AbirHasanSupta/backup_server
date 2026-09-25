@@ -1,0 +1,54 @@
+/* custom.css — Minimal overrides and animations for the Phone Backup Admin Panel */
+
+/* ── Scrollbar ────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+/* ── Animations ───────────────────────────────────────────────────────────── */
+@keyframes slide-in-right {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pairing-flash {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
+  50%       { box-shadow: 0 0 0 6px rgba(234, 179, 8, 0.25); }
+}
+
+#pairing-banner { animation: pairing-flash 1.8s ease-in-out infinite; }
+.card           { animation: fade-in 0.15s ease-out; }
+
+/* ── Log output ───────────────────────────────────────────────────────────── */
+#log-output {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── Drop zone hover ──────────────────────────────────────────────────────── */
+#drop-zone:hover { background-color: rgba(59, 130, 246, 0.08); }
+/* ── Progress bar shimmer ─────────────────────────────────────────────────── */
+@keyframes shimmer {
+  from { background-position: -200% 0; }
+  to   { background-position:  200% 0; }
+}
+.progress-shimmer {
+  background: linear-gradient(90deg, #3b82f6 25%, #60a5fa 50%, #3b82f6 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+}
+
+/* ── Table row hover ──────────────────────────────────────────────────────── */
+tbody tr:hover { background-color: rgba(255,255,255,0.03); }
+
+/* ── Peer checkbox toggle switch fix ──────────────────────────────────────── */
+.peer:checked ~ div { background-color: #3b82f6; }
+.peer:checked ~ div::after { transform: translateX(1.25rem); }
+div::after { transition: transform 0.2s; }

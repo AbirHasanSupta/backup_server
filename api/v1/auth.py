@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import socket
 import uuid
 from pydantic import BaseModel
@@ -12,7 +13,15 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from core.config import load_config
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo
-from state import add_log, get_current_activity, pending_connections, set_current_activity
+from state import (
+    add_log,
+    clear_logs,
+    get_current_activity,
+    get_logs,
+    pending_connections,
+    resolve_connection,
+    set_current_activity,
+)
 from network_info import get_all_local_ips, get_tailscale_network_info
 from version import APP_VERSION
 
