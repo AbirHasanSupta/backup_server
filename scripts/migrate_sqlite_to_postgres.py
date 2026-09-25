@@ -636,6 +636,47 @@ def _init_pg_schema_direct(pg_conn) -> None:
     pg_conn.commit()
 
 
+
+
+# ---------------------------------------------------------------------------
+# Sequence reset helper
+# ---------------------------------------------------------------------------
+
+_SEQUENCE_TABLE_MAP = [
+    # (sequence_name, table_name, id_column)
+    ("device_shares_share_id_seq",  "device_shares",        "share_id"),
+    ("sync_sessions_id_seq",        "sync_sessions",        "id"),
+    ("media_index_id_seq",          "media_index",          "id"),
+    ("reactions_id_seq",            "reactions",            "id"),
+    ("comments_id_seq",             "comments",             "id"),
+    ("trips_id_seq",                "trips",                "id"),
+    ("trip_media_id_seq",           "trip_media",           "id"),
+    ("saved_reels_id_seq",          "saved_reels",          "id"),
+    ("reel_telemetry_id_seq",       "reel_telemetry",       "id"),
+    ("device_share_targets_id_seq", "device_share_targets", "id"),
+]
+
+
+def _reset_sequences(pg_conn) -> None:
+    """Reset every BIGSERIAL sequence to MAX(id) after bulk migration.
+
+    PostgreSQL BIGSERIAL sequences start at 1 after schema creation, but the
+    migration may have inserted rows with much higher IDs (copied from SQLite).
+    New inserts would then collide with the migrated rows until the sequence
+    catches up past the current maximum -- resetting it here prevents that.
+    """
+    with pg_conn.cursor() as cur:
+        for seq_name, table_name, id_col in _SEQUENCE_TABLE_MAP:
+            try:
+                sql = f"SELECT setval('{seq_name}', COALESCE(MAX({id_col}), 1)) FROM {table_name};"
+                cur.execute(sql)
+                val = cur.fetchone()
+                print(f"  up {seq_name} -> {val[0] if val else '?'}")
+            except Exception as exc:
+                print(f"  ! Could not reset {seq_name}: {exc}")
+                pg_conn.rollback()
+    pg_conn.commit()
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -672,6 +713,13 @@ def migrate(sqlite_paths: list[str], pg_url: str) -> None:
     for path in valid_paths:
         label = os.path.basename(os.path.dirname(path)) + "/" + os.path.basename(path)
         _migrate_one_db(path, pg_conn, label=label)
+
+    # ── Reset all BIGSERIAL sequences to MAX(id)+1 ──────────────────────────
+    # Without this, new inserts will fail with duplicate-key violations because
+    # PostgreSQL sequences start at 1 while the tables contain migrated rows
+    # with much higher IDs.
+    print("\nResetting PostgreSQL sequences to match migrated data…")
+    _reset_sequences(pg_conn)
 
     pg_conn.close()
     grand_total = time.time() - total_start

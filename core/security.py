@@ -31,8 +31,10 @@ def verify_api_key_or_device_token(
     cfg = load_config()
     current_global_key = cfg.get("API_KEY", "")
 
-    # Constant-time comparison for global API key
-    if hmac.compare_digest(token, current_global_key):
+    # Constant-time comparison for global API key.
+    # Guard against empty config keys which would allow any token through
+    # or cause a TypeError in hmac.compare_digest.
+    if current_global_key and hmac.compare_digest(token, current_global_key):
         return
 
     # Check device-specific token if device_id and verifier supplied

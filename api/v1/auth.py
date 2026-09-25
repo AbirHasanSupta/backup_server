@@ -173,6 +173,12 @@ async def list_devices(
     devices = device_repo.get_devices()
     for d in devices:
         d["display_name"] = device_repo.format_device_display_name(d.get("username"), d.get("device_name"))
+        # Normalize column names: PostgreSQL uses files_backed_up/total_bytes,
+        # SQLite and the admin panel JS expect total_files/total_size.
+        if "total_files" not in d:
+            d["total_files"] = d.get("files_backed_up") or 0
+        if "total_size" not in d:
+            d["total_size"] = d.get("total_bytes") or 0
     return {"devices": devices}
 
 

@@ -324,4 +324,32 @@ def init_pg_db():
             """)
 
             conn.commit()
+
+            # ── Post-migration safety: reset BIGSERIAL sequences ──────────────
+            # After a SQLite-to-PostgreSQL migration BIGSERIAL sequences may
+            # still be at 1 while the tables already contain rows with large IDs.
+            # Resetting here is a no-op on empty tables and prevents duplicate-key
+            # failures that would otherwise appear on the first write after migration.
+            _sequence_map = [
+                ("device_shares_share_id_seq",  "device_shares",        "share_id"),
+                ("sync_sessions_id_seq",         "sync_sessions",        "id"),
+                ("media_index_id_seq",            "media_index",          "id"),
+                ("reactions_id_seq",              "reactions",            "id"),
+                ("comments_id_seq",               "comments",             "id"),
+                ("trips_id_seq",                  "trips",                "id"),
+                ("trip_media_id_seq",             "trip_media",           "id"),
+                ("saved_reels_id_seq",            "saved_reels",          "id"),
+                ("reel_telemetry_id_seq",         "reel_telemetry",       "id"),
+                ("device_share_targets_id_seq",   "device_share_targets", "id"),
+            ]
+            with conn.cursor() as seq_cur:
+                for seq_name, tbl, col in _sequence_map:
+                    try:
+                        seq_cur.execute(
+                            f"SELECT setval('{seq_name}', COALESCE(MAX({col}), 1)) FROM {tbl};"
+                        )
+                    except Exception:
+                        pass
+            conn.commit()
+
             logger.info("PostgreSQL database initialized successfully with partitioned tables.")
