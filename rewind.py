@@ -22,6 +22,7 @@ import time
 import urllib.request
 
 from config import APP_DATA_DIR, load_config
+from core.path_utils import normalize_fs_path
 from repositories.device_repo import get_device_display_name
 from repositories.media_repo import get_media_for_year_month
 from ffmpeg_utils import resolve_ffmpeg_path
@@ -285,17 +286,39 @@ def _shared_full_path(item: dict) -> str | None:
         if s.get("id") == item["source_key"]:
             root = s.get("path")
             if root:
-                return os.path.join(root, item["relative_path"])
+                norm_root = normalize_fs_path(root)
+                rel = item["relative_path"].replace("\\", "/").lstrip("/")
+                full = os.path.abspath(os.path.join(norm_root, rel))
+                if os.path.isfile(full):
+                    return full
+    # Fallback if relative_path is already an absolute path
+    norm_p = normalize_fs_path(item["relative_path"])
+    if os.path.isfile(norm_p):
+        return norm_p
     return None
 
 
 def _source_full_path(item: dict) -> str | None:
-    if item["source_type"] == "phone":
-        from storage import full_path_for
+    st = item.get("source_type")
+    if st in ("phone", "reel_backup"):
         try:
-            return full_path_for(item["relative_path"], device_id=item["source_key"])
+            from storage.manager import get_storage
+            p = get_storage().get_file_path(item["relative_path"], device_id=item["source_key"])
+            if os.path.isfile(p):
+                return p
         except Exception:
-            return None
+            pass
+        try:
+            from storage import full_path_for
+            p = full_path_for(item["relative_path"], device_id=item["source_key"])
+            if os.path.isfile(p):
+                return p
+        except Exception:
+            pass
+    if st == "desktop":
+        norm_p = normalize_fs_path(item["relative_path"])
+        if os.path.isfile(norm_p):
+            return norm_p
     return _shared_full_path(item)
 
 
@@ -347,13 +370,16 @@ def get_reel_items(device_id: str, year: int, month: int | None, randomize: bool
 def get_rewind_status(device_id: str, year: int, month: int | None) -> dict:
     job_key = _job_key(device_id, year, month)
 
+    latest_path = _get_latest_reel_path(device_id, year, month)
+    if latest_path and os.path.isfile(latest_path) and os.path.getsize(latest_path) > 0:
+        with _generation_lock:
+            _active_jobs.discard(job_key)
+            _failed_jobs.discard(job_key)
+        return {"status": "ready", "ready": True}
+
     with _generation_lock:
         if job_key in _active_jobs:
             return {"status": "generating", "ready": False}
-
-    latest_path = _get_latest_reel_path(device_id, year, month)
-    if latest_path and os.path.isfile(latest_path) and os.path.getsize(latest_path) > 0:
-        return {"status": "ready", "ready": True}
 
     with _generation_lock:
         if job_key in _failed_jobs:
@@ -655,6 +681,12 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
 
 
 
+def build_rewind_reel(device_id: str, year: int, month: int | None = None, music_id: str | None = None) -> str | None:
+    """Synchronously build rewind reel and return output path."""
+    _build_reel_sync(device_id, year, month)
+    return get_rewind_path(device_id, year, month)
+
+
 def start_rewind_build(device_id: str, year: int, month: int | None) -> dict:
     job_key = _job_key(device_id, year, month)
 
@@ -669,6 +701,13 @@ def start_rewind_build(device_id: str, year: int, month: int | None) -> dict:
             return {"ok": True, "status": "generating"}
         _failed_jobs.discard(job_key)
         _active_jobs.add(job_key)
+
+    try:
+        from tasks.rewind_tasks import dispatch_rewind_render
+        dispatch_rewind_render(device_id, year, month)
+        return {"ok": True, "status": "generating"}
+    except Exception:
+        pass
 
     threading.Thread(
         target=_build_reel_sync,

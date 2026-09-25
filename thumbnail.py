@@ -125,6 +125,72 @@ def get_video_thumbnail_path(source_path: str) -> str | None:
                 evt.set()
 
 
+def get_image_thumbnail_path(source_path: str, max_size: int = 512) -> str | None:
+    """Generate and return a fast, lightweight JPEG thumbnail for image files using Pillow."""
+    if not os.path.isfile(source_path):
+        return None
+    try:
+        stat = os.stat(source_path)
+    except OSError:
+        return None
+
+    key = _cache_key(f"img_{max_size}_{source_path}", stat.st_mtime, stat.st_size)
+    out_path = os.path.join(_cache_dir(), f"{key}.jpg")
+    if os.path.isfile(out_path):
+        return out_path
+
+    event = None
+    with _inflight_lock:
+        if os.path.isfile(out_path):
+            return out_path
+        if key in _inflight:
+            event = _inflight[key]
+        else:
+            event = threading.Event()
+            _inflight[key] = event
+
+    if event and not _inflight.get(key) is event:
+        event.wait(timeout=10)
+        return out_path if os.path.isfile(out_path) else None
+
+    try:
+        with _thumbnail_semaphore:
+            if os.path.isfile(out_path):
+                return out_path
+
+            partial = f"{out_path}.part-{os.getpid()}-{threading.get_ident()}"
+            try:
+                import PIL.Image
+                import PIL.ImageOps
+
+                with PIL.Image.open(source_path) as img:
+                    try:
+                        img = PIL.ImageOps.exif_transpose(img)
+                    except Exception:
+                        pass
+                    if img.mode not in ("RGB", "L"):
+                        img = img.convert("RGB")
+                    img.thumbnail((max_size, max_size), getattr(PIL.Image.Resampling, "BILINEAR", PIL.Image.BILINEAR))
+                    img.save(partial, format="JPEG", quality=80, optimize=True)
+
+                if os.path.isfile(partial) and os.path.getsize(partial) > 0:
+                    os.replace(partial, out_path)
+                    return out_path
+            except Exception as e:
+                pass
+            finally:
+                if os.path.isfile(partial):
+                    try:
+                        os.remove(partial)
+                    except OSError:
+                        pass
+            return None
+    finally:
+        with _inflight_lock:
+            evt = _inflight.pop(key, None)
+            if evt:
+                evt.set()
+
 
 # ─── Cache management helpers (used by desktop_app settings + shutdown) ────────
 

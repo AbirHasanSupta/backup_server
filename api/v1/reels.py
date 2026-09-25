@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from core.config import get_shared_dirs
+from core.path_utils import normalize_fs_path
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo, reels_repo, social_repo, file_repo
 from services.reels_service import reels_service
@@ -143,7 +144,7 @@ async def get_shared_and_backups_reels(
                 continue
             if not entry.get("available_in_reels", entry.get("available_in_reel", True)):
                 continue
-            root = os.path.abspath(entry.get("path") or "")
+            root = os.path.abspath(normalize_fs_path(entry.get("path") or ""))
             if not os.path.isdir(root):
                 continue
             for root_dir, _, files in os.walk(root):

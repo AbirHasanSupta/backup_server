@@ -22,6 +22,7 @@ COPY . .
 RUN mkdir -p /app_data /backup_storage /host_g /host_c /host_d
 
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 ENV HOST=0.0.0.0
 ENV PORT=8000
 

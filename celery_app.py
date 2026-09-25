@@ -8,6 +8,14 @@ isolated worker pools:
 """
 
 import os
+import sys
+
+_app_root = os.path.abspath(os.path.dirname(__file__))
+if _app_root not in sys.path:
+    sys.path.insert(0, _app_root)
+if "/app" not in sys.path and os.path.isdir("/app"):
+    sys.path.insert(0, "/app")
+
 from celery import Celery
 from config import load_config
 
