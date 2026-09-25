@@ -55,9 +55,23 @@ def toggle_reaction(media_id: int, source_id: str, emoji: str) -> Dict[str, Any]
 
 def get_media_reactions(media_id: int) -> Dict[str, Any]:
     if is_postgres():
-        rows = execute_read_query("SELECT emoji, COUNT(*) as count FROM reactions WHERE media_id = ? GROUP BY emoji", (media_id,))
-        counts = {r["emoji"]: r["count"] for r in rows}
-        return {"reactions": counts, "total": sum(counts.values())}
+        rows = execute_read_query(
+            """
+            SELECT r.id, r.media_id, r.source_id, r.emoji, r.created_at,
+                   d.device_name AS device_name, d.username AS username
+            FROM reactions r
+            LEFT JOIN devices d ON d.device_id = r.source_id
+            WHERE r.media_id = ?
+            ORDER BY r.created_at ASC
+            """,
+            (media_id,),
+        )
+        reactions = list(rows)
+        counts: Dict[str, int] = {}
+        for r in reactions:
+            em = r["emoji"]
+            counts[em] = counts.get(em, 0) + 1
+        return {"media_id": media_id, "reactions": reactions, "counts": counts}
     return db_get_media_reactions(media_id)
 
 
@@ -94,8 +108,20 @@ def add_comment(media_id: int, source_id: str, text: str) -> Dict[str, Any]:
     if is_postgres():
         now = int(time.time())
         execute_write("INSERT INTO comments (media_id, source_id, text, created_at) VALUES (?, ?, ?, ?)", (media_id, source_id, text[:MAX_COMMENT_LENGTH], now))
-        row = execute_read_one("SELECT * FROM comments WHERE media_id = ? AND source_id = ? AND created_at = ? ORDER BY id DESC LIMIT 1", (media_id, source_id, now))
-        return row or {"media_id": media_id, "source_id": source_id, "text": text, "created_at": now}
+        row = execute_read_one(
+            """
+            SELECT c.id, c.media_id, c.source_id, c.text, c.created_at,
+                   d.device_name AS device_name, d.username AS username
+            FROM comments c
+            LEFT JOIN devices d ON d.device_id = c.source_id
+            WHERE c.media_id = ? AND c.source_id = ? AND c.created_at = ?
+            ORDER BY c.id DESC LIMIT 1
+            """,
+            (media_id, source_id, now),
+        )
+        if row:
+            return dict(row)
+        return {"media_id": media_id, "source_id": source_id, "text": text, "created_at": now, "device_name": None, "username": None}
     return db_add_comment(media_id, source_id, text)
 
 

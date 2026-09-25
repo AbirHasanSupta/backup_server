@@ -226,7 +226,7 @@ async def react_media(
             media_id=media_id,
             reaction=body.emoji.strip(),
             device_id=body.source_id,
-            counts=res.get("reaction_counts", {}),
+            counts=res.get("counts", {}),
         )
     except Exception:
         pass
