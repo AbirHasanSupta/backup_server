@@ -49,7 +49,22 @@ def toggle_reaction(media_id: int, source_id: str, emoji: str) -> Dict[str, Any]
                 (media_id, source_id, emoji, now),
             )
             action = "added"
-        return {"action": action, **get_media_reactions(media_id)}
+        # Fetch the user's current reactions after the toggle (for glow indicator)
+        user_rows = execute_read_query(
+            "SELECT emoji FROM reactions WHERE media_id = ? AND source_id = ?",
+            (media_id, source_id),
+        )
+        user_reactions = [r["emoji"] for r in user_rows]
+        media_data = get_media_reactions(media_id)
+        return {
+            "status": action,
+            "action": action,
+            "emoji": emoji,
+            "media_id": media_id,
+            "counts": media_data.get("counts", {}),
+            "reactions": media_data.get("reactions", []),
+            "user_reactions": user_reactions,
+        }
     return db_toggle_reaction(media_id, source_id, emoji)
 
 
