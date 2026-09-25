@@ -16,7 +16,7 @@ import {
 } from '@/components/QuizShareCards';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
-import { getQuizRound, getConfig, buildPreviewUrl, createQuizShare } from '../../downloader';
+import { getQuizRound, getConfig, buildPreviewUrl, buildThumbnailUrl, createQuizShare } from '../../downloader';
 import { setUIPriorityMode } from '../../backgroundTask';
 
 
@@ -143,7 +143,7 @@ export default function QuizScreen() {
 
   const currentItem = items[roundIdx] ?? null;
   const imageUrl = currentItem && serverConfig
-    ? buildPreviewUrl(serverConfig, currentItem.relative_path, currentItem.source_type, currentItem.source_id)
+    ? buildThumbnailUrl(serverConfig, currentItem.relative_path, currentItem.source_type, currentItem.source_id)
     : '';
   const scoreMessage = getScoreMessage(score, items.length);
 

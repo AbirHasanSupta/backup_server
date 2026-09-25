@@ -226,10 +226,10 @@ async def get_all_sync_history(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    all_sessions = await asyncio.to_thread(file_repo.get_sync_sessions, device_id or None, offset + limit + 1)
-    paged = all_sessions[offset: offset + limit]
-    has_more = len(all_sessions) > offset + limit
-    return {"sessions": paged, "has_more": has_more, "total": len(all_sessions)}
+    total_count = await asyncio.to_thread(file_repo.get_sync_sessions_count, device_id or None)
+    sessions = await asyncio.to_thread(file_repo.get_sync_sessions, device_id or None, limit, offset)
+    has_more = (offset + len(sessions)) < total_count
+    return {"sessions": sessions, "has_more": has_more, "total": total_count}
 
 
 @router.post("/api/sync/history/clear")

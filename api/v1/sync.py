@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import hmac
 import re
+import time
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile, status
 
 from core.security import verify_api_key_or_device_token
@@ -45,15 +46,28 @@ class CompleteChunkedUploadRequest(BaseModel):
 
 
 class SyncSessionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     device_id: str | None = None
+    device_name: str | None = None
     started_at: int | None = None
+    ended_at: int | None = None
     finished_at: int | None = None
+    duration_ms: int | float | None = None
     duration_sec: float | None = None
+    trigger: str | None = "manual"
+    outcome: str | None = None
+    status: str | None = None
+    scanned: int = 0
+    checked: int = 0
+    uploaded: int = 0
     files_uploaded: int = 0
     bytes_uploaded: int = 0
+    skipped: int = 0
     files_skipped: int = 0
+    errors: int = 0
     files_failed: int = 0
-    status: str = "success"
+    total_files: int = 0
     device_ip: str | None = None
     uploaded_files: list[str] | None = None
     error_details: list[str] | None = None
@@ -372,7 +386,61 @@ async def record_sync_session(
     verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
     body.device_id = _require_accepted_device(body.device_id)
     session_data = body.model_dump()
+
+    # Normalize fields
+    now_ts = int(time.time() * 1000)
+    started_at = session_data.get("started_at") or now_ts
+    ended_at = session_data.get("ended_at") or session_data.get("finished_at") or now_ts
+    session_data["started_at"] = started_at
+    session_data["ended_at"] = ended_at
+    session_data["finished_at"] = ended_at
+
+    dur_ms = session_data.get("duration_ms")
+    dur_sec = session_data.get("duration_sec")
+    if dur_ms is None and dur_sec is not None:
+        session_data["duration_ms"] = int(dur_sec * 1000)
+    elif dur_ms is not None and dur_sec is None:
+        session_data["duration_sec"] = dur_ms / 1000.0
+    elif dur_ms is None and dur_sec is None:
+        diff_ms = max(0, ended_at - started_at)
+        session_data["duration_ms"] = diff_ms
+        session_data["duration_sec"] = diff_ms / 1000.0
+
+    uploaded = session_data.get("uploaded") or session_data.get("files_uploaded") or 0
+    session_data["uploaded"] = uploaded
+    session_data["files_uploaded"] = uploaded
+
+    skipped = session_data.get("skipped") or session_data.get("files_skipped") or 0
+    session_data["skipped"] = skipped
+    session_data["files_skipped"] = skipped
+
+    errors = session_data.get("errors") or session_data.get("files_failed") or 0
+    session_data["errors"] = errors
+    session_data["files_failed"] = errors
+
+    outcome = session_data.get("outcome") or session_data.get("status") or "completed"
+    session_data["outcome"] = outcome
+    session_data["status"] = outcome
+
+    if not session_data.get("device_name") and body.device_id:
+        session_data["device_name"] = device_repo.get_device_display_name(body.device_id)
+
     file_repo.insert_sync_session(session_data)
+
+    label = {"completed": "✅", "stopped": "⏹", "force_stopped": "⚡", "failed": "❌"}.get(outcome, "🔄")
+    dev_name = session_data.get("device_name") or body.device_id or "unknown"
+    add_log(
+        f"{label} Sync session from {dev_name}: "
+        f"{uploaded} uploaded, {skipped} skipped, {errors} errors — {outcome}"
+    )
+
+    if body.device_id and uploaded > 0:
+        try:
+            from trips import trigger_background_clustering
+            trigger_background_clustering(body.device_id)
+        except Exception:
+            pass
+
     return {"ok": True}
 
 

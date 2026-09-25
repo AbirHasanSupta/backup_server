@@ -161,18 +161,24 @@ def init_pg_db():
             CREATE TABLE IF NOT EXISTS sync_sessions (
                 id BIGSERIAL PRIMARY KEY,
                 device_id VARCHAR(64) NOT NULL,
+                device_name TEXT,
                 started_at BIGINT NOT NULL,
                 finished_at BIGINT NOT NULL,
                 duration_sec DOUBLE PRECISION NOT NULL,
+                duration_ms BIGINT DEFAULT 0,
                 files_uploaded INT NOT NULL DEFAULT 0,
                 bytes_uploaded BIGINT NOT NULL DEFAULT 0,
                 files_skipped INT NOT NULL DEFAULT 0,
                 files_failed INT NOT NULL DEFAULT 0,
                 status VARCHAR(32) NOT NULL DEFAULT 'success',
+                total_files INT NOT NULL DEFAULT 0,
                 device_ip VARCHAR(45),
                 uploaded_files_summary TEXT,
                 error_details TEXT
             );
+            ALTER TABLE sync_sessions ADD COLUMN IF NOT EXISTS device_name TEXT;
+            ALTER TABLE sync_sessions ADD COLUMN IF NOT EXISTS duration_ms BIGINT DEFAULT 0;
+            ALTER TABLE sync_sessions ADD COLUMN IF NOT EXISTS total_files INT DEFAULT 0;
             CREATE INDEX IF NOT EXISTS idx_sync_sessions_dev ON sync_sessions(device_id, started_at DESC);
             """)
 

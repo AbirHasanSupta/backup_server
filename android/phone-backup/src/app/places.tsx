@@ -44,6 +44,8 @@ import {
   downloadFile,
   downloadSharedFile,
   createDeviceShare,
+  getCachedPlaceClusters,
+  getCachedTrips,
 } from '../../downloader';
 
 type ExpoVideoModule = typeof import('expo-video');
@@ -145,9 +147,12 @@ export default function PlacesScreen() {
   const [activeTab, setActiveTab] = useState<'places' | 'trips'>('places');
   const [serverConfig, setServerConfig] = useState<any>(null);
 
-  // Places state
-  const [places, setPlaces] = useState<PlaceCluster[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Places state – seed from SWR cache for instant render
+  const _cachedPlaces = getCachedPlaceClusters() as any; // JS downloader returns null|object
+  const [places, setPlaces] = useState<PlaceCluster[]>(
+    Array.isArray(_cachedPlaces?.places) ? (_cachedPlaces.places as PlaceCluster[]) : []
+  );
+  const [loading, setLoading] = useState(!_cachedPlaces);
   const [error, setError] = useState<string | null>(null);
   const [activeCluster, setActiveCluster] = useState<PlaceCluster | null>(null);
   const [clusterItems, setClusterItems] = useState<PlaceItem[]>([]);
@@ -156,8 +161,11 @@ export default function PlacesScreen() {
   const resolvedPlaceKeysRef = useRef<Set<string>>(new Set());
   const [placeMediaFilter, setPlaceMediaFilter] = useState<'all' | 'photos' | 'videos'>('all');
 
-  // Trips state
-  const [trips, setTrips] = useState<Trip[]>([]);
+  // Trips state – seed from SWR cache for instant render
+  const _cachedTrips = getCachedTrips() as any; // JS downloader returns null|object
+  const [trips, setTrips] = useState<Trip[]>(
+    Array.isArray(_cachedTrips?.trips) ? (_cachedTrips.trips as Trip[]) : []
+  );
   const [tripsLoading, setTripsLoading] = useState(false);
   const [activeTrip, setActiveTrip] = useState<Trip | null>(null);
   const [tripItems, setTripItems] = useState<PlaceItem[]>([]);

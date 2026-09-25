@@ -1943,21 +1943,32 @@ def insert_sync_session(
     return row_id
 
 
-def get_sync_sessions(device_id: str | None = None, limit: int = 100) -> list[dict]:
-    """Return sync sessions newest-first, optionally filtered by device."""
+def get_sync_sessions(device_id: str | None = None, limit: int = 100, offset: int = 0) -> list[dict]:
+    """Return sync sessions newest-first, optionally filtered by device with pagination."""
     conn = get_read_conn()
     if device_id:
         rows = conn.execute(
-            "SELECT * FROM sync_sessions WHERE device_id=? ORDER BY started_at DESC LIMIT ?",
-            (device_id, limit),
+            "SELECT * FROM sync_sessions WHERE device_id=? ORDER BY started_at DESC LIMIT ? OFFSET ?",
+            (device_id, limit, offset),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM sync_sessions ORDER BY started_at DESC LIMIT ?",
-            (limit,),
+            "SELECT * FROM sync_sessions ORDER BY started_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_sync_sessions_count(device_id: str | None = None) -> int:
+    """Return total count of recorded sync sessions, optionally filtered by device."""
+    conn = get_read_conn()
+    if device_id:
+        row = conn.execute("SELECT COUNT(*) AS c FROM sync_sessions WHERE device_id=?", (device_id,)).fetchone()
+    else:
+        row = conn.execute("SELECT COUNT(*) AS c FROM sync_sessions").fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
 
 
 def clear_sync_sessions(device_id: str | None = None) -> None:

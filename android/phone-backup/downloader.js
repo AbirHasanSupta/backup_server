@@ -6,6 +6,15 @@ const _uiMemoryCache = {
   reelsFeed: {},
   browse: {},
   browseShared: {},
+  recentMemories: {},
+  todaysMemories: null,
+  placeClusters: null,
+  placeItems: {},
+  quizRound: null,
+  roulette: null,
+  wrapped: {},
+  trips: {},
+  tripMedia: {},
 };
 
 export function getCachedFeed() {
@@ -23,6 +32,42 @@ export function getCachedBrowseFiles(prefix = '') {
 export function getCachedBrowseSharedFiles(sourceId, prefix = '') {
   const key = `${sourceId}:${prefix}`;
   return _uiMemoryCache.browseShared[key] || null;
+}
+
+export function getCachedRecentMemories(days = 7) {
+  return _uiMemoryCache.recentMemories[days] || null;
+}
+
+export function getCachedTodaysMemories() {
+  return _uiMemoryCache.todaysMemories;
+}
+
+export function getCachedPlaceClusters() {
+  return _uiMemoryCache.placeClusters;
+}
+
+export function getCachedPlaceItems(clusterKey) {
+  return _uiMemoryCache.placeItems[clusterKey] || null;
+}
+
+export function getCachedQuizRound() {
+  return _uiMemoryCache.quizRound;
+}
+
+export function getCachedRouletteItem() {
+  return _uiMemoryCache.roulette;
+}
+
+export function getCachedYearWrapped(year) {
+  return _uiMemoryCache.wrapped[year] || null;
+}
+
+export function getCachedTrips(sourceId = '') {
+  return _uiMemoryCache.trips[sourceId] || null;
+}
+
+export function getCachedTripMedia(tripId) {
+  return _uiMemoryCache.tripMedia[tripId] || null;
 }
 
 import * as FileSystem from 'expo-file-system/legacy';
@@ -416,13 +461,15 @@ export async function getSharedFilePreviewUrl(sourceId, relativePath) {
  * @returns {Promise<{today: {month: number, day: number}, groups: Array<{year: number, years_ago: number, items: Array<any>}>}>}
  */
 export async function getTodaysMemories() {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/memories/today?device_id=${encodeURIComponent(deviceId)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  _uiMemoryCache.todaysMemories = res;
+  return res;
 }
 
 /**
@@ -430,13 +477,15 @@ export async function getTodaysMemories() {
  * @returns {Promise<{days: Array<{date: {month: number, day: number, year: number}, days_ago: number, is_today: boolean, groups: Array<{year: number, years_ago: number, items: Array<any>}>}>}>}
  */
 export async function getRecentMemories(days = 7) {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/memories/recent?device_id=${encodeURIComponent(deviceId)}&days=${encodeURIComponent(days)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  _uiMemoryCache.recentMemories[days] = res;
+  return res;
 }
 
 /**
@@ -455,13 +504,15 @@ export async function readJsonOrNull(res) {
  * @returns {Promise<{items: Array<{source_type: string, source_id: string, relative_path: string, correct_year: number, options: number[]}>}>}
  */
 export async function getQuizRound(count = 10) {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/memories/quiz?device_id=${encodeURIComponent(deviceId)}&count=${encodeURIComponent(count)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  _uiMemoryCache.quizRound = res;
+  return res;
 }
 
 /**
@@ -469,26 +520,30 @@ export async function getQuizRound(count = 10) {
  * @returns {Promise<null | {source_type: string, source_id: string, source_label: string, relative_path: string, size: number, capture_time: number|null, is_video: boolean, year: number|null}>}
  */
 export async function getRouletteItem() {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/memories/roulette?device_id=${encodeURIComponent(deviceId)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  _uiMemoryCache.roulette = res;
+  return res;
 }
 
 /**
  * Fetch clustered "Memories from this place" groups (GPS EXIF-derived).
  */
 export async function getPlaceClusters() {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/memories/places?device_id=${encodeURIComponent(deviceId)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  _uiMemoryCache.placeClusters = res;
+  return res;
 }
 
 /**
@@ -496,13 +551,15 @@ export async function getPlaceClusters() {
  * @param {string} clusterKey
  */
 export async function getPlaceItems(clusterKey) {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/memories/places/${encodeURIComponent(clusterKey)}?device_id=${encodeURIComponent(deviceId)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  _uiMemoryCache.placeItems[clusterKey] = res;
+  return res;
 }
 
 /**
@@ -540,13 +597,15 @@ export async function getRandomFlashback() {
  * @param {number} year
  */
 export async function getYearWrapped(year) {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/memories/wrapped?device_id=${encodeURIComponent(deviceId)}&year=${encodeURIComponent(year)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  _uiMemoryCache.wrapped[year] = res;
+  return res;
 }
 
 /**
@@ -634,7 +693,7 @@ export async function downloadRewindReel(year, month, destUri, onProgress) {
  * @returns {Promise<{trips: Array<{id: number, source_id: string, title: string, start_time: number, end_time: number, center_lat: number, center_lon: number, media_count: number, cover_media_id: number|null, cover: any}>}>}
  */
 export async function getTrips(sourceId) {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     const target = sourceId || deviceId;
     return {
@@ -642,6 +701,8 @@ export async function getTrips(sourceId) {
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  _uiMemoryCache.trips[sourceId || ''] = res;
+  return res;
 }
 
 /**
@@ -650,13 +711,15 @@ export async function getTrips(sourceId) {
  * @returns {Promise<{trip: any, media: Array<any>}>}
  */
 export async function getTripMedia(tripId) {
-  return fetchJsonWithMeshRetry(async () => {
+  const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/api/trips/${encodeURIComponent(tripId)}/media?device_id=${encodeURIComponent(deviceId)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  _uiMemoryCache.tripMedia[tripId] = res;
+  return res;
 }
 
 /**

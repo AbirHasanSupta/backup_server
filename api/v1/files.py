@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pydantic import BaseModel
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
@@ -18,6 +19,12 @@ from storage.manager import get_storage
 from video_preview import arm_active_video_preview
 
 router = APIRouter(tags=["Files & Library"])
+
+# ── In-memory cache for browse_shared_files ─────────────────────────────────
+# Keyed by (source_id, norm_prefix). Value: (result_dict, cached_at, dir_mtime)
+# TTL: 10 s; also invalidated when the directory mtime changes.
+_BROWSE_SHARED_CACHE: dict[tuple[str, str], tuple[dict, float, float]] = {}
+_BROWSE_SHARED_TTL = 10.0  # seconds
 
 
 class WarmPreviewsRequest(BaseModel):
@@ -284,7 +291,20 @@ async def browse_shared_files(
     if not os.path.isdir(target_dir):
         return {"folders": [], "files": []}
 
-    def _scan():
+    def _scan_with_cache() -> dict:
+        cache_key = (source_id, norm_prefix)
+        now = time.monotonic()
+        try:
+            dir_mtime = os.stat(target_dir).st_mtime
+        except OSError:
+            dir_mtime = 0.0
+
+        cached = _BROWSE_SHARED_CACHE.get(cache_key)
+        if cached:
+            result, cached_at, cached_mtime = cached
+            if (now - cached_at) < _BROWSE_SHARED_TTL and cached_mtime == dir_mtime:
+                return result
+
         folders = []
         files = []
         for e in os.scandir(target_dir):
@@ -297,9 +317,11 @@ async def browse_shared_files(
                     files.append({"name": e.name, "path": rel, "size": st.st_size, "modified_time": int(st.st_mtime)})
             except OSError:
                 pass
-        return {"folders": folders, "files": files}
+        result = {"folders": folders, "files": files}
+        _BROWSE_SHARED_CACHE[cache_key] = (result, now, dir_mtime)
+        return result
 
-    return await asyncio.to_thread(_scan)
+    return await asyncio.to_thread(_scan_with_cache)
 
 
 @router.get("/api/shared/{source_id}/download")

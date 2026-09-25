@@ -175,54 +175,115 @@ def get_upload_cache(device_id: str) -> List[Dict[str, Any]]:
 
 
 def insert_sync_session(data: Dict[str, Any]) -> int:
+    now_ms = int(time.time() * 1000)
+    dev_id = str(data.get("device_id") or "")
+    dev_name = data.get("device_name")
+    if not dev_name and dev_id:
+        try:
+            from repositories import device_repo
+            dev_name = device_repo.get_device_display_name(dev_id)
+        except Exception:
+            dev_name = dev_id
+
+    st = int(data.get("started_at") or now_ms)
+    fin = int(data.get("ended_at") or data.get("finished_at") or now_ms)
+    dur_sec = float(data.get("duration_sec") or ((data.get("duration_ms") or max(0, fin - st)) / 1000.0))
+    dur_ms = int(data.get("duration_ms") or int(dur_sec * 1000))
+    up = int(data.get("uploaded") or data.get("files_uploaded") or 0)
+    by = int(data.get("bytes_uploaded") or 0)
+    sk = int(data.get("skipped") or data.get("files_skipped") or 0)
+    fa = int(data.get("errors") or data.get("files_failed") or 0)
+    stat = str(data.get("outcome") or data.get("status") or "completed")
+    ip = data.get("device_ip")
+    tot = int(data.get("total_files") or 0)
+    trigger = str(data.get("trigger") or "manual")
+    scanned = int(data.get("scanned") or 0)
+    checked = int(data.get("checked") or 0)
+
     if is_postgres():
-        dev_id = data.get("device_id", "")
-        st = data.get("started_at", 0)
-        fin = data.get("ended_at", data.get("finished_at", 0))
-        dur = data.get("duration_sec", (data.get("duration_ms", 0) / 1000))
-        up = data.get("uploaded", data.get("files_uploaded", 0))
-        by = data.get("bytes_uploaded", 0)
-        sk = data.get("skipped", data.get("files_skipped", 0))
-        fa = data.get("errors", data.get("files_failed", 0))
-        stat = data.get("outcome", data.get("status", "completed"))
-        ip = data.get("device_ip")
         execute_write(
             """
-            INSERT INTO sync_sessions (device_id, started_at, finished_at, duration_sec, files_uploaded, bytes_uploaded, files_skipped, files_failed, status, device_ip)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sync_sessions (
+                device_id, device_name, started_at, finished_at, duration_sec, duration_ms,
+                files_uploaded, bytes_uploaded, files_skipped, files_failed, status, total_files, device_ip
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (dev_id, st, fin, dur, up, by, sk, fa, stat, ip),
+            (dev_id, dev_name, st, fin, dur_sec, dur_ms, up, by, sk, fa, stat, tot, ip),
         )
         return 1
+
     return db_insert_sync_session(
-        device_id=data.get("device_id"),
-        device_name=data.get("device_name"),
-        started_at=data.get("started_at", 0),
-        ended_at=data.get("ended_at", data.get("finished_at", 0)),
-        duration_ms=data.get("duration_ms", int(data.get("duration_sec", 0) * 1000)),
-        trigger=data.get("trigger", "manual"),
-        outcome=data.get("outcome", data.get("status", "success")),
-        scanned=data.get("scanned", 0),
-        checked=data.get("checked", 0),
-        uploaded=data.get("uploaded", data.get("files_uploaded", 0)),
-        skipped=data.get("skipped", data.get("files_skipped", 0)),
-        errors=data.get("errors", data.get("files_failed", 0)),
-        total_files=data.get("total_files", 0),
+        device_id=dev_id,
+        device_name=dev_name,
+        started_at=st,
+        ended_at=fin,
+        duration_ms=dur_ms,
+        trigger=trigger,
+        outcome=stat,
+        scanned=scanned,
+        checked=checked,
+        uploaded=up,
+        skipped=sk,
+        errors=fa,
+        total_files=tot,
     )
 
 
-def get_sync_sessions(device_id: str | None = None, limit: int = 50) -> List[Dict[str, Any]]:
+def get_sync_sessions(device_id: str | None = None, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
     if is_postgres():
         if device_id:
-            return execute_read_query(
-                "SELECT * FROM sync_sessions WHERE device_id = ? ORDER BY started_at DESC LIMIT ?",
-                (device_id, limit),
+            rows = execute_read_query(
+                """
+                SELECT s.*, COALESCE(s.device_name, d.device_name, s.device_id) AS device_name
+                FROM sync_sessions s
+                LEFT JOIN devices d ON s.device_id = d.device_id
+                WHERE s.device_id = ?
+                ORDER BY s.started_at DESC LIMIT ? OFFSET ?
+                """,
+                (device_id, limit, offset),
             )
-        return execute_read_query(
-            "SELECT * FROM sync_sessions ORDER BY started_at DESC LIMIT ?",
-            (limit,),
-        )
-    return db_get_sync_sessions(device_id, limit)
+        else:
+            rows = execute_read_query(
+                """
+                SELECT s.*, COALESCE(s.device_name, d.device_name, s.device_id) AS device_name
+                FROM sync_sessions s
+                LEFT JOIN devices d ON s.device_id = d.device_id
+                ORDER BY s.started_at DESC LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            )
+        for r in rows:
+            r["duration_seconds"] = r.get("duration_sec") if r.get("duration_sec") is not None else ((r.get("duration_ms") or 0) / 1000.0)
+            r["file_count"] = r.get("files_uploaded") if r.get("files_uploaded") is not None else (r.get("uploaded") or 0)
+            r["uploaded"] = r["file_count"]
+            r["total_bytes"] = r.get("bytes_uploaded") or 0
+            r["status"] = r.get("status") or r.get("outcome") or "completed"
+            r["outcome"] = r["status"]
+            r["errors"] = r.get("files_failed") if r.get("files_failed") is not None else (r.get("errors") or 0)
+        return rows
+
+    rows = db_get_sync_sessions(device_id, limit, offset)
+    for r in rows:
+        r["duration_seconds"] = (r.get("duration_ms") or 0) / 1000.0
+        r["file_count"] = r.get("uploaded") if r.get("uploaded") is not None else (r.get("files_uploaded") or 0)
+        r["files_uploaded"] = r["file_count"]
+        r["total_bytes"] = r.get("bytes_uploaded") or 0
+        r["status"] = r.get("outcome") or r.get("status") or "completed"
+        r["outcome"] = r["status"]
+        r["files_failed"] = r.get("errors") or 0
+    return rows
+
+
+def get_sync_sessions_count(device_id: str | None = None) -> int:
+    if is_postgres():
+        if device_id:
+            row = execute_read_one("SELECT COUNT(*) AS c FROM sync_sessions WHERE device_id = ?", (device_id,))
+        else:
+            row = execute_read_one("SELECT COUNT(*) AS c FROM sync_sessions")
+        return int(row["c"]) if row and "c" in row else 0
+    from database import get_sync_sessions_count as db_get_sync_sessions_count
+    return db_get_sync_sessions_count(device_id)
 
 
 def clear_sync_sessions(device_id: str | None = None) -> bool:

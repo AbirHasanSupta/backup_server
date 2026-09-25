@@ -31,6 +31,7 @@ import { hapticLight, hapticMedium, hapticSelection, hapticSuccess, hapticError 
 import { ShareModal } from '@/components/ShareModal';
 import {
   getRecentMemories,
+  getCachedRecentMemories,
   getConfig,
   buildPreviewUrl,
   buildVideoPreviewUrl,
@@ -167,10 +168,11 @@ export default function MemoriesScreen() {
   const { colors, isDark } = useAppTheme();
   const styles = useMemo(() => createStyles(colors, insets), [colors, insets]);
 
-  const [loading, setLoading] = useState(true);
+  const cachedData = getCachedRecentMemories(7);
+  const [loading, setLoading] = useState(!cachedData);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<MemoriesResponse | null>(null);
+  const [data, setData] = useState<MemoriesResponse | null>(cachedData);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const serverConfigRef = useRef<ServerConfig | null>(null);
 
@@ -251,6 +253,7 @@ export default function MemoriesScreen() {
     try {
       const [cfg, res] = await Promise.all([getConfig(), getRecentMemories(7)]);
       setServerConfig(cfg);
+      serverConfigRef.current = cfg;
       setData(res);
       setError(null);
     } catch (err: any) {
@@ -273,20 +276,13 @@ export default function MemoriesScreen() {
 
   useEffect(() => {
     let active = true;
-    Promise.all([getConfig(), getRecentMemories(7)])
-      .then(([cfg, res]) => {
-        if (active) {
-          setServerConfig(cfg);
-          setData(res);
-          setLoading(false);
-        }
-      })
-      .catch((err: any) => {
-        if (active) {
-          setError(sanitizeErrorMessage(err, 'Could not load your memories right now.'));
-          setLoading(false);
-        }
-      });
+    getConfig().then((cfg) => {
+      if (active) {
+        setServerConfig(cfg);
+        serverConfigRef.current = cfg;
+      }
+    }).catch(() => {});
+    fetchMemories({ silent: !!cachedData });
     return () => {
       active = false;
     };
@@ -639,11 +635,12 @@ export default function MemoriesScreen() {
   useFocusEffect(
     useCallback(() => {
       setUIPriorityMode(true);
+      void fetchMemories({ silent: true });
       return () => {
         setUIPriorityMode(false);
         stopAllPlaybackRef.current();
       };
-    }, []),
+    }, [fetchMemories]),
   );
 
   // Hardware back-button: dismiss modals in order of priority.
@@ -855,7 +852,7 @@ export default function MemoriesScreen() {
   const getCoverUrl = (items: MemoryItem[]) => {
     if (!serverConfig || !items?.length) return '';
     const photo = items.find(i => !i.is_video && /\.(jpe?g|png|webp|gif|bmp)$/i.test(i.relative_path));
-    if (photo) return buildPreviewUrl(serverConfig, photo.relative_path, photo.source_type, photo.source_id);
+    if (photo) return buildThumbnailUrl(serverConfig, photo.relative_path, photo.source_type, photo.source_id);
     const video = items.find(i => i.is_video);
     if (video) return buildThumbnailUrl(serverConfig, video.relative_path, video.source_type, video.source_id);
     return '';

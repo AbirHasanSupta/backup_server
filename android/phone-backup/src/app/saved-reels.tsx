@@ -228,11 +228,20 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
         readyFiredRef.current = true;
         onReadyRef.current();
       }
-      if (isActive && isPlaying) {
-        try { player.play(); } catch {}
-      }
+    }
+    if (isActive && isPlaying && status === 'readyToPlay') {
+      try { player.play(); } catch {}
+    } else {
+      try { player.pause(); } catch {}
     }
   }, [status, isActive, isPlaying, player]);
+
+  // Unmount cleanup: always pause to prevent ghost audio
+  useEffect(() => {
+    return () => {
+      try { player.pause(); } catch {}
+    };
+  }, [player]);
 
   useEffect(() => {
     readyFiredRef.current = false;
@@ -255,6 +264,8 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
       player.playbackRate = speed;
       if (isActive && isPlaying) {
         player.play();
+      } else {
+        player.pause();
       }
     } catch {}
   }, [speed, player, isActive, isPlaying]);
