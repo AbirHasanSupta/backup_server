@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Phone Backup — Admin Panel</title>
+  <title>Phone Backup Server — Web Console & Admin</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="/admin/css/custom.css">
   <script>
@@ -12,407 +12,644 @@
       theme: {
         extend: {
           colors: {
-            zinc: { 850: '#1e1e23' },
+            zinc: { 850: '#1e1e23', 925: '#111114' },
           }
         }
       }
     };
   </script>
-  <style>
-    /* Component classes — raw CSS for guaranteed Tailwind CDN compatibility */
-    .card {
-      background-color: rgba(39,39,42,0.6);
-      border: 1px solid rgba(63,63,70,0.5);
-      border-radius: 0.75rem;
-      padding: 1rem;
-    }
-    .btn-primary {
-      background-color: #2563eb; color: #fff; border-radius: 0.5rem;
-      padding: 0.375rem 0.75rem; font-size: 0.875rem; font-weight: 500;
-      transition: background-color 0.15s; cursor: pointer;
-      border: none; display: inline-block;
-    }
-    .btn-primary:hover { background-color: #3b82f6; }
-    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-
-    .btn-secondary {
-      background-color: rgba(63,63,70,0.6); color: #e4e4e7;
-      border: 1px solid rgba(82,82,91,0.5); border-radius: 0.5rem;
-      padding: 0.375rem 0.75rem; font-size: 0.875rem;
-      transition: background-color 0.15s; cursor: pointer;
-    }
-    .btn-secondary:hover { background-color: rgba(82,82,91,0.6); }
-
-    .btn-danger {
-      background-color: rgba(239,68,68,0.15); color: #f87171;
-      border: 1px solid rgba(239,68,68,0.3); border-radius: 0.5rem;
-      padding: 0.375rem 0.75rem; font-size: 0.875rem;
-      transition: background-color 0.15s; cursor: pointer;
-    }
-    .btn-danger:hover { background-color: rgba(239,68,68,0.25); }
-
-    .input {
-      width: 100%; background-color: rgba(9,9,11,0.6);
-      border: 1px solid rgba(82,82,91,0.5); border-radius: 0.5rem;
-      padding: 0.5rem 0.75rem; font-size: 0.875rem; color: #f4f4f5;
-      transition: border-color 0.15s, box-shadow 0.15s; box-sizing: border-box;
-    }
-    .input::placeholder { color: #71717a; }
-    .input:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59,130,246,0.2); }
-
-    .label { display: block; font-size: 0.75rem; font-weight: 500; color: #a1a1aa; margin-bottom: 0.25rem; }
-    .section-header { font-size: 0.75rem; font-weight: 600; color: #71717a; text-transform: uppercase; letter-spacing: 0.05em; }
-
-    .modal-backdrop {
-      position: fixed; inset: 0; background-color: rgba(0,0,0,0.6);
-      backdrop-filter: blur(4px); z-index: 50;
-      align-items: center; justify-content: center;
-    }
-
-    /* Tab active style */
-    [data-tab].tab-active { color: #f4f4f5; background-color: rgba(255,255,255,0.06); }
-    [data-tab]:not(.tab-active) { color: #a1a1aa; }
-  </style>
 </head>
-<body class="bg-zinc-950 text-zinc-100 min-h-screen antialiased">
+<body class="bg-zinc-950 text-zinc-100 min-h-screen antialiased flex flex-col font-sans select-none">
 
 <!-- ═══════════════════════════════════════════════════════
      LOGIN MODAL
 ════════════════════════════════════════════════════════ -->
 <div id="login-modal" class="fixed inset-0 bg-zinc-950 flex items-center justify-center z-50">
   <div class="w-full max-w-sm mx-4">
-    <!-- Brand -->
     <div class="flex items-center gap-3 mb-8 justify-center">
-      <div class="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center">
-        <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/>
-        </svg>
+      <div class="w-11 h-11 rounded-xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-600/30">
+        <span class="text-white font-bold text-lg tracking-wider">PB</span>
       </div>
       <div>
         <div class="font-bold text-lg text-zinc-100 leading-none">Phone Backup</div>
-        <div class="text-xs text-blue-400 font-semibold tracking-widest">ADMIN PANEL</div>
+        <div class="text-[10px] text-blue-400 font-bold tracking-widest mt-1">SERVER CONSOLE</div>
       </div>
     </div>
 
     <form id="login-form" class="bg-zinc-900 border border-zinc-700/60 rounded-2xl p-6 shadow-2xl">
-      <h2 class="text-base font-semibold text-zinc-200 mb-1">Admin Login</h2>
-      <p class="text-xs text-zinc-500 mb-5">Enter your server API key to continue.</p>
+      <h2 class="text-base font-semibold text-zinc-200 mb-1">Server Login</h2>
+      <p class="text-xs text-zinc-400 mb-5">Enter your server API key to access the console.</p>
 
       <label class="label">API Key</label>
-      <input id="login-key-input" type="password" class="input mb-4" placeholder="Your server API key" autocomplete="current-password">
+      <input id="login-key-input" type="password" class="input mb-4" placeholder="Enter server API key" autocomplete="current-password" autofocus>
 
-      <p id="login-error" class="text-xs text-red-400 mb-3 min-h-[1rem]"></p>
+      <p id="login-error" class="text-xs text-red-400 mb-3 min-h-[1.2rem]"></p>
 
-      <button id="login-btn" type="submit" class="btn-primary w-full py-2.5">Login</button>
+      <button id="login-btn" type="submit" class="btn-primary w-full py-2.5">
+        Connect to Server
+      </button>
     </form>
   </div>
 </div>
 
 
 <!-- ═══════════════════════════════════════════════════════
-     APP SHELL (hidden until authenticated)
+     APP SHELL
 ════════════════════════════════════════════════════════ -->
 <div id="app-shell" class="hidden flex h-screen overflow-hidden">
 
   <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
-  <aside class="w-56 shrink-0 bg-zinc-900 border-r border-zinc-800 flex flex-col overflow-y-auto">
-    <!-- Brand -->
-    <div class="px-4 pt-5 pb-3 border-b border-zinc-800">
-      <div class="flex items-center gap-2.5">
-        <div class="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center shrink-0">
-          <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/>
-          </svg>
+  <aside class="w-60 shrink-0 bg-zinc-900 border-r border-zinc-800 flex flex-col justify-between overflow-y-auto">
+    <div>
+      <!-- Brand Header -->
+      <div class="px-4 pt-5 pb-3 border-b border-zinc-800">
+        <div class="flex items-center gap-2.5">
+          <div class="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center shrink-0 shadow-md shadow-blue-600/30">
+            <span class="text-white font-bold text-sm tracking-wider">PB</span>
+          </div>
+          <div>
+            <div class="text-sm font-bold text-zinc-100 leading-none">Phone Backup</div>
+            <div class="text-[9px] text-blue-400 font-bold tracking-widest mt-1">SERVER CONSOLE</div>
+          </div>
         </div>
-        <div>
-          <div class="text-sm font-bold text-zinc-100 leading-none">Phone Backup</div>
-          <div class="text-[10px] text-blue-400 font-semibold tracking-widest mt-0.5">ADMIN PANEL</div>
+
+        <!-- Server Status Card in Sidebar -->
+        <div class="mt-3.5 p-2.5 rounded-xl bg-zinc-800/80 border border-zinc-700/60 text-xs">
+          <div class="flex items-center justify-between mb-1">
+            <div class="flex items-center gap-1.5">
+              <div id="status-dot" class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></div>
+              <span id="status-label" class="font-semibold text-zinc-200">Server Online</span>
+            </div>
+            <span id="ws-badge" class="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-mono">Live ●</span>
+          </div>
+          <div id="sidebar-endpoint" class="text-[11px] font-mono text-zinc-400 truncate mb-2">http://127.0.0.1:8000</div>
+          <div class="flex items-center justify-between gap-1.5">
+            <button onclick="copyServerUrl()" class="btn-secondary text-[11px] py-1 px-2 flex-1">
+              📋 Copy URL
+            </button>
+            <button onclick="restartServer()" title="Reload server configuration" class="btn-secondary text-[11px] py-1 px-2">
+              ↻
+            </button>
+          </div>
         </div>
       </div>
-      <!-- WS status -->
-      <div class="mt-3 flex items-center gap-1.5">
-        <div id="status-dot" class="w-2.5 h-2.5 rounded-full bg-zinc-600"></div>
-        <span id="status-label" class="text-xs text-zinc-500">Connecting…</span>
-        <span id="ws-badge" class="ml-auto text-xs px-2 py-0.5 rounded-full bg-zinc-700 text-zinc-400 font-mono">Offline ○</span>
-      </div>
+
+      <!-- Workspace Navigation -->
+      <nav class="px-2 py-3 space-y-1">
+        <p class="px-2.5 pb-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Workspace</p>
+
+        <button data-tab="dashboard" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 13a1 1 0 011-1h4a1 1 0 011 1v6a1 1 0 01-1 1h-4a1 1 0 01-1-1v-6z"/></svg>
+          Dashboard
+        </button>
+
+        <button data-tab="devices" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+          Devices
+        </button>
+
+        <button data-tab="post_to_devices" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+          Post to Devices
+        </button>
+
+        <button data-tab="posts" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+          Posts
+        </button>
+
+        <button data-tab="shared_folders" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+          Shared Folders
+        </button>
+
+        <button data-tab="settings" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+          Settings
+        </button>
+
+        <button data-tab="logs" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          Logs
+        </button>
+
+        <button data-tab="history" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          Sync History
+        </button>
+      </nav>
     </div>
 
-    <!-- Nav -->
-    <nav class="flex-1 px-2 py-3 space-y-0.5">
-      <p class="px-2 pb-1 text-[10px] font-semibold text-zinc-600 uppercase tracking-wider">Workspace</p>
-
-      <button data-tab="dashboard" class="tab-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 transition">
-        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 13a1 1 0 011-1h4a1 1 0 011 1v6a1 1 0 01-1 1h-4a1 1 0 01-1-1v-6z"/></svg>
-        Dashboard
-      </button>
-
-      <button data-tab="devices" class="tab-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 transition">
-        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
-        Devices
-      </button>
-
-      <button data-tab="post" class="tab-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 transition">
-        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
-        Post to Devices
-      </button>
-
-      <button data-tab="posts" class="tab-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 transition">
-        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
-        Posts
-      </button>
-
-      <button data-tab="shared-folders" class="tab-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 transition">
-        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
-        Shared Folders
-      </button>
-
-      <button data-tab="storage" class="tab-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 transition">
-        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 7a3 3 0 013-3h10a3 3 0 013 3v10a3 3 0 01-3 3H7a3 3 0 01-3-3V7zM9 17h6M9 13h6M9 9h6"/></svg>
-        Storage
-      </button>
-
-      <button data-tab="logs" class="tab-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 transition">
-        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
-        Live Logs
-      </button>
-
-      <button data-tab="history" class="tab-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 transition">
-        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-        Sync History
-      </button>
-
-      <button data-tab="settings" class="tab-btn w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/60 transition">
-        <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
-        Settings
-      </button>
-    </nav>
-
-    <!-- Sidebar footer -->
-    <div class="px-3 pb-4 border-t border-zinc-800 pt-3">
-      <button onclick="logout()" class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition">
+    <!-- Sidebar Footer -->
+    <div class="px-3 py-4 border-t border-zinc-800 space-y-2">
+      <div class="flex items-center justify-between px-2 text-xs text-zinc-400">
+        <span id="uptime-display">Uptime: 00:00:00</span>
+        <button onclick="toggleTheme()" title="Toggle Theme" class="p-1 rounded hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100 transition">
+          <span id="theme-icon">🌙</span>
+        </button>
+      </div>
+      <button onclick="logout()" class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition">
         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
         Logout
       </button>
     </div>
   </aside>
 
-  <!-- ── Main content ──────────────────────────────────────────────────────── -->
-  <main class="flex-1 flex flex-col overflow-hidden">
+  <!-- ── Main Content Area ────────────────────────────────────────────────── -->
+  <main class="flex-1 flex flex-col overflow-hidden bg-zinc-950">
 
-    <!-- Pairing approval banner -->
+    <!-- Real-time Pairing Approval Banner -->
     <div id="pairing-banner" class="hidden bg-amber-500/15 border-b border-amber-500/30 px-5 py-3 flex items-center gap-4">
-      <div class="flex items-center gap-2 flex-1 min-w-0">
-        <svg class="w-4 h-4 text-amber-400 shrink-0 animate-pulse" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
+      <div class="flex items-center gap-2.5 flex-1 min-w-0">
+        <svg class="w-5 h-5 text-amber-400 shrink-0 animate-pulse" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
         <div class="min-w-0">
-          <span class="text-sm font-medium text-amber-300">New device pairing request: </span>
-          <span id="pairing-device-name" class="text-sm font-bold text-amber-200"></span>
-          <span class="text-xs text-zinc-400 ml-2" id="pairing-device-ip"></span>
+          <span class="text-sm font-semibold text-amber-300">New Device Wants to Pair: </span>
+          <span id="pairing-device-name" class="text-sm font-bold text-amber-100"></span>
+          <span class="text-xs text-zinc-400 ml-2 font-mono" id="pairing-device-ip"></span>
         </div>
       </div>
       <div class="flex gap-2 shrink-0">
-        <button id="pairing-approve-btn" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs px-3 py-1.5 rounded-lg font-medium transition">Approve</button>
-        <button id="pairing-reject-btn" class="bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30 text-xs px-3 py-1.5 rounded-lg font-medium transition">Reject</button>
+        <button id="pairing-approve-btn" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs px-3.5 py-1.5 rounded-lg font-semibold shadow transition">Approve</button>
+        <button id="pairing-reject-btn" class="bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30 text-xs px-3.5 py-1.5 rounded-lg font-semibold transition">Reject</button>
       </div>
     </div>
 
-    <!-- Scrollable content area -->
-    <div class="flex-1 overflow-y-auto bg-zinc-950">
+    <!-- Scrollable content -->
+    <div class="flex-1 overflow-y-auto p-6">
 
-      <!-- ─── DASHBOARD ──────────────────────────────────────────────────── -->
-      <section data-panel="dashboard" class="hidden p-6 max-w-5xl mx-auto w-full">
-        <h1 class="text-xl font-bold text-zinc-100 mb-5">Dashboard</h1>
+      <!-- ─── 1. DASHBOARD TAB ───────────────────────────────────────────── -->
+      <section data-panel="dashboard" class="hidden max-w-6xl mx-auto w-full space-y-6">
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-2xl font-bold text-zinc-100">Dashboard</h1>
+            <p class="text-xs text-zinc-400 mt-0.5">Overview of backup server operations and connected devices.</p>
+          </div>
+          <button onclick="loadDashboard()" class="btn-secondary text-xs">↻ Refresh</button>
+        </div>
 
-        <!-- Stat cards -->
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <!-- 4 Key Stat Cards Matching Desktop App -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <!-- Server Status -->
           <div class="card">
-            <div class="text-xs text-zinc-500 mb-1">Server Version</div>
-            <div id="dash-version" class="text-lg font-bold text-zinc-100">—</div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="section-header">Server Status</span>
+              <span id="dash-status-pill" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold">Running</span>
+            </div>
+            <div id="dash-version" class="text-lg font-bold text-zinc-100">v2.1.0</div>
+            <div id="dash-hostport" class="text-xs text-zinc-400 mt-1 font-mono">0.0.0.0:8000</div>
           </div>
+
+          <!-- Connected Devices -->
+          <div class="card cursor-pointer hover:border-blue-500/50 transition" onclick="showTab('devices')">
+            <div class="flex items-center justify-between mb-2">
+              <span class="section-header">Connected Devices</span>
+              <span class="text-xs text-blue-400 font-medium">View all →</span>
+            </div>
+            <div id="dash-device-count" class="text-2xl font-bold text-blue-400">0</div>
+            <div id="dash-active-count" class="text-xs text-zinc-400 mt-1">0 active now</div>
+          </div>
+
+          <!-- Total Storage Used -->
           <div class="card">
-            <div class="text-xs text-zinc-500 mb-1">Connected Devices</div>
-            <div id="dash-device-count" class="text-lg font-bold text-blue-400">—</div>
+            <div class="flex items-center justify-between mb-2">
+              <span class="section-header">Backup Storage</span>
+              <span class="text-xs text-emerald-400 font-mono">📦</span>
+            </div>
+            <div id="dash-storage-total" class="text-2xl font-bold text-emerald-400">0 B</div>
+            <div id="dash-files-total" class="text-xs text-zinc-400 mt-1">0 files backed up</div>
           </div>
-          <div class="card col-span-2">
-            <div class="text-xs text-zinc-500 mb-1">Server IP Addresses</div>
-            <div id="dash-ips" class="text-sm font-mono text-zinc-300">—</div>
+
+          <!-- Backup Root Directory -->
+          <div class="card">
+            <div class="flex items-center justify-between mb-2">
+              <span class="section-header">Backup Root</span>
+              <button onclick="openExplorerAt(window._currentBackupRoot)" class="text-xs text-blue-400 hover:text-blue-300 font-medium">Explore 📁</button>
+            </div>
+            <div id="dash-backup-root" class="text-xs font-mono text-zinc-300 truncate" title="Click to explore" onclick="openExplorerAt(window._currentBackupRoot)">—</div>
+            <div class="text-[11px] text-zinc-500 mt-1.5 flex gap-2">
+              <button onclick="openExplorerAt(window._currentBackupRoot)" class="text-xs text-zinc-400 hover:text-zinc-200">Open in Explorer</button>
+              <span>·</span>
+              <button onclick="showTab('settings')" class="text-xs text-zinc-400 hover:text-zinc-200">Change in Settings</button>
+            </div>
           </div>
         </div>
 
-        <!-- Activity + Tailscale -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-          <div class="card">
-            <div class="text-xs text-zinc-500 mb-1">Current Activity</div>
-            <div id="dash-activity" class="text-sm text-zinc-200">Idle</div>
-          </div>
-          <div class="card hidden" id="tailscale-card">
-            <div class="text-xs text-zinc-500 mb-1">Tailscale</div>
-            <div id="dash-tailscale" class="text-sm font-mono text-zinc-200">—</div>
-          </div>
-        </div>
-
-        <!-- Recent devices -->
+        <!-- IP Addresses Card -->
         <div class="card">
-          <div class="flex items-center justify-between mb-3">
-            <div class="text-sm font-semibold text-zinc-200">Recent Devices</div>
-            <button onclick="showTab('devices')" class="text-xs text-blue-400 hover:text-blue-300 transition">View all →</button>
+          <div class="section-header mb-2.5">Server Network Addresses</div>
+          <p class="text-xs text-zinc-400 mb-3">Click any address to copy URL for connecting your phone.</p>
+          <div id="dash-ip-chips" class="flex flex-wrap gap-2"></div>
+        </div>
+
+        <!-- Activity Log & Recent Devices Grid -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <!-- Live Activity Log -->
+          <div class="card flex flex-col">
+            <div class="flex items-center justify-between mb-3">
+              <div class="section-header">Recent Activity</div>
+              <button onclick="showTab('logs')" class="text-xs text-blue-400 hover:text-blue-300">View live logs →</button>
+            </div>
+            <div id="dash-activity-list" class="space-y-2 flex-1 min-h-[160px] max-h-[260px] overflow-y-auto"></div>
           </div>
-          <div id="dash-device-list" class="space-y-2"></div>
+
+          <!-- Recent Devices Card -->
+          <div class="card flex flex-col">
+            <div class="flex items-center justify-between mb-3">
+              <div class="section-header">Paired Devices</div>
+              <button onclick="showTab('devices')" class="text-xs text-blue-400 hover:text-blue-300">Manage devices →</button>
+            </div>
+            <div id="dash-device-list" class="space-y-2 flex-1 min-h-[160px] max-h-[260px] overflow-y-auto"></div>
+          </div>
         </div>
       </section>
 
-      <!-- ─── DEVICES ────────────────────────────────────────────────────── -->
-      <section data-panel="devices" class="hidden p-6 max-w-5xl mx-auto w-full">
-        <div class="flex items-center justify-between mb-5">
-          <h1 class="text-xl font-bold text-zinc-100">Devices</h1>
+
+      <!-- ─── 2. DEVICES TAB ─────────────────────────────────────────────── -->
+      <section data-panel="devices" class="hidden max-w-6xl mx-auto w-full space-y-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-2xl font-bold text-zinc-100">Devices</h1>
+            <p class="text-xs text-zinc-400 mt-0.5">Manage paired phones, inspect backup files, and compose direct posts.</p>
+          </div>
           <button onclick="loadDevices()" class="btn-secondary text-xs">↻ Refresh</button>
         </div>
-        <input id="devices-search" class="input mb-4 max-w-xs" placeholder="Search devices…">
-        <div id="devices-content"></div>
+
+        <!-- Filter bar -->
+        <div class="flex items-center gap-3">
+          <div class="relative flex-1 max-w-md">
+            <input id="devices-search" class="input pl-9" placeholder="Search devices by name, model, IP…">
+            <svg class="w-4 h-4 text-zinc-500 absolute left-3 top-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+          </div>
+          <span id="devices-count-badge" class="text-xs text-zinc-400">0 devices</span>
+        </div>
+
+        <!-- Devices List -->
+        <div id="devices-content" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
       </section>
 
-      <!-- ─── POST TO DEVICES ────────────────────────────────────────────── -->
-      <section data-panel="post" class="hidden p-6 max-w-3xl mx-auto w-full">
-        <h1 class="text-xl font-bold text-zinc-100 mb-5">Post to Devices</h1>
+
+      <!-- ─── 3. POST TO DEVICES TAB ─────────────────────────────────────── -->
+      <section data-panel="post_to_devices" class="hidden max-w-4xl mx-auto w-full space-y-6">
+        <div>
+          <h1 class="text-2xl font-bold text-zinc-100">Post to Devices</h1>
+          <p class="text-xs text-zinc-400 mt-0.5">Directly share photos, videos, audio, and documents with paired phones.</p>
+        </div>
 
         <div class="space-y-5">
-          <!-- Drop zone -->
+          <!-- Drop Zone & File Selector -->
           <div class="card">
-            <div class="section-header mb-3">Files</div>
-            <div id="drop-zone" class="border-2 border-dashed border-zinc-600 rounded-xl p-8 text-center cursor-pointer hover:border-blue-500 transition-colors">
-              <svg class="w-10 h-10 mx-auto mb-3 text-zinc-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-              <div class="text-sm text-zinc-400">Drag &amp; drop photos/videos here</div>
-              <div class="text-xs text-zinc-600 mt-1">or click to browse files</div>
-              <input id="post-file-input" type="file" accept="image/*,video/*" multiple class="hidden">
+            <div class="flex items-center justify-between mb-3">
+              <span class="section-header">Select Files to Post</span>
+              <div class="flex gap-2">
+                <button type="button" onclick="el('post-file-input').click()" class="btn-secondary text-xs">
+                  📁 + Browse Files
+                </button>
+                <button type="button" onclick="clearPostFiles()" id="post-clear-files-btn" class="btn-secondary text-xs hidden text-red-400">
+                  Clear
+                </button>
+              </div>
             </div>
-            <div id="post-file-list" class="mt-3 space-y-1"></div>
+
+            <div id="drop-zone" class="border-2 border-dashed border-zinc-700/80 rounded-2xl p-8 text-center cursor-pointer hover:border-blue-500 transition-colors bg-zinc-900/40">
+              <div class="w-12 h-12 rounded-2xl bg-blue-500/10 text-blue-400 flex items-center justify-center mx-auto mb-3">
+                <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+              </div>
+              <div class="text-sm font-semibold text-zinc-200">Drag &amp; drop photos, videos, audio, or documents here</div>
+              <div class="text-xs text-zinc-500 mt-1">or click to browse your local computer</div>
+              <input id="post-file-input" type="file" multiple class="hidden">
+            </div>
+
+            <!-- Selected Files List with Reordering -->
+            <div id="post-file-list" class="mt-4 space-y-1.5 max-h-64 overflow-y-auto"></div>
+            <div id="post-files-summary" class="text-xs text-zinc-400 mt-2 hidden"></div>
           </div>
 
           <!-- Caption -->
           <div class="card">
-            <label class="section-header mb-2 block">Caption (optional)</label>
-            <textarea id="post-caption" class="input h-20 resize-none" placeholder="Add a caption for this post…"></textarea>
+            <label class="section-header mb-2 block">Caption (Optional)</label>
+            <textarea id="post-caption" class="input h-24 resize-none" placeholder="Write a message or caption for this post…"></textarea>
           </div>
 
-          <!-- Target devices -->
+          <!-- Target Devices Selection -->
           <div class="card">
-            <div class="section-header mb-3">Target Devices</div>
-            <div id="post-devices-list" class="space-y-1 max-h-48 overflow-y-auto"></div>
+            <div class="flex items-center justify-between mb-3">
+              <span class="section-header">Target Devices</span>
+              <span id="post-targets-summary" class="text-xs text-zinc-400">0 devices selected</span>
+            </div>
+            <div id="post-devices-list" class="space-y-1.5 max-h-52 overflow-y-auto p-1"></div>
           </div>
 
-          <!-- Submit -->
+          <!-- Submit Button -->
           <div>
-            <div id="post-progress" class="hidden h-1 rounded-full bg-zinc-800 mb-3 overflow-hidden">
+            <div id="post-progress" class="hidden h-1.5 rounded-full bg-zinc-800 mb-3 overflow-hidden">
               <div class="h-full progress-shimmer rounded-full w-full"></div>
             </div>
-            <button id="post-submit-btn" onclick="submitDirectPost()" class="btn-primary w-full py-3">
-              Post to Devices
+            <button id="post-submit-btn" onclick="submitDirectPost()" class="btn-primary w-full py-3.5 text-base font-semibold shadow-lg shadow-blue-600/20">
+              🚀 Post to Selected Devices
             </button>
           </div>
         </div>
       </section>
 
-      <!-- ─── POSTS ──────────────────────────────────────────────────────── -->
-      <section data-panel="posts" class="hidden p-6 max-w-5xl mx-auto w-full">
-        <div class="flex items-center justify-between mb-5">
-          <h1 class="text-xl font-bold text-zinc-100">Posts</h1>
-          <button onclick="loadPosts()" class="btn-secondary text-xs">↻ Refresh</button>
+
+      <!-- ─── 4. POSTS TAB ───────────────────────────────────────────────── -->
+      <section data-panel="posts" class="hidden max-w-6xl mx-auto w-full space-y-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-2xl font-bold text-zinc-100">Posts</h1>
+            <p class="text-xs text-zinc-400 mt-0.5">Manage shared posts, update file attachments, recipients, and captions.</p>
+          </div>
+          <div class="flex gap-2">
+            <button onclick="showTab('post_to_devices')" class="btn-primary text-xs">+ Create New Post</button>
+            <button onclick="loadPosts()" class="btn-secondary text-xs">↻ Refresh</button>
+          </div>
         </div>
-        <input id="posts-search" class="input mb-4 max-w-xs" placeholder="Search posts…">
-        <div id="posts-content" class="space-y-3"></div>
-        <div class="mt-4 text-center">
-          <button id="posts-load-more" onclick="fetchMorePosts()" class="hidden btn-secondary">Load more</button>
+
+        <!-- Filter & Search Controls -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="sm:col-span-2 relative">
+            <input id="posts-search" class="input pl-9" placeholder="Search posts by caption, author, recipient…">
+            <svg class="w-4 h-4 text-zinc-500 absolute left-3 top-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+          </div>
+          <select id="posts-device-filter" onchange="loadPosts()" class="input">
+            <option value="all">All Target Devices</option>
+          </select>
+        </div>
+
+        <!-- Posts Content List -->
+        <div id="posts-content" class="space-y-4"></div>
+
+        <!-- Pagination Controls -->
+        <div id="posts-pagination" class="flex items-center justify-between pt-2">
+          <button id="posts-prev-btn" onclick="postsPrevPage()" class="btn-secondary text-xs">← Previous</button>
+          <span id="posts-page-lbl" class="text-xs text-zinc-400 font-mono">Page 1</span>
+          <button id="posts-next-btn" onclick="postsNextPage()" class="btn-secondary text-xs">Next →</button>
         </div>
       </section>
 
-      <!-- ─── SHARED FOLDERS ─────────────────────────────────────────────── -->
-      <section data-panel="shared-folders" class="hidden p-6 max-w-5xl mx-auto w-full">
-        <div class="flex items-center justify-between mb-5">
-          <h1 class="text-xl font-bold text-zinc-100">Shared Folders</h1>
-          <button onclick="showTab('settings')" class="btn-secondary text-xs">Manage in Settings →</button>
+
+      <!-- ─── 5. SHARED FOLDERS TAB ───────────────────────────────────────── -->
+      <section data-panel="shared_folders" class="hidden max-w-6xl mx-auto w-full space-y-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-2xl font-bold text-zinc-100">Shared Folders</h1>
+            <p class="text-xs text-zinc-400 mt-0.5">Share server directories with connected devices and manage access permissions.</p>
+          </div>
+          <div class="flex gap-2">
+            <button onclick="openAddSharedFolderModal()" class="btn-primary text-xs">+ Add Shared Folder</button>
+            <button onclick="loadSharedFolders()" class="btn-secondary text-xs">↻ Refresh</button>
+          </div>
         </div>
+
         <div id="shared-content" class="space-y-3"></div>
       </section>
 
-      <!-- ─── STORAGE ────────────────────────────────────────────────────── -->
-      <section data-panel="storage" class="hidden p-6 max-w-5xl mx-auto w-full">
-        <div class="flex items-center justify-between mb-5">
-          <h1 class="text-xl font-bold text-zinc-100">Storage</h1>
-          <button onclick="loadStorage()" class="btn-secondary text-xs">↻ Refresh</button>
+
+      <!-- ─── 6. SETTINGS TAB ────────────────────────────────────────────── -->
+      <section data-panel="settings" class="hidden max-w-4xl mx-auto w-full space-y-6">
+        <div>
+          <h1 class="text-2xl font-bold text-zinc-100">Settings</h1>
+          <p class="text-xs text-zinc-400 mt-0.5">Configure network ports, storage directories, caches, and security options.</p>
         </div>
-        <div id="storage-content"></div>
+
+        <div id="settings-content" class="space-y-5"></div>
       </section>
 
-      <!-- ─── LIVE LOGS ──────────────────────────────────────────────────── -->
-      <section data-panel="logs" class="hidden p-6 flex flex-col h-full max-w-6xl mx-auto w-full">
-        <div class="flex items-center justify-between mb-4">
-          <h1 class="text-xl font-bold text-zinc-100">Live Logs</h1>
+
+      <!-- ─── 7. LIVE LOGS TAB ───────────────────────────────────────────── -->
+      <section data-panel="logs" class="hidden max-w-6xl mx-auto w-full flex flex-col h-full space-y-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-2xl font-bold text-zinc-100">Live Logs</h1>
+            <p class="text-xs text-zinc-400 mt-0.5">Real-time streaming console logs from the backup server engine.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="copyAllLogs()" class="btn-secondary text-xs">📋 Copy All</button>
+            <button onclick="clearServerLogs()" class="btn-danger text-xs">Clear</button>
+          </div>
+        </div>
+
+        <!-- Filter Controls -->
+        <div class="flex items-center justify-between gap-3 flex-wrap">
+          <div class="flex gap-1.5">
+            <button onclick="setLogFilter('')" class="log-pill-btn text-xs px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition font-medium">All</button>
+            <button onclick="setLogFilter('info')" class="log-pill-btn text-xs px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-emerald-400 transition font-medium">Info</button>
+            <button onclick="setLogFilter('warn')" class="log-pill-btn text-xs px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-amber-400 transition font-medium">Warnings</button>
+            <button onclick="setLogFilter('error')" class="log-pill-btn text-xs px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-red-400 transition font-medium">Errors</button>
+          </div>
+
           <div class="flex items-center gap-3">
-            <label class="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer">
+            <input class="input w-48 text-xs py-1.5" placeholder="Search log text…" oninput="setLogFilter(this.value)">
+            <label class="flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer select-none">
               <input type="checkbox" checked onchange="toggleAutoScroll(this)" class="rounded">
               Auto-scroll
             </label>
-            <!-- Filter buttons -->
-            <div class="flex gap-1">
-              <button onclick="setLogFilter('')" class="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition">All</button>
-              <button onclick="setLogFilter('error')" class="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-red-400 transition">Errors</button>
-              <button onclick="setLogFilter('warn')" class="text-xs px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-amber-400 transition">Warnings</button>
-            </div>
-            <input class="input w-40 text-xs py-1.5" placeholder="Filter logs…" oninput="setLogFilter(this.value)">
-            <button onclick="clearLogs()" class="btn-danger text-xs">Clear</button>
           </div>
         </div>
-        <div id="log-output" class="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl p-4 overflow-y-auto space-y-0.5 min-h-[400px]"></div>
+
+        <!-- Monospace Console -->
+        <div id="log-output" class="flex-1 bg-zinc-925 border border-zinc-800 rounded-xl p-4 overflow-y-auto space-y-0.5 min-h-[420px] max-h-[600px] shadow-inner font-mono"></div>
       </section>
 
-      <!-- ─── SYNC HISTORY ───────────────────────────────────────────────── -->
-      <section data-panel="history" class="hidden p-6 max-w-5xl mx-auto w-full">
-        <div class="flex items-center justify-between mb-5">
-          <h1 class="text-xl font-bold text-zinc-100">Sync History</h1>
+
+      <!-- ─── 8. SYNC HISTORY TAB ────────────────────────────────────────── -->
+      <section data-panel="history" class="hidden max-w-6xl mx-auto w-full space-y-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-2xl font-bold text-zinc-100">Sync History</h1>
+            <p class="text-xs text-zinc-400 mt-0.5">Audit log of all phone backup and synchronization sessions.</p>
+          </div>
           <div class="flex gap-2">
             <button onclick="loadHistory()" class="btn-secondary text-xs">↻ Refresh</button>
-            <button onclick="clearSyncHistory()" class="btn-danger text-xs">Clear All</button>
+            <button onclick="clearSyncHistoryModal()" class="btn-danger text-xs">Clear All History</button>
           </div>
         </div>
-        <div id="history-content" class="card overflow-x-auto"></div>
-        <div class="mt-4 text-center">
-          <button id="history-load-more" onclick="fetchMoreHistory()" class="hidden btn-secondary">Load more</button>
-        </div>
-      </section>
 
-      <!-- ─── SETTINGS ──────────────────────────────────────────────────── -->
-      <section data-panel="settings" class="hidden p-6 max-w-3xl mx-auto w-full">
-        <h1 class="text-xl font-bold text-zinc-100 mb-5">Settings</h1>
-        <div id="settings-content"></div>
+        <!-- Filter bar -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <select id="hist-device-filter" onchange="loadHistory()" class="input">
+            <option value="">All Devices</option>
+          </select>
+          <select id="hist-status-filter" onchange="loadHistory()" class="input">
+            <option value="">All Statuses</option>
+            <option value="completed">Completed</option>
+            <option value="failed">Failed / Partial</option>
+          </select>
+          <div class="text-right flex items-center justify-end text-xs text-zinc-400" id="hist-total-badge">
+            0 sessions recorded
+          </div>
+        </div>
+
+        <!-- Table Container -->
+        <div class="card overflow-x-auto p-0 border border-zinc-800 rounded-xl">
+          <div id="history-content"></div>
+        </div>
+
+        <!-- Pagination Controls -->
+        <div id="history-pagination" class="flex items-center justify-between pt-2">
+          <button id="hist-prev-btn" onclick="histPrevPage()" class="btn-secondary text-xs">← Previous</button>
+          <span id="hist-page-lbl" class="text-xs text-zinc-400 font-mono">Page 1</span>
+          <button id="hist-next-btn" onclick="histNextPage()" class="btn-secondary text-xs">Next →</button>
+        </div>
       </section>
 
     </div><!-- /scrollable content -->
-  </main><!-- /main -->
-</div><!-- /app-shell -->
+  </main>
+</div>
 
 
 <!-- ═══════════════════════════════════════════════════════
      MODALS
 ════════════════════════════════════════════════════════ -->
 
-<!-- Rename Device Modal -->
+<!-- 1. Rename Device Modal -->
 <div id="rename-modal" class="hidden modal-backdrop">
   <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
-    <h3 id="rename-modal-title" class="text-base font-semibold text-zinc-100 mb-4">Rename Device</h3>
-    <label class="label">New display name</label>
-    <input id="rename-input" class="input mb-5" placeholder="Enter username or display name">
+    <h3 id="rename-modal-title" class="text-base font-semibold text-zinc-100 mb-3">Rename Device</h3>
+    <label class="label">Custom Username / Display Name</label>
+    <input id="rename-input" class="input mb-5" placeholder="Enter username (e.g. Abir)">
     <div class="flex gap-3 justify-end">
       <button onclick="closeModal('rename-modal')" class="btn-secondary">Cancel</button>
-      <button id="rename-save-btn" class="btn-primary">Save</button>
+      <button id="rename-save-btn" class="btn-primary">Save Username</button>
     </div>
   </div>
 </div>
 
-<!-- Edit Caption Modal -->
+
+<!-- 2. Device Backup Files Explorer Modal (_open_device_files_dialog 1:1) -->
+<div id="device-files-modal" class="hidden modal-backdrop">
+  <div class="bg-zinc-900 border border-zinc-700 rounded-2xl w-full max-w-4xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden mx-4">
+    <!-- Header -->
+    <div class="px-6 py-4 border-b border-zinc-800 flex items-center justify-between bg-zinc-900/80">
+      <div>
+        <h3 id="device-files-modal-title" class="text-base font-bold text-zinc-100">Backup Files</h3>
+        <p id="device-files-modal-subtitle" class="text-xs text-zinc-400">Explore and search backup records.</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="device-files-open-folder-btn" class="btn-secondary text-xs">📁 Open Backup Folder</button>
+        <button onclick="closeModal('device-files-modal')" class="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white transition">✕</button>
+      </div>
+    </div>
+
+    <!-- Search & Category Filter bar -->
+    <div class="p-4 border-b border-zinc-800 bg-zinc-925 space-y-3">
+      <div class="flex gap-3">
+        <div class="relative flex-1">
+          <input id="device-files-search" class="input pl-9" placeholder="Search files, folders, extensions (e.g. DCIM, .mp4, camera)…">
+          <svg class="w-4 h-4 text-zinc-500 absolute left-3 top-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+        </div>
+        <select id="device-files-cat" onchange="renderDeviceFiles()" class="input w-36">
+          <option value="all">All Files</option>
+          <option value="photos">Photos</option>
+          <option value="videos">Videos</option>
+          <option value="audio">Audio</option>
+          <option value="docs">Docs</option>
+        </select>
+      </div>
+      <div class="flex items-center justify-between text-xs text-zinc-400">
+        <span id="device-files-status">Loading…</span>
+        <span id="device-files-summary">0 files</span>
+      </div>
+    </div>
+
+    <!-- Files Scroll Area -->
+    <div id="device-files-list" class="flex-1 overflow-y-auto p-4 space-y-2 min-h-[300px]"></div>
+  </div>
+</div>
+
+
+<!-- 3. Server Filesystem Explorer Modal (Windows Explorer & Server Folder Browser) -->
+<div id="fs-explorer-modal" class="hidden modal-backdrop">
+  <div class="bg-zinc-900 border border-zinc-700 rounded-2xl w-full max-w-3xl max-h-[85vh] flex flex-col shadow-2xl overflow-hidden mx-4">
+    <!-- Header -->
+    <div class="px-5 py-3.5 border-b border-zinc-800 flex items-center justify-between bg-zinc-900">
+      <div class="flex items-center gap-2">
+        <span class="text-lg">📁</span>
+        <div>
+          <h3 id="fs-modal-title" class="text-sm font-bold text-zinc-100">Server File &amp; Folder Explorer</h3>
+          <p class="text-[11px] text-zinc-400">Browse server filesystem directories.</p>
+        </div>
+      </div>
+      <button onclick="closeModal('fs-explorer-modal')" class="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white transition">✕</button>
+    </div>
+
+    <!-- Breadcrumb & Path Bar -->
+    <div class="p-3 border-b border-zinc-800 bg-zinc-925 space-y-2">
+      <div class="flex items-center gap-2">
+        <button id="fs-parent-btn" onclick="fsNavigateParent()" title="Go to Parent Folder" class="btn-secondary text-xs px-2.5 py-1.5">⬆ Up</button>
+        <input id="fs-path-input" class="input text-xs py-1.5 font-mono flex-1" placeholder="/path/to/folder">
+        <button onclick="fsNavigateTo(el('fs-path-input').value)" class="btn-secondary text-xs py-1.5">Go</button>
+        <button onclick="fsPromptNewFolder()" class="btn-secondary text-xs py-1.5">+ New Folder</button>
+      </div>
+
+      <!-- Quick access shortcuts -->
+      <div id="fs-roots-chips" class="flex flex-wrap gap-1.5 pt-1"></div>
+    </div>
+
+    <!-- Directory Listing -->
+    <div id="fs-dir-list" class="flex-1 overflow-y-auto p-2 min-h-[280px]"></div>
+
+    <!-- Footer Action -->
+    <div class="p-4 border-t border-zinc-800 bg-zinc-900/80 flex items-center justify-between gap-3">
+      <div class="text-xs text-zinc-400 truncate flex-1 font-mono" id="fs-selected-path-display">
+        Selected: —
+      </div>
+      <div class="flex gap-2">
+        <button onclick="closeModal('fs-explorer-modal')" class="btn-secondary text-xs">Cancel</button>
+        <button id="fs-select-btn" onclick="fsConfirmSelection()" class="btn-primary text-xs font-semibold">
+          Select This Folder
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- 4. Add / Edit Shared Folder Modal -->
+<div id="shared-folder-modal" class="hidden modal-backdrop">
+  <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-md shadow-2xl space-y-4">
+    <h3 id="shared-modal-title" class="text-base font-bold text-zinc-100">Add Shared Folder</h3>
+
+    <div>
+      <label class="label">Server Folder Path</label>
+      <div class="flex gap-2">
+        <input id="shared-path-input" class="input font-mono text-xs flex-1" placeholder="e.g. C:\Photos or /storage/media">
+        <button type="button" onclick="openFsPickerFor('shared-path-input')" class="btn-secondary text-xs">📁 Browse</button>
+      </div>
+    </div>
+
+    <div>
+      <label class="label">Display Label</label>
+      <input id="shared-label-input" class="input" placeholder="e.g. Family Albums">
+    </div>
+
+    <div>
+      <label class="label mb-1">Access Permissions</label>
+      <label class="flex items-center gap-2 cursor-pointer mb-2">
+        <input type="checkbox" id="shared-all-devices-chk" class="rounded" onchange="toggleSharedAllDevices(this)">
+        <span class="text-xs text-zinc-300 font-medium">Allow all paired devices</span>
+      </label>
+      <div id="shared-devices-checklist" class="space-y-1 max-h-36 overflow-y-auto p-2 bg-zinc-950 rounded-lg border border-zinc-800"></div>
+    </div>
+
+    <label class="flex items-center gap-2 cursor-pointer">
+      <input type="checkbox" id="shared-reels-chk" class="rounded" checked>
+      <span class="text-xs text-zinc-300">Available in Rewind Reels</span>
+    </label>
+
+    <div class="flex gap-3 justify-end pt-2">
+      <button onclick="closeModal('shared-folder-modal')" class="btn-secondary">Cancel</button>
+      <button id="shared-save-btn" class="btn-primary">Save Shared Folder</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- 5. Edit Caption Modal -->
 <div id="caption-modal" class="hidden modal-backdrop">
-  <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
-    <h3 class="text-base font-semibold text-zinc-100 mb-4">Edit Caption</h3>
-    <label class="label">Caption</label>
-    <textarea id="caption-input" class="input h-24 resize-none mb-5" placeholder="Enter caption…"></textarea>
+  <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl space-y-4">
+    <h3 class="text-base font-semibold text-zinc-100">Edit Caption</h3>
+    <textarea id="caption-input" class="input h-28 resize-none" placeholder="Enter post caption…"></textarea>
     <div class="flex gap-3 justify-end">
       <button onclick="closeModal('caption-modal')" class="btn-secondary">Cancel</button>
       <button id="caption-save-btn" class="btn-primary">Save Caption</button>
@@ -420,11 +657,74 @@
   </div>
 </div>
 
-<!-- Confirm / Destructive Action Modal -->
+
+<!-- 6. Manage Post Access / Recipients Modal -->
+<div id="post-access-modal" class="hidden modal-backdrop">
+  <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-md shadow-2xl space-y-4">
+    <div class="flex items-center justify-between">
+      <h3 class="text-base font-bold text-zinc-100">Manage Post Recipients</h3>
+      <button onclick="closeModal('post-access-modal')" class="p-1 rounded text-zinc-400 hover:text-white">✕</button>
+    </div>
+    <p class="text-xs text-zinc-400">Select which paired devices can view and download this post.</p>
+
+    <div class="flex items-center justify-between pt-1">
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input type="checkbox" id="post-access-all-chk" class="rounded" onchange="togglePostAccessAll(this)">
+        <span class="text-xs font-semibold text-zinc-200">Select All</span>
+      </label>
+      <span id="post-access-count" class="text-xs text-zinc-500">0 selected</span>
+    </div>
+
+    <div id="post-access-devices-list" class="space-y-1.5 max-h-52 overflow-y-auto p-2 bg-zinc-950 rounded-lg border border-zinc-800"></div>
+
+    <div class="flex gap-3 justify-end pt-2">
+      <button onclick="closeModal('post-access-modal')" class="btn-secondary">Cancel</button>
+      <button id="post-access-save-btn" class="btn-primary">Save Access</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- 7. Edit Post Files Modal (_open_edit_files_dialog 1:1) -->
+<div id="post-files-modal" class="hidden modal-backdrop">
+  <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-lg shadow-2xl space-y-4 max-h-[85vh] flex flex-col">
+    <div class="flex items-center justify-between">
+      <h3 class="text-base font-bold text-zinc-100">Edit Post Files</h3>
+      <button onclick="closeModal('post-files-modal')" class="p-1 rounded text-zinc-400 hover:text-white">✕</button>
+    </div>
+    <p class="text-xs text-zinc-400">Reorder files, remove items, or add new attachments to this post.</p>
+
+    <div id="post-edit-files-list" class="flex-1 overflow-y-auto space-y-2 p-2 bg-zinc-950 rounded-lg border border-zinc-800 min-h-[200px]"></div>
+
+    <div class="flex items-center justify-between pt-2">
+      <button onclick="el('post-edit-file-input').click()" class="btn-secondary text-xs">
+        📁 + Add Files
+      </button>
+      <input id="post-edit-file-input" type="file" multiple class="hidden">
+
+      <div class="flex gap-2">
+        <button onclick="closeModal('post-files-modal')" class="btn-secondary text-xs">Cancel</button>
+        <button id="post-edit-files-save-btn" class="btn-primary text-xs font-semibold">Save Changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- 8. Media Preview Modal (Zoom / Video Player) -->
+<div id="media-modal" class="hidden modal-backdrop">
+  <div class="relative bg-zinc-900 border border-zinc-700 rounded-2xl overflow-hidden shadow-2xl max-w-4xl w-full mx-4 flex flex-col items-center justify-center p-2">
+    <button onclick="closeModal('media-modal')" class="absolute top-4 right-4 z-10 w-9 h-9 rounded-full bg-zinc-800/90 flex items-center justify-center text-zinc-300 hover:text-white transition shadow-lg">✕</button>
+    <div id="media-modal-content" class="w-full flex items-center justify-center min-h-[300px] p-2"></div>
+  </div>
+</div>
+
+
+<!-- 9. Confirm / Destructive Action Modal -->
 <div id="confirm-modal" class="hidden modal-backdrop">
   <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
     <h3 id="confirm-modal-title" class="text-base font-semibold text-zinc-100 mb-2">Confirm Action</h3>
-    <p id="confirm-modal-body" class="text-sm text-zinc-400 mb-6"></p>
+    <p id="confirm-modal-body" class="text-xs text-zinc-400 mb-6 leading-relaxed"></p>
     <div class="flex gap-3 justify-end">
       <button onclick="closeModal('confirm-modal')" class="btn-secondary">Cancel</button>
       <button id="confirm-ok-btn" class="btn-danger">Confirm</button>
@@ -432,34 +732,12 @@
   </div>
 </div>
 
-<!-- Media Preview Modal -->
-<div id="media-modal" class="hidden modal-backdrop">
-  <div class="relative bg-zinc-900 border border-zinc-700 rounded-2xl overflow-hidden shadow-2xl max-w-3xl w-full mx-4">
-    <button onclick="closeModal('media-modal')" class="absolute top-3 right-3 z-10 w-8 h-8 rounded-full bg-zinc-800/80 flex items-center justify-center text-zinc-400 hover:text-white transition">✕</button>
-    <div id="media-modal-content" class="min-h-[200px]"></div>
-  </div>
-</div>
 
-
-<!-- Toast container -->
+<!-- Toast notifications -->
 <div id="toast-container" class="fixed bottom-5 right-5 z-[100] flex flex-col gap-2 items-end pointer-events-none"></div>
 
-
-<!-- ── Scripts ───────────────────────────────────────────────────────────── -->
+<!-- App entry scripts -->
 <script type="module" src="/admin/js/app.js"></script>
-
-<!-- Wire up tab buttons (Tailwind CDN doesn't JIT @apply in <style>, patch here) -->
-<script>
-  // Patch tab-active styling since Tailwind CDN won't process arbitrary @apply in <style>
-  document.addEventListener('DOMContentLoaded', () => {
-    document.querySelectorAll('[data-tab]').forEach(btn => {
-      btn.dataset.tab = btn.dataset.tab; // ensure attr exists
-    });
-  });
-
-  // Global showTab exposed from app.js is available via window.showTab
-  // Nav buttons use data-tab and are wired in app.js boot()
-</script>
 
 </body>
 </html>
