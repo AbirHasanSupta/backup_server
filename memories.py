@@ -27,12 +27,12 @@ except Exception:
     pass
 
 from config import load_config
-from database import (
+from repositories.device_repo import get_devices, get_device_display_name
+from repositories.file_repo import get_files_for_device
+from repositories.media_repo import (
     batch_upsert_media_index_rows,
     clear_media_index,
-    get_devices,
     get_distinct_cap_years,
-    get_files_for_device,
     get_geotagged_media,
     get_media_for_day,
     get_media_for_days_multi,
@@ -46,7 +46,6 @@ from database import (
     prune_media_index,
     upsert_media_index_row,
     upsert_scan_dirs,
-    get_device_display_name,
 )
 from state import add_log
 from storage import full_path_in_root, resolve_backup_root

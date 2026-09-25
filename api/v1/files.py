@@ -9,6 +9,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 
 from core.config import get_shared_dirs
+from core.path_utils import normalize_fs_path
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo, file_repo, social_repo
 from services.preview_service import preview_service
@@ -181,7 +182,7 @@ async def list_shared_files(
     if not _is_folder_tagged_for_device(entry, device_id):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         return {"files": [], "warning": "Directory does not exist on server"}
 
@@ -232,7 +233,7 @@ async def search_shared_files(
     q = q.strip().lower()
     if not q:
         return {"files": []}
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         return {"files": []}
 
@@ -274,7 +275,7 @@ async def browse_shared_files(
     if not _is_folder_tagged_for_device(entry, device_id):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     norm_prefix = prefix.strip("/").replace("\\", "/")
     target_dir = os.path.join(root, norm_prefix) if norm_prefix else root
     target_dir = os.path.abspath(target_dir)
@@ -318,7 +319,7 @@ async def download_shared_file(
     if not _is_folder_tagged_for_device(entry, device_id):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
     full_path = os.path.abspath(os.path.join(root, safe_rel))
     if os.path.commonpath([root, full_path]) != root or not os.path.isfile(full_path):
@@ -343,7 +344,7 @@ async def preview_shared_file(
     if not _is_folder_tagged_for_device(entry, device_id):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
     full_path = os.path.abspath(os.path.join(root, safe_rel))
     if os.path.commonpath([root, full_path]) != root or not os.path.isfile(full_path):
@@ -372,7 +373,7 @@ async def thumbnail_shared_file(
     if not _is_folder_tagged_for_device(entry, device_id):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
     full_path = os.path.abspath(os.path.join(root, safe_rel))
     if os.path.commonpath([root, full_path]) != root or not os.path.isfile(full_path):
@@ -392,7 +393,7 @@ async def warm_shared_previews(
     entry = _find_shared_dir(source_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Shared source not found")
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     for rel_path in body.paths[:3]:
         try:
             full_path = os.path.abspath(os.path.join(root, rel_path))

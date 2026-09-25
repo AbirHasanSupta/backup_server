@@ -66,7 +66,7 @@ from pydantic import BaseModel
 
 from config import APP_DATA_DIR, SHARED_DIRECT_POST_DIR, load_config, save_config
 from core.security import verify_api_key_or_device_token
-import database as db
+from repositories import device_repo, file_repo, media_repo, social_repo
 import memories
 import network_info
 from state import (
@@ -226,8 +226,7 @@ async def get_all_sync_history(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    # database.get_sync_sessions supports device_id=None for all-devices view
-    all_sessions = await asyncio.to_thread(db.get_sync_sessions, device_id or None, offset + limit + 1)
+    all_sessions = await asyncio.to_thread(file_repo.get_sync_sessions, device_id or None, offset + limit + 1)
     paged = all_sessions[offset: offset + limit]
     has_more = len(all_sessions) > offset + limit
     return {"sessions": paged, "has_more": has_more, "total": len(all_sessions)}
@@ -240,7 +239,7 @@ async def clear_all_sync_history(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    await asyncio.to_thread(db.clear_sync_sessions, device_id or None)
+    await asyncio.to_thread(file_repo.clear_sync_sessions, device_id or None)
     return {"ok": True}
 
 
@@ -253,7 +252,7 @@ async def get_admin_status(
 ):
     _auth(authorization, token)
     cfg = load_config()
-    devices = await asyncio.to_thread(db.get_devices)
+    devices = await asyncio.to_thread(device_repo.get_devices)
     
     total_storage = sum(d.get("total_bytes", 0) or 0 for d in devices)
     total_files = sum(d.get("files_backed_up", 0) or 0 for d in devices)
@@ -602,7 +601,7 @@ async def list_admin_devices(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    devices = await asyncio.to_thread(db.get_devices)
+    devices = await asyncio.to_thread(device_repo.get_devices)
     cfg_root = load_config().get("BACKUP_ROOT", "")
     
     enriched = []
@@ -614,7 +613,7 @@ async def list_admin_devices(
         last_seen = d.get("last_seen")
         is_online = bool(last_seen and (time.time() - last_seen) < 300)
         
-        display_name = db.format_device_display_name(d)
+        display_name = device_repo.format_device_display_name(d)
 
         enriched.append({
             "id": d.get("id"),
@@ -650,7 +649,7 @@ async def rename_device(
 ):
     _auth(authorization, token)
     username = body.username.strip()
-    await asyncio.to_thread(db.set_device_username, device_id, username if username else None)
+    await asyncio.to_thread(device_repo.set_device_username, device_id, username if username else None)
     return {"ok": True, "username": username}
 
 
@@ -661,7 +660,7 @@ async def delete_device(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    await asyncio.to_thread(db.remove_device, device_id)
+    await asyncio.to_thread(device_repo.remove_device, device_id)
     return {"ok": True}
 
 
@@ -684,7 +683,7 @@ async def search_device_files(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    raw_files = await asyncio.to_thread(db.search_files_for_device, device_id, q, limit=max(1, min(limit * 3, 1000)))
+    raw_files = await asyncio.to_thread(file_repo.search_files_for_device, device_id, q, category=category, limit=max(1, min(limit * 3, 1000)))
     
     cat_lower = category.lower()
     if cat_lower in _CATEGORY_EXTS:
@@ -855,8 +854,8 @@ async def list_admin_posts(
     _auth(authorization, token)
     key = token or (authorization.split(" ", 1)[1] if authorization and " " in authorization else "")
 
-    rows = await asyncio.to_thread(db.get_device_shares_by_sharer, db.DESKTOP_SHARE_DEVICE_ID)
-    all_targets = await asyncio.to_thread(db.get_all_share_targets_for_sharer, db.DESKTOP_SHARE_DEVICE_ID)
+    rows = await asyncio.to_thread(social_repo.get_device_shares_by_sharer, "desktop-server")
+    all_targets = await asyncio.to_thread(social_repo.get_all_share_targets_for_sharer, "desktop-server")
 
     groups: dict[str, list[dict]] = {}
     order: list[str] = []
@@ -873,7 +872,7 @@ async def list_admin_posts(
         head = items[0]
         targets = all_targets.get(gid, [])
         target_ids = [t.get("target_device_id") for t in targets]
-        target_names = [db.format_device_display_name(t) for t in targets]
+        target_names = [device_repo.format_device_display_name(t) for t in targets]
 
         caption = head.get("group_caption") or head.get("caption") or ""
         author = head.get("shared_by_name") or "Desktop"
@@ -943,9 +942,9 @@ async def get_admin_post_targets(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    targets = await asyncio.to_thread(db.get_share_targets_for_group, group_id, db.DESKTOP_SHARE_DEVICE_ID)
+    targets = await asyncio.to_thread(social_repo.get_share_targets_for_group, group_id, "desktop-server")
     for t in targets:
-        t["display_name"] = db.format_device_display_name(t)
+        t["display_name"] = device_repo.format_device_display_name(t)
     return {"targets": targets}
 
 
@@ -961,19 +960,19 @@ async def update_admin_post_targets(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    current_targets = await asyncio.to_thread(db.get_share_targets_for_group, group_id, db.DESKTOP_SHARE_DEVICE_ID)
+    current_targets = await asyncio.to_thread(social_repo.get_share_targets_for_group, group_id, "desktop-server")
     current_ids = {t["target_device_id"] for t in current_targets}
     new_ids = set(body.target_device_ids)
 
     # To remove
     to_remove = current_ids - new_ids
     for did in to_remove:
-        await asyncio.to_thread(db.remove_share_group_target, group_id, did, db.DESKTOP_SHARE_DEVICE_ID)
+        await asyncio.to_thread(social_repo.remove_share_group_target, group_id, did, "desktop-server")
 
     # To add
     to_add = new_ids - current_ids
     if to_add:
-        await asyncio.to_thread(db.add_share_group_targets, group_id, list(to_add), db.DESKTOP_SHARE_DEVICE_ID)
+        await asyncio.to_thread(social_repo.add_share_group_targets, group_id, list(to_add), "desktop-server")
 
     return {"ok": True}
 
@@ -986,7 +985,7 @@ async def get_admin_post_items(
 ):
     _auth(authorization, token)
     key = token or (authorization.split(" ", 1)[1] if authorization and " " in authorization else "")
-    shares = await asyncio.to_thread(db.get_device_shares_by_sharer, db.DESKTOP_SHARE_DEVICE_ID)
+    shares = await asyncio.to_thread(social_repo.get_device_shares_by_sharer, "desktop-server")
     items = [s for s in shares if (s.get("share_group_id") or str(s["share_id"])) == group_id]
     
     enriched = []
@@ -1026,7 +1025,7 @@ async def update_admin_post_items(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    ok = await asyncio.to_thread(db.update_share_group_items, group_id, db.DESKTOP_SHARE_DEVICE_ID, body.items)
+    ok = await asyncio.to_thread(social_repo.update_share_group_items, group_id, "desktop-server", body.items)
     if not ok:
         raise HTTPException(status_code=400, detail="Failed to update post items")
     return {"ok": True}
@@ -1043,11 +1042,11 @@ async def upload_admin_post_items(
     os.makedirs(SHARED_DIRECT_POST_DIR, exist_ok=True)
 
     # Get existing items
-    shares = await asyncio.to_thread(db.get_device_shares_by_sharer, db.DESKTOP_SHARE_DEVICE_ID)
+    shares = await asyncio.to_thread(social_repo.get_device_shares_by_sharer, "desktop-server")
     current_items = [
         {
             "source_type": it.get("source_type", "desktop"),
-            "source_key": it.get("source_key", db.DESKTOP_SHARE_DEVICE_ID),
+            "source_key": it.get("source_key", "desktop-server"),
             "relative_path": it.get("relative_path", ""),
             "size": int(it.get("size") or 0),
             "modified_time": int(it.get("modified_time") or 0),
@@ -1066,13 +1065,13 @@ async def upload_admin_post_items(
         file_size = os.path.getsize(dest_path)
         new_items.append({
             "source_type": "desktop",
-            "source_key": db.DESKTOP_SHARE_DEVICE_ID,
+            "source_key": "desktop-server",
             "relative_path": dest_path,
             "size": file_size,
             "modified_time": int(time.time()),
         })
 
-    ok = await asyncio.to_thread(db.update_share_group_items, group_id, db.DESKTOP_SHARE_DEVICE_ID, new_items)
+    ok = await asyncio.to_thread(social_repo.update_share_group_items, group_id, "desktop-server", new_items)
     if not ok:
         raise HTTPException(status_code=400, detail="Failed to save uploaded files to post")
     return {"ok": True, "total_items": len(new_items)}
@@ -1091,7 +1090,7 @@ async def edit_admin_post_caption(
 ):
     _auth(authorization, token)
     caption = (body.caption or "").strip() or None
-    ok = await asyncio.to_thread(db.edit_device_share_group_caption, group_id, db.DESKTOP_SHARE_DEVICE_ID, caption)
+    ok = await asyncio.to_thread(social_repo.edit_device_share_group_caption, group_id, "desktop-server", caption)
     if not ok:
         raise HTTPException(status_code=400, detail="Failed to edit caption")
     return {"ok": True, "caption": caption}
@@ -1104,7 +1103,7 @@ async def delete_admin_post_group(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    ok = await asyncio.to_thread(db.delete_device_share_group, group_id, db.DESKTOP_SHARE_DEVICE_ID)
+    ok = await asyncio.to_thread(social_repo.delete_device_share_group, group_id, "desktop-server")
     if not ok:
         raise HTTPException(status_code=400, detail="Failed to delete post")
     return {"ok": True}

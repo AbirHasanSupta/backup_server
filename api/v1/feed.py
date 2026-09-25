@@ -15,6 +15,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 
 from core.config import APP_DATA_DIR, SHARED_DIRECT_POST_DIR, SHARED_QUIZ_DIR, SHARED_REWIND_DIR, get_shared_dirs
+from core.path_utils import normalize_fs_path
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo, social_repo
 from services.feed_service import feed_service
@@ -101,8 +102,16 @@ def _resolve_share_path(share: dict) -> str:
 
     if source_type in ("phone", "reel_backup"):
         return storage.get_file_path(relative_path, device_id=source_key)
+
     if source_type == "desktop":
-        return relative_path
+        full_p = normalize_fs_path(relative_path)
+        if os.path.isfile(full_p):
+            return full_p
+        candidate = os.path.join(SHARED_DIRECT_POST_DIR, os.path.basename(relative_path.replace("\\", "/")))
+        if os.path.isfile(candidate):
+            return candidate
+        return full_p
+
     if source_type in ("shared", "reel_shared"):
         found = None
         for entry in get_shared_dirs():
@@ -111,35 +120,43 @@ def _resolve_share_path(share: dict) -> str:
                 break
         if not found:
             raise HTTPException(status_code=404, detail="Shared source not found")
-        root = os.path.abspath(found["path"])
+        root = normalize_fs_path(found["path"])
         if not os.path.isdir(root):
             raise HTTPException(status_code=404, detail="Shared directory not found on server")
-        safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
+        safe_rel = os.path.normpath(relative_path.replace("\\", "/")).lstrip("/")
         full_p = os.path.abspath(os.path.join(root, safe_rel))
-        if os.path.commonpath([root, full_p]) != root:
+        if os.path.commonpath([root, full_p]) != root and not os.path.exists(full_p):
             raise HTTPException(status_code=400, detail="Invalid path")
         return full_p
+
     if source_type == "rewind":
         year_str, _, month_str = relative_path.partition("-")
         path = rewind.get_rewind_path(source_key, int(year_str), int(month_str) if month_str else None)
         if not path:
             raise HTTPException(status_code=404, detail="Reel not ready")
         return path
+
     if source_type == "rewind_shared":
-        full_p = os.path.abspath(relative_path)
-        if os.path.commonpath([SHARED_REWIND_DIR, full_p]) != SHARED_REWIND_DIR:
-            raise HTTPException(status_code=400, detail="Invalid path")
-        return full_p
+        fname = os.path.basename(relative_path.replace("\\", "/"))
+        candidate = os.path.join(SHARED_REWIND_DIR, fname)
+        if os.path.isfile(candidate):
+            return candidate
+        return normalize_fs_path(relative_path)
+
     if source_type == "quiz_shared":
-        full_p = os.path.abspath(relative_path)
-        if os.path.commonpath([SHARED_QUIZ_DIR, full_p]) != SHARED_QUIZ_DIR:
-            raise HTTPException(status_code=400, detail="Invalid path")
-        return full_p
+        fname = os.path.basename(relative_path.replace("\\", "/"))
+        candidate = os.path.join(SHARED_QUIZ_DIR, fname)
+        if os.path.isfile(candidate):
+            return candidate
+        return normalize_fs_path(relative_path)
+
     if source_type == "direct_post_shared":
-        full_p = os.path.abspath(relative_path)
-        if os.path.commonpath([SHARED_DIRECT_POST_DIR, full_p]) != SHARED_DIRECT_POST_DIR:
-            raise HTTPException(status_code=400, detail="Invalid path")
-        return full_p
+        fname = os.path.basename(relative_path.replace("\\", "/"))
+        candidate = os.path.join(SHARED_DIRECT_POST_DIR, fname)
+        if os.path.isfile(candidate):
+            return candidate
+        return normalize_fs_path(relative_path)
+
     raise HTTPException(status_code=400, detail="Unknown share source type")
 
 

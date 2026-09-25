@@ -211,27 +211,55 @@ def insert_sync_session(data: Dict[str, Any]) -> int:
     )
 
 
-def get_sync_sessions(device_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+def get_sync_sessions(device_id: str | None = None, limit: int = 50) -> List[Dict[str, Any]]:
     if is_postgres():
+        if device_id:
+            return execute_read_query(
+                "SELECT * FROM sync_sessions WHERE device_id = ? ORDER BY started_at DESC LIMIT ?",
+                (device_id, limit),
+            )
         return execute_read_query(
-            "SELECT * FROM sync_sessions WHERE device_id = ? ORDER BY started_at DESC LIMIT ?",
-            (device_id, limit),
+            "SELECT * FROM sync_sessions ORDER BY started_at DESC LIMIT ?",
+            (limit,),
         )
     return db_get_sync_sessions(device_id, limit)
 
 
-def clear_sync_sessions(device_id: str) -> bool:
+def clear_sync_sessions(device_id: str | None = None) -> bool:
     if is_postgres():
-        execute_write("DELETE FROM sync_sessions WHERE device_id = ?", (device_id,))
+        if device_id:
+            execute_write("DELETE FROM sync_sessions WHERE device_id = ?", (device_id,))
+        else:
+            execute_write("DELETE FROM sync_sessions")
         return True
     return db_clear_sync_sessions(device_id)
 
 
-def get_cleanup_candidates(device_id: str, client_files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return db_get_cleanup_candidates(device_id, client_files)
+def get_cleanup_candidates(device_id: str) -> List[Dict[str, Any]]:
+    if is_postgres():
+        rows = execute_read_query(
+            "SELECT id, path, size, modified_time FROM files WHERE device_id = ?",
+            (device_id,),
+        )
+        capture_rows = execute_read_query(
+            "SELECT relative_path, cap_time AS capture_time FROM media_index WHERE source_type = 'phone' AND source_key = ?",
+            (device_id,),
+        )
+        capture_map = {r["relative_path"]: r["capture_time"] for r in capture_rows}
+        candidates = []
+        for r in rows:
+            candidates.append({
+                "id": r["id"],
+                "path": r["path"],
+                "size": r["size"],
+                "modified_time": r["modified_time"],
+                "capture_time": capture_map.get(r["path"]),
+            })
+        return candidates
+    return db_get_cleanup_candidates(device_id)
 
 
-def log_cleanup_deletions(device_id: str, deleted_files: List[Dict[str, Any]]) -> int:
+def log_cleanup_deletions(device_id: str, deleted_files: List[Dict[str, Any]]) -> Dict[str, Any]:
     return db_log_cleanup_deletions(device_id, deleted_files)
 
 

@@ -22,7 +22,8 @@ import time
 import urllib.request
 
 from config import APP_DATA_DIR, load_config
-from database import get_device_display_name, get_media_for_year_month
+from repositories.device_repo import get_device_display_name
+from repositories.media_repo import get_media_for_year_month
 from ffmpeg_utils import resolve_ffmpeg_path
 from memories import VIDEO_EXTS, _shared_sources_for_device
 from state import add_log

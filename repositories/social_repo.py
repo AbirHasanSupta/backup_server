@@ -398,3 +398,93 @@ def edit_device_share_group_caption(group_id: str, requester_device_id: str, new
             return True
         return False
     return db_edit_device_share_group_caption(group_id, requester_device_id, new_caption)
+
+
+def get_all_share_targets_for_sharer(sharer_device_id: str) -> Dict[str, List[Dict[str, Any]]]:
+    if is_postgres():
+        rows = execute_read_query(
+            """
+            SELECT DISTINCT ds.share_group_id,
+                   dst.target_device_id,
+                   d.device_name, d.device_model, d.username
+            FROM device_share_groups dsg
+            JOIN device_shares ds ON ds.share_group_id = dsg.group_id
+            JOIN device_share_targets dst ON dst.share_id = ds.share_id
+            LEFT JOIN devices d ON d.device_id = dst.target_device_id
+            WHERE dsg.shared_by_device_id = ?
+            """,
+            (sharer_device_id,),
+        )
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for r in rows:
+            gid = r.get("share_group_id")
+            if gid:
+                groups.setdefault(gid, []).append(r)
+        return groups
+    from database import get_all_share_targets_for_sharer as db_get_all_share_targets_for_sharer
+    return db_get_all_share_targets_for_sharer(sharer_device_id)
+
+
+def update_share_group_items(group_id: str, requesting_device_id: str, new_items: List[Dict[str, Any]]) -> bool:
+    if is_postgres():
+        row = execute_read_one(
+            "SELECT shared_by_device_id, caption, created_at FROM device_share_groups WHERE group_id = ?",
+            (group_id,),
+        )
+        if not row or row["shared_by_device_id"] != requesting_device_id:
+            return False
+
+        target_rows = execute_read_query(
+            """
+            SELECT DISTINCT dst.target_device_id
+            FROM device_shares ds
+            JOIN device_share_targets dst ON dst.share_id = ds.share_id
+            WHERE ds.share_group_id = ?
+            """,
+            (group_id,),
+        )
+        targets = [r["target_device_id"] for r in target_rows]
+
+        old_rows = execute_read_query("SELECT share_id FROM device_shares WHERE share_group_id = ?", (group_id,))
+        old_ids = [r["share_id"] for r in old_rows]
+        if old_ids:
+            ph = ",".join(["?"] * len(old_ids))
+            execute_write(f"DELETE FROM device_share_targets WHERE share_id IN ({ph})", old_ids)
+            execute_write("DELETE FROM device_shares WHERE share_group_id = ?", (group_id,))
+
+        cap = row.get("caption")
+        now_ts = int(row.get("created_at") or time.time())
+
+        from repositories.reels_repo import get_or_create_media_id
+        for it in new_items:
+            source_type = it["source_type"]
+            source_key = it["source_key"]
+            relative_path = it["relative_path"]
+            sz = int(it.get("size") or 0)
+            mt = int(it.get("modified_time") or 0)
+            mid = get_or_create_media_id(source_type, source_key, relative_path, mt)
+
+            execute_write(
+                """
+                INSERT INTO device_shares
+                    (media_id, source_type, source_key, relative_path, size, modified_time,
+                     caption, shared_by_device_id, created_at, share_group_id, is_library_reel)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                """,
+                (mid, source_type, source_key, relative_path, sz, mt, cap, requesting_device_id, now_ts, group_id),
+            )
+            s_row = execute_read_one(
+                "SELECT share_id FROM device_shares WHERE share_group_id = ? AND relative_path = ? ORDER BY share_id DESC LIMIT 1",
+                (group_id, relative_path),
+            )
+            if s_row:
+                sid = s_row["share_id"]
+                for tid in targets:
+                    execute_write(
+                        "INSERT INTO device_share_targets (share_id, target_device_id, seen, notified) VALUES (?, ?, 0, 0) ON CONFLICT DO NOTHING",
+                        (sid, tid),
+                    )
+        return True
+    from database import update_share_group_items as db_update_share_group_items
+    return db_update_share_group_items(group_id, requesting_device_id, new_items)
+

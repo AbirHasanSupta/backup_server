@@ -7,9 +7,8 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Header, HTTPException, Query, status
 
 from core.security import verify_api_key_or_device_token
-from repositories import device_repo
+from repositories import device_repo, file_repo
 from state import add_log
-import database
 
 router = APIRouter(tags=["Cleanup & Storage Optimization"])
 
@@ -33,7 +32,7 @@ async def cleanup_candidates(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, source_id, device_repo.verify_device_token)
-    candidates = await asyncio.to_thread(database.get_cleanup_candidates, source_id)
+    candidates = await asyncio.to_thread(file_repo.get_cleanup_candidates, source_id)
     total_size = sum(c.get("size", 0) for c in candidates)
     return {
         "candidates": candidates,
@@ -54,7 +53,7 @@ async def cleanup_delete(
         {"path": f.path, "size": f.size, "file_id": f.file_id}
         for f in body.files
     ]
-    result = await asyncio.to_thread(database.log_cleanup_deletions, body.source_id, items)
+    result = await asyncio.to_thread(file_repo.log_cleanup_deletions, body.source_id, items)
     dev_name = device_repo.get_device_display_name(body.source_id)
     freed_gb = result.get("total_bytes_freed", 0) / (1024 ** 3)
     add_log(

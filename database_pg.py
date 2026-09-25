@@ -200,6 +200,22 @@ def init_pg_db():
             CREATE INDEX IF NOT EXISTS idx_media_calendar ON media_index(source_key, cap_month, cap_day);
             CREATE INDEX IF NOT EXISTS idx_media_gps ON media_index(lat, lon) WHERE has_gps = TRUE;
             CREATE INDEX IF NOT EXISTS idx_media_year ON media_index(source_key, cap_year, cap_month);
+
+            CREATE TABLE IF NOT EXISTS scan_dirs (
+                source_type VARCHAR(32) NOT NULL,
+                source_key VARCHAR(64) NOT NULL,
+                dir_relpath TEXT NOT NULL,
+                dir_mtime_ns BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL,
+                PRIMARY KEY (source_type, source_key, dir_relpath)
+            );
+
+            CREATE TABLE IF NOT EXISTS geocode_cache (
+                lat_round DOUBLE PRECISION NOT NULL,
+                lon_round DOUBLE PRECISION NOT NULL,
+                place_name TEXT NOT NULL,
+                PRIMARY KEY (lat_round, lon_round)
+            );
             """)
 
             # 5. Trips and Trip Media

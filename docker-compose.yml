@@ -40,6 +40,7 @@ services:
       # Serve shared media + generated assets through nginx for zero-copy downloads
       - ${BACKUP_ROOT:-D:\PhoneBackup}:/backup_storage:ro
       - ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}:/app_data:ro
+      - ${SHARED_DRIVE_G:-G:\}:/host_g:ro
     depends_on:
       api:
         condition: service_healthy
@@ -73,6 +74,10 @@ services:
       - type: bind
         source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
         target: /app_data
+      # Shared host drives
+      - type: bind
+        source: ${SHARED_DRIVE_G:-G:\}
+        target: /host_g
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,6 +113,9 @@ services:
       - type: bind
         source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
         target: /app_data
+      - type: bind
+        source: ${SHARED_DRIVE_G:-G:\}
+        target: /host_g
     depends_on:
       postgres:
         condition: service_healthy
@@ -137,6 +145,9 @@ services:
       - type: bind
         source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
         target: /app_data
+      - type: bind
+        source: ${SHARED_DRIVE_G:-G:\}
+        target: /host_g
     depends_on:
       postgres:
         condition: service_healthy

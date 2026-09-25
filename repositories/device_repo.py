@@ -8,7 +8,6 @@ from typing import Any, Dict, List
 from repositories.base import execute_read_one, execute_read_query, execute_write, is_postgres
 from database import (
     format_device_display_name as db_format_device_display_name,
-    get_device_display_name,
     get_devices as db_get_devices,
     get_device_by_id as db_get_device_by_id,
     upsert_device as db_upsert_device,
@@ -23,7 +22,57 @@ from database import (
     get_device_folder_name as db_get_device_folder_name,
     find_device_by_name_model as db_find_device_by_name_model,
     merge_device_id as db_merge_device_id,
+    get_device_display_name as db_get_device_display_name,
 )
+
+
+def get_device_display_name(identifier: str | None, fallback: str | None = None) -> str:
+    """Look up a device or source by device_id, device_ip, or shared folder ID,
+    and return its human-readable display name (e.g. 'Abir (Redmi Note 10s)').
+    """
+    if not identifier:
+        return fallback or "Unknown device"
+
+    identifier_str = str(identifier).strip()
+    if not identifier_str:
+        return fallback or "Unknown device"
+
+    if identifier_str == "desktop-server":
+        try:
+            from config import load_config
+            cfg = load_config()
+            return (cfg.get("DESKTOP_NAME") or "").strip() or "Desktop Server"
+        except Exception:
+            return "Desktop Server"
+
+    if is_postgres():
+        try:
+            row = execute_read_one(
+                "SELECT username, device_name, device_model, device_id, device_ip FROM devices WHERE device_id = ? OR device_ip = ? LIMIT 1",
+                (identifier_str, identifier_str),
+            )
+            if row:
+                return format_device_display_name(row, fallback=fallback or identifier_str)
+        except Exception:
+            pass
+    else:
+        try:
+            return db_get_device_display_name(identifier_str, fallback)
+        except Exception:
+            pass
+
+    # Check shared folders
+    try:
+        from config import get_shared_dirs
+        shared_dirs = get_shared_dirs()
+        for entry in shared_dirs:
+            if entry.get("id") == identifier_str:
+                label = entry.get("label") or entry.get("path")
+                return f"Shared: {label}" if label else identifier_str
+    except Exception:
+        pass
+
+    return fallback or identifier_str
 
 
 def format_device_display_name(
@@ -82,6 +131,18 @@ def upsert_device(
         execute_write(sql, (target_id, device_name, device_ip, now, now, device_model, username))
         return
     db_upsert_device(device_name, device_ip, device_id, device_model, username)
+
+
+def touch_device(device_ip: str, device_id: str | None = None) -> None:
+    if is_postgres():
+        now = int(time.time())
+        target_id = device_id or device_ip
+        execute_write(
+            "UPDATE devices SET last_seen = ? WHERE device_id = ? OR device_ip = ?",
+            (now, target_id, target_id),
+        )
+        return
+    db_touch_device(device_ip, device_id)
 
 
 def touch_device_and_get_stats(

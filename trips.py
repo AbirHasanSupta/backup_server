@@ -14,10 +14,9 @@ import urllib.request
 import urllib.error
 
 from config import load_config
-from database import (
-    get_conn,
-    get_devices,
-    get_device_display_name,
+from repositories.base import execute_read_query, is_postgres
+from repositories.device_repo import get_devices, get_device_display_name
+from repositories.trips_repo import (
     get_trips,
     get_trip_media,
     save_trip_clusters,
@@ -165,33 +164,59 @@ def cluster_source_media(source_id: str) -> list[dict]:
     for stype, skey in sources:
         params.extend((stype, skey))
 
-    conn = get_conn()
-    rows = conn.execute(
-        f"""
-        SELECT id, source_type, source_key, relative_path, size, modified_time,
-               capture_time, cap_lat, cap_lon
-        FROM media_index
-        WHERE ({where_clause})
-          AND cap_lat IS NOT NULL
-          AND cap_lon IS NOT NULL
-          AND capture_time IS NOT NULL
-        ORDER BY capture_time ASC
-        """,
-        params,
-    ).fetchall()
-
-    all_source_rows = conn.execute(
-        f"""
-        SELECT id, source_type, source_key, relative_path, size, modified_time,
-               capture_time, cap_lat, cap_lon
-        FROM media_index
-        WHERE ({where_clause})
-          AND capture_time IS NOT NULL
-        ORDER BY capture_time ASC
-        """,
-        params,
-    ).fetchall()
-    conn.close()
+    if is_postgres():
+        rows = execute_read_query(
+            f"""
+            SELECT id, source_type, source_key, relative_path, size, modified_time,
+                   cap_time AS capture_time, lat AS cap_lat, lon AS cap_lon
+            FROM media_index
+            WHERE ({where_clause})
+              AND lat IS NOT NULL
+              AND lon IS NOT NULL
+              AND cap_time IS NOT NULL
+            ORDER BY cap_time ASC
+            """,
+            params,
+        )
+        all_source_rows = execute_read_query(
+            f"""
+            SELECT id, source_type, source_key, relative_path, size, modified_time,
+                   cap_time AS capture_time, lat AS cap_lat, lon AS cap_lon
+            FROM media_index
+            WHERE ({where_clause})
+              AND cap_time IS NOT NULL
+            ORDER BY cap_time ASC
+            """,
+            params,
+        )
+    else:
+        from database import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            f"""
+            SELECT id, source_type, source_key, relative_path, size, modified_time,
+                   capture_time, cap_lat, cap_lon
+            FROM media_index
+            WHERE ({where_clause})
+              AND cap_lat IS NOT NULL
+              AND cap_lon IS NOT NULL
+              AND capture_time IS NOT NULL
+            ORDER BY capture_time ASC
+            """,
+            params,
+        ).fetchall()
+        all_source_rows = conn.execute(
+            f"""
+            SELECT id, source_type, source_key, relative_path, size, modified_time,
+                   capture_time, cap_lat, cap_lon
+            FROM media_index
+            WHERE ({where_clause})
+              AND capture_time IS NOT NULL
+            ORDER BY capture_time ASC
+            """,
+            params,
+        ).fetchall()
+        conn.close()
 
     if not rows:
         # No geotagged media: clear existing trips for this source

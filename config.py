@@ -328,7 +328,23 @@ REQUIRE_APPROVAL = bool(_cfg.get("REQUIRE_APPROVAL", True))
 
 def get_shared_dirs() -> list:
     """Always read from the live config so access changes take effect without restart."""
-    return load_config().get("SHARED_DIRS", [])
+    dirs = load_config().get("SHARED_DIRS", [])
+    if not isinstance(dirs, list):
+        return []
+    try:
+        from core.path_utils import normalize_fs_path
+        res = []
+        for d in dirs:
+            if isinstance(d, dict):
+                entry = dict(d)
+                if "path" in entry:
+                    entry["path"] = normalize_fs_path(entry["path"])
+                res.append(entry)
+            else:
+                res.append(d)
+        return res
+    except Exception:
+        return dirs
 
 
 # Backward-compat shim: behaves like a list at import time but warns callers

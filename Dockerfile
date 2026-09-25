@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir -r requirements-server.txt
 COPY . .
 
 # Create persistent data directories
-RUN mkdir -p /app_data /backup_storage
+RUN mkdir -p /app_data /backup_storage /host_g /host_c /host_d
 
 ENV PYTHONUNBUFFERED=1
 ENV HOST=0.0.0.0

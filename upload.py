@@ -22,43 +22,43 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from config import load_config, APP_DATA_DIR, SHARED_QUIZ_DIR
-from database import (
-    batch_check_files,
+from repositories.device_repo import (
     find_device_by_name_model,
     format_device_display_name,
     get_device_by_id,
     get_device_display_name,
-    get_stats,
     get_device_stats,
     get_devices,
+    is_device_known,
+    merge_device_id,
+    remove_device,
+    touch_device,
+    touch_device_and_get_stats,
+    upsert_device,
+    set_device_username,
+    ensure_device_token,
+    verify_device_token,
+)
+from repositories.file_repo import (
+    batch_check_files,
+    get_global_stats as get_stats,
     get_files_for_device,
     search_files_for_device,
     insert_file,
     insert_sync_session,
     get_sync_sessions,
     clear_sync_sessions,
-    is_device_known,
     is_uploaded_compatible,
-    merge_device_id,
-    remove_device,
     remove_file_record,
-    touch_device,
-    touch_device_and_get_stats,
-    upsert_device,
-    set_device_username,
-    ensure_device_token,
-    verify_device_token, get_files_browse,
+    get_files_browse,
     get_cleanup_candidates,
     get_upload_cache,
     log_cleanup_deletions,
-    get_trips,
-    get_trip_media,
+)
+from repositories.social_repo import (
     toggle_reaction,
     get_media_reactions,
     get_reactions_for_media_ids,
-    get_or_create_media_id,
-    get_or_create_library_reel_share,
-    bulk_get_or_create_library_reel_shares,
     get_comment_counts_for_media_ids,
     add_comment,
     get_comments_for_media,
@@ -79,6 +79,12 @@ from database import (
     mark_share_notifications_seen,
     add_share_group_targets,
     edit_device_share_group_caption,
+    MAX_COMMENT_LENGTH,
+)
+from repositories.reels_repo import (
+    get_or_create_media_id,
+    get_or_create_library_reel_share,
+    bulk_get_or_create_library_reel_shares,
     save_reel,
     unsave_reel,
     toggle_save_reel,
@@ -94,7 +100,10 @@ from database import (
     get_reel_view_counts,
     get_reel_durations,
     record_reel_telemetry,
-    MAX_COMMENT_LENGTH,
+)
+from repositories.trips_repo import (
+    get_trips,
+    get_trip_media,
 )
 from trips import cluster_source_media, trigger_background_clustering
 from state import add_log, get_current_activity, pending_connections, set_current_activity
