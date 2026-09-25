@@ -318,16 +318,132 @@ def get_share_targets_for_group(group_id: str, device_id: str | None = None) -> 
     return db_get_share_targets_for_group(group_id, device_id)
 
 
+def _pg_cleanup_persisted_share_files(share_ids: List[int]) -> None:
+    """Delete on-disk files for persisted share types (rewind reels, quiz cards, direct posts)
+    in the Postgres/Docker path.  Mirrors database._cleanup_persisted_share_files for SQLite."""
+    if not share_ids:
+        return
+    placeholders = ",".join(["?"] * len(share_ids))
+    rows = execute_read_query(
+        f"SELECT relative_path FROM device_shares WHERE share_id IN ({placeholders})"
+        f" AND source_type IN ('rewind_shared', 'quiz_shared', 'direct_post_shared')",
+        share_ids,
+    )
+    import os as _os
+    for r in rows:
+        path = r.get("relative_path") or ""
+        if path and _os.path.isfile(path):
+            try:
+                _os.remove(path)
+            except OSError:
+                pass
+
+
+def _pg_cleanup_quiz_group_metadata(group_id: str) -> None:
+    """Delete the stored quiz-result JSON for a share group (best-effort) in Postgres path."""
+    import os as _os
+    from core.config import SHARED_QUIZ_DIR
+    meta_path = _os.path.join(SHARED_QUIZ_DIR, f"{group_id}.json")
+    try:
+        _os.remove(meta_path)
+    except OSError:
+        pass
+
+
+def _pg_cleanup_orphaned_media(media_ids: List[int]) -> None:
+    """Delete reactions/comments for media_ids no longer referenced by any device_shares row.
+    Must be called AFTER the owning device_shares rows are deleted."""
+    unique_ids = sorted({m for m in media_ids if m is not None})
+    if not unique_ids:
+        return
+    placeholders = ",".join(["?"] * len(unique_ids))
+    still_used_rows = execute_read_query(
+        f"SELECT DISTINCT media_id FROM device_shares WHERE media_id IN ({placeholders})",
+        unique_ids,
+    )
+    still_used = {r["media_id"] for r in still_used_rows}
+    orphaned = [mid for mid in unique_ids if mid not in still_used]
+    if orphaned:
+        o_ph = ",".join(["?"] * len(orphaned))
+        execute_write(f"DELETE FROM reactions WHERE media_id IN ({o_ph})", orphaned)
+        execute_write(f"DELETE FROM comments WHERE media_id IN ({o_ph})", orphaned)
+
+
 def delete_device_share_group(group_id: str, device_id: str) -> bool:
     if is_postgres():
-        n = execute_write("DELETE FROM device_share_groups WHERE group_id = ? AND shared_by_device_id = ?", (group_id, device_id))
+        # Collect share_ids and metadata before deletion for file/media cleanup.
+        grp = execute_read_one(
+            "SELECT group_id, shared_by_device_id, post_kind FROM device_share_groups"
+            " WHERE group_id = ? AND shared_by_device_id = ?",
+            (group_id, device_id),
+        )
+        if not grp:
+            return False
+        post_kind = grp.get("post_kind")
+        share_rows = execute_read_query(
+            "SELECT share_id, media_id FROM device_shares WHERE share_group_id = ?",
+            (group_id,),
+        )
+        share_ids = [r["share_id"] for r in share_rows]
+        media_ids = [r["media_id"] for r in share_rows if r.get("media_id")]
+
+        # Collect file paths before the CASCADE delete wipes the rows.
+        _pg_cleanup_persisted_share_files(share_ids)
+
+        # Explicitly delete saved_reels — Postgres saved_reels has no FK cascade on share_id.
+        if share_ids:
+            sr_ph = ",".join(["?"] * len(share_ids))
+            execute_write(f"DELETE FROM saved_reels WHERE share_id IN ({sr_ph})", share_ids)
+
+        # Delete the group — Postgres CASCADE removes device_shares and device_share_targets
+        # via foreign-key ON DELETE CASCADE on share_group_id / share_id respectively.
+        n = execute_write(
+            "DELETE FROM device_share_groups WHERE group_id = ? AND shared_by_device_id = ?",
+            (group_id, device_id),
+        )
+
+        if post_kind == "quiz":
+            _pg_cleanup_quiz_group_metadata(group_id)
+        _pg_cleanup_orphaned_media(media_ids)
         return n > 0
     return db_delete_device_share_group(group_id, device_id)
 
 
 def delete_device_share(share_id: int, device_id: str) -> bool:
     if is_postgres():
-        n = execute_write("DELETE FROM device_shares WHERE share_id = ? AND shared_by_device_id = ?", (share_id, device_id))
+        # Collect metadata before deletion.
+        row = execute_read_one(
+            "SELECT share_id, shared_by_device_id, share_group_id, media_id"
+            " FROM device_shares WHERE share_id = ? AND shared_by_device_id = ?",
+            (share_id, device_id),
+        )
+        if not row:
+            return False
+        group_id = row.get("share_group_id")
+        media_id = row.get("media_id")
+
+        # If this is the last share in the group, delegate to group-delete so
+        # quiz metadata and group row are also removed.
+        if group_id:
+            remaining = execute_read_one(
+                "SELECT COUNT(*) AS cnt FROM device_shares WHERE share_group_id = ?",
+                (group_id,),
+            )
+            if remaining and (remaining.get("cnt") or 0) <= 1:
+                return delete_device_share_group(group_id, device_id)
+
+        # Collect persisted file path before the row is gone.
+        _pg_cleanup_persisted_share_files([share_id])
+
+        # Explicitly delete saved_reels (no FK cascade in Postgres saved_reels).
+        execute_write("DELETE FROM saved_reels WHERE share_id = ?", (share_id,))
+
+        # Delete the share row — CASCADE removes device_share_targets via FK.
+        n = execute_write(
+            "DELETE FROM device_shares WHERE share_id = ? AND shared_by_device_id = ?",
+            (share_id, device_id),
+        )
+        _pg_cleanup_orphaned_media([media_id] if media_id else [])
         return n > 0
     return db_delete_device_share(share_id, device_id)
 
