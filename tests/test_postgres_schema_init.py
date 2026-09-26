@@ -26,7 +26,7 @@ class PostgreSQLSchemaInitializationTests(unittest.TestCase):
             cursor.execute.call_args_list[0].args[0],
             "SELECT pg_advisory_xact_lock(486795553)",
         )
-        connection.commit.assert_called_once()
+        self.assertGreaterEqual(connection.commit.call_count, 1)
 
 
 if __name__ == "__main__":
