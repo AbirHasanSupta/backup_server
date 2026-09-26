@@ -45,12 +45,22 @@ async function request(path, options = {}) {
   return res;
 }
 
+function buildUrl(path, params) {
+  if (!params) return path;
+  const searchParams = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== '') {
+      searchParams.append(key, value);
+    }
+  }
+  const qs = searchParams.toString();
+  return qs ? `${path}?${qs}` : path;
+}
+
 export const api = {
-  get: (path, params) => {
-    const url = params ? `${path}?${new URLSearchParams(params)}` : path;
-    return request(url, { method: 'GET' });
-  },
+  get: (path, params) => request(buildUrl(path, params), { method: 'GET' }),
   post: (path, body) => request(path, { method: 'POST', body }),
   postForm: (path, formData) => request(path, { method: 'POST', body: formData }),
-  delete: (path) => request(path, { method: 'DELETE' }),
+  delete: (path, params) => request(buildUrl(path, params), { method: 'DELETE' }),
 };
+

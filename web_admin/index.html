@@ -467,10 +467,10 @@
 
         <!-- Filter bar -->
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <select id="hist-device-filter" onchange="loadHistory()" class="input">
+          <select id="hist-device-filter" onchange="loadHistory(true)" class="input">
             <option value="">All Devices</option>
           </select>
-          <select id="hist-status-filter" onchange="loadHistory()" class="input">
+          <select id="hist-status-filter" onchange="loadHistory(true)" class="input">
             <option value="">All Statuses</option>
             <option value="completed">Completed</option>
             <option value="failed">Failed / Partial</option>

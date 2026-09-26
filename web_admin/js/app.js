@@ -24,18 +24,20 @@ export function fmtBytes(n) {
 
 export function fmtTs(ts) {
   if (!ts) return 'Never';
-  return new Date(ts * 1000).toLocaleString();
+  const ms = ts > 1e11 ? Number(ts) : Number(ts) * 1000;
+  return new Date(ms).toLocaleString();
 }
 
 export function fmtRel(ts) {
   if (!ts) return 'Never';
-  const secs = Math.floor(Date.now() / 1000) - ts;
+  const ms = ts > 1e11 ? Number(ts) : Number(ts) * 1000;
+  const secs = Math.floor((Date.now() - ms) / 1000);
   if (secs < 0) return 'Just now';
   if (secs < 60) return 'Just now';
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
   if (secs < 86400 * 30) return `${Math.floor(secs / 86400)}d ago`;
-  return new Date(ts * 1000).toLocaleDateString();
+  return new Date(ms).toLocaleDateString();
 }
 
 export function formatDuration(secs) {
@@ -1675,37 +1677,51 @@ const HIST_PER_PAGE = 30;
 let _histSessions = [];
 let _histTotal = 0;
 
-async function loadHistory() {
+async function loadHistory(resetPage = false) {
+  if (resetPage) _histPage = 0;
   const con = el('history-content');
   if (con) con.innerHTML = loadingSpinner();
 
-  populateHistDeviceFilter();
+  await populateHistDeviceFilter();
 
   try {
     const devId = el('hist-device-filter')?.value || '';
+    const statusVal = el('hist-status-filter')?.value || '';
     const res = await api.get('/api/sync/history', {
       offset: _histPage * HIST_PER_PAGE,
       limit: HIST_PER_PAGE,
-      device_id: devId || undefined,
+      device_id: devId,
+      status: statusVal,
     });
 
     _histSessions = res.sessions || [];
-    _histTotal = res.total || _histSessions.length;
+    _histTotal = res.total ?? _histSessions.length;
     renderHistory();
   } catch (e) {
     if (con) con.innerHTML = errorBanner(e.message);
   }
 }
 
-function populateHistDeviceFilter() {
+async function populateHistDeviceFilter() {
   const sel = el('hist-device-filter');
-  if (!sel || sel.children.length > 1) return;
+  if (!sel) return;
+  if (!_devices || !_devices.length) {
+    try {
+      const res = await api.get('/api/admin/devices');
+      _devices = res.devices || [];
+    } catch (_) {}
+  }
+  const currentVal = sel.value;
+  while (sel.children.length > 1) {
+    sel.removeChild(sel.lastChild);
+  }
   _devices.forEach(d => {
     const opt = document.createElement('option');
     opt.value = d.device_id;
-    opt.textContent = `Device: ${d.display_name || d.device_name}`;
+    opt.textContent = `Device: ${d.display_name || d.device_name || d.device_id}`;
     sel.appendChild(opt);
   });
+  if (currentVal) sel.value = currentVal;
 }
 
 function renderHistory() {
@@ -1741,7 +1757,7 @@ function renderHistory() {
           const filesCount = s.files_uploaded ?? s.file_count ?? s.uploaded ?? 0;
           const files = Number(filesCount).toLocaleString();
           const bytesCount = s.bytes_uploaded ?? s.total_bytes ?? 0;
-          const size = fmtBytes(bytesCount);
+          const size = bytesCount > 0 ? fmtBytes(bytesCount) : (filesCount > 0 ? '—' : '0 B');
           const start = fmtTs(s.started_at);
           const durSec = s.duration_seconds ?? s.duration_sec ?? (s.duration_ms ? s.duration_ms / 1000 : 0);
           const dur = formatDuration(durSec);
@@ -1782,6 +1798,7 @@ window.clearSyncHistoryModal = function() {
     try {
       await api.post('/api/sync/history/clear');
       closeModal('confirm-modal');
+      _histPage = 0;
       loadHistory();
       showToast('Sync history cleared.');
     } catch (e) {
