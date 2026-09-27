@@ -264,6 +264,7 @@ async def ping():
     hostname = socket.gethostname()
     cfg = load_config()
     tailscale = await asyncio.to_thread(get_tailscale_network_info)
+    from network_info import get_discovery_port
     return JSONResponse(
         content={
             "status": "ok",
@@ -272,7 +273,7 @@ async def ping():
             "hostname": f"{hostname}.local",
             "version": APP_VERSION,
             "all_ips": local_ips,
-            "port": int(cfg.get("PORT", 8000)),
+            "port": get_discovery_port(),
             "tailscale": tailscale,
         },
         headers={

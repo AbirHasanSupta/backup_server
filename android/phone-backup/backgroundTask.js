@@ -171,6 +171,7 @@ function withBackupForegroundServiceType(options) {
 function emptySyncResult(skippedReason = '') {
   return {
     uploaded: 0,
+    uploadedBytes: 0,
     skipped: 0,
     total: 0,
     errors: 0,
@@ -826,6 +827,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
     const stoppedPending = files.filter((file) => !present.has(getFileCacheMatchKey(file)));
     return {
       uploaded: 0,
+      uploadedBytes: 0,
       skipped: present.size + snapshotSkipped,
       total: files.length + snapshotSkipped,
       errors: 0,
@@ -840,6 +842,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
   const totalUploads = pending.length;
   let uploaded = 0;
+  let uploadedBytes = 0;
   let skipped = files.length - pending.length + snapshotSkipped;
   let completed = 0;
   let errors = 0;
@@ -892,6 +895,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
             skipped++;
           } else {
             uploaded++;
+            uploadedBytes += Number(file.size) || 0;
           }
         } else {
           errors++;
@@ -949,6 +953,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
   return {
     uploaded,
+    uploadedBytes,
     skipped,
     total: files.length + snapshotSkipped,
     scanned: files.length,
@@ -1166,6 +1171,8 @@ export async function runSync(onProgress, runOptions = {}) {
       skipped:     result.skipped   ?? 0,
       errors:      result.errors    ?? 0,
       total_files: totalSynced,
+      bytes_uploaded: result.uploadedBytes ?? 0,
+      total_size:     result.uploadedBytes ?? 0,
     }).catch(() => {});
     // ─────────────────────────────────────────────────────────────────────────
 

@@ -34,7 +34,10 @@ services:
     container_name: backup_nginx
     restart: unless-stopped
     ports:
+      # Browser / admin UI
       - "80:80"
+      # Phone discovery defaults to port 8000 — map it onto nginx so scans find us
+      - "8000:80"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       # Serve shared media + generated assets through nginx for zero-copy downloads
@@ -64,6 +67,11 @@ services:
       # All containers write config/cache/posts/reels/memories here
       # — same physical folder as the desktop EXE's AppData directory
       - APP_DATA_DIR=/app_data
+      # Host LAN IPs for phone discovery (comma-separated). Required in Docker
+      # because container networking only sees unreachable 172.x bridge addresses.
+      - ADVERTISED_IPS=${ADVERTISED_IPS:-}
+      - ADVERTISED_PORT=${ADVERTISED_PORT:-8000}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-4}
     volumes:
       # Phone backup files — bind-mount the same root the desktop app uses
       - type: bind

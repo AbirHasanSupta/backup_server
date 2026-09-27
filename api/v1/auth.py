@@ -48,6 +48,8 @@ class ActivityRequest(BaseModel):
 @router.get("/ping")
 async def ping():
     """LAN discovery endpoint without auth."""
+    from network_info import get_discovery_port
+
     local_ips = await asyncio.to_thread(get_all_local_ips)
     hostname = socket.gethostname()
     cfg = load_config()
@@ -67,6 +69,7 @@ async def ping():
         "version": APP_VERSION,
         "cert_fingerprint": cert_fp,
         "all_ips": local_ips,
+        "port": get_discovery_port(),
         "tailscale": tailscale,
     }
 

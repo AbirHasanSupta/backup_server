@@ -27,13 +27,16 @@ def run_trip_clustering(source_id: str | None = None):
         return {"status": "failed", "error": str(exc)}
 
 
-def dispatch_trip_clustering(source_id: str | None = None):
+def dispatch_trip_clustering(source_id: str | None = None, countdown: int = 0):
     """Safely dispatch spatial-temporal trip clustering to Celery or async thread pool."""
     import threading
     try:
         from services.redis_service import get_redis_client
         if get_redis_client():
-            run_trip_clustering.delay(source_id)
+            if countdown and countdown > 0:
+                run_trip_clustering.apply_async(args=[source_id], countdown=int(countdown))
+            else:
+                run_trip_clustering.delay(source_id)
             return "celery"
     except Exception:
         pass
@@ -44,6 +47,11 @@ def dispatch_trip_clustering(source_id: str | None = None):
         except Exception:
             pass
 
-    threading.Thread(target=_fallback_run, daemon=True, name="trip-clustering").start()
+    if countdown and countdown > 0:
+        timer = threading.Timer(float(countdown), _fallback_run)
+        timer.daemon = True
+        timer.start()
+    else:
+        threading.Thread(target=_fallback_run, daemon=True, name="trip-clustering").start()
     return "thread"
 

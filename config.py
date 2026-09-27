@@ -88,6 +88,12 @@ _DEFAULTS = {
     # origins must be explicitly allowlisted by a web deployment.
     "CORS_ORIGINS": os.environ.get("CORS_ORIGINS", ""),
     "CORS_ALLOW_CREDENTIALS": os.environ.get("CORS_ALLOW_CREDENTIALS", "0").lower() in ("1", "true", "yes"),
+    # Comma-separated host LAN IPs advertised in /ping for Docker discovery.
+    # Container-local probes often only see unreachable 172.x bridge addresses.
+    "ADVERTISED_IPS": os.environ.get("ADVERTISED_IPS") or os.environ.get("HOST_LAN_IPS") or "",
+    # Optional published/proxy port for phone discovery. None → use listen PORT
+    # so desktop custom ports keep working unchanged.
+    "ADVERTISED_PORT": None,
 }
 
 # Environment values are deployment-owned secrets/runtime settings.  They take
@@ -107,6 +113,8 @@ _ENV_CONFIG_KEYS = {
     "MAX_UPLOAD_CHUNKS": int,
     "UPLOAD_SESSION_TTL_SECONDS": int,
     "CORS_ORIGINS": str,
+    "ADVERTISED_IPS": str,
+    "ADVERTISED_PORT": int,
 }
 
 
@@ -127,6 +135,20 @@ def _apply_environment_overrides(cfg: dict) -> dict:
         cfg["REQUIRE_APPROVAL"] = os.environ["REQUIRE_APPROVAL"].lower() in ("1", "true", "yes")
     if "CORS_ALLOW_CREDENTIALS" in os.environ:
         cfg["CORS_ALLOW_CREDENTIALS"] = os.environ["CORS_ALLOW_CREDENTIALS"].lower() in ("1", "true", "yes")
+    # Prefer explicit ADVERTISED_PORT; fall back to PORT. Never crash on bad values.
+    for port_key in ("ADVERTISED_PORT", "PORT"):
+        raw = os.environ.get(port_key)
+        if raw is None or not str(raw).strip():
+            continue
+        try:
+            cfg[port_key] = int(str(raw).strip())
+        except (TypeError, ValueError):
+            pass
+    if not cfg.get("ADVERTISED_PORT"):
+        try:
+            cfg["ADVERTISED_PORT"] = int(cfg.get("PORT") or 8000)
+        except (TypeError, ValueError):
+            cfg["ADVERTISED_PORT"] = 8000
     return cfg
 
 _AUTOSTART_KEY_NAME = APP_NAME

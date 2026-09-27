@@ -25,7 +25,82 @@ from database import (
 
 
 def batch_check_files(items: List[Dict[str, Any]]) -> Set[str]:
-    return db_batch_check_files(items)
+    """Return set of keys ``path|mtime|size`` that already exist in the DB."""
+    if not items:
+        return set()
+
+    if not is_postgres():
+        return db_batch_check_files(items)
+
+    present_keys: Set[str] = set()
+    device_groups: Dict[str, List[Dict[str, Any]]] = {}
+    for item in items:
+        did = item.get("device_id") or ""
+        device_groups.setdefault(did, []).append(item)
+
+    CHUNK_SIZE = 400
+    for did, group in device_groups.items():
+        for chunk_idx in range(0, len(group), CHUNK_SIZE):
+            chunk = group[chunk_idx:chunk_idx + CHUNK_SIZE]
+            paths = [(i.get("path") or "").replace("\\", "/") for i in chunk]
+            placeholders = ",".join(["?"] * len(paths))
+            if did:
+                query = (
+                    f"SELECT path, size, modified_time, external_id FROM files "
+                    f"WHERE (device_id = ? OR device_id IS NULL) AND path IN ({placeholders})"
+                )
+                params: list = [did] + paths
+            else:
+                query = (
+                    f"SELECT path, size, modified_time, external_id FROM files "
+                    f"WHERE device_id IS NULL AND path IN ({placeholders})"
+                )
+                params = list(paths)
+
+            rows = execute_read_query(query, params)
+
+            row_map: Dict[str, list] = {}
+            eid_map: Dict[str, list] = {}
+            for r in rows:
+                p = (r.get("path") or "").replace("\\", "/")
+                row_map.setdefault(p, []).append(r)
+                if r.get("external_id"):
+                    eid_map.setdefault(r["external_id"], []).append(r)
+
+            for item in chunk:
+                p = (item.get("path") or "").replace("\\", "/")
+                try:
+                    s = int(item.get("size") or 0)
+                    m = int(item.get("modified_time") or 0)
+                except (TypeError, ValueError):
+                    continue
+                eid = item.get("external_id")
+                found = False
+                size_ref, mtime_ref = s, m
+
+                def _meta_ok(row: dict, _s: int = size_ref, _m: int = mtime_ref) -> bool:
+                    try:
+                        row_size = int(row.get("size") or 0)
+                        row_mtime = int(row.get("modified_time") or 0)
+                    except (TypeError, ValueError):
+                        return False
+                    if row_size != _s:
+                        return False
+                    return not _m or not row_mtime or row_mtime == _m
+
+                if eid and eid in eid_map:
+                    found = any(
+                        (r.get("path") or "").replace("\\", "/") == p and _meta_ok(r)
+                        for r in eid_map[eid]
+                    )
+                elif p in row_map:
+                    found = any(_meta_ok(r) for r in row_map[p])
+
+                if found:
+                    # Keep the key format identical to SyncService.check_files
+                    present_keys.add(f"{item.get('path')}|{m}|{s}")
+
+    return present_keys
 
 
 def is_uploaded_compatible(
@@ -190,10 +265,14 @@ def insert_sync_session(data: Dict[str, Any]) -> int:
     fin = int(data.get("ended_at") or data.get("finished_at") or now_ms)
     dur_sec = float(data.get("duration_sec") or ((data.get("duration_ms") or max(0, fin - st)) / 1000.0))
     dur_ms = int(data.get("duration_ms") or int(dur_sec * 1000))
-    up = int(data.get("uploaded") or data.get("files_uploaded") or 0)
-    by = int(data.get("bytes_uploaded") or 0)
-    sk = int(data.get("skipped") or data.get("files_skipped") or 0)
-    fa = int(data.get("errors") or data.get("files_failed") or 0)
+    up = int(data.get("uploaded") if data.get("uploaded") is not None else (data.get("files_uploaded") or 0))
+    # Prefer an explicit non-zero transfer size; fall back to size aliases only when
+    # bytes_uploaded was omitted/defaulted to 0 (Pydantic / older clients).
+    bu = int(data.get("bytes_uploaded") or 0)
+    alias = int(data.get("total_size") or data.get("totalSize") or data.get("bytes") or 0)
+    by = bu if bu > 0 else (alias if alias > 0 else bu)
+    sk = int(data.get("skipped") if data.get("skipped") is not None else (data.get("files_skipped") or 0))
+    fa = int(data.get("errors") if data.get("errors") is not None else (data.get("files_failed") or 0))
     stat = str(data.get("outcome") or data.get("status") or "completed")
     ip = data.get("device_ip")
     tot = int(data.get("total_files") or 0)
@@ -232,6 +311,14 @@ def insert_sync_session(data: Dict[str, Any]) -> int:
 
 
 def get_sync_sessions(device_id: str | None = None, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    def _as_int(value: Any, default: int = 0) -> int:
+        try:
+            if value is None:
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     if is_postgres():
         if device_id:
             rows = execute_read_query(
@@ -255,24 +342,37 @@ def get_sync_sessions(device_id: str | None = None, limit: int = 50, offset: int
                 (limit, offset),
             )
         for r in rows:
-            r["duration_seconds"] = r.get("duration_sec") if r.get("duration_sec") is not None else ((r.get("duration_ms") or 0) / 1000.0)
-            r["file_count"] = r.get("files_uploaded") if r.get("files_uploaded") is not None else (r.get("uploaded") or 0)
+            dur_sec = r.get("duration_sec")
+            if dur_sec is None:
+                dur_sec = _as_int(r.get("duration_ms")) / 1000.0
+            r["duration_seconds"] = float(dur_sec or 0)
+            r["file_count"] = _as_int(r.get("files_uploaded") if r.get("files_uploaded") is not None else r.get("uploaded"))
             r["uploaded"] = r["file_count"]
-            r["total_bytes"] = r.get("bytes_uploaded") or 0
+            r["files_uploaded"] = r["file_count"]
+            r["total_bytes"] = _as_int(r.get("bytes_uploaded"))
+            r["bytes_uploaded"] = r["total_bytes"]
             r["status"] = r.get("status") or r.get("outcome") or "completed"
             r["outcome"] = r["status"]
-            r["errors"] = r.get("files_failed") if r.get("files_failed") is not None else (r.get("errors") or 0)
+            r["errors"] = _as_int(r.get("files_failed") if r.get("files_failed") is not None else r.get("errors"))
+            r["files_failed"] = r["errors"]
+            r["files_skipped"] = _as_int(r.get("files_skipped") if r.get("files_skipped") is not None else r.get("skipped"))
+            r["skipped"] = r["files_skipped"]
         return rows
 
     rows = db_get_sync_sessions(device_id, limit, offset)
     for r in rows:
-        r["duration_seconds"] = (r.get("duration_ms") or 0) / 1000.0
-        r["file_count"] = r.get("uploaded") if r.get("uploaded") is not None else (r.get("files_uploaded") or 0)
+        r["duration_seconds"] = _as_int(r.get("duration_ms")) / 1000.0
+        r["file_count"] = _as_int(r.get("uploaded") if r.get("uploaded") is not None else r.get("files_uploaded"))
         r["files_uploaded"] = r["file_count"]
-        r["total_bytes"] = r.get("bytes_uploaded") or 0
+        r["uploaded"] = r["file_count"]
+        r["total_bytes"] = _as_int(r.get("bytes_uploaded") if r.get("bytes_uploaded") is not None else r.get("total_size"))
+        r["bytes_uploaded"] = r["total_bytes"]
         r["status"] = r.get("outcome") or r.get("status") or "completed"
         r["outcome"] = r["status"]
-        r["files_failed"] = r.get("errors") or 0
+        r["files_failed"] = _as_int(r.get("errors"))
+        r["errors"] = r["files_failed"]
+        r["files_skipped"] = _as_int(r.get("skipped"))
+        r["skipped"] = r["files_skipped"]
     return rows
 
 

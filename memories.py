@@ -374,8 +374,14 @@ def _extract_media_row_metadata(item: dict) -> dict:
 def _resolve_worker_counts() -> tuple[int, int]:
     cfg = load_config()
     cpu = os.cpu_count() or 4
-    default_image = min(32, cpu * 4)
-    default_video = max(2, cpu)
+    # Under Postgres/multi-worker Docker, keep EXIF/ffprobe pools modest so
+    # interactive memories/library queries keep DB + disk headroom during sync.
+    if cfg.get("DATABASE_BACKEND") == "postgres":
+        default_image = min(8, max(2, cpu * 2))
+        default_video = max(1, min(2, cpu))
+    else:
+        default_image = min(32, cpu * 4)
+        default_video = max(2, cpu)
     try:
         image_workers = int(cfg.get("MEMORIES_IMAGE_WORKERS") or default_image)
     except (TypeError, ValueError):
@@ -570,10 +576,79 @@ def reindex_shared(source_id: str, root_path: str) -> None:
 
 
 _reindex_lock = threading.Lock()
+_SCAN_LEADER_KEY = "lock:memory-scan-leader"
+_SCAN_LEADER_TTL_SEC = 15 * 60  # short TTL; refreshed while leader works/sleeps
+_FOLLOWER_RETRY_SEC = 60
+_scan_leader_token: str | None = None
+_scan_leader_lock = threading.Lock()
+
+
+def _redis_client_or_none():
+    try:
+        from services.redis_service import get_redis_client
+        return get_redis_client()
+    except Exception:
+        return None
+
+
+def _try_become_or_refresh_scan_leader() -> bool:
+    """Elect a single memory-scan leader across Gunicorn workers.
+
+    Returns True when this process should run the expensive reindex.
+    Desktop / no-Redis deployments always return True.
+    """
+    global _scan_leader_token
+    client = _redis_client_or_none()
+    if not client:
+        return True
+
+    pid = str(os.getpid())
+    with _scan_leader_lock:
+        token = _scan_leader_token or pid
+        try:
+            held = client.get(_SCAN_LEADER_KEY)
+            if held is None:
+                if client.set(_SCAN_LEADER_KEY, token, nx=True, ex=_SCAN_LEADER_TTL_SEC):
+                    _scan_leader_token = token
+                    return True
+                return False
+            if str(held) == str(token):
+                # Refresh TTL while we remain leader so failover stays timely.
+                client.expire(_SCAN_LEADER_KEY, _SCAN_LEADER_TTL_SEC)
+                _scan_leader_token = token
+                return True
+            return False
+        except Exception as exc:
+            # Redis configured but unreachable: avoid multi-worker stampede.
+            if load_config().get("DATABASE_BACKEND") == "postgres":
+                add_log(f"[Memories] Scan leader election failed ({exc}); skipping on this worker.")
+                return False
+            return True
+
+
+def release_scan_leader_if_held() -> None:
+    """Drop the scan-leader lock on process shutdown so another worker can take over."""
+    global _scan_leader_token
+    client = _redis_client_or_none()
+    if not client:
+        return
+    with _scan_leader_lock:
+        token = _scan_leader_token
+        if not token:
+            return
+        try:
+            held = client.get(_SCAN_LEADER_KEY)
+            if held is not None and str(held) == str(token):
+                client.delete(_SCAN_LEADER_KEY)
+        except Exception:
+            pass
+        _scan_leader_token = None
 
 
 def _do_reindex_all() -> None:
     add_log("[Memories] Starting indexing scan...")
+    # Keep scan leadership alive for the duration of a long indexing run.
+    _try_become_or_refresh_scan_leader()
     try:
         tasks: list[tuple[str, str, str | None]] = []
         for d in get_devices():
@@ -601,7 +676,12 @@ def _do_reindex_all() -> None:
         max_workers = min(4, max(1, len(tasks)))
         if tasks:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                list(executor.map(_run_task, tasks))
+                # Refresh leadership between tasks so a multi-hour run cannot
+                # expire the Redis TTL and elect a second concurrent leader.
+                futures = [executor.submit(_run_task, t) for t in tasks]
+                for fut in concurrent.futures.as_completed(futures):
+                    _try_become_or_refresh_scan_leader()
+                    fut.result()
 
         add_log("[Memories] Indexing scan completed.")
         trigger_background_clustering()
@@ -610,13 +690,44 @@ def _do_reindex_all() -> None:
 
 
 def reindex_all() -> None:
+    """Run a full media reindex if no other run is already in progress.
+
+    Uses Redis when available so Gunicorn workers do not reindex in parallel.
+    On Redis errors under Postgres we skip rather than stampeding locally.
+    """
+    client = _redis_client_or_none()
+    redis_token = None
+    if client:
+        redis_token = f"{os.getpid()}:{time_module.time_ns()}"
+        try:
+            if not client.set("lock:memories-reindex", redis_token, nx=True, ex=60 * 60):
+                add_log("[Memories] Skipped scan: another indexing run is already in progress.")
+                return
+        except Exception as exc:
+            if load_config().get("DATABASE_BACKEND") == "postgres":
+                add_log(f"[Memories] Skipped scan: distributed lock unavailable ({exc}).")
+                return
+            redis_token = None  # fall through to process-local lock
+
     if not _reindex_lock.acquire(blocking=False):
+        if client and redis_token:
+            try:
+                if client.get("lock:memories-reindex") == redis_token:
+                    client.delete("lock:memories-reindex")
+            except Exception:
+                pass
         add_log("[Memories] Skipped scan: another indexing run is already in progress.")
         return
     try:
         _do_reindex_all()
     finally:
         _reindex_lock.release()
+        if client and redis_token:
+            try:
+                if client.get("lock:memories-reindex") == redis_token:
+                    client.delete("lock:memories-reindex")
+            except Exception:
+                pass
 
 
 def reset_and_reindex_all() -> dict:
@@ -638,14 +749,26 @@ def get_memory_index_stats() -> dict:
 
 
 def startup_scan_loop() -> None:
-    reindex_all()
+    """Supervisor loop: only the elected leader runs reindex; followers retry election."""
     while True:
         try:
-            now = datetime.now()
-            tomorrow = datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
-            sleep_sec = max(10, (tomorrow - now).total_seconds() + 2)
-            time_module.sleep(sleep_sec)
-            reindex_all()
+            is_leader = _try_become_or_refresh_scan_leader()
+            if is_leader:
+                reindex_all()
+                now = datetime.now()
+                tomorrow = datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
+                sleep_sec = max(10, (tomorrow - now).total_seconds() + 2)
+                # Refresh leadership periodically during the long sleep so TTL does not expire.
+                deadline = time_module.monotonic() + sleep_sec
+                while time_module.monotonic() < deadline:
+                    # Refresh at ~1/3 of TTL (and at least every 5 minutes).
+                    chunk = min(max(60.0, _SCAN_LEADER_TTL_SEC / 3), max(5.0, deadline - time_module.monotonic()))
+                    time_module.sleep(chunk)
+                    if not _try_become_or_refresh_scan_leader():
+                        add_log("[Memories] Lost scan leadership; waiting to re-elect.")
+                        break
+            else:
+                time_module.sleep(_FOLLOWER_RETRY_SEC)
         except Exception as e:
             add_log(f"[Memories] Daemon loop error: {e}")
             time_module.sleep(300)

@@ -196,10 +196,19 @@ python server.py
 
 For the PostgreSQL, Redis, Celery, and Nginx deployment, copy
 [`.env.example`](.env.example) to `.env`, replace every placeholder with a
-unique secret, run `python scripts/sync_version.py`, then run
-`docker compose up -d --build`. The compose stack deliberately requires those
-credentials and exposes only HTTP port 80; terminate TLS at a configured reverse
-proxy/load balancer before allowing non-private-network access.
+unique secret, set `ADVERTISED_IPS` to this machine's LAN IPv4 address (phones
+cannot see Docker bridge `172.x` addresses), run `python scripts/sync_version.py`,
+then run `docker compose up -d --build`.
+
+Nginx publishes both **port 80** (admin UI) and **port 8000** (Android discovery
+default). Terminate TLS at a configured reverse proxy/load balancer before
+allowing non-private-network access.
+
+```bash
+# Example .env discovery settings
+ADVERTISED_IPS=192.168.1.50
+ADVERTISED_PORT=8000
+```
 
 ### 3. Building Standalone Windows Executable
 To bundle the GUI server into a standalone `.exe`:

@@ -1754,12 +1754,14 @@ function renderHistory() {
       <tbody class="divide-y divide-zinc-800/60 font-medium">
         ${_histSessions.map(s => {
           const dev = escHtml(s.device_name || s.device_id || 'Device');
-          const filesCount = s.files_uploaded ?? s.file_count ?? s.uploaded ?? 0;
-          const files = Number(filesCount).toLocaleString();
-          const bytesCount = s.bytes_uploaded ?? s.total_bytes ?? 0;
-          const size = bytesCount > 0 ? fmtBytes(bytesCount) : (filesCount > 0 ? '—' : '0 B');
+          const filesCount = Number(s.files_uploaded ?? s.file_count ?? s.uploaded ?? 0) || 0;
+          const files = filesCount.toLocaleString();
+          const bytesCount = Number(s.bytes_uploaded ?? s.total_bytes ?? 0) || 0;
+          const size = bytesCount > 0
+            ? fmtBytes(bytesCount)
+            : (filesCount > 0 ? '—' : '0 B');
           const start = fmtTs(s.started_at);
-          const durSec = s.duration_seconds ?? s.duration_sec ?? (s.duration_ms ? s.duration_ms / 1000 : 0);
+          const durSec = Number(s.duration_seconds ?? s.duration_sec ?? (s.duration_ms ? s.duration_ms / 1000 : 0)) || 0;
           const dur = formatDuration(durSec);
           const isError = s.status === 'failed' || s.outcome === 'failed' || (s.files_failed ?? s.errors ?? 0) > 0;
           const statusPill = isError

@@ -268,6 +268,7 @@ async def get_admin_status(
         "uptime_seconds": uptime_seconds,
         "host": cfg.get("HOST", "0.0.0.0"),
         "port": int(cfg.get("PORT", 8000)),
+        "discovery_port": network_info.get_discovery_port(),
         "desktop_name": cfg.get("DESKTOP_NAME", ""),
         "backup_root": cfg.get("BACKUP_ROOT", ""),
         "require_approval": bool(cfg.get("REQUIRE_APPROVAL", True)),

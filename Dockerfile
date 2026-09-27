@@ -28,4 +28,4 @@ ENV PORT=8000
 
 EXPOSE 8000
 
-CMD ["gunicorn", "server:app", "--workers", "4", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "300"]
+CMD ["sh", "-c", "exec gunicorn server:app --workers ${GUNICORN_WORKERS:-4} --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --timeout 300"]

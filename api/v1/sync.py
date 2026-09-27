@@ -63,6 +63,7 @@ class SyncSessionRequest(BaseModel):
     uploaded: int = 0
     files_uploaded: int = 0
     bytes_uploaded: int = 0
+    total_size: int = 0
     skipped: int = 0
     files_skipped: int = 0
     errors: int = 0
@@ -406,15 +407,34 @@ async def record_sync_session(
         session_data["duration_ms"] = diff_ms
         session_data["duration_sec"] = diff_ms / 1000.0
 
-    uploaded = session_data.get("uploaded") or session_data.get("files_uploaded") or 0
+    uploaded = session_data.get("uploaded") if session_data.get("uploaded") is not None else session_data.get("files_uploaded")
+    uploaded = int(uploaded or 0)
     session_data["uploaded"] = uploaded
     session_data["files_uploaded"] = uploaded
 
-    skipped = session_data.get("skipped") or session_data.get("files_skipped") or 0
+    # Prefer an explicit non-zero transfer size; fall back to total_size alias
+    # only when bytes_uploaded was omitted/defaulted to 0 (Pydantic default).
+    bu = int(session_data.get("bytes_uploaded") or 0)
+    alias = int(
+        session_data.get("total_size")
+        or session_data.get("totalSize")
+        or 0
+    )
+    if bu > 0:
+        bytes_uploaded = bu
+    elif alias > 0:
+        bytes_uploaded = alias
+    else:
+        bytes_uploaded = bu
+    session_data["bytes_uploaded"] = bytes_uploaded
+
+    skipped = session_data.get("skipped") if session_data.get("skipped") is not None else session_data.get("files_skipped")
+    skipped = int(skipped or 0)
     session_data["skipped"] = skipped
     session_data["files_skipped"] = skipped
 
-    errors = session_data.get("errors") or session_data.get("files_failed") or 0
+    errors = session_data.get("errors") if session_data.get("errors") is not None else session_data.get("files_failed")
+    errors = int(errors or 0)
     session_data["errors"] = errors
     session_data["files_failed"] = errors
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import time
 from pydantic import BaseModel
@@ -25,6 +26,34 @@ router = APIRouter(tags=["Files & Library"])
 # TTL: 10 s; also invalidated when the directory mtime changes.
 _BROWSE_SHARED_CACHE: dict[tuple[str, str], tuple[dict, float, float]] = {}
 _BROWSE_SHARED_TTL = 10.0  # seconds
+
+# Bound concurrent full-tree shared-folder walks under Docker/Postgres so sync
+# I/O cannot exhaust the thread pool. Desktop SQLite keeps unlimited concurrency.
+_HEAVY_FS_SEM: asyncio.Semaphore | None = None
+
+
+def _heavy_fs_semaphore() -> asyncio.Semaphore | None:
+    """Lazy semaphore: only enabled for the Postgres/Docker deployment path."""
+    global _HEAVY_FS_SEM
+    try:
+        from core.config import load_config
+        if load_config().get("DATABASE_BACKEND") != "postgres":
+            return None
+    except Exception:
+        return None
+    if _HEAVY_FS_SEM is None:
+        _HEAVY_FS_SEM = asyncio.Semaphore(2)
+    return _HEAVY_FS_SEM
+
+
+@contextlib.asynccontextmanager
+async def _heavy_fs_slot():
+    sem = _heavy_fs_semaphore()
+    if sem is None:
+        yield
+        return
+    async with sem:
+        yield
 
 
 class WarmPreviewsRequest(BaseModel):
@@ -218,7 +247,8 @@ async def list_shared_files(
                     continue
         return files
 
-    files = await asyncio.to_thread(_walk)
+    async with _heavy_fs_slot():
+        files = await asyncio.to_thread(_walk)
     return {"files": files, "source_id": source_id, "label": entry.get("label")}
 
 
@@ -262,7 +292,8 @@ async def search_shared_files(
                         pass
         return matched
 
-    files = await asyncio.to_thread(_search)
+    async with _heavy_fs_slot():
+        files = await asyncio.to_thread(_search)
     return {"files": files}
 
 

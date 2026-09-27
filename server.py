@@ -37,13 +37,19 @@ def _configured_cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # High-throughput thread pool for file I/O and CPU offloading
-    token_limit = max(200, (os.cpu_count() or 4) * 30)
+    # High-throughput thread pool for file I/O and CPU offloading.
+    # Cap lower under Postgres/Gunicorn so sync + interactive reads don't starve each other.
+    cfg = load_config()
+    cpu = os.cpu_count() or 4
+    if cfg.get("DATABASE_BACKEND") == "postgres":
+        # Slightly capped vs desktop so interactive reads keep headroom during sync,
+        # but high enough to preserve upload throughput with leader-elected indexing.
+        token_limit = max(120, min(200, cpu * 20))
+    else:
+        token_limit = max(200, cpu * 30)
     anyio.to_thread.current_default_thread_limiter().total_tokens = token_limit
     executor = ThreadPoolExecutor(max_workers=token_limit)
     asyncio.get_running_loop().set_default_executor(executor)
-
-    cfg = load_config()
 
     # Always initialize base schema so local fallback and direct SQLite calls have tables ready
     try:
@@ -70,7 +76,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.info("Running in standalone in-memory mode (Redis disabled): %s", e)
 
-    # Background memory index startup scan
+    # Background memory index: every worker runs a supervisor; only the Redis
+    # leader (or the single desktop process) performs the expensive reindex.
     threading.Thread(target=memories.startup_scan_loop, daemon=True, name="MemoryScanLoop").start()
 
     async def cleanup_expired_upload_sessions() -> None:
@@ -97,6 +104,10 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
         executor.shutdown(wait=False)
+        try:
+            memories.release_scan_leader_if_held()
+        except Exception:
+            pass
 
 
 app = FastAPI(
