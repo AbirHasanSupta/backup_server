@@ -1,4 +1,5 @@
 const { execFileSync } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 
 const TAG_PATTERN = /^v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/;
@@ -9,9 +10,7 @@ function normalise(tag) {
   return match ? match[1] : null;
 }
 
-function getVersion() {
-  const configured = normalise(process.env.PHONE_BACKUP_VERSION);
-  if (configured) return configured;
+function gitVersion() {
   try {
     return normalise(execFileSync(
       'git',
@@ -21,6 +20,34 @@ function getVersion() {
   } catch (_) {
     return null;
   }
+}
+
+function bundledVersion() {
+  for (const candidate of [path.join(projectRoot, 'VERSION'), path.join(__dirname, 'VERSION')]) {
+    try {
+      const version = normalise(fs.readFileSync(candidate, 'utf8'));
+      if (version) return version;
+    } catch (_) {
+      // Missing or unreadable VERSION files are expected outside packaged builds.
+    }
+  }
+  return null;
+}
+
+function packageVersion() {
+  try {
+    return normalise(require('./package.json').version);
+  } catch (_) {
+    return null;
+  }
+}
+
+function getVersion() {
+  // EAS Build archives omit .git, so fall back to VERSION / package.json after env + tag lookup.
+  return normalise(process.env.PHONE_BACKUP_VERSION)
+    || gitVersion()
+    || bundledVersion()
+    || packageVersion();
 }
 
 function androidVersionCode(version) {

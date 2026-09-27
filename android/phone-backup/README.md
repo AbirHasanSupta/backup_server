@@ -11,9 +11,10 @@ and the social/memory features provided by the companion server.
 
 - `app.json` is the human-readable base Expo configuration.
 - `app.config.js` loads that base and derives the Expo `version` and Android
-  `versionCode` from the nearest semantic Git tag. Do not add version fields to
-  `app.json`.
-- Run `npm run version:sync` to refresh npm package metadata from the tag. It is
+  `versionCode` from the nearest semantic Git tag (with fallbacks to a bundled
+  `VERSION` file and `package.json`). Do not add version fields to `app.json`.
+- Run `npm run version:sync` before EAS builds so `package.json` matches the tag;
+  EAS archives omit `.git`, so the builder relies on that synced metadata. It is
   already run by `npm run start`, `npm run android`, and the APK build scripts.
 - Use a tag formatted as `vMAJOR.MINOR.PATCH`. Android's version code is derived
   as `major * 1,000,000 + minor * 1,000 + patch`.
