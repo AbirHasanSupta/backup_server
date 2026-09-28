@@ -234,7 +234,9 @@ async def get_feed(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    posts, has_more, total = feed_service.build_unified_feed(device_id, offset, limit)
+    # Feed assembly is synchronous PostgreSQL work.  Offload it so a slow
+    # social scroll cannot pin this Uvicorn event loop and stall upload I/O.
+    posts, has_more, total = await asyncio.to_thread(feed_service.build_unified_feed, device_id, offset, limit)
     _schedule_feed_thumbnail_warm(posts, offset=offset)
     return {"items": posts, "has_more": has_more, "total": total}
 

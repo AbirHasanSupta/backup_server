@@ -25,7 +25,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from config import APP_DATA_DIR, load_config
-from ffmpeg_utils import resolve_ffmpeg_path, resolve_ffprobe_path
+from ffmpeg_utils import configured_ffmpeg_threads, resolve_ffmpeg_path, resolve_ffprobe_path
 from state import add_log
 
 
@@ -530,7 +530,7 @@ def _transcode_preview(source_path: str, output_path: str) -> None:
     # Leave capacity for HTTP requests and the desktop app while the single
     # background job is encoding.  One job prevents preload fan-out from
     # multiplying disk reads and CPU contention.
-    threads = str(max(1, min(6, (os.cpu_count() or 2) - 1)))
+    threads = str(configured_ffmpeg_threads())
     try:
         _run_ffmpeg([
             ffmpeg_path, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",

@@ -204,6 +204,12 @@ Nginx publishes both **port 80** (admin UI) and **port 8000** (Android discovery
 default). Terminate TLS at a configured reverse proxy/load balancer before
 allowing non-private-network access.
 
+The Docker defaults reserve capacity for interactive requests: video previews
+use two Celery processes, rewind rendering uses one isolated process, and
+indexing uses two.  Tune `CELERY_*_CONCURRENCY`, `FFMPEG_THREADS`, and
+`REWIND_SEGMENT_WORKERS` in `.env` only after observing host CPU and disk
+latency; increasing every value together causes CPU oversubscription.
+
 ```bash
 # Example .env discovery settings
 ADVERTISED_IPS=192.168.1.50

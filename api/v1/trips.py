@@ -28,12 +28,12 @@ async def list_trips(
     verify_api_key_or_device_token(authorization, token, target_id, device_repo.verify_device_token)
     cache_key = places_trips_cache.trips_list_key(target_id)
     if not refresh:
-        cached = places_trips_cache.get_cached(cache_key)
+        cached = await asyncio.to_thread(places_trips_cache.get_cached, cache_key)
         if cached is not None:
             return cached
     trips = await asyncio.to_thread(trips_service.get_device_trips, target_id)
     payload = {"trips": trips}
-    places_trips_cache.set_cached(cache_key, payload)
+    await asyncio.to_thread(places_trips_cache.set_cached, cache_key, payload)
     return payload
 
 
@@ -49,14 +49,18 @@ async def get_trip_media(
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     cache_key = places_trips_cache.trip_media_key(trip_id)
     if not refresh:
-        cached = places_trips_cache.get_cached(cache_key)
+        cached = await asyncio.to_thread(places_trips_cache.get_cached, cache_key)
         if cached is not None:
             return cached
     trip, media = await asyncio.to_thread(trips_service.get_trip_media, trip_id)
     if not trip:
-        raise HTTPException(status_code=404, detail="Trip not found")
+        # Trip IDs are intentionally ephemeral: reclustering replaces the
+        # rows, so a phone can briefly hold an ID from the previous catalogue.
+        # Return a recoverable empty result instead of surfacing a noisy 404
+        # while the list cache refreshes.
+        return {"trip": None, "media": [], "stale": True}
     payload = {"trip": trip, "media": media}
-    places_trips_cache.set_cached(cache_key, payload)
+    await asyncio.to_thread(places_trips_cache.set_cached, cache_key, payload)
     return payload
 
 
@@ -74,7 +78,11 @@ async def recluster_trips(
     verify_api_key_or_device_token(authorization, token, target_id, device_repo.verify_device_token)
     clusters, trips = await asyncio.to_thread(trips_service.recluster, target_id)
     # Recluster rewrites trips only — places clusters are unchanged.
-    places_trips_cache.invalidate_trips(target_id)
+    await asyncio.to_thread(places_trips_cache.invalidate_trips, target_id)
     payload = {"ok": True, "clusters_found": len(clusters), "trips": trips}
-    places_trips_cache.set_cached(places_trips_cache.trips_list_key(target_id), {"trips": trips})
+    await asyncio.to_thread(
+        places_trips_cache.set_cached,
+        places_trips_cache.trips_list_key(target_id),
+        {"trips": trips},
+    )
     return payload

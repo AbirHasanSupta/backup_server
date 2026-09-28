@@ -25,7 +25,7 @@ from config import APP_DATA_DIR, load_config
 from core.path_utils import normalize_fs_path
 from repositories.device_repo import get_device_display_name
 from repositories.media_repo import get_media_for_year_month
-from ffmpeg_utils import resolve_ffmpeg_path
+from ffmpeg_utils import configured_ffmpeg_threads, configured_rewind_segment_workers, resolve_ffmpeg_path
 from memories import VIDEO_EXTS, _shared_sources_for_device
 from state import add_log
 from version import APP_VERSION
@@ -424,7 +424,7 @@ def _build_segment(ffmpeg: str, src_path: str, seg_path: str, is_video: bool) ->
             "-t", str(VIDEO_CLIP_SEC),
             "-vf", vf,
             "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-            "-r", "30", "-threads", "2", "-an", "-movflags", "+faststart",
+            "-r", "30", "-threads", str(configured_ffmpeg_threads()), "-an", "-movflags", "+faststart",
             "-f", "mp4",
             seg_path,
         ]
@@ -435,7 +435,7 @@ def _build_segment(ffmpeg: str, src_path: str, seg_path: str, is_video: bool) ->
             "-t", str(PHOTO_DURATION_SEC),
             "-vf", vf,
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage", "-g", "30", "-pix_fmt", "yuv420p",
-            "-r", "30", "-threads", "2", "-an", "-movflags", "+faststart",
+            "-r", "30", "-threads", str(configured_ffmpeg_threads()), "-an", "-movflags", "+faststart",
             "-f", "mp4",
             seg_path,
         ]
@@ -578,7 +578,10 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                     return
 
                 # Build segments in parallel across CPU cores using ultrafast presets
-                max_workers = max(2, min(8, os.cpu_count() or 4))
+                # A reel is already a CPU- and disk-intensive Celery task.
+                # Keep its inner FFmpeg fan-out bounded so two queued reels do
+                # not starve API workers or saturate the mounted backup disk.
+                max_workers = configured_rewind_segment_workers()
                 segment_results: dict[int, str] = {}
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     future_to_idx = {

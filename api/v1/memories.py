@@ -130,11 +130,11 @@ async def get_places(
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     cache_key = places_trips_cache.places_clusters_key(device_id)
     if not refresh:
-        cached = places_trips_cache.get_cached(cache_key)
+        cached = await asyncio.to_thread(places_trips_cache.get_cached, cache_key)
         if cached is not None:
             return cached
     res = await asyncio.to_thread(memories.get_place_clusters, device_id)
-    places_trips_cache.set_cached(cache_key, res)
+    await asyncio.to_thread(places_trips_cache.set_cached, cache_key, res)
     return res
 
 
@@ -150,11 +150,11 @@ async def get_place_details(
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     cache_key = places_trips_cache.places_items_key(device_id, cluster_key)
     if not refresh:
-        cached = places_trips_cache.get_cached(cache_key)
+        cached = await asyncio.to_thread(places_trips_cache.get_cached, cache_key)
         if cached is not None:
             return cached
     res = await asyncio.to_thread(memories.get_place_items, device_id, cluster_key)
-    places_trips_cache.set_cached(cache_key, res)
+    await asyncio.to_thread(places_trips_cache.set_cached, cache_key, res)
     return res
 
 

@@ -32,6 +32,15 @@ except Exception:
     pass
 
 
+def _pool_size_from_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Read bounded per-process pool sizes for multi-worker deployments."""
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 def _get_pg_url() -> str:
     cfg = load_config()
     return os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL") or cfg.get("POSTGRES_URL") or "postgresql://postgres:postgres@localhost:5432/backup_db"
@@ -43,13 +52,18 @@ def _init_pool():
         return _pg_pool
 
     url = _get_pg_url()
+    # Pools are process-local.  With four Gunicorn and several prefork Celery
+    # children, a 4/32 pool in each process can exceed PostgreSQL's default
+    # connection limit and turn ordinary requests into 30-second pool waits.
+    min_size = _pool_size_from_env("PG_POOL_MIN_SIZE", 1, minimum=1, maximum=8)
+    max_size = _pool_size_from_env("PG_POOL_MAX_SIZE", 8, minimum=min_size, maximum=32)
     try:
         # Try psycopg (v3) first
         from psycopg_pool import ConnectionPool
         _pg_pool = ConnectionPool(
             conninfo=url,
-            min_size=4,
-            max_size=32,
+            min_size=min_size,
+            max_size=max_size,
             timeout=30.0,
             max_idle=300.0,
             reconnect_timeout=5.0,
@@ -62,8 +76,8 @@ def _init_pool():
         # Fallback to psycopg2 ThreadedConnectionPool
         from psycopg2.pool import ThreadedConnectionPool
         _pg_pool = ThreadedConnectionPool(
-            minconn=4,
-            maxconn=32,
+            minconn=min_size,
+            maxconn=max_size,
             dsn=url,
         )
         return _pg_pool
@@ -343,6 +357,7 @@ def init_pg_db():
                 created_at BIGINT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_reel_telem_share ON reel_telemetry(share_id);
+            CREATE INDEX IF NOT EXISTS idx_reel_telem_device_recent ON reel_telemetry(device_id, created_at DESC);
             """)
 
             conn.commit()

@@ -13,8 +13,15 @@ from state import add_log
 
 DEFAULT_THUMBNAIL_CACHE_DIR = os.path.join(APP_DATA_DIR, "thumbnail_cache")
 
-# Bounded semaphore allows multiple video thumbnails to generate in parallel
-_max_thumbnail_workers = max(2, min(8, os.cpu_count() or 4))
+# Bounded semaphore allows multiple video thumbnails to generate in parallel.
+# This module is loaded once in every Gunicorn process, so Docker supplies a
+# small explicit value instead of multiplying the old CPU-count-based limit by
+# every API worker during a cold gallery load.
+try:
+    _max_thumbnail_workers = int(os.environ.get("THUMBNAIL_WORKERS", max(2, min(8, os.cpu_count() or 4))))
+except (TypeError, ValueError):
+    _max_thumbnail_workers = max(2, min(8, os.cpu_count() or 4))
+_max_thumbnail_workers = max(1, min(_max_thumbnail_workers, os.cpu_count() or 4))
 _thumbnail_semaphore = threading.Semaphore(_max_thumbnail_workers)
 
 # In-flight deduplication so concurrent requests for the exact same video share results
@@ -84,6 +91,7 @@ def get_video_thumbnail_path(source_path: str) -> str | None:
 
     # Deduplicate concurrent requests for the identical video
     event = None
+    is_owner = False
     with _inflight_lock:
         if os.path.isfile(out_path):
             return out_path
@@ -92,9 +100,10 @@ def get_video_thumbnail_path(source_path: str) -> str | None:
         else:
             event = threading.Event()
             _inflight[key] = event
+            is_owner = True
 
     # If another thread is already building this exact thumbnail, wait for it
-    if event and not _inflight.get(key) is event:
+    if event and not is_owner:
         event.wait(timeout=20)
         return out_path if os.path.isfile(out_path) else None
 
@@ -157,6 +166,7 @@ def get_image_thumbnail_path(source_path: str, max_size: int = 512) -> str | Non
         return out_path
 
     event = None
+    is_owner = False
     with _inflight_lock:
         if os.path.isfile(out_path):
             return out_path
@@ -165,8 +175,9 @@ def get_image_thumbnail_path(source_path: str, max_size: int = 512) -> str | Non
         else:
             event = threading.Event()
             _inflight[key] = event
+            is_owner = True
 
-    if event and not _inflight.get(key) is event:
+    if event and not is_owner:
         event.wait(timeout=10)
         return out_path if os.path.isfile(out_path) else None
 

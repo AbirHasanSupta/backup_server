@@ -133,10 +133,10 @@ async def check_files(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
-    _require_accepted_device(body.device_id)
+    await asyncio.to_thread(_require_accepted_device, body.device_id)
 
     file_dicts = [f.model_dump() for f in body.files]
-    return sync_service.check_files(body.device_id or "", file_dicts, verify_disk=body.verify_disk)
+    return await asyncio.to_thread(sync_service.check_files, body.device_id or "", file_dicts, body.verify_disk)
 
 
 @router.post("/upload/raw")
@@ -153,14 +153,14 @@ async def upload_file_raw(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    device_id = _require_accepted_device(device_id)
+    device_id = await asyncio.to_thread(_require_accepted_device, device_id)
     device_ip = request.client.host if request.client else "127.0.0.1"
 
-    if sync_service.should_skip_upload(relative_path, size, modified_time, external_id, device_id, verify_disk):
-        return sync_service.skipped_upload(device_ip, device_id)
+    if await asyncio.to_thread(sync_service.should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
+        return await asyncio.to_thread(sync_service.skipped_upload, device_ip, device_id)
 
     set_current_activity(f"Uploading {relative_path}", device_ip, device_id)
-    dev_name = device_repo.get_device_display_name(device_id or device_ip)
+    dev_name = await asyncio.to_thread(device_repo.get_device_display_name, device_id or device_ip)
     add_log(f"Uploading: {relative_path} ({dev_name})")
 
     storage = get_storage()
@@ -181,8 +181,8 @@ async def upload_file_raw(
         set_current_activity(None, device_ip, device_id)
 
     final_sha = _validate_declared_sha256(sha256, saved_sha)
-    return sync_service.finish_upload(
-        relative_path, size, modified_time, device_ip, external_id, final_sha, device_id
+    return await asyncio.to_thread(
+        sync_service.finish_upload, relative_path, size, modified_time, device_ip, external_id, final_sha, device_id
     )
 
 
@@ -201,14 +201,14 @@ async def upload_file_multipart(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    device_id = _require_accepted_device(device_id)
+    device_id = await asyncio.to_thread(_require_accepted_device, device_id)
     device_ip = request.client.host if request.client else "127.0.0.1"
 
-    if sync_service.should_skip_upload(relative_path, size, modified_time, external_id, device_id, verify_disk):
-        return sync_service.skipped_upload(device_ip, device_id)
+    if await asyncio.to_thread(sync_service.should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
+        return await asyncio.to_thread(sync_service.skipped_upload, device_ip, device_id)
 
     set_current_activity(f"Uploading {relative_path}", device_ip, device_id)
-    dev_name = device_repo.get_device_display_name(device_id or device_ip)
+    dev_name = await asyncio.to_thread(device_repo.get_device_display_name, device_id or device_ip)
     add_log(f"Uploading: {relative_path} ({dev_name})")
 
     storage = get_storage()
@@ -231,8 +231,8 @@ async def upload_file_multipart(
         set_current_activity(None, device_ip, device_id)
 
     final_sha = _validate_declared_sha256(sha256, saved_sha)
-    return sync_service.finish_upload(
-        relative_path, size, modified_time, device_ip, external_id, final_sha, device_id
+    return await asyncio.to_thread(
+        sync_service.finish_upload, relative_path, size, modified_time, device_ip, external_id, final_sha, device_id
     )
 
 
@@ -247,7 +247,7 @@ async def upload_file_chunk(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    device_id = _require_accepted_device(device_id)
+    device_id = await asyncio.to_thread(_require_accepted_device, device_id)
     _validate_chunk_parameters(upload_id, chunk_index, total_chunks)
     storage = get_storage()
     max_chunk_bytes = max(1, int(load_config().get("MAX_UPLOAD_CHUNK_BYTES", 8 * 1024 * 1024)))
@@ -275,7 +275,7 @@ async def get_chunked_upload_status(
 ):
     """Return persisted chunk indexes so interrupted uploads resume, not restart."""
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    device_id = _require_accepted_device(device_id)
+    device_id = await asyncio.to_thread(_require_accepted_device, device_id)
     _validate_chunk_parameters(upload_id, 0, total_chunks)
     storage = get_storage()
     try:
@@ -298,20 +298,21 @@ async def complete_chunked_upload(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
-    body.device_id = _require_accepted_device(body.device_id)
+    body.device_id = await asyncio.to_thread(_require_accepted_device, body.device_id)
     _validate_chunk_parameters(body.upload_id, 0, body.total_chunks)
     device_ip = request.client.host if request.client else "127.0.0.1"
 
     # A completed response can be lost during a network handoff.  Do not make
     # the client rebuild the entire file in that case.
-    if sync_service.should_skip_upload(
-        body.relative_path, body.size, body.modified_time, body.external_id, body.device_id, verify_disk=True
+    if await asyncio.to_thread(
+        sync_service.should_skip_upload,
+        body.relative_path, body.size, body.modified_time, body.external_id, body.device_id, True,
     ):
         await asyncio.to_thread(get_storage().cleanup_chunks, body.upload_id, body.device_id)
-        return sync_service.skipped_upload(device_ip, body.device_id)
+        return await asyncio.to_thread(sync_service.skipped_upload, device_ip, body.device_id)
 
     set_current_activity(f"Assembling {body.relative_path}", device_ip, body.device_id)
-    dev_name = device_repo.get_device_display_name(body.device_id or device_ip)
+    dev_name = await asyncio.to_thread(device_repo.get_device_display_name, body.device_id or device_ip)
     add_log(f"Assembling chunks: {body.relative_path} ({dev_name})")
 
     storage = get_storage()
@@ -334,7 +335,8 @@ async def complete_chunked_upload(
         set_current_activity(None, device_ip, body.device_id)
 
     final_sha = _validate_declared_sha256(body.sha256, computed_sha)
-    return sync_service.finish_upload(
+    return await asyncio.to_thread(
+        sync_service.finish_upload,
         body.relative_path,
         body.size,
         body.modified_time,
@@ -353,7 +355,7 @@ async def abort_chunked_upload(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    device_id = _require_accepted_device(device_id)
+    device_id = await asyncio.to_thread(_require_accepted_device, device_id)
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", upload_id or ""):
         raise HTTPException(status_code=422, detail="Invalid upload_id")
     storage = get_storage()
@@ -368,8 +370,8 @@ async def get_upload_cache(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    device_id = _require_accepted_device(device_id)
-    files = file_repo.get_upload_cache(device_id)
+    device_id = await asyncio.to_thread(_require_accepted_device, device_id)
+    files = await asyncio.to_thread(file_repo.get_upload_cache, device_id)
     return {
         "device_id": device_id,
         "count": len(files),
@@ -385,7 +387,7 @@ async def record_sync_session(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
-    body.device_id = _require_accepted_device(body.device_id)
+    body.device_id = await asyncio.to_thread(_require_accepted_device, body.device_id)
     session_data = body.model_dump()
 
     # Normalize fields
@@ -443,9 +445,9 @@ async def record_sync_session(
     session_data["status"] = outcome
 
     if not session_data.get("device_name") and body.device_id:
-        session_data["device_name"] = device_repo.get_device_display_name(body.device_id)
+        session_data["device_name"] = await asyncio.to_thread(device_repo.get_device_display_name, body.device_id)
 
-    file_repo.insert_sync_session(session_data)
+    await asyncio.to_thread(file_repo.insert_sync_session, session_data)
 
     label = {"completed": "✅", "stopped": "⏹", "force_stopped": "⚡", "failed": "❌"}.get(outcome, "🔄")
     dev_name = session_data.get("device_name") or body.device_id or "unknown"
@@ -472,8 +474,8 @@ async def list_sync_sessions(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    _require_accepted_device(device_id)
-    sessions = file_repo.get_sync_sessions(device_id, limit)
+    await asyncio.to_thread(_require_accepted_device, device_id)
+    sessions = await asyncio.to_thread(file_repo.get_sync_sessions, device_id, limit)
     return {"device_id": device_id, "sessions": sessions}
 
 
@@ -484,6 +486,6 @@ async def delete_sync_sessions(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    _require_accepted_device(device_id)
-    file_repo.clear_sync_sessions(device_id)
+    await asyncio.to_thread(_require_accepted_device, device_id)
+    await asyncio.to_thread(file_repo.clear_sync_sessions, device_id)
     return {"ok": True}

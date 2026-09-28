@@ -124,8 +124,17 @@ def upsert_media_index_row(
 
 def batch_upsert_media_index_rows(rows: List[Dict[str, Any]]) -> None:
     if is_postgres():
-        for r in rows:
-            upsert_media_index_row(
+        if not rows:
+            return
+        # A reindex commonly contains hundreds of files.  Calling
+        # ``execute_write`` for every one opens/checks out a connection and
+        # commits every row individually, which is particularly expensive
+        # through Docker Desktop.  Keep the entire batch in one transaction.
+        from database_pg import get_pg_connection
+
+        now = int(time.time())
+        values = [
+            (
                 r["source_type"],
                 r["source_key"],
                 r["relative_path"],
@@ -139,7 +148,31 @@ def batch_upsert_media_index_rows(rows: List[Dict[str, Any]]) -> None:
                 r.get("lat") if r.get("lat") is not None else r.get("cap_lat"),
                 r.get("lon") if r.get("lon") is not None else r.get("cap_lon"),
                 r.get("duration"),
+                now,
             )
+            for r in rows
+        ]
+        sql = """
+        INSERT INTO media_index (source_type, source_key, relative_path, size, modified_time,
+                                 cap_time, cap_year, cap_month, cap_day, has_gps, lat, lon, duration, indexed_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT(source_type, source_key, relative_path) DO UPDATE SET
+            size = EXCLUDED.size,
+            modified_time = EXCLUDED.modified_time,
+            cap_time = EXCLUDED.cap_time,
+            cap_year = EXCLUDED.cap_year,
+            cap_month = EXCLUDED.cap_month,
+            cap_day = EXCLUDED.cap_day,
+            has_gps = EXCLUDED.has_gps,
+            lat = EXCLUDED.lat,
+            lon = EXCLUDED.lon,
+            duration = EXCLUDED.duration,
+            indexed_at = EXCLUDED.indexed_at
+        """
+        with get_pg_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(sql, values)
+            conn.commit()
         return
     db_batch_upsert_media_index_rows(rows)
 
@@ -440,18 +473,23 @@ def upsert_scan_dirs(source_type: str, source_key: str, dir_mtimes: Dict[str, in
     if not dir_mtimes:
         return
     if is_postgres():
+        from database_pg import get_pg_connection
+
         now = int(time.time())
-        for rel, mtime in dir_mtimes.items():
-            execute_write(
-                """
-                INSERT INTO scan_dirs (source_type, source_key, dir_relpath, dir_mtime_ns, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT (source_type, source_key, dir_relpath) DO UPDATE SET
-                    dir_mtime_ns = EXCLUDED.dir_mtime_ns,
-                    updated_at = EXCLUDED.updated_at
-                """,
-                (source_type, source_key, rel, mtime, now),
-            )
+        values = [(source_type, source_key, rel, mtime, now) for rel, mtime in dir_mtimes.items()]
+        with get_pg_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO scan_dirs (source_type, source_key, dir_relpath, dir_mtime_ns, updated_at)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (source_type, source_key, dir_relpath) DO UPDATE SET
+                        dir_mtime_ns = EXCLUDED.dir_mtime_ns,
+                        updated_at = EXCLUDED.updated_at
+                    """,
+                    values,
+                )
+            conn.commit()
         return
     db_upsert_scan_dirs(source_type, source_key, dir_mtimes)
 

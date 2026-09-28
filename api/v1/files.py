@@ -84,7 +84,7 @@ async def list_files(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    files = file_repo.get_files_for_device(device_id, prefix)
+    files = await asyncio.to_thread(file_repo.get_files_for_device, device_id, prefix)
     return {"device_id": device_id, "files": files}
 
 
@@ -115,7 +115,7 @@ async def search_files(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    files = file_repo.search_files_for_device(device_id, q, category, limit)
+    files = await asyncio.to_thread(file_repo.search_files_for_device, device_id, q, category, limit)
     return {"device_id": device_id, "query": q, "files": files}
 
 

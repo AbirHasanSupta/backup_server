@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import threading
 import time
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from core.config import get_shared_dirs
@@ -123,7 +124,7 @@ class TelemetryEvent(BaseModel):
 
 class TelemetryRequest(BaseModel):
     device_id: str
-    events: list[dict]
+    events: list[dict] = Field(max_length=100)
 
 
 def _is_video(path: str) -> bool:
@@ -171,7 +172,10 @@ async def get_reels_feed(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    reels, has_more, total = reels_service.build_reels_feed(device_id, offset, limit, seed)
+    # The service uses the synchronous repository layer.  Never execute its
+    # PostgreSQL work in Uvicorn's event-loop thread: one slow feed query used
+    # to delay unrelated uploads and video streams handled by that worker.
+    reels, has_more, total = await asyncio.to_thread(reels_service.build_reels_feed, device_id, offset, limit, seed)
     return {"reels": reels, "has_more": has_more, "total": total}
 
 
@@ -194,61 +198,128 @@ async def get_shared_and_backups_reels(
     limit = max(1, min(100, limit))
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
 
-    candidates: list[dict] = []
-    if source != "shared":
-        for f in file_repo.get_files_for_device(device_id):
-            if not _is_video(f["path"]):
-                continue
-            candidates.append({
-                "source_type": "reel_backup",
-                "source_key": device_id,
-                "path": f["path"],
-                "size": f.get("size", 0),
-                "modified_time": f.get("modified_time", 0),
-                "label": "My backup",
-            })
+    # Shared folders are indexed by the leader-elected memory scanner.
+    # Recursive os.walk() calls against a Windows bind mount are extremely
+    # slow and were repeated for every client page/scroll.  Read the durable
+    # PostgreSQL index instead; its scanner handles filesystem changes off the
+    # interactive request path.
+    shared_entries = [
+        entry for entry in get_shared_dirs()
+        if entry.get("id")
+        and (not entry.get("device_ids", ["all"]) or "all" in entry.get("device_ids", ["all"]) or device_id in entry.get("device_ids", ["all"]))
+        and entry.get("available_in_reels", entry.get("available_in_reel", True))
+    ]
+    shared_labels = {
+        str(entry["id"]): entry.get("label") or "Shared folder"
+        for entry in shared_entries
+    }
 
-    if source != "backups":
-        for entry in get_shared_dirs():
-            if not entry.get("id"):
-                continue
-            tags = entry.get("device_ids", ["all"])
-            if tags and "all" not in tags and device_id not in tags:
-                continue
-            if not entry.get("available_in_reels", entry.get("available_in_reel", True)):
-                continue
-            root = os.path.abspath(normalize_fs_path(entry.get("path") or ""))
-            if not os.path.isdir(root):
-                continue
-            for root_dir, _, files in os.walk(root):
-                for fn in files:
-                    if _is_video(fn):
-                        full_p = os.path.join(root_dir, fn)
-                        rel_p = os.path.relpath(full_p, root).replace("\\", "/")
-                        try:
-                            st = os.stat(full_p)
-                            candidates.append({
-                                "source_type": "reel_shared",
-                                "source_key": entry["id"],
-                                "path": rel_p,
-                                "size": st.st_size,
-                                "modified_time": int(st.st_mtime),
-                                "label": entry.get("label") or "Shared folder",
-                            })
-                        except OSError:
-                            pass
+    async def _catalog_page(page_offset: int, page_limit: int) -> list[dict]:
+        """Load only one catalog page; never materialize a whole library to scroll."""
+        async def _backups() -> list[dict]:
+            rows = await asyncio.to_thread(
+                file_repo.get_video_files_for_device, device_id, page_limit, page_offset
+            )
+            return [{
+                "source_type": "reel_backup", "source_key": device_id,
+                "path": row["path"], "size": row.get("size", 0),
+                "modified_time": row.get("modified_time", 0), "label": "My backup",
+            } for row in rows]
 
-    materialized = reels_repo.bulk_get_or_create_library_reel_shares(candidates)
-    _schedule_reel_thumbnail_warm(materialized, offset=0)
+        async def _shared() -> list[dict]:
+            rows = await asyncio.to_thread(
+                reels_repo.get_indexed_shared_video_candidates,
+                list(shared_labels), page_limit, page_offset,
+            )
+            return [{
+                "source_type": "reel_shared", "source_key": row["source_key"],
+                "path": row["path"], "size": row.get("size", 0),
+                "modified_time": row.get("modified_time", 0),
+                "label": shared_labels.get(str(row["source_key"]), "Shared folder"),
+            } for row in rows]
+
+        if source == "backups":
+            return await _backups()
+        if source == "shared":
+            return await _shared()
+
+        # Legacy callers without a source receive a stable merged page.  Read
+        # only enough from each catalog to form that page, in parallel.
+        fetch_to = page_offset + page_limit
+        backup_rows, shared_rows = await asyncio.gather(
+            _backups() if page_offset == 0 else asyncio.to_thread(
+                file_repo.get_video_files_for_device, device_id, fetch_to, 0
+            ),
+            _shared() if page_offset == 0 else asyncio.to_thread(
+                reels_repo.get_indexed_shared_video_candidates, list(shared_labels), fetch_to, 0
+            ),
+        )
+        if page_offset:
+            backup_rows = [{
+                "source_type": "reel_backup", "source_key": device_id,
+                "path": row["path"], "size": row.get("size", 0),
+                "modified_time": row.get("modified_time", 0), "label": "My backup",
+            } for row in backup_rows]
+            shared_rows = [{
+                "source_type": "reel_shared", "source_key": row["source_key"],
+                "path": row["path"], "size": row.get("size", 0),
+                "modified_time": row.get("modified_time", 0),
+                "label": shared_labels.get(str(row["source_key"]), "Shared folder"),
+            } for row in shared_rows]
+        merged = [*backup_rows, *shared_rows]
+        merged.sort(key=lambda row: (-int(row.get("modified_time") or 0), str(row["source_type"]), str(row["path"])))
+        return merged[page_offset:page_offset + page_limit]
+
+    # Mirror the main personalized feed's no-repeat guarantee in the private
+    # backup/shared shelves.  These remain independently personalized by the
+    # phone, but an already watched underlying media item is not recycled.
+    watched_share_ids, watched_media_ids = await asyncio.to_thread(
+        reels_repo.get_recently_watched_reel_ids,
+        device_id,
+    )
+    materialized: list[dict] = []
+    scan_offset = offset
+    has_more_candidates = False
+    # A run of previously watched items must not leave a short page or cause a
+    # duplicate on the next request.  Advance the server cursor past every
+    # scanned candidate, but only materialize the requested page size.
+    while len(materialized) < limit:
+        remaining = limit - len(materialized)
+        candidate_page = await _catalog_page(scan_offset, remaining + 1)
+        has_more_candidates = len(candidate_page) > remaining
+        candidates = candidate_page[:remaining]
+        if not candidates:
+            break
+        scan_offset += len(candidates)
+        catalog_rows = await asyncio.to_thread(
+            reels_repo.bulk_get_or_create_library_reel_shares, candidates
+        )
+        materialized.extend(
+            item for item in catalog_rows
+            if item["share_id"] not in watched_share_ids
+            and (not item.get("media_id") or item["media_id"] not in watched_media_ids)
+        )
+        if len(materialized) >= limit or not has_more_candidates:
+            break
+
+    materialized = materialized[:limit]
+    _schedule_reel_thumbnail_warm(materialized, offset=offset)
     media_ids = [r["media_id"] for r in materialized]
-    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id)
-    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids)
-    repost_counts = reels_repo.get_repost_counts_for_media_ids(media_ids)
-    user_reposted_media, user_reposted_shares = reels_repo.get_user_reposted_info(device_id)
-    saved_ids = reels_repo.get_saved_reel_ids(device_id)
     share_ids = [r["share_id"] for r in materialized]
-    view_counts = reels_repo.get_reel_view_counts(share_ids)
-    durations_map = reels_repo.get_reel_durations(share_ids)
+    (
+        reactions_result, comment_counts, repost_counts, reposted_result,
+        saved_ids, view_counts, durations_map,
+    ) = await asyncio.gather(
+        asyncio.to_thread(social_repo.get_reactions_for_media_ids, media_ids, device_id),
+        asyncio.to_thread(social_repo.get_comment_counts_for_media_ids, media_ids),
+        asyncio.to_thread(reels_repo.get_repost_counts_for_media_ids, media_ids),
+        asyncio.to_thread(reels_repo.get_user_reposted_info, device_id),
+        asyncio.to_thread(reels_repo.get_saved_reel_ids, device_id),
+        asyncio.to_thread(reels_repo.get_reel_view_counts, share_ids),
+        asyncio.to_thread(reels_repo.get_reel_durations, share_ids),
+    )
+    counts_map, user_map = reactions_result
+    user_reposted_media, user_reposted_shares = reposted_result
     now_ts = int(time.time())
 
     reels = []
@@ -299,8 +370,14 @@ async def get_shared_and_backups_reels(
         return recency * 0.50 + quality * 0.25 + source_boost + source_jitter
 
     reels.sort(key=_catalog_rank, reverse=True)
-    total = len(reels)
-    return {"reels": reels[offset: offset + limit], "has_more": (offset + limit) < total, "total": total}
+    return {
+        "reels": reels,
+        "has_more": has_more_candidates,
+        "total": len(reels),
+        # The client must advance past filtered watched rows as well as the
+        # visible page, otherwise they are fetched again after every scroll.
+        "next_offset": scan_offset,
+    }
 
 
 @router.post("/api/reels/telemetry")
@@ -311,7 +388,7 @@ async def record_telemetry(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
-    inserted = reels_repo.record_reel_telemetry(body.device_id, body.events)
+    inserted = await asyncio.to_thread(reels_repo.record_reel_telemetry, body.device_id, body.events)
     return {"ok": True, "recorded": inserted}
 
 

@@ -1212,13 +1212,18 @@ export default function ReelsScreen() {
 
       if (reset) seedRef.current = Date.now();
       const currentSeed = seedRef.current;
-      const response: { reels: ReelItem[]; has_more: boolean } = isLibrarySection(requestedSection)
+      const response: { reels: ReelItem[]; has_more: boolean; next_offset?: number } = isLibrarySection(requestedSection)
         ? await getLibraryReels(requestedSection, reset ? 0 : offsetRef.current, 30, currentSeed)
         : await getReelsFeed(reset ? 0 : offsetRef.current, 30, currentSeed);
       if (requestedSection !== reelSectionRef.current) return;
       const { reels: raw, has_more } = response;
       hasMoreRef.current = has_more && raw.length > 0;
-      offsetRef.current = reset ? raw.length : offsetRef.current + raw.length;
+      // Library shelves may scan past watched rows to fill a page.  Use the
+      // server cursor so those hidden rows are not requested again.
+      const nextOffset = typeof response.next_offset === 'number'
+        ? response.next_offset
+        : (reset ? raw.length : offsetRef.current + raw.length);
+      offsetRef.current = nextOffset;
       // Keep the shelves strictly separated even if a stale server does not
       // yet honour the source query parameter.
       const filteredRaw = isLibrarySection(requestedSection)

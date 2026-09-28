@@ -27,6 +27,15 @@ import memories
 logger = logging.getLogger("backup_server")
 
 
+def _positive_int_env(name: str, default: int, *, minimum: int = 1, maximum: int = 256) -> int:
+    """Read a bounded deployment tuning value without making startup fragile."""
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 def _configured_cors_origins() -> list[str]:
     """Parse an explicit browser-origin allowlist without affecting native clients."""
     configured = load_config().get("CORS_ORIGINS", "")
@@ -37,25 +46,29 @@ def _configured_cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # High-throughput thread pool for file I/O and CPU offloading.
-    # Cap lower under Postgres/Gunicorn so sync + interactive reads don't starve each other.
+    # Blocking filesystem/database work is shared by every request handled by
+    # this Gunicorn worker.  The previous 120–200 thread setting *per worker*
+    # created hundreds of runnable threads in a four-worker Docker deployment,
+    # causing CPU and disk queue contention.  Keep a bounded pool per process;
+    # deployments with demonstrably faster storage can raise it explicitly.
     cfg = load_config()
     cpu = os.cpu_count() or 4
-    if cfg.get("DATABASE_BACKEND") == "postgres":
-        # Slightly capped vs desktop so interactive reads keep headroom during sync,
-        # but high enough to preserve upload throughput with leader-elected indexing.
-        token_limit = max(120, min(200, cpu * 20))
-    else:
-        token_limit = max(200, cpu * 30)
+    default_threads = max(8, min(24, cpu * 2)) if cfg.get("DATABASE_BACKEND") == "postgres" else max(16, min(48, cpu * 3))
+    token_limit = _positive_int_env("API_THREADPOOL_WORKERS", default_threads)
     anyio.to_thread.current_default_thread_limiter().total_tokens = token_limit
     executor = ThreadPoolExecutor(max_workers=token_limit)
     asyncio.get_running_loop().set_default_executor(executor)
+    logger.info("Configured API blocking-work pool with %s threads per process.", token_limit)
 
-    # Always initialize base schema so local fallback and direct SQLite calls have tables ready
-    try:
-        init_db()
-    except Exception as e:
-        logger.warning("SQLite schema initialization: %s", e)
+    # Docker uses PostgreSQL exclusively.  Running the SQLite migration in all
+    # four Gunicorn workers created avoidable lock contention and harmless but
+    # alarming "duplicate column" startup warnings against the fallback file.
+    # Keep SQLite initialization for desktop/local deployments only.
+    if cfg.get("DATABASE_BACKEND") != "postgres":
+        try:
+            init_db()
+        except Exception as e:
+            logger.warning("SQLite schema initialization: %s", e)
 
     # Multi-backend Database Initialization (Postgres with SQLite fallback)
     if cfg.get("DATABASE_BACKEND") == "postgres":

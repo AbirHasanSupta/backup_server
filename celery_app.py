@@ -45,6 +45,10 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,  # Prevent worker hoard on heavy transcoding tasks
     task_acks_late=True,
     task_reject_on_worker_lost=True,
+    worker_max_tasks_per_child=200,  # Recycle media workers before long-lived library leaks accumulate.
+    result_expires=3600,
+    broker_connection_retry_on_startup=True,
+    broker_transport_options={"visibility_timeout": 7200},
     task_routes={
         "tasks.video_tasks.*": {"queue": "transcode_video"},
         "tasks.rewind_tasks.*": {"queue": "render_rewind"},

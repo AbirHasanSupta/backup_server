@@ -487,6 +487,11 @@ export function scoreReelCandidate(
   const watchRecord = state.watched[item.reel_id];
   const isWatched = Boolean(watchRecord);
 
+  // A watched reel never belongs in the discover feed.  The server applies
+  // the same rule using persisted telemetry; keeping it here makes cached and
+  // in-flight pages obey it immediately as well.
+  if (isWatched) return Number.NEGATIVE_INFINITY;
+
   // Top Priority: Direct newly received unseen shared/reposted reel
   if (!isWatched && item.is_unseen) {
     return 100000 + (item.created_at || 0);
@@ -620,53 +625,41 @@ export function scoreReelCandidate(
  * - Direct unseen reels placed at the very top.
  * - Minimum author spacing of 2 slots (no 2 consecutive reels from the same creator).
  * - Minimum share group de-clustering of 3 slots (no bursting of 10 videos from one album).
- * - Multi-tiered pool fallback: Unseen -> Fresh Unwatched -> Bandit -> Nostalgia Replay -> Interacted.
+ * - Only unseen/unwatched candidates are eligible; watched reels live in
+ *   Saved/Reposted history rather than silently returning to discovery.
  */
 export function buildDiverseReelSlate(
   items: ReelItem[],
   state: HyperPulseState,
   sessionSeed: number,
 ): ReelItem[] {
-  const scored = [...items].map(item => {
+  const scored = [...items].flatMap(item => {
     const watchRecord = state.watched[item.reel_id];
     const isWatched = Boolean(watchRecord);
-    const hasInteracted = Boolean(
-      (item.user_reactions && item.user_reactions.length > 0) ||
-      item.user_has_reposted ||
-      item.is_saved
-    );
-    return {
+    if (isWatched) return [];
+    return [{
       item,
       score: scoreReelCandidate(item, state, sessionSeed),
-      isWatched,
-      hasInteracted,
-      utility: watchRecord ? watchRecord.utility : 0,
-    };
+    }];
   });
 
   scored.sort((a, b) => b.score - a.score);
 
-  // Multi-tiered pool separation
+  // Keep direct, unread shares prominent without reintroducing watched media.
   const unseenDirect: ReelItem[] = [];
   const freshUnwatched: ReelItem[] = [];
-  const nostalgiaReplay: ReelItem[] = [];
-  const alreadyInteracted: ReelItem[] = [];
 
   for (const entry of scored) {
-    const { item, isWatched, hasInteracted, utility } = entry;
-    if (!isWatched && item.is_unseen) {
+    const { item } = entry;
+    if (item.is_unseen) {
       unseenDirect.push(item);
-    } else if (!isWatched && !hasInteracted) {
-      freshUnwatched.push(item);
-    } else if (isWatched && utility >= 0.5 && !hasInteracted) {
-      nostalgiaReplay.push(item);
     } else {
-      alreadyInteracted.push(item);
+      freshUnwatched.push(item);
     }
   }
 
   const result: ReelItem[] = [...unseenDirect];
-  const candidatePool = [...freshUnwatched, ...nostalgiaReplay, ...alreadyInteracted];
+  const candidatePool = [...freshUnwatched];
 
   // Slate diversification trackers
   const recentAuthors: string[] = result.map(

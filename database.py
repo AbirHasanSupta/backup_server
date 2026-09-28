@@ -834,6 +834,7 @@ def init_db():
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_reel_telem_share ON reel_telemetry(share_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_reel_telem_device ON reel_telemetry(device_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reel_telem_device_recent ON reel_telemetry(device_id, created_at DESC)")
 
     conn.commit()
     conn.close()

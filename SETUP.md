@@ -149,6 +149,9 @@ Important environment settings are:
 | `DATABASE_BACKEND` | `sqlite` (default) or `postgres` |
 | `POSTGRES_URL` | PostgreSQL connection URL when the backend is `postgres` |
 | `REDIS_URL`, `CELERY_ENABLED` | Enable Redis-backed caching/locks and Celery tasks |
+| `API_THREADPOOL_WORKERS`, `THUMBNAIL_WORKERS` | Per-Gunicorn-process cap for blocking work and concurrent cold-gallery thumbnail encodes (Docker defaults: 24 / 2) |
+| `PG_POOL_MIN_SIZE`, `PG_POOL_MAX_SIZE` | Per-process PostgreSQL connection-pool bounds (Docker defaults: 1 / 8) |
+| `CELERY_*_CONCURRENCY`, `FFMPEG_THREADS`, `REWIND_SEGMENT_WORKERS` | Docker CPU budget for video, rewind, indexing, and FFmpeg subprocesses |
 | `CORS_ORIGINS` | Comma-separated allowlist for browser clients; leave empty for native-only use |
 | `ADVERTISED_IPS`, `ADVERTISED_PORT` | Host LAN IPs / published port for Docker phone discovery |
 | `TAILSCALE_IPS`, `TAILSCALE_DNS_NAME` | Host Tailscale endpoints for Docker `/ping` (mirrors desktop CLI) |
@@ -160,7 +163,8 @@ successful multi-user deployment.
 
 ## 6. Run the Docker deployment
 
-The Compose deployment starts Nginx on port 80, the API, two Celery workers,
+The Compose deployment starts Nginx on port 80, the API, three isolated Celery
+workers (video, rewind, and indexing),
 PostgreSQL, and Redis. Its Docker volumes retain the database, backups, caches,
 and Redis state.
 

@@ -4,7 +4,7 @@ import os
 import subprocess
 import logging
 from celery_app import celery_app
-from ffmpeg_utils import resolve_ffmpeg_path
+from ffmpeg_utils import configured_ffmpeg_threads, resolve_ffmpeg_path
 
 logger = logging.getLogger("backup_server.tasks.video")
 
@@ -39,6 +39,7 @@ def transcode_video_preview(self, source_path: str, cache_path: str, cache_key: 
         "-movflags", "+faststart",
         "-c:a", "aac",
         "-b:a", "128k",
+        "-threads", str(configured_ffmpeg_threads()),
         tmp_path,
     ]
 
@@ -102,4 +103,3 @@ def dispatch_transcode_video(source_path: str, cache_path: str, cache_key: str):
 
     threading.Thread(target=_fallback_run, daemon=True, name=f"transcode-{cache_key[:8]}").start()
     return "thread"
-

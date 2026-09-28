@@ -27,6 +27,39 @@ from database import (
 )
 
 
+_VIDEO_PATH_PATTERNS = ("%.mp4", "%.mov", "%.avi", "%.mkv", "%.webm", "%.3gp", "%.m4v", "%.wmv")
+RECENT_WATCH_WINDOW_SECONDS = 30 * 24 * 60 * 60
+
+
+def get_indexed_shared_video_candidates(
+    source_keys: str | List[str],
+    limit: int | None = None,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """Read a shared-folder reel catalog from ``media_index`` instead of walking the mount.
+
+    Bind-mounted Windows folders have high metadata latency in Docker.  The
+    leader-elected memory index already maintains this catalog, so scrolling
+    should be a database read, not another recursive filesystem scan.
+    """
+    keys = [str(source_keys)] if isinstance(source_keys, str) else [str(key) for key in source_keys if key]
+    if is_postgres() and keys:
+        path_predicates = " OR ".join(["LOWER(relative_path) LIKE ?"] * len(_VIDEO_PATH_PATTERNS))
+        key_placeholders = ", ".join(["?"] * len(keys))
+        sql = f"""
+            SELECT source_key, relative_path AS path, size, modified_time
+            FROM media_index
+            WHERE source_type = ? AND source_key IN ({key_placeholders}) AND ({path_predicates})
+            ORDER BY modified_time DESC, source_key ASC, relative_path ASC
+        """
+        params: tuple[Any, ...] = ("shared", *keys, *_VIDEO_PATH_PATTERNS)
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params += (max(1, int(limit)), max(0, int(offset)))
+        return execute_read_query(sql, params)
+    return []
+
+
 def get_or_create_media_id(source_type: str, source_key: str, relative_path: str, cap_time: int | None = None) -> int:
     if is_postgres():
         row = execute_read_one(
@@ -52,38 +85,116 @@ def bulk_get_or_create_library_reel_shares(candidates: List[Dict[str, Any]]) -> 
     if not candidates:
         return []
     if is_postgres():
+        # PostgreSQL limits a single statement to 65,535 bind parameters.  The
+        # catalog CTE uses six values per item, so split exceptionally large
+        # libraries before constructing it.
+        catalog_batch_size = 5_000
+        if len(candidates) > catalog_batch_size:
+            materialized: list[dict] = []
+            for start in range(0, len(candidates), catalog_batch_size):
+                materialized.extend(
+                    bulk_get_or_create_library_reel_shares(candidates[start:start + catalog_batch_size])
+                )
+            return materialized
+        # Catalog refreshes may contain thousands of videos.  The old loop did
+        # up to five queries plus a commit per candidate, turning a first
+        # scroll into thousands of network round trips.  One transaction also
+        # makes materialization atomic from the caller's perspective.
+        from database_pg import get_pg_connection
+
         now = int(time.time())
-        results = []
-        for c in candidates:
-            st = c.get("source_type") or ""
-            sk = c.get("source_key") or ""
-            rp = c.get("path") or c.get("relative_path") or ""
-            sz = int(c.get("size") or 0)
-            mt = int(c.get("modified_time") or 0)
-            created_at = mt or now
-            row = execute_read_one(
-                "SELECT share_id, media_id, created_at FROM device_shares WHERE is_library_reel = 1 AND source_type = ? AND source_key = ? AND relative_path = ?",
-                (st, sk, rp),
-            )
-            if row:
-                results.append({**c, "share_id": row["share_id"], "media_id": row["media_id"], "created_at": row["created_at"]})
-            else:
-                mid = get_or_create_media_id(st, sk, rp, mt)
-                execute_write(
-                    """
+        normalized: list[tuple[str, str, str, int, int, int]] = []
+        originals: dict[tuple[str, str, str], dict] = {}
+        for candidate in candidates:
+            source_type = str(candidate.get("source_type") or "")
+            source_key = str(candidate.get("source_key") or "")
+            relative_path = str(candidate.get("path") or candidate.get("relative_path") or "")
+            if not source_type or not source_key or not relative_path:
+                continue
+            size = int(candidate.get("size") or 0)
+            modified = int(candidate.get("modified_time") or 0)
+            key = (source_type, source_key, relative_path)
+            # A source can be listed twice by a misconfigured share; do not
+            # manufacture duplicate shares for it.
+            if key in originals:
+                continue
+            originals[key] = candidate
+            normalized.append((source_type, source_key, relative_path, size, modified, modified or now))
+
+        if not normalized:
+            return []
+
+        placeholders = ", ".join(["(%s, %s, %s, %s, %s, %s)"] * len(normalized))
+        flat_params: list[Any] = [value for row in normalized for value in row]
+        catalog_sql = (
+            "WITH catalog(source_type, source_key, relative_path, size, modified_time, created_at) AS "
+            f"(VALUES {placeholders}) "
+        )
+
+        with get_pg_connection() as conn:
+            with conn.cursor() as cur:
+                # This lock is held only while filling missing catalog rows.
+                # It prevents two Gunicorn workers from both observing a
+                # missing pre-existing library row and inserting it.
+                cur.execute("SELECT pg_advisory_xact_lock(619830211)")
+                cur.execute(
+                    catalog_sql
+                    + """
+                    INSERT INTO media_index
+                        (source_type, source_key, relative_path, size, modified_time, indexed_at)
+                    SELECT source_type, source_key, relative_path, size, modified_time, %s
+                    FROM catalog
+                    ON CONFLICT(source_type, source_key, relative_path) DO UPDATE SET
+                        size = EXCLUDED.size,
+                        modified_time = EXCLUDED.modified_time,
+                        indexed_at = EXCLUDED.indexed_at
+                    """,
+                    (*flat_params, now),
+                )
+                cur.execute(
+                    catalog_sql
+                    + """
                     INSERT INTO device_shares
                         (media_id, source_type, source_key, relative_path, size, modified_time,
                          shared_by_device_id, created_at, is_library_reel)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    SELECT mi.id, c.source_type, c.source_key, c.relative_path, c.size, c.modified_time,
+                           'library:' || c.source_type || ':' || c.source_key, c.created_at, 1
+                    FROM catalog c
+                    JOIN media_index mi ON mi.source_type = c.source_type
+                        AND mi.source_key = c.source_key AND mi.relative_path = c.relative_path
+                    LEFT JOIN device_shares ds ON ds.is_library_reel = 1
+                        AND ds.source_type = c.source_type AND ds.source_key = c.source_key
+                        AND ds.relative_path = c.relative_path
+                    WHERE ds.share_id IS NULL
                     """,
-                    (mid, st, sk, rp, sz, mt, f"library:{st}:{sk}", created_at),
+                    flat_params,
                 )
-                new_row = execute_read_one(
-                    "SELECT share_id FROM device_shares WHERE is_library_reel = 1 AND source_type = ? AND source_key = ? AND relative_path = ? ORDER BY share_id DESC LIMIT 1",
-                    (st, sk, rp),
+                cur.execute(
+                    catalog_sql
+                    + """
+                    SELECT DISTINCT ON (c.source_type, c.source_key, c.relative_path)
+                           c.source_type, c.source_key, c.relative_path,
+                           ds.share_id, ds.media_id, ds.created_at
+                    FROM catalog c
+                    JOIN device_shares ds ON ds.is_library_reel = 1
+                        AND ds.source_type = c.source_type AND ds.source_key = c.source_key
+                        AND ds.relative_path = c.relative_path
+                    ORDER BY c.source_type, c.source_key, c.relative_path, ds.share_id ASC
+                    """,
+                    flat_params,
                 )
-                sid = new_row["share_id"] if new_row else 0
-                results.append({**c, "share_id": sid, "media_id": mid, "created_at": created_at})
+                rows = cur.fetchall()
+            conn.commit()
+
+        results = []
+        for source_type, source_key, relative_path, share_id, media_id, created_at in rows:
+            original = originals[(source_type, source_key, relative_path)]
+            results.append({
+                **original,
+                "share_id": share_id,
+                "media_id": media_id,
+                "created_at": created_at,
+            })
         return results
 def get_or_create_library_reel_share(source_type: str, source_key: str, relative_path: str, size: int = 0, modified_time: int = 0) -> Dict[str, Any]:
     res = bulk_get_or_create_library_reel_shares([{"source_type": source_type, "source_key": source_key, "relative_path": relative_path, "size": size, "modified_time": modified_time}])
@@ -372,13 +483,41 @@ def get_user_reposted_media_ids(device_id: str) -> Set[int]:
     return media_ids
 
 
+def get_recently_watched_reel_ids(
+    device_id: str,
+    *,
+    since_seconds: int = RECENT_WATCH_WINDOW_SECONDS,
+) -> Tuple[Set[int], Set[int]]:
+    """Return recently watched share and media IDs for one viewer.
+
+    ``share_id`` prevents a duplicate card from recurring, while ``media_id``
+    prevents the same underlying video from bypassing the cooldown via a
+    repost.  This is intentionally a server-side rule: local state alone can
+    be stale after an app restart or while telemetry is waiting to flush.
+    """
+    if not device_id:
+        return set(), set()
+    cutoff = int(time.time()) - max(60, int(since_seconds))
+    rows = execute_read_query(
+        """
+        SELECT DISTINCT share_id, media_id
+        FROM reel_telemetry
+        WHERE device_id = ? AND created_at >= ?
+        """,
+        (device_id, cutoff),
+    )
+    share_ids = {int(row["share_id"]) for row in rows if row.get("share_id") is not None}
+    media_ids = {int(row["media_id"]) for row in rows if row.get("media_id") is not None}
+    return share_ids, media_ids
+
+
 def get_reel_view_counts(share_ids: List[int]) -> Dict[int, int]:
     if is_postgres():
         if not share_ids:
             return {}
         placeholders = ",".join(["?"] * len(share_ids))
         rows = execute_read_query(
-            f"SELECT share_id, COUNT(*) as views FROM reel_telemetry WHERE share_id IN ({placeholders}) GROUP BY share_id",
+            f"SELECT share_id, COUNT(*) as views FROM reel_telemetry WHERE share_id IN ({placeholders}) AND skipped = 0 GROUP BY share_id",
             share_ids,
         )
         return {r["share_id"]: r["views"] for r in rows}
@@ -391,7 +530,7 @@ def get_reel_durations(share_ids: List[int]) -> Dict[int, float]:
             return {}
         placeholders = ",".join(["?"] * len(share_ids))
         rows = execute_read_query(
-            f"SELECT share_id, duration_sec FROM reel_telemetry WHERE share_id IN ({placeholders}) AND duration_sec > 0",
+            f"SELECT share_id, MAX(duration_sec) AS duration_sec FROM reel_telemetry WHERE share_id IN ({placeholders}) AND duration_sec > 0 GROUP BY share_id",
             share_ids,
         )
         return {r["share_id"]: r["duration_sec"] for r in rows}
@@ -400,26 +539,50 @@ def get_reel_durations(share_ids: List[int]) -> Dict[int, float]:
 
 def record_reel_telemetry(device_id: str, events: List[Dict[str, Any]]) -> int:
     if is_postgres():
+        if not device_id or not events:
+            return 0
+        # Keep an untrusted client from using telemetry as a way to monopolize
+        # a database worker.  The Android client normally flushes batches of 5.
+        events = events[:100]
         now = int(time.time())
-        count = 0
+        values: list[tuple] = []
         for ev in events:
-            execute_write(
-                """
-                INSERT INTO reel_telemetry (device_id, share_id, media_id, watch_time_sec, duration_sec, completion_rate, loops, skipped, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    device_id,
-                    ev.get("share_id", 0),
-                    ev.get("media_id"),
-                    float(ev.get("watch_time_sec", 0.0)),
-                    float(ev.get("duration_sec", 0.0)),
-                    float(ev.get("completion_rate", 0.0)),
-                    int(ev.get("loops", 0)),
-                    1 if ev.get("skipped") else 0,
-                    now,
-                ),
-            )
-            count += 1
-        return count
+            if not isinstance(ev, dict):
+                continue
+            try:
+                share_id = int(ev.get("share_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if share_id <= 0:
+                continue
+            try:
+                media_id = int(ev["media_id"]) if ev.get("media_id") is not None else None
+            except (TypeError, ValueError):
+                media_id = None
+            try:
+                watch_time = max(0.0, min(float(ev.get("watch_time_sec", 0.0)), 8 * 60 * 60))
+                duration = max(0.0, min(float(ev.get("duration_sec", 0.0)), 8 * 60 * 60))
+                completion = max(0.0, min(float(ev.get("completion_rate", 0.0)), 10.0))
+                loops = max(0, min(int(ev.get("loops", 0)), 100))
+            except (TypeError, ValueError):
+                continue
+            values.append((device_id, share_id, media_id, watch_time, duration, completion, loops, bool(ev.get("skipped")), now))
+
+        if not values:
+            return 0
+        # The old implementation committed one insert per playback event.  A
+        # single mobile flush then consumed many connections and made its own
+        # watch-history write visible slowly.  Insert the batch atomically.
+        from database_pg import get_pg_connection
+        with get_pg_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO reel_telemetry (device_id, share_id, media_id, watch_time_sec, duration_sec, completion_rate, loops, skipped, created_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    values,
+                )
+            conn.commit()
+        return len(values)
     return db_record_reel_telemetry(device_id, events)

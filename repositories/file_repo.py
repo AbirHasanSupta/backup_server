@@ -183,6 +183,34 @@ def get_files_for_device(device_id: str, prefix: str = "") -> List[Dict[str, Any
     return db_get_files_for_device(device_id, prefix)
 
 
+def get_video_files_for_device(
+    device_id: str,
+    limit: int | None = None,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """Return only video rows for the backup-reels catalog.
+
+    This avoids loading an entire device library merely to discard photos in
+    the request handler.  The query is still portable through the repository
+    layer and is intentionally used only by the Docker/Postgres catalog path.
+    """
+    video_patterns = ("%.mp4", "%.mov", "%.avi", "%.mkv", "%.webm", "%.3gp", "%.m4v", "%.wmv")
+    if is_postgres():
+        predicates = " OR ".join(["LOWER(path) LIKE ?"] * len(video_patterns))
+        sql = f"SELECT path, size, modified_time FROM files WHERE device_id = ? AND ({predicates}) ORDER BY modified_time DESC, path ASC"
+        params: tuple[Any, ...] = (device_id, *video_patterns)
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params += (max(1, int(limit)), max(0, int(offset)))
+        return execute_read_query(sql, params)
+    rows = [
+        row for row in db_get_files_for_device(device_id)
+        if str(row.get("path") or "").lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"))
+    ]
+    rows.sort(key=lambda row: (-int(row.get("modified_time") or 0), str(row.get("path") or "")))
+    return rows[max(0, int(offset)):] if limit is None else rows[max(0, int(offset)):max(0, int(offset)) + max(1, int(limit))]
+
+
 def search_files_for_device(
     device_id: str,
     query: str,

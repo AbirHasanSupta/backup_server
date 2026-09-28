@@ -78,6 +78,14 @@ services:
       - ADVERTISED_TAILSCALE_IPS=${ADVERTISED_TAILSCALE_IPS:-}
       - ADVERTISED_TAILSCALE_DNS=${ADVERTISED_TAILSCALE_DNS:-}
       - GUNICORN_WORKERS=${GUNICORN_WORKERS:-4}
+      # Bounded per-Gunicorn-process pool for blocking filesystem/DB work.
+      - API_THREADPOOL_WORKERS=${API_THREADPOOL_WORKERS:-12}
+      # Per API process: cap cold-gallery thumbnail FFmpeg generation.
+      - THUMBNAIL_WORKERS=${THUMBNAIL_WORKERS:-2}
+      # These pools are per process; conservative defaults keep all Gunicorn
+      # and Celery child processes below PostgreSQL's normal connection cap.
+      - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
+      - PG_POOL_MAX_SIZE=${PG_POOL_MAX_SIZE:-8}
     volumes:
       # Phone backup files — bind-mount the same root the desktop app uses
       - type: bind
@@ -111,7 +119,7 @@ services:
     build: .
     container_name: backup_celery_video
     restart: unless-stopped
-    command: ["celery", "-A", "celery_app", "worker", "-Q", "transcode_video", "-c", "2", "-l", "INFO"]
+    command: ["sh", "-c", "exec celery -A celery_app worker -Q transcode_video -c $${CELERY_VIDEO_CONCURRENCY:-2} -l INFO"]
     environment:
       - API_KEY=${API_KEY:?Set API_KEY in .env}
       - DATABASE_BACKEND=postgres
@@ -120,6 +128,11 @@ services:
       - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
       - BACKUP_ROOT=/backup_storage
       - APP_DATA_DIR=/app_data
+      # Limit threads inside each FFmpeg process; without this, two video
+      # tasks can each consume all host cores and delay API traffic.
+      - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
+      - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
+      - PG_POOL_MAX_SIZE=${PG_POOL_MAX_SIZE:-8}
     volumes:
       - type: bind
         source: ${BACKUP_ROOT:-D:\PhoneBackup}
@@ -138,12 +151,12 @@ services:
     networks:
       - backup_net
 
-  # ── 4. General Worker (Rewind Reels, EXIF Indexing, Trips) ───────────────
-  celery_worker_general:
+  # ── 4. Rewind Worker (isolated from indexing latency) ────────────────────
+  celery_worker_rewind:
     build: .
-    container_name: backup_celery_general
+    container_name: backup_celery_rewind
     restart: unless-stopped
-    command: ["celery", "-A", "celery_app", "worker", "-Q", "render_rewind,indexing_queue", "-c", "2", "-l", "INFO"]
+    command: ["sh", "-c", "exec celery -A celery_app worker -Q render_rewind -c $${CELERY_REWIND_CONCURRENCY:-1} -l INFO"]
     environment:
       - API_KEY=${API_KEY:?Set API_KEY in .env}
       - DATABASE_BACKEND=postgres
@@ -152,6 +165,10 @@ services:
       - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
       - BACKUP_ROOT=/backup_storage
       - APP_DATA_DIR=/app_data
+      - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
+      - REWIND_SEGMENT_WORKERS=${REWIND_SEGMENT_WORKERS:-2}
+      - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
+      - PG_POOL_MAX_SIZE=${PG_POOL_MAX_SIZE:-8}
     volumes:
       - type: bind
         source: ${BACKUP_ROOT:-D:\PhoneBackup}
@@ -170,7 +187,41 @@ services:
     networks:
       - backup_net
 
-  # ── 5. PostgreSQL ─────────────────────────────────────────────────────────
+  # ── 5. Indexing Worker (cannot queue behind reel rendering) ──────────────
+  celery_worker_indexing:
+    build: .
+    container_name: backup_celery_indexing
+    restart: unless-stopped
+    command: ["sh", "-c", "exec celery -A celery_app worker -Q indexing_queue -c $${CELERY_INDEXING_CONCURRENCY:-2} -l INFO"]
+    environment:
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
+      - DATABASE_BACKEND=postgres
+      - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
+      - REDIS_URL=redis://redis:6379/0
+      - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
+      - BACKUP_ROOT=/backup_storage
+      - APP_DATA_DIR=/app_data
+      - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
+      - PG_POOL_MAX_SIZE=${PG_POOL_MAX_SIZE:-8}
+    volumes:
+      - type: bind
+        source: ${BACKUP_ROOT:-D:\PhoneBackup}
+        target: /backup_storage
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
+      - type: bind
+        source: ${SHARED_DRIVE_G:-G:\}
+        target: /host_g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backup_net
+
+  # ── 6. PostgreSQL ─────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     container_name: backup_postgres
@@ -179,6 +230,21 @@ services:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       - POSTGRES_DB=backup_db
+    # These defaults fit a Docker Desktop host with roughly 16 GB RAM while
+    # keeping enough memory for the API, Celery and the operating system.
+    # ``effective_cache_size`` is a planner estimate, not allocated memory.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-3GB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-8MB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-96}
     volumes:
       # PG data lives in a named volume (managed by Docker) — no conflict with SQLite
       - pg_data:/var/lib/postgresql/data
@@ -193,11 +259,23 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── 6. Redis Broker & Cache ───────────────────────────────────────────────
+  # ── 7. Redis Broker & Cache ───────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: backup_redis
     restart: unless-stopped
+    # Keep queue data durable enough for task recovery, and never evict Celery
+    # broker keys to make room for response-cache entries.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - noeviction
     volumes:
       - redis_data:/data
     networks:
