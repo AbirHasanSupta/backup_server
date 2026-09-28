@@ -12,11 +12,25 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 class DiscoveryAdvertisementTests(unittest.TestCase):
     def tearDown(self) -> None:
-        for key in ("ADVERTISED_IPS", "HOST_LAN_IPS", "ADVERTISED_PORT", "PORT"):
+        for key in (
+            "ADVERTISED_IPS",
+            "HOST_LAN_IPS",
+            "ADVERTISED_PORT",
+            "PORT",
+            "TAILSCALE_IPS",
+            "TAILSCALE_DNS_NAME",
+            "ADVERTISED_TAILSCALE_IPS",
+            "ADVERTISED_TAILSCALE_DNS",
+        ):
             os.environ.pop(key, None)
         import config
         config._config_cache = None
         config._config_cache_mtime = None
+        try:
+            from network_info import clear_tailscale_cache
+            clear_tailscale_cache()
+        except Exception:
+            pass
 
     def test_advertised_ips_preferred_and_bridge_filtered(self) -> None:
         os.environ["ADVERTISED_IPS"] = "192.168.1.50, 10.0.0.5"
@@ -55,6 +69,176 @@ class DiscoveryAdvertisementTests(unittest.TestCase):
 
         with mock.patch("config.load_config", return_value={"PORT": 9000, "ADVERTISED_PORT": 9000}):
             self.assertEqual(get_discovery_port(), 9000)
+
+
+class TailscaleAdvertisementTests(unittest.TestCase):
+    """Docker has no Tailscale CLI; env overrides must mirror desktop /ping payload."""
+
+    def setUp(self) -> None:
+        self._clear_env()
+        from network_info import clear_tailscale_cache
+        clear_tailscale_cache()
+
+    def tearDown(self) -> None:
+        self._clear_env()
+        import config
+        config._config_cache = None
+        config._config_cache_mtime = None
+        from network_info import clear_tailscale_cache
+        clear_tailscale_cache()
+
+    def _clear_env(self) -> None:
+        for key in (
+            "TAILSCALE_IPS",
+            "TAILSCALE_DNS_NAME",
+            "ADVERTISED_TAILSCALE_IPS",
+            "ADVERTISED_TAILSCALE_DNS",
+        ):
+            os.environ.pop(key, None)
+
+    def test_env_override_when_cli_absent(self) -> None:
+        os.environ["TAILSCALE_IPS"] = "100.64.1.2, 100.64.1.3"
+        os.environ["TAILSCALE_DNS_NAME"] = "desktop.tailnet.ts.net."
+
+        from network_info import get_tailscale_network_info
+
+        with mock.patch("network_info._resolve_tailscale_binary", return_value=None):
+            info = get_tailscale_network_info()
+
+        self.assertTrue(info["available"])
+        self.assertEqual(info["ips"], ["100.64.1.2", "100.64.1.3"])
+        self.assertEqual(info["dns_name"], "desktop.tailnet.ts.net")
+
+    def test_advertised_alias_env_keys(self) -> None:
+        os.environ["ADVERTISED_TAILSCALE_IPS"] = "100.100.50.1"
+        os.environ["ADVERTISED_TAILSCALE_DNS"] = "host.example.ts.net"
+
+        from network_info import clear_tailscale_cache, get_tailscale_network_info
+        clear_tailscale_cache()
+
+        with mock.patch("network_info._resolve_tailscale_binary", return_value=None):
+            info = get_tailscale_network_info()
+
+        self.assertTrue(info["available"])
+        self.assertEqual(info["ips"], ["100.100.50.1"])
+        self.assertEqual(info["dns_name"], "host.example.ts.net")
+
+    def test_dns_only_override_is_available(self) -> None:
+        os.environ["TAILSCALE_DNS_NAME"] = "only-dns.tailnet.ts.net"
+
+        from network_info import clear_tailscale_cache, get_tailscale_network_info
+        clear_tailscale_cache()
+
+        with mock.patch("network_info._resolve_tailscale_binary", return_value=None):
+            info = get_tailscale_network_info()
+
+        self.assertTrue(info["available"])
+        self.assertEqual(info["ips"], [])
+        self.assertEqual(info["dns_name"], "only-dns.tailnet.ts.net")
+
+    def test_cli_running_wins_over_env(self) -> None:
+        os.environ["TAILSCALE_IPS"] = "100.64.9.9"
+        os.environ["TAILSCALE_DNS_NAME"] = "env-override.ts.net"
+
+        from network_info import clear_tailscale_cache, get_tailscale_network_info
+        clear_tailscale_cache()
+
+        cli_payload = {
+            "available": True,
+            "ips": ["100.64.0.1"],
+            "dns_name": "from-cli.ts.net",
+        }
+        with mock.patch("network_info._resolve_tailscale_binary", return_value="/usr/bin/tailscale"), \
+             mock.patch("network_info._tailscale_info_from_cli", return_value=cli_payload):
+            info = get_tailscale_network_info()
+
+        self.assertEqual(info["ips"], ["100.64.0.1"])
+        self.assertEqual(info["dns_name"], "from-cli.ts.net")
+
+    def test_cli_present_but_down_falls_back_to_env(self) -> None:
+        """Binary on PATH but daemon not Running must still honor Docker overrides."""
+        os.environ["TAILSCALE_IPS"] = "100.64.1.2"
+        os.environ["TAILSCALE_DNS_NAME"] = "fallback.ts.net"
+
+        from network_info import clear_tailscale_cache, get_tailscale_network_info
+        clear_tailscale_cache()
+
+        with mock.patch("network_info._resolve_tailscale_binary", return_value="/usr/bin/tailscale"), \
+             mock.patch(
+                 "network_info._tailscale_info_from_cli",
+                 return_value={"available": False, "ips": [], "dns_name": ""},
+             ):
+            info = get_tailscale_network_info()
+
+        self.assertTrue(info["available"])
+        self.assertEqual(info["ips"], ["100.64.1.2"])
+        self.assertEqual(info["dns_name"], "fallback.ts.net")
+
+    def test_unavailable_payload_ips_not_shared(self) -> None:
+        from network_info import _unavailable_tailscale
+
+        a = _unavailable_tailscale()
+        b = _unavailable_tailscale()
+        a["ips"].append("poison")
+        self.assertEqual(b["ips"], [])
+
+    def test_format_endpoint_brackets_ipv6(self) -> None:
+        from network_info import format_endpoint_for_url
+
+        self.assertEqual(format_endpoint_for_url("100.64.1.2"), "100.64.1.2")
+        self.assertEqual(format_endpoint_for_url("host.ts.net."), "host.ts.net")
+        self.assertEqual(format_endpoint_for_url("fd7a:115c:a1e0::1"), "[fd7a:115c:a1e0::1]")
+        self.assertEqual(format_endpoint_for_url("[fd7a:115c:a1e0::1]"), "[fd7a:115c:a1e0::1]")
+
+    def test_empty_compose_env_does_not_block_config(self) -> None:
+        """Compose injects TAILSCALE_*=\"\"; config-file values must still apply."""
+        os.environ["TAILSCALE_IPS"] = ""
+        os.environ["TAILSCALE_DNS_NAME"] = ""
+
+        from network_info import clear_tailscale_cache, get_tailscale_network_info
+        clear_tailscale_cache()
+
+        with mock.patch("network_info._resolve_tailscale_binary", return_value=None), \
+             mock.patch(
+                 "config.load_config",
+                 return_value={
+                     "TAILSCALE_IPS": "100.64.7.7",
+                     "TAILSCALE_DNS_NAME": "from-config.ts.net",
+                 },
+             ):
+            info = get_tailscale_network_info()
+
+        self.assertTrue(info["available"])
+        self.assertEqual(info["ips"], ["100.64.7.7"])
+        self.assertEqual(info["dns_name"], "from-config.ts.net")
+
+    def test_partial_env_merges_dns_from_config(self) -> None:
+        os.environ["TAILSCALE_IPS"] = "100.64.1.9"
+        # DNS only in config
+        from network_info import clear_tailscale_cache, get_tailscale_network_info
+        clear_tailscale_cache()
+
+        with mock.patch("network_info._resolve_tailscale_binary", return_value=None), \
+             mock.patch(
+                 "config.load_config",
+                 return_value={"TAILSCALE_IPS": "", "TAILSCALE_DNS_NAME": "merged.ts.net"},
+             ):
+            info = get_tailscale_network_info()
+
+        self.assertEqual(info["ips"], ["100.64.1.9"])
+        self.assertEqual(info["dns_name"], "merged.ts.net")
+
+    def test_no_cli_no_env_unavailable(self) -> None:
+        from network_info import clear_tailscale_cache, get_tailscale_network_info
+        clear_tailscale_cache()
+
+        with mock.patch("network_info._resolve_tailscale_binary", return_value=None), \
+             mock.patch("config.load_config", return_value={}):
+            info = get_tailscale_network_info()
+
+        self.assertFalse(info["available"])
+        self.assertEqual(info["ips"], [])
+        self.assertEqual(info["dns_name"], "")
 
 
 class SyncSessionNormalizationTests(unittest.TestCase):

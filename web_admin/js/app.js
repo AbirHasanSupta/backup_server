@@ -289,7 +289,7 @@ function renderDashboard(status, devices) {
   const ipContainer = el('dash-ip-chips');
   if (ipContainer) {
     const ips = status.all_ips || [];
-    const port = status.port || 8000;
+    const port = status.discovery_port || status.port || 8000;
     const proto = location.protocol;
     if (!ips.length) {
       ipContainer.innerHTML = '<span class="text-xs text-zinc-500">No external IP addresses detected.</span>';
@@ -306,13 +306,21 @@ function renderDashboard(status, devices) {
     }
 
     const ts = status.tailscale;
-    if (ts && ts.ips && ts.ips.length) {
-      const tsUrl = `${proto}//${ts.ips[0]}:${port}`;
-      ipContainer.insertAdjacentHTML('beforeend', `
-        <div class="chip border-blue-500/40 bg-blue-500/10 text-blue-300 cursor-pointer" data-action="copy-url" data-url="${escHtml(tsUrl)}" title="Tailscale MagicDNS / IP">
-          <span>🔒 Tailscale:</span>
-          <span class="font-mono">${escHtml(ts.ips[0])}:${port}</span>
-        </div>`);
+    if (ts && (ts.available || (ts.ips && ts.ips.length) || ts.dns_name)) {
+      const rawTarget = (ts.dns_name || (ts.ips && ts.ips[0]) || '').trim();
+      if (rawTarget) {
+        // Bracket bare IPv6 so copy-URL stays a valid absolute URL.
+        const colonCount = (rawTarget.match(/:/g) || []).length;
+        const tsTarget = (rawTarget.startsWith('[') || colonCount < 2)
+          ? rawTarget
+          : `[${rawTarget}]`;
+        const tsUrl = `${proto}//${tsTarget}:${port}`;
+        ipContainer.insertAdjacentHTML('beforeend', `
+          <div class="chip border-blue-500/40 bg-blue-500/10 text-blue-300 cursor-pointer" data-action="copy-url" data-url="${escHtml(tsUrl)}" title="Tailscale MagicDNS / IP">
+            <span>🔒 Tailscale:</span>
+            <span class="font-mono">${escHtml(tsTarget)}:${port}</span>
+          </div>`);
+      }
     }
   }
 

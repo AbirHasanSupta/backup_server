@@ -208,7 +208,18 @@ allowing non-private-network access.
 # Example .env discovery settings
 ADVERTISED_IPS=192.168.1.50
 ADVERTISED_PORT=8000
+# Optional: advertise host Tailscale so /ping matches the desktop CLI payload
+TAILSCALE_IPS=100.64.1.2
+TAILSCALE_DNS_NAME=desktop.tailnet.ts.net
 ```
+
+Away-from-home access works the same as desktop: install Tailscale (or WireGuard)
+on the **Docker host** and the phone. Because the API container cannot see the
+host Tailscale CLI, set `TAILSCALE_IPS` / `TAILSCALE_DNS_NAME` from
+`tailscale status` on the host. API startup logs the remote endpoint; the admin
+UI shows a Tailscale chip; Android **Tailscale / WireGuard** mode uses the
+MagicDNS name or tunnel IP on port `ADVERTISED_PORT` (default 8000). WireGuard
+has no peer-discovery API — enter the tunnel address manually, same as desktop.
 
 ### 3. Building Standalone Windows Executable
 To bundle the GUI server into a standalone `.exe`:
@@ -254,13 +265,22 @@ After installing the APK on your device:
 ### Backup while away: Tailscale or WireGuard
 
 No public port forwarding is required. Install and sign in to Tailscale on both
-the desktop and phone (or connect both to the same WireGuard tunnel). Start the
-desktop server; when Tailscale is available its MagicDNS endpoint is written to
-the desktop log. In the Android app go to **Settings**, choose **Tailscale /
-WireGuard**, enter that MagicDNS name (for example
-`desktop.example.ts.net`) or tunnel IP and port, then Save. This profile skips
-LAN discovery and subnet scanning, so it remains valid on mobile data or any
-Wi-Fi network. The existing API key and per-device approval still apply.
+the desktop (or Docker **host**) and phone (or connect both to the same
+WireGuard tunnel).
+
+**Desktop app:** when Tailscale is available its MagicDNS endpoint is written to
+the desktop log automatically via the host CLI.
+
+**Docker:** set `TAILSCALE_IPS` and/or `TAILSCALE_DNS_NAME` in `.env` from the
+host's `tailscale status` output (the container has no Tailscale CLI). Startup
+logs and `/ping` then advertise the same structured `tailscale` field as
+desktop.
+
+In the Android app go to **Settings**, choose **Tailscale / WireGuard**, enter
+that MagicDNS name (for example `desktop.example.ts.net`) or tunnel IP and
+port, then Save. This profile skips LAN discovery and subnet scanning, so it
+remains valid on mobile data or any Wi-Fi network. The existing API key and
+per-device approval still apply.
 
 ---
 

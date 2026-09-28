@@ -71,6 +71,12 @@ services:
       # because container networking only sees unreachable 172.x bridge addresses.
       - ADVERTISED_IPS=${ADVERTISED_IPS:-}
       - ADVERTISED_PORT=${ADVERTISED_PORT:-8000}
+      # Host Tailscale MagicDNS / 100.x addresses (CLI is on the host, not in
+      # the image). Mirrors desktop ``tailscale status`` advertising in /ping.
+      - TAILSCALE_IPS=${TAILSCALE_IPS:-}
+      - TAILSCALE_DNS_NAME=${TAILSCALE_DNS_NAME:-}
+      - ADVERTISED_TAILSCALE_IPS=${ADVERTISED_TAILSCALE_IPS:-}
+      - ADVERTISED_TAILSCALE_DNS=${ADVERTISED_TAILSCALE_DNS:-}
       - GUNICORN_WORKERS=${GUNICORN_WORKERS:-4}
     volumes:
       # Phone backup files — bind-mount the same root the desktop app uses

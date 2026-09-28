@@ -80,6 +80,28 @@ async def lifespan(app: FastAPI):
     # leader (or the single desktop process) performs the expensive reindex.
     threading.Thread(target=memories.startup_scan_loop, daemon=True, name="MemoryScanLoop").start()
 
+    # Mirror desktop startup: surface the away-from-home Tailscale endpoint when
+    # the CLI is present or Docker env overrides (TAILSCALE_*) are configured.
+    try:
+        from network_info import (
+            format_endpoint_for_url,
+            get_discovery_port,
+            get_tailscale_network_info,
+        )
+        tailscale = get_tailscale_network_info()
+        if tailscale.get("available"):
+            endpoint = format_endpoint_for_url(
+                tailscale.get("dns_name") or (tailscale.get("ips") or [""])[0]
+            )
+            if endpoint:
+                logger.info(
+                    "Tailscale remote endpoint: http://%s:%s",
+                    endpoint,
+                    get_discovery_port(),
+                )
+    except Exception:
+        pass
+
     async def cleanup_expired_upload_sessions() -> None:
         """Keep interrupted resumable uploads from becoming permanent cache data."""
         from storage.manager import get_storage

@@ -4,12 +4,19 @@ Tailscale is intentionally optional: a normal LAN-only installation must not
 need its CLI installed.  WireGuard has no portable peer-discovery API, so its
 endpoint is supplied manually by the client; it uses the exact same private
 network connection mode.
+
+Docker containers cannot see the host Tailscale CLI, so operators may inject
+the same structured ``tailscale`` payload via ``TAILSCALE_IPS`` /
+``TAILSCALE_DNS_NAME`` (or the ``ADVERTISED_TAILSCALE_*`` aliases).  A live
+CLI with ``BackendState == Running`` always wins; if the CLI is missing or
+not usable, env/config overrides are used.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -20,6 +27,11 @@ _TAILSCALE_CACHE_SECONDS = 30.0
 _tailscale_cache: dict = {"available": False, "ips": [], "dns_name": ""}
 _tailscale_cache_until = 0.0
 _tailscale_cache_lock = threading.Lock()
+
+
+def _unavailable_tailscale() -> dict:
+    """Fresh unavailable payload (never share nested mutable lists)."""
+    return {"available": False, "ips": [], "dns_name": ""}
 
 
 def _resolve_tailscale_binary() -> str | None:
@@ -41,21 +53,82 @@ def _resolve_tailscale_binary() -> str | None:
     return None
 
 
-def get_tailscale_network_info() -> dict:
-    """Return this node's Tailscale addresses and MagicDNS name when available."""
-    global _tailscale_cache, _tailscale_cache_until
-    now = time.monotonic()
-    with _tailscale_cache_lock:
-        if now < _tailscale_cache_until:
-            return dict(_tailscale_cache)
+def _parse_tailscale_override_ips(raw: str) -> list[str]:
+    """Parse comma/space-separated Tailscale IPs from env or config."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for part in re.split(r"[,;\s]+", str(raw or "").strip()):
+        ip = part.strip().strip("[]")
+        if not ip or ip in seen:
+            continue
+        if ip.startswith("127.") or ip.startswith("169.254."):
+            continue
+        seen.add(ip)
+        result.append(ip)
+    return result
 
-    binary = _resolve_tailscale_binary()
-    if not binary:
-        info = {"available": False, "ips": [], "dns_name": ""}
-        with _tailscale_cache_lock:
-            _tailscale_cache, _tailscale_cache_until = info, now + _TAILSCALE_CACHE_SECONDS
-        return dict(info)
 
+def format_endpoint_for_url(endpoint: str) -> str:
+    """Bracket bare IPv6 literals so ``http://{host}:{port}`` stays valid."""
+    host = str(endpoint or "").strip().rstrip(".")
+    if not host:
+        return ""
+    if host.startswith("[") and "]" in host:
+        return host
+    # IPv6 has at least two colons; hostnames / IPv4 do not.
+    if host.count(":") >= 2:
+        return f"[{host}]"
+    return host
+
+
+def _tailscale_info_from_overrides() -> dict:
+    """Build Tailscale payload from env/config when the host CLI is unavailable.
+
+    Used by Docker: install Tailscale on the host (or another reachable node),
+    then advertise that node's MagicDNS / 100.x address into the API container
+    so /ping, /connect, and the admin UI match desktop behavior.
+    """
+    raw_ips = (
+        os.environ.get("TAILSCALE_IPS")
+        or os.environ.get("ADVERTISED_TAILSCALE_IPS")
+        or ""
+    )
+    raw_dns = (
+        os.environ.get("TAILSCALE_DNS_NAME")
+        or os.environ.get("ADVERTISED_TAILSCALE_DNS")
+        or ""
+    )
+
+    # Merge missing fields from config independently so a partial env (IPs only
+    # or DNS only) does not block the other field's persisted value.
+    need_ips = not str(raw_ips).strip()
+    need_dns = not str(raw_dns).strip()
+    if need_ips or need_dns:
+        try:
+            from config import load_config
+            cfg = load_config()
+            if need_ips:
+                raw_ips = cfg.get("TAILSCALE_IPS") or ""
+            if need_dns:
+                raw_dns = cfg.get("TAILSCALE_DNS_NAME") or ""
+        except Exception:
+            pass
+
+    ips = _parse_tailscale_override_ips(
+        raw_ips if isinstance(raw_ips, str) else ",".join(str(x) for x in raw_ips)
+    )
+    dns_name = str(raw_dns or "").strip().rstrip(".")
+    if not ips and not dns_name:
+        return _unavailable_tailscale()
+    return {
+        "available": True,
+        "ips": ips,
+        "dns_name": dns_name,
+    }
+
+
+def _tailscale_info_from_cli(binary: str) -> dict:
+    """Query ``tailscale status --json``. Returns unavailable when CLI/daemon fails."""
     run_options: dict[str, object] = {
         "capture_output": True,
         "text": True,
@@ -75,40 +148,77 @@ def get_tailscale_network_info() -> dict:
             **run_options,
         )
         if result.returncode != 0:
-            info = {"available": False, "ips": [], "dns_name": ""}
-            with _tailscale_cache_lock:
-                _tailscale_cache, _tailscale_cache_until = info, now + _TAILSCALE_CACHE_SECONDS
-            return dict(info)
+            return _unavailable_tailscale()
         status = json.loads(result.stdout)
         backend_state = status.get("BackendState")
         if backend_state and backend_state != "Running":
-            info = {"available": False, "ips": [], "dns_name": ""}
-            with _tailscale_cache_lock:
-                _tailscale_cache, _tailscale_cache_until = info, now + _TAILSCALE_CACHE_SECONDS
-            return dict(info)
+            return _unavailable_tailscale()
 
         self_info = status.get("Self") or {}
         ips = [ip for ip in (self_info.get("TailscaleIPs") or []) if isinstance(ip, str) and ip]
         # Tailscale returns a trailing dot in its JSON DNS name.  Android URL
         # handling does not need it and saved profiles should have one stable form.
         dns_name = str(self_info.get("DNSName") or "").rstrip(".")
-        info = {
-            "available": bool(ips or dns_name),
+        if not ips and not dns_name:
+            return _unavailable_tailscale()
+        return {
+            "available": True,
             "ips": ips,
             "dns_name": dns_name,
         }
     except (OSError, ValueError, subprocess.SubprocessError):
-        info = {"available": False, "ips": [], "dns_name": ""}
+        return _unavailable_tailscale()
+
+
+def get_tailscale_network_info() -> dict:
+    """Return this node's Tailscale addresses and MagicDNS name when available.
+
+    Preference order:
+      1. Live Tailscale CLI when BackendState is Running
+      2. ``TAILSCALE_IPS`` / ``TAILSCALE_DNS_NAME`` env or config (Docker /
+         CLI missing or not usable)
+    """
+    global _tailscale_cache, _tailscale_cache_until
+    now = time.monotonic()
+    with _tailscale_cache_lock:
+        if now < _tailscale_cache_until:
+            return {
+                "available": bool(_tailscale_cache.get("available")),
+                "ips": list(_tailscale_cache.get("ips") or []),
+                "dns_name": str(_tailscale_cache.get("dns_name") or ""),
+            }
+
+    info = _unavailable_tailscale()
+    binary = _resolve_tailscale_binary()
+    if binary:
+        info = _tailscale_info_from_cli(binary)
+
+    # CLI missing, stopped, or otherwise unusable → operator overrides (Docker).
+    if not info.get("available"):
+        override = _tailscale_info_from_overrides()
+        if override.get("available"):
+            info = override
 
     with _tailscale_cache_lock:
-        _tailscale_cache, _tailscale_cache_until = info, now + _TAILSCALE_CACHE_SECONDS
-    return dict(info)
+        _tailscale_cache = {
+            "available": bool(info.get("available")),
+            "ips": list(info.get("ips") or []),
+            "dns_name": str(info.get("dns_name") or ""),
+        }
+        _tailscale_cache_until = now + _TAILSCALE_CACHE_SECONDS
+        return dict(_tailscale_cache)
+
+
+def clear_tailscale_cache() -> None:
+    """Reset the Tailscale discovery cache (tests / config reload)."""
+    global _tailscale_cache, _tailscale_cache_until
+    with _tailscale_cache_lock:
+        _tailscale_cache = _unavailable_tailscale()
+        _tailscale_cache_until = 0.0
 
 
 def _parse_advertised_ips() -> list[str]:
     """Host LAN IPs injected for Docker/container deployments (comma/space separated)."""
-    import re
-
     raw = os.environ.get("ADVERTISED_IPS") or os.environ.get("HOST_LAN_IPS") or ""
     if not str(raw).strip():
         try:
@@ -197,7 +307,6 @@ def get_all_local_ips() -> list[str]:
     (172.x). Prefer explicitly advertised host LAN IPs when provided.
     """
     import platform
-    import re
     import socket
 
     advertised = _parse_advertised_ips()
@@ -275,5 +384,3 @@ def get_all_local_ips() -> list[str]:
         return (3, ip_str)
 
     return sorted(ips, key=_sort_key)
-
-

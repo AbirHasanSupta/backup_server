@@ -150,6 +150,8 @@ Important environment settings are:
 | `POSTGRES_URL` | PostgreSQL connection URL when the backend is `postgres` |
 | `REDIS_URL`, `CELERY_ENABLED` | Enable Redis-backed caching/locks and Celery tasks |
 | `CORS_ORIGINS` | Comma-separated allowlist for browser clients; leave empty for native-only use |
+| `ADVERTISED_IPS`, `ADVERTISED_PORT` | Host LAN IPs / published port for Docker phone discovery |
+| `TAILSCALE_IPS`, `TAILSCALE_DNS_NAME` | Host Tailscale endpoints for Docker `/ping` (mirrors desktop CLI) |
 
 The server automatically initializes SQLite when configured for standalone
 operation. When PostgreSQL initialization fails, it logs a warning and falls
@@ -196,6 +198,11 @@ delete the PostgreSQL database, backups, and cached data.
 
 The included Nginx configuration exposes HTTP only. Terminate TLS at a trusted
 reverse proxy or load balancer before allowing access outside a private network.
+
+For away-from-home access, install Tailscale or WireGuard on the Docker **host**
+and the phone. Set `TAILSCALE_IPS` / `TAILSCALE_DNS_NAME` in `.env` from the
+host's `tailscale status` (the API container has no Tailscale CLI). WireGuard
+tunnel addresses are entered manually in the Android app, same as desktop.
 
 ## 7. Install and run the Android client
 

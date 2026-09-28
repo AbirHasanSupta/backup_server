@@ -94,6 +94,11 @@ _DEFAULTS = {
     # Optional published/proxy port for phone discovery. None → use listen PORT
     # so desktop custom ports keep working unchanged.
     "ADVERTISED_PORT": None,
+    # Tailscale endpoints for Docker (CLI is on the host, not in the image).
+    # Same structured ``tailscale`` field desktop gets from ``tailscale status``.
+    # Values come from env via _apply_environment_overrides (blank env ignored).
+    "TAILSCALE_IPS": "",
+    "TAILSCALE_DNS_NAME": "",
 }
 
 # Environment values are deployment-owned secrets/runtime settings.  They take
@@ -115,6 +120,8 @@ _ENV_CONFIG_KEYS = {
     "CORS_ORIGINS": str,
     "ADVERTISED_IPS": str,
     "ADVERTISED_PORT": int,
+    "TAILSCALE_IPS": str,
+    "TAILSCALE_DNS_NAME": str,
 }
 
 
@@ -123,12 +130,29 @@ def _apply_environment_overrides(cfg: dict) -> dict:
         value = os.environ.get(key)
         if value is None:
             continue
+        # Blank compose-injected env (TAILSCALE_IPS=) must not wipe values from
+        # server_config.json.  Same for optional string discovery knobs.
+        if converter is str and not str(value).strip() and key in (
+            "TAILSCALE_IPS",
+            "TAILSCALE_DNS_NAME",
+            "ADVERTISED_IPS",
+        ):
+            continue
         try:
             cfg[key] = converter(value)
         except (TypeError, ValueError):
             # Invalid values remain visible in the persisted configuration
             # rather than preventing the server from starting unexpectedly.
             pass
+    # Alias env keys used in docs / older templates.
+    if not str(cfg.get("TAILSCALE_IPS") or "").strip():
+        alias_ips = os.environ.get("ADVERTISED_TAILSCALE_IPS")
+        if alias_ips is not None and str(alias_ips).strip():
+            cfg["TAILSCALE_IPS"] = str(alias_ips).strip()
+    if not str(cfg.get("TAILSCALE_DNS_NAME") or "").strip():
+        alias_dns = os.environ.get("ADVERTISED_TAILSCALE_DNS")
+        if alias_dns is not None and str(alias_dns).strip():
+            cfg["TAILSCALE_DNS_NAME"] = str(alias_dns).strip()
     if "CELERY_ENABLED" in os.environ:
         cfg["CELERY_ENABLED"] = os.environ["CELERY_ENABLED"].lower() in ("1", "true", "yes")
     if "REQUIRE_APPROVAL" in os.environ:
@@ -285,10 +309,18 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> None:
     global _config_cache, _config_cache_mtime
     with _config_lock:
-        existing_server_id = (_config_cache or {}).get("SERVER_ID")
+        existing = _config_cache if isinstance(_config_cache, dict) else {}
+        if not existing:
+            existing = _load_json(CONFIG_FILE) or {}
+        existing_server_id = existing.get("SERVER_ID")
         merged = {**_DEFAULTS, **cfg}
         if existing_server_id and not merged.get("SERVER_ID"):
             merged["SERVER_ID"] = existing_server_id
+        # Desktop settings save is a partial dict. Preserve Docker Tailscale
+        # overrides that were set in the shared config file / prior load.
+        for key in ("TAILSCALE_IPS", "TAILSCALE_DNS_NAME"):
+            if key not in cfg and existing.get(key):
+                merged[key] = existing[key]
         if _IS_FROZEN:
             merged["DB_PATH"] = DB_PATH
 
