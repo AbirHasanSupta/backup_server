@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 import time
 from pydantic import BaseModel
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
@@ -12,11 +13,83 @@ from core.config import get_shared_dirs
 from core.path_utils import normalize_fs_path
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo, reels_repo, social_repo, file_repo
+from repositories.base import is_postgres
 from services.reels_service import reels_service
+from storage.manager import get_storage
 
 router = APIRouter(tags=["Reels"])
 
 _REEL_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
+
+_reel_warm_lock = threading.Lock()
+_reel_warm_active = False
+
+
+def _schedule_reel_thumbnail_warm(items: list[dict], *, offset: int = 0, limit: int = 12) -> None:
+    """Prefetch first-page reel thumbnails (Postgres/Docker only).
+
+    Desktop/SQLite keeps prior behavior: no background ffmpeg on list endpoints.
+    """
+    global _reel_warm_active
+    if offset != 0 or not items or not is_postgres():
+        return
+
+    sample = list(items[:limit])
+    with _reel_warm_lock:
+        if _reel_warm_active:
+            return
+        _reel_warm_active = True
+
+    def _run() -> None:
+        global _reel_warm_active
+        try:
+            from thumbnail import warm_thumbnails
+
+            storage = get_storage()
+            shared_roots: dict[str, str] = {}
+            for entry in get_shared_dirs():
+                eid = entry.get("id")
+                if not eid:
+                    continue
+                root = os.path.abspath(normalize_fs_path(entry.get("path") or ""))
+                if os.path.isdir(root):
+                    shared_roots[str(eid)] = root
+
+            paths: list[str] = []
+            for item in sample:
+                st = item.get("source_type") or ""
+                sk = item.get("source_key") or ""
+                rel = item.get("path") or item.get("relative_path") or ""
+                if not rel:
+                    continue
+                try:
+                    if st in ("reel_backup", "phone"):
+                        full = storage.get_file_path(rel, device_id=sk)
+                        if full and os.path.isfile(full):
+                            paths.append(full)
+                    elif st in ("reel_shared", "shared"):
+                        root = shared_roots.get(str(sk))
+                        if not root:
+                            continue
+                        safe_rel = os.path.normpath(str(rel).replace("\\", "/")).lstrip("/\\")
+                        full_p = os.path.abspath(os.path.join(root, safe_rel))
+                        try:
+                            if os.path.commonpath([root, full_p]) != root:
+                                continue
+                        except ValueError:
+                            continue
+                        if os.path.isfile(full_p):
+                            paths.append(full_p)
+                except Exception:
+                    continue
+            warm_thumbnails(paths, limit=limit)
+        except Exception:
+            pass
+        finally:
+            with _reel_warm_lock:
+                _reel_warm_active = False
+
+    threading.Thread(target=_run, daemon=True, name="reel-thumb-warm").start()
 
 
 class RepostRequest(BaseModel):
@@ -166,6 +239,7 @@ async def get_shared_and_backups_reels(
                             pass
 
     materialized = reels_repo.bulk_get_or_create_library_reel_shares(candidates)
+    _schedule_reel_thumbnail_warm(materialized, offset=0)
     media_ids = [r["media_id"] for r in materialized]
     counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id)
     comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids)
@@ -371,6 +445,17 @@ async def get_saved_reels(
         })
 
     total = len(reels)
+    _schedule_reel_thumbnail_warm(
+        [
+            {
+                "source_type": s.get("source_type"),
+                "source_key": s.get("source_key"),
+                "path": s.get("relative_path"),
+            }
+            for s in saved_rows
+        ],
+        offset=offset,
+    )
     return {"reels": reels, "has_more": (offset + limit) < total or len(saved_rows) == limit, "total": total}
 
 
@@ -461,6 +546,17 @@ async def get_liked_reels(
         })
 
     total = len(reels)
+    _schedule_reel_thumbnail_warm(
+        [
+            {
+                "source_type": s.get("source_type"),
+                "source_key": s.get("source_key"),
+                "path": s.get("relative_path"),
+            }
+            for s in video_rows
+        ],
+        offset=offset,
+    )
     return {"reels": reels, "has_more": (offset + limit) < total or len(liked_rows) == limit, "total": total}
 
 

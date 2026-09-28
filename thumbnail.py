@@ -27,8 +27,25 @@ def _cache_dir() -> str:
     return DEFAULT_THUMBNAIL_CACHE_DIR
 
 
-def _cache_key(source_path: str, mtime: float, size: int) -> str:
-    raw = f"{source_path}:{mtime}:{size}"
+def _stable_path_token(source_path: str) -> str:
+    """Identity that survives Windows↔Docker path remaps on the same mount.
+
+    Prefer device+inode when available so `D:\\PhoneBackup\\...` and
+    `/backup_storage/...` share one thumbnail cache entry. Fall back to a
+    slash-normalized path string when inode is unavailable (e.g. some
+    network/FAT mounts report st_ino == 0).
+    """
+    try:
+        st = os.stat(source_path)
+        if getattr(st, "st_ino", 0):
+            return f"ino:{st.st_dev}:{st.st_ino}"
+    except OSError:
+        pass
+    return source_path.replace("\\", "/").lower()
+
+
+def _cache_key(source_path: str, mtime: float, size: int, *, prefix: str = "") -> str:
+    raw = f"{prefix}{_stable_path_token(source_path)}:{mtime}:{size}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -134,7 +151,7 @@ def get_image_thumbnail_path(source_path: str, max_size: int = 512) -> str | Non
     except OSError:
         return None
 
-    key = _cache_key(f"img_{max_size}_{source_path}", stat.st_mtime, stat.st_size)
+    key = _cache_key(source_path, stat.st_mtime, stat.st_size, prefix=f"img_{max_size}_")
     out_path = os.path.join(_cache_dir(), f"{key}.jpg")
     if os.path.isfile(out_path):
         return out_path
@@ -237,3 +254,19 @@ def clear_thumbnail_cache() -> dict:
     except OSError:
         pass
     return {"files": removed_files, "bytes": removed_bytes}
+
+
+def warm_thumbnails(paths: list[str], limit: int = 12) -> None:
+    """Best-effort prefetch of thumbnails (used after share/reel materialization)."""
+    from video_preview import is_video_path
+
+    for source_path in paths[: max(0, limit)]:
+        try:
+            if not source_path or not os.path.isfile(source_path):
+                continue
+            if is_video_path(source_path):
+                get_video_thumbnail_path(source_path)
+            else:
+                get_image_thumbnail_path(source_path)
+        except Exception:
+            continue

@@ -18,11 +18,13 @@ from core.config import APP_DATA_DIR, SHARED_DIRECT_POST_DIR, SHARED_QUIZ_DIR, S
 from core.path_utils import normalize_fs_path
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo, social_repo
+from repositories.base import is_postgres
 from services.feed_service import feed_service
 from services.preview_service import preview_service
 from services.thumbnail_service import thumbnail_service
 from storage.manager import get_storage
 import rewind
+import threading
 
 router = APIRouter(tags=["Social Feed & Shares"])
 
@@ -31,6 +33,68 @@ QUIZ_SHARE_MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_POST_FILES = 300
 DIRECT_POST_MAX_FILES = 300
 DIRECT_POST_MAX_FILE_BYTES = 100 * 1024 * 1024
+
+# Deduplicate overlapping warm jobs under multi-client Docker load.
+_feed_warm_lock = threading.Lock()
+_feed_warm_active = False
+
+
+def _schedule_feed_thumbnail_warm(posts: list[dict], *, offset: int = 0, limit: int = 12) -> None:
+    """Prefetch first-page feed thumbnails (Postgres/Docker only).
+
+    Desktop/SQLite keeps prior behavior: no background ffmpeg work on list.
+    Only the first page is warmed, and at most one warm job runs per process.
+    """
+    global _feed_warm_active
+    if offset != 0 or not posts or not is_postgres():
+        return
+
+    share_ids: list[int] = []
+    for post in posts:
+        for item in post.get("items") or []:
+            sid = item.get("share_id")
+            if sid is None:
+                continue
+            try:
+                share_ids.append(int(sid))
+            except (TypeError, ValueError):
+                continue
+            if len(share_ids) >= limit:
+                break
+        if len(share_ids) >= limit:
+            break
+    if not share_ids:
+        return
+
+    with _feed_warm_lock:
+        if _feed_warm_active:
+            return
+        _feed_warm_active = True
+
+    def _run() -> None:
+        global _feed_warm_active
+        try:
+            from thumbnail import warm_thumbnails
+
+            paths: list[str] = []
+            for sid in share_ids:
+                try:
+                    share = social_repo.get_device_share_by_id(sid)
+                    if not share:
+                        continue
+                    path = _resolve_share_path(share)
+                    if path and os.path.isfile(path):
+                        paths.append(path)
+                except Exception:
+                    continue
+            warm_thumbnails(paths, limit=limit)
+        except Exception:
+            pass
+        finally:
+            with _feed_warm_lock:
+                _feed_warm_active = False
+
+    threading.Thread(target=_run, daemon=True, name="feed-thumb-warm").start()
 
 
 class ReactRequest(BaseModel):
@@ -171,6 +235,7 @@ async def get_feed(
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     posts, has_more, total = feed_service.build_unified_feed(device_id, offset, limit)
+    _schedule_feed_thumbnail_warm(posts, offset=offset)
     return {"items": posts, "has_more": has_more, "total": total}
 
 
@@ -729,7 +794,8 @@ async def thumbnail_share_item(
     path = _resolve_share_path(share)
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
-    return thumbnail_service.get_thumbnail_response(path)
+    # ffmpeg/Pillow must not block the uvicorn event loop (critical under Gunicorn).
+    return await asyncio.to_thread(thumbnail_service.get_thumbnail_response, path)
 
 
 @router.get("/api/notifications/pending")

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Any, Dict, List, Tuple
 from repositories.base import execute_read_one, execute_read_query, execute_write, is_postgres
 from database import (
@@ -12,6 +11,30 @@ from database import (
     get_cached_geocode as db_get_cached_geocode,
     save_cached_geocode as db_save_cached_geocode,
 )
+
+
+def _lookup_media_by_ids(media_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+    """Batch-load media_index rows for the given ids."""
+    by_id: Dict[int, Dict[str, Any]] = {}
+    if not media_ids:
+        return by_id
+    # PG uses cap_time; SQLite media_index uses capture_time.
+    cap_col = "cap_time" if is_postgres() else "capture_time"
+    chunk_size = 500
+    for i in range(0, len(media_ids), chunk_size):
+        chunk = media_ids[i : i + chunk_size]
+        placeholders = ",".join(["?"] * len(chunk))
+        rows = execute_read_query(
+            f"""
+            SELECT id, source_type, source_key, relative_path, COALESCE({cap_col}, 0) AS cap_time
+            FROM media_index
+            WHERE id IN ({placeholders})
+            """,
+            tuple(chunk),
+        )
+        for row in rows:
+            by_id[int(row["id"])] = row
+    return by_id
 
 
 def get_trips(source_id: str) -> List[Dict[str, Any]]:
@@ -41,9 +64,13 @@ def get_trips(source_id: str) -> List[Dict[str, Any]]:
         )
         media_counts: Dict[int, list[int]] = {}
         for cr in counts_rows:
+            # Match get_trip_media: skip unresolvable rows so badge == interior.
+            path = (cr["relative_path"] or "").strip()
+            if not path:
+                continue
             tid = cr["trip_id"]
-            path = (cr["relative_path"] or "").lower()
-            ext = ("." + path.rsplit(".", 1)[-1]) if "." in path else ""
+            path_l = path.lower()
+            ext = ("." + path_l.rsplit(".", 1)[-1]) if "." in path_l else ""
             is_vid = ext in video_exts
             if tid not in media_counts:
                 media_counts[tid] = [0, 0]  # [photo_count, video_count]
@@ -65,7 +92,14 @@ def get_trips(source_id: str) -> List[Dict[str, Any]]:
                     "source_id": r.get("cover_source_key") or source_id,
                     "is_video": ext in video_exts,
                 }
-            p_cnt, v_cnt = media_counts.get(r["id"], [r["media_count"], 0])
+            # Live junction counts when present so badge matches trip detail.
+            # Empty junction → 0 (fixes Docker ghost badges from media_ids drop).
+            if r["id"] in media_counts:
+                p_cnt, v_cnt = media_counts[r["id"]]
+                live_count = p_cnt + v_cnt
+            else:
+                p_cnt, v_cnt = 0, 0
+                live_count = 0
             trips.append({
                 "id": r["id"],
                 "source_id": r["source_id"],
@@ -74,7 +108,7 @@ def get_trips(source_id: str) -> List[Dict[str, Any]]:
                 "end_time": r["end_time"],
                 "center_lat": r["center_lat"],
                 "center_lon": r["center_lon"],
-                "media_count": r["media_count"],
+                "media_count": live_count,
                 "photo_count": p_cnt,
                 "video_count": v_cnt,
                 "cover_media_id": r["cover_media_id"],
@@ -117,14 +151,16 @@ def get_trip_media(trip_id: int) -> Tuple[Dict[str, Any] | None, List[Dict[str, 
         video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
         media_items = []
         for r in media_rows:
-            path = r["relative_path"]
-            ext = ("." + path.rsplit(".", 1)[-1].lower()) if path and "." in path else ""
+            path = (r["relative_path"] or "").strip()
+            if not path:
+                continue
+            ext = ("." + path.rsplit(".", 1)[-1].lower()) if "." in path else ""
             media_items.append({
                 "id": r["media_id"],
                 "trip_media_id": r["id"],
                 "source_type": r["source_type"],
                 "source_id": r["source_key"],
-                "relative_path": r["relative_path"],
+                "relative_path": path,
                 "size": r["size"],
                 "modified_time": r["modified_time"],
                 "capture_time": r["capture_time"],
@@ -133,8 +169,109 @@ def get_trip_media(trip_id: int) -> Tuple[Dict[str, Any] | None, List[Dict[str, 
                 "cap_year": r["cap_year"],
                 "is_video": ext in video_exts,
             })
+        # Keep response media_count aligned with the items we actually return.
+        trip = dict(trip)
+        trip["media_count"] = len(media_items)
         return trip, media_items
     return db_get_trip_media(trip_id)
+
+
+def _trip_media_items_from_cluster(source_id: str, cluster: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build denormalized trip_media rows from cluster `items` or `media_ids`.
+
+    Clustering (`trips.cluster_source_media`) only emits `media_ids`. Postgres
+    trip_media requires source_type/source_key/relative_path/cap_time, so look
+    those up from media_index — matching the SQLite junction insert path.
+
+    Rows without a resolvable relative_path are dropped: PG UNIQUE
+    (trip_id, source_type, source_key, relative_path) would collapse empties
+    into a single row and get_trip_media would skip them anyway.
+    """
+    items = cluster.get("items")
+    if items:
+        prepared: List[Dict[str, Any]] = []
+        missing_ids: List[int] = []
+        for item in items:
+            try:
+                mid = int(item.get("media_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not mid:
+                continue
+            try:
+                cap_time = int(item.get("cap_time") or item.get("capture_time") or 0)
+            except (TypeError, ValueError):
+                cap_time = 0
+            rel = (item.get("relative_path") or "").strip()
+            entry = {
+                "media_id": mid,
+                "source_type": item.get("source_type") or "phone",
+                "source_key": item.get("source_key") or source_id,
+                "relative_path": rel,
+                "cap_time": cap_time,
+            }
+            prepared.append(entry)
+            if not rel:
+                missing_ids.append(mid)
+
+        if missing_ids:
+            by_id = _lookup_media_by_ids(missing_ids)
+            for entry in prepared:
+                if entry["relative_path"]:
+                    continue
+                row = by_id.get(entry["media_id"])
+                if not row:
+                    continue
+                entry["relative_path"] = (row.get("relative_path") or "").strip()
+                if not entry.get("source_type"):
+                    entry["source_type"] = row.get("source_type") or "phone"
+                if not entry.get("source_key"):
+                    entry["source_key"] = row.get("source_key") or source_id
+                if not entry.get("cap_time"):
+                    try:
+                        entry["cap_time"] = int(row.get("cap_time") or 0)
+                    except (TypeError, ValueError):
+                        entry["cap_time"] = 0
+
+        return [e for e in prepared if e["relative_path"]]
+
+    raw_ids = cluster.get("media_ids") or []
+    media_ids: List[int] = []
+    for mid in raw_ids:
+        if mid is None:
+            continue
+        try:
+            media_ids.append(int(mid))
+        except (TypeError, ValueError):
+            continue
+    if not media_ids:
+        return []
+
+    by_id = _lookup_media_by_ids(media_ids)
+    out: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for mid in media_ids:
+        if mid in seen:
+            continue
+        seen.add(mid)
+        row = by_id.get(mid)
+        if not row:
+            continue
+        rel = (row.get("relative_path") or "").strip()
+        if not rel:
+            continue
+        try:
+            cap_time = int(row.get("cap_time") or 0)
+        except (TypeError, ValueError):
+            cap_time = 0
+        out.append({
+            "media_id": mid,
+            "source_type": row.get("source_type") or "phone",
+            "source_key": row.get("source_key") or source_id,
+            "relative_path": rel,
+            "cap_time": cap_time,
+        })
+    return out
 
 
 def save_trip_clusters(source_id: str, clusters: List[Dict[str, Any]]) -> None:
@@ -146,6 +283,21 @@ def save_trip_clusters(source_id: str, clusters: List[Dict[str, Any]]) -> None:
         execute_write("DELETE FROM trips WHERE source_id = ?", (source_id,))
 
         for c in clusters:
+            media_items = _trip_media_items_from_cluster(source_id, c)
+            # Persist the count of rows we actually insert, not the cluster's
+            # claim — keeps list badges aligned with trip detail after save.
+            media_count = len(media_items)
+            if media_count == 0:
+                # Still allow empty clusters to be skipped entirely (no ghost trips).
+                continue
+            cover_id = c.get("cover_media_id")
+            try:
+                cover_id = int(cover_id) if cover_id is not None else None
+            except (TypeError, ValueError):
+                cover_id = None
+            media_id_set = {item["media_id"] for item in media_items}
+            if cover_id not in media_id_set:
+                cover_id = media_items[0]["media_id"]
             execute_write(
                 """
                 INSERT INTO trips (source_id, title, start_date, end_date, start_time, end_time, place_name, center_lat, center_lon, media_count, cover_media_id, created_at)
@@ -161,33 +313,34 @@ def save_trip_clusters(source_id: str, clusters: List[Dict[str, Any]]) -> None:
                     c.get("place_name"),
                     c.get("center_lat"),
                     c.get("center_lon"),
-                    c.get("media_count", 0),
-                    c.get("cover_media_id"),
-                    int(c.get("created_at", 0)),
+                    media_count,
+                    cover_id,
+                    int(c.get("created_at", 0) or 0),
                 ),
             )
             trip_row = execute_read_one(
                 "SELECT id FROM trips WHERE source_id = ? AND start_time = ? ORDER BY id DESC LIMIT 1",
                 (source_id, c.get("start_time", 0)),
             )
-            if trip_row and "items" in c:
-                trip_id = trip_row["id"]
-                for item in c["items"]:
-                    execute_write(
-                        """
-                        INSERT INTO trip_media (trip_id, media_id, source_type, source_key, relative_path, cap_time)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        (
-                            trip_id,
-                            item.get("media_id", 0),
-                            item.get("source_type", "phone"),
-                            item.get("source_key", source_id),
-                            item.get("relative_path", ""),
-                            item.get("cap_time") or item.get("capture_time") or 0,
-                        ),
-                    )
+            if not trip_row:
+                continue
+            trip_id = trip_row["id"]
+            for item in media_items:
+                execute_write(
+                    """
+                    INSERT INTO trip_media (trip_id, media_id, source_type, source_key, relative_path, cap_time)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (
+                        trip_id,
+                        item["media_id"],
+                        item["source_type"],
+                        item["source_key"],
+                        item["relative_path"],
+                        item["cap_time"],
+                    ),
+                )
         return
     db_save_trip_clusters(source_id, clusters)
 

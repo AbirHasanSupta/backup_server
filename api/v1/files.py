@@ -178,7 +178,7 @@ async def get_thumbnail(
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     storage = get_storage()
     full_path = storage.get_file_path(target_path, device_id=device_id)
-    return thumbnail_service.get_thumbnail_response(full_path)
+    return await asyncio.to_thread(thumbnail_service.get_thumbnail_response, full_path)
 
 
 @router.post("/api/files/warm_previews")
@@ -431,7 +431,7 @@ async def thumbnail_shared_file(
     full_path = os.path.abspath(os.path.join(root, safe_rel))
     if os.path.commonpath([root, full_path]) != root or not os.path.isfile(full_path):
         raise HTTPException(status_code=404, detail="File not found")
-    return thumbnail_service.get_thumbnail_response(full_path)
+    return await asyncio.to_thread(thumbnail_service.get_thumbnail_response, full_path)
 
 
 @router.post("/api/shared/{source_id}/warm_previews")
