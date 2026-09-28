@@ -39,7 +39,7 @@ trips.start_time                  → start_time + start_date (derived)
 trips.end_time                    → end_time + end_date     (derived)
 device_share_groups.id            → group_id       (renamed)
 device_shares.id                  → share_id       (renamed)
-trip_media.(trip_id,media_id)     → richer schema in PG, migrated as-is
+trip_media.(trip_id,media_id)     → enriched from SQLite media_index metadata
 """
 
 from __future__ import annotations
@@ -184,19 +184,26 @@ def _build_migration_plan() -> list[dict]:  # noqa: C901
             out.pop(col, None)
         return out
 
-    def _trip_media(row: dict) -> dict:
-        """trip_media in SQLite only has (trip_id, media_id).
-        PG expects (trip_id, media_id, source_type, source_key, relative_path, cap_time).
-        We look those up from media_index — but that requires a join.
-        Since we can't do joins here easily, we store NULLs for the extra cols
-        and let the PG UNIQUE constraint handle duplicates."""
+    def _trip_media(row: dict) -> dict | None:
+        """Expand SQLite's junction row with its indexed-media metadata.
+
+        SQLite stores just ``(trip_id, media_id)``.  PostgreSQL's trip_media
+        uniqueness key includes the source and path, so placeholder values here
+        collapse every media row in a trip into one blank record.  The migration
+        query adds the ``migration_*`` fields with a join to media_index.
+        """
+        relative_path = str(row.get("migration_relative_path") or "").strip()
+        if not relative_path:
+            # A trip-media row cannot be served without its path.  Skipping it
+            # is preferable to creating a ghost trip row that masks later data.
+            return None
         return {
             "trip_id": row["trip_id"],
             "media_id": row["media_id"],
-            "source_type": "phone",       # reasonable default
-            "source_key": "",
-            "relative_path": "",
-            "cap_time": 0,
+            "source_type": str(row.get("migration_source_type") or "phone"),
+            "source_key": str(row.get("migration_source_key") or ""),
+            "relative_path": relative_path,
+            "cap_time": row.get("migration_cap_time") or 0,
         }
 
     def _device_share_groups(row: dict) -> dict:
@@ -336,7 +343,23 @@ def _migrate_one_db(sqlite_path: str, pg_conn, label: str = "") -> None:
 
         actual_sqlite_cols = _sqlite_cols(sqlite_conn, sqlite_tbl)
         col_str = ", ".join(actual_sqlite_cols)
-        rows_iter = sqlite_conn.execute(f"SELECT {col_str} FROM {sqlite_tbl}")
+        if sqlite_tbl == "trip_media" and "media_index" in existing_sqlite_tables:
+            # See _trip_media: this join is essential.  Do not substitute blank
+            # metadata; PG's path-bearing unique key would then discard nearly
+            # every file in each migrated trip.
+            rows_iter = sqlite_conn.execute(
+                """
+                SELECT tm.*,
+                       mi.source_type AS migration_source_type,
+                       mi.source_key AS migration_source_key,
+                       mi.relative_path AS migration_relative_path,
+                       mi.capture_time AS migration_cap_time
+                FROM trip_media tm
+                LEFT JOIN media_index mi ON mi.id = tm.media_id
+                """
+            )
+        else:
+            rows_iter = sqlite_conn.execute(f"SELECT {col_str} FROM {sqlite_tbl}")
 
         inserted = 0
         skipped = 0
@@ -344,6 +367,23 @@ def _migrate_one_db(sqlite_path: str, pg_conn, label: str = "") -> None:
         t0 = time.time()
 
         print(f"\n  → {sqlite_tbl} ({_fmt_num(total_rows)} rows)…", end="", flush=True)
+
+        if sqlite_tbl == "trip_media":
+            # Versions of this migrator before the metadata join wrote this
+            # exact placeholder shape.  Remove it before importing the real
+            # rows so re-running the migration repairs an already-affected PG
+            # database instead of returning duplicate media for each trip.
+            with pg_conn.cursor() as pg_cur:
+                pg_cur.execute(
+                    """
+                    DELETE FROM trip_media
+                    WHERE source_type = 'phone'
+                      AND source_key = ''
+                      AND relative_path = ''
+                      AND cap_time = 0
+                    """
+                )
+            pg_conn.commit()
 
         while True:
             raw_batch = rows_iter.fetchmany(batch_size)
