@@ -316,6 +316,11 @@ def cluster_source_media(source_id: str) -> list[dict]:
 
     # Save to database idempotently
     save_trip_clusters(source_id, qualifying_clusters)
+    try:
+        from services import places_trips_cache
+        places_trips_cache.invalidate_trips(source_id)
+    except Exception:
+        pass
     if qualifying_clusters:
         dev_name = get_device_display_name(source_id)
         add_log(f"[Trips] Generated {len(qualifying_clusters)} trip album(s) for {dev_name}")

@@ -1,6 +1,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Fast UI In-Memory SWR Cache (Parallel Instant Navigation)
 // ─────────────────────────────────────────────────────────────────────────────
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 const _uiMemoryCache = {
   feed: null,
   reelsFeed: {},
@@ -16,6 +18,146 @@ const _uiMemoryCache = {
   trips: {},
   tripMedia: {},
 };
+
+const PLACES_DISK_KEY = 'places_trips_cache_v1:clusters';
+const PLACE_ITEMS_DISK_PREFIX = 'places_trips_cache_v1:items:';
+const TRIPS_DISK_PREFIX = 'places_trips_cache_v1:trips:';
+const TRIP_MEDIA_DISK_PREFIX = 'places_trips_cache_v1:trip_media:';
+
+let _placesTripsHydratePromise = null;
+let _placesTripsHydrateGen = 0;
+
+function _persistJson(key, value) {
+  AsyncStorage.setItem(key, JSON.stringify(value)).catch(() => {});
+}
+
+function _removeDiskKey(key) {
+  AsyncStorage.removeItem(key).catch(() => {});
+}
+
+async function _readJson(key) {
+  try {
+    const raw = await AsyncStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function _clearDiskByPrefixes(prefixes, exactKeys = []) {
+  try {
+    const allKeys = await AsyncStorage.getAllKeys();
+    const toRemove = allKeys.filter(
+      (k) => exactKeys.includes(k) || prefixes.some((p) => k.startsWith(p)),
+    );
+    if (toRemove.length) await AsyncStorage.multiRemove(toRemove);
+  } catch {
+    for (const k of exactKeys) _removeDiskKey(k);
+  }
+}
+
+/**
+ * Hydrate places/trips memory cache from AsyncStorage (survives app restart).
+ * Safe to call repeatedly; only one disk load runs at a time.
+ * Invalidate bumps the generation so an in-flight hydrate cannot restore stale data.
+ */
+export function hydratePlacesTripsCache() {
+  if (_placesTripsHydratePromise) return _placesTripsHydratePromise;
+  const gen = _placesTripsHydrateGen;
+  _placesTripsHydratePromise = (async () => {
+    try {
+      const clusters = await _readJson(PLACES_DISK_KEY);
+      if (gen !== _placesTripsHydrateGen) return null;
+      if (clusters && Array.isArray(clusters.places) && !_uiMemoryCache.placeClusters) {
+        _uiMemoryCache.placeClusters = clusters;
+      }
+
+      const allKeys = await AsyncStorage.getAllKeys().catch(() => []);
+      if (gen !== _placesTripsHydrateGen) return null;
+
+      const itemKeys = allKeys.filter((k) => k.startsWith(PLACE_ITEMS_DISK_PREFIX));
+      const tripKeys = allKeys.filter((k) => k.startsWith(TRIPS_DISK_PREFIX));
+      const mediaKeys = allKeys.filter((k) => k.startsWith(TRIP_MEDIA_DISK_PREFIX));
+
+      if (itemKeys.length) {
+        const pairs = await AsyncStorage.multiGet(itemKeys);
+        if (gen !== _placesTripsHydrateGen) return null;
+        for (const [key, raw] of pairs) {
+          if (!raw) continue;
+          try {
+            const clusterKey = key.slice(PLACE_ITEMS_DISK_PREFIX.length);
+            if (!_uiMemoryCache.placeItems[clusterKey]) {
+              _uiMemoryCache.placeItems[clusterKey] = JSON.parse(raw);
+            }
+          } catch { /* ignore corrupt entries */ }
+        }
+      }
+
+      if (tripKeys.length) {
+        const pairs = await AsyncStorage.multiGet(tripKeys);
+        if (gen !== _placesTripsHydrateGen) return null;
+        for (const [key, raw] of pairs) {
+          if (!raw) continue;
+          try {
+            let sourceId = key.slice(TRIPS_DISK_PREFIX.length);
+            if (sourceId === '_default') sourceId = '';
+            const parsed = JSON.parse(raw);
+            if (!_uiMemoryCache.trips[sourceId]) {
+              _uiMemoryCache.trips[sourceId] = parsed;
+            }
+            if (sourceId && !_uiMemoryCache.trips['']) {
+              _uiMemoryCache.trips[''] = parsed;
+            }
+          } catch { /* ignore */ }
+        }
+      }
+
+      if (mediaKeys.length) {
+        const pairs = await AsyncStorage.multiGet(mediaKeys);
+        if (gen !== _placesTripsHydrateGen) return null;
+        for (const [key, raw] of pairs) {
+          if (!raw) continue;
+          try {
+            const tripId = key.slice(TRIP_MEDIA_DISK_PREFIX.length);
+            if (!_uiMemoryCache.tripMedia[tripId]) {
+              _uiMemoryCache.tripMedia[tripId] = JSON.parse(raw);
+            }
+          } catch { /* ignore */ }
+        }
+      }
+    } catch (err) {
+      console.warn('[Downloader] Places/trips cache hydrate failed:', err);
+    }
+    if (gen !== _placesTripsHydrateGen) return null;
+    return {
+      placeClusters: _uiMemoryCache.placeClusters,
+      trips: _uiMemoryCache.trips[''] || Object.values(_uiMemoryCache.trips)[0] || null,
+    };
+  })();
+  return _placesTripsHydratePromise;
+}
+
+/** Clear detail caches only (keep list caches). Used after a successful list refresh. */
+export async function invalidatePlacesTripsDetailCache() {
+  _uiMemoryCache.placeItems = {};
+  _uiMemoryCache.tripMedia = {};
+  await _clearDiskByPrefixes([PLACE_ITEMS_DISK_PREFIX, TRIP_MEDIA_DISK_PREFIX]);
+}
+
+/** Clear in-memory + disk places/trips caches. */
+export async function invalidatePlacesTripsCache() {
+  _placesTripsHydrateGen += 1;
+  _placesTripsHydratePromise = null;
+  _uiMemoryCache.placeClusters = null;
+  _uiMemoryCache.placeItems = {};
+  _uiMemoryCache.trips = {};
+  _uiMemoryCache.tripMedia = {};
+  await _clearDiskByPrefixes(
+    [PLACE_ITEMS_DISK_PREFIX, TRIPS_DISK_PREFIX, TRIP_MEDIA_DISK_PREFIX],
+    [PLACES_DISK_KEY],
+  );
+}
 
 export function getCachedFeed() {
   return _uiMemoryCache.feed;
@@ -72,7 +214,7 @@ export function getCachedTrips(sourceId = '') {
 }
 
 export function getCachedTripMedia(tripId) {
-  return _uiMemoryCache.tripMedia[tripId] || null;
+  return _uiMemoryCache.tripMedia[tripId] || _uiMemoryCache.tripMedia[String(tripId)] || null;
 }
 
 import * as FileSystem from 'expo-file-system/legacy';
@@ -538,40 +680,55 @@ export async function getRouletteItem() {
 
 /**
  * Fetch clustered "Memories from this place" groups (GPS EXIF-derived).
+ * @param {{ force?: boolean }} [opts] - force=true bypasses client + server cache.
  */
-export async function getPlaceClusters() {
+export async function getPlaceClusters(opts = {}) {
+  const force = !!opts?.force;
+  if (!force && _uiMemoryCache.placeClusters) {
+    return _uiMemoryCache.placeClusters;
+  }
   const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
+    const refresh = force ? '&refresh=1' : '';
     return {
-      url: `http://${ip}:${port}/memories/places?device_id=${encodeURIComponent(deviceId)}`,
+      url: `http://${ip}:${port}/memories/places?device_id=${encodeURIComponent(deviceId)}${refresh}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
   _uiMemoryCache.placeClusters = res;
+  _persistJson(PLACES_DISK_KEY, res);
   return res;
 }
 
 /**
  * Fetch all items within a single place cluster.
  * @param {string} clusterKey
+ * @param {{ force?: boolean }} [opts]
  */
-export async function getPlaceItems(clusterKey) {
+export async function getPlaceItems(clusterKey, opts = {}) {
+  const force = !!opts?.force;
+  if (!force && _uiMemoryCache.placeItems[clusterKey]) {
+    return _uiMemoryCache.placeItems[clusterKey];
+  }
   const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
+    const refresh = force ? '&refresh=1' : '';
     return {
-      url: `http://${ip}:${port}/memories/places/${encodeURIComponent(clusterKey)}?device_id=${encodeURIComponent(deviceId)}`,
+      url: `http://${ip}:${port}/memories/places/${encodeURIComponent(clusterKey)}?device_id=${encodeURIComponent(deviceId)}${refresh}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
   _uiMemoryCache.placeItems[clusterKey] = res;
+  _persistJson(PLACE_ITEMS_DISK_PREFIX + clusterKey, res);
   return res;
 }
 
 /**
  * Trigger media reindexing on the server.
+ * Also clears local places/trips caches so the next visit refetches after reindex.
  */
 export async function triggerMemoriesReindex() {
-  return fetchJsonWithMeshRetry(async () => {
+  const result = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
       url: `http://${ip}:${port}/memories/reindex?device_id=${encodeURIComponent(deviceId)}`,
@@ -581,6 +738,8 @@ export async function triggerMemoriesReindex() {
       },
     };
   });
+  await invalidatePlacesTripsCache().catch(() => {});
+  return result;
 }
 
 /**
@@ -695,35 +854,64 @@ export async function downloadRewindReel(year, month, destUri, onProgress) {
 /**
  * Fetch auto-generated trip albums for the current or specified source.
  * @param {string} [sourceId]
+ * @param {{ force?: boolean }} [opts]
  * @returns {Promise<{trips: Array<{id: number, source_id: string, title: string, start_time: number, end_time: number, center_lat: number, center_lon: number, media_count: number, cover_media_id: number|null, cover: any}>}>}
  */
-export async function getTrips(sourceId) {
+export async function getTrips(sourceId, opts = {}) {
+  // Support legacy call signature getTrips(opts) when first arg is options object.
+  let targetSourceId = sourceId;
+  let force = !!opts?.force;
+  if (sourceId && typeof sourceId === 'object') {
+    force = !!sourceId.force;
+    targetSourceId = undefined;
+  }
+
+  const cacheKey = targetSourceId || '';
+  if (!force && _uiMemoryCache.trips[cacheKey]) {
+    return _uiMemoryCache.trips[cacheKey];
+  }
+
   const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
-    const target = sourceId || deviceId;
+    const target = targetSourceId || deviceId;
+    const refresh = force ? '&refresh=1' : '';
     return {
-      url: `http://${ip}:${port}/api/trips?source_id=${encodeURIComponent(target)}`,
+      url: `http://${ip}:${port}/api/trips?source_id=${encodeURIComponent(target)}${refresh}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
-  _uiMemoryCache.trips[sourceId || ''] = res;
+  _uiMemoryCache.trips[cacheKey] = res;
+  // Also mirror under '' so getCachedTrips() without args works after a device-scoped fetch.
+  if (cacheKey) {
+    _uiMemoryCache.trips[''] = res;
+  }
+  _persistJson(TRIPS_DISK_PREFIX + (cacheKey || '_default'), res);
   return res;
 }
 
 /**
  * Fetch all media items in a specific trip.
  * @param {number} tripId
+ * @param {{ force?: boolean }} [opts]
  * @returns {Promise<{trip: any, media: Array<any>}>}
  */
-export async function getTripMedia(tripId) {
+export async function getTripMedia(tripId, opts = {}) {
+  const force = !!opts?.force;
+  const idKey = String(tripId);
+  if (!force && (_uiMemoryCache.tripMedia[idKey] || _uiMemoryCache.tripMedia[tripId])) {
+    return _uiMemoryCache.tripMedia[idKey] || _uiMemoryCache.tripMedia[tripId];
+  }
   const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
+    const refresh = force ? '&refresh=1' : '';
     return {
-      url: `http://${ip}:${port}/api/trips/${encodeURIComponent(tripId)}/media?device_id=${encodeURIComponent(deviceId)}`,
+      url: `http://${ip}:${port}/api/trips/${encodeURIComponent(tripId)}/media?device_id=${encodeURIComponent(deviceId)}${refresh}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  _uiMemoryCache.tripMedia[idKey] = res;
   _uiMemoryCache.tripMedia[tripId] = res;
+  _persistJson(TRIP_MEDIA_DISK_PREFIX + idKey, res);
   return res;
 }
 
@@ -732,7 +920,7 @@ export async function getTripMedia(tripId) {
  * @param {string} [sourceId]
  */
 export async function reclusterTrips(sourceId) {
-  return fetchJsonWithMeshRetry(async () => {
+  const result = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     const target = sourceId || deviceId;
     return {
@@ -740,6 +928,16 @@ export async function reclusterTrips(sourceId) {
       options: { method: 'POST', headers: { Authorization: `Bearer ${key}` } },
     };
   });
+  // Server rebuilt trips — drop local trip caches so next reads refetch.
+  _uiMemoryCache.trips = {};
+  _uiMemoryCache.tripMedia = {};
+  await _clearDiskByPrefixes([TRIPS_DISK_PREFIX, TRIP_MEDIA_DISK_PREFIX]);
+  if (result?.trips) {
+    const payload = { trips: result.trips };
+    _uiMemoryCache.trips[''] = payload;
+    _persistJson(TRIPS_DISK_PREFIX + '_default', payload);
+  }
+  return result;
 }
 
 /**

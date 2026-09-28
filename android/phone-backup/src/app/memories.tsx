@@ -286,6 +286,8 @@ export default function MemoriesScreen() {
     return () => {
       active = false;
     };
+    // Mount-only seed; focus effect handles subsequent refreshes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional
   }, []);
 
   const todayDay = data?.days && data.days.length > 0 ? data.days[0] : null;

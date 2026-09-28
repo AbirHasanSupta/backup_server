@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo
 from services.preview_service import preview_service
+from services import places_trips_cache
 import memories
 import rewind
 
@@ -59,8 +60,11 @@ async def trigger_reindex(
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     if device_id:
         await asyncio.to_thread(memories.reindex_device, device_id)
+        places_trips_cache.invalidate_all_for_device(device_id)
     else:
         await asyncio.to_thread(memories.reindex_all)
+        places_trips_cache.invalidate_places()
+        places_trips_cache.invalidate_trips()
     return {"ok": True, "message": "Reindex triggered"}
 
 
@@ -119,11 +123,18 @@ async def get_roulette(
 @router.get("/api/memories/places")
 async def get_places(
     device_id: str,
+    refresh: int = Query(0),
     authorization: str = Header(None),
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    cache_key = places_trips_cache.places_clusters_key(device_id)
+    if not refresh:
+        cached = places_trips_cache.get_cached(cache_key)
+        if cached is not None:
+            return cached
     res = await asyncio.to_thread(memories.get_place_clusters, device_id)
+    places_trips_cache.set_cached(cache_key, res)
     return res
 
 
@@ -132,11 +143,18 @@ async def get_places(
 async def get_place_details(
     cluster_key: str,
     device_id: str,
+    refresh: int = Query(0),
     authorization: str = Header(None),
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    cache_key = places_trips_cache.places_items_key(device_id, cluster_key)
+    if not refresh:
+        cached = places_trips_cache.get_cached(cache_key)
+        if cached is not None:
+            return cached
     res = await asyncio.to_thread(memories.get_place_items, device_id, cluster_key)
+    places_trips_cache.set_cached(cache_key, res)
     return res
 
 

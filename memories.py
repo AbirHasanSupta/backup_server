@@ -466,6 +466,11 @@ def reindex_device(device_id: str, trigger_cluster: bool = True) -> None:
         _flush_rows(_run_extraction(to_process))
 
     prune_media_index("phone", device_id, seen_paths, existing_paths=set(cache.keys()))
+    try:
+        from services import places_trips_cache
+        places_trips_cache.invalidate_places(device_id)
+    except Exception:
+        pass
     if trigger_cluster:
         trigger_background_clustering(device_id)
 
@@ -573,6 +578,12 @@ def reindex_shared(source_id: str, root_path: str) -> None:
 
     prune_media_index("shared", source_id, seen_paths, existing_paths=set(cache.keys()))
     upsert_scan_dirs("shared", source_id, dir_updates)
+    try:
+        from services import places_trips_cache
+        # Shared-folder reindex can change place clusters for any device that can see it.
+        places_trips_cache.invalidate_places()
+    except Exception:
+        pass
 
 
 _reindex_lock = threading.Lock()

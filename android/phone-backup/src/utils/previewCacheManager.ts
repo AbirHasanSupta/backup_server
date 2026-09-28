@@ -255,6 +255,14 @@ export async function clearAllDiskCache(): Promise<void> {
         console.warn('[CacheManager] Error deleting documentDirectory temp files:', err);
       }
     }
+
+    // 4. Clear persisted Places/Trips API response caches
+    try {
+      const { invalidatePlacesTripsCache } = await import('../../downloader');
+      await invalidatePlacesTripsCache();
+    } catch (err) {
+      console.warn('[CacheManager] Error clearing places/trips cache:', err);
+    }
   } catch (err) {
     console.warn('[CacheManager] Error clearing disk cache:', err);
   }
