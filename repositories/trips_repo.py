@@ -276,73 +276,102 @@ def _trip_media_items_from_cluster(source_id: str, cluster: Dict[str, Any]) -> L
 
 def save_trip_clusters(source_id: str, clusters: List[Dict[str, Any]]) -> None:
     if is_postgres():
-        # Clean existing trips for source
-        old_trips = execute_read_query("SELECT id FROM trips WHERE source_id = ?", (source_id,))
-        for ot in old_trips:
-            execute_write("DELETE FROM trip_media WHERE trip_id = ?", (ot["id"],))
-        execute_write("DELETE FROM trips WHERE source_id = ?", (source_id,))
-
-        for c in clusters:
-            media_items = _trip_media_items_from_cluster(source_id, c)
-            # Persist the count of rows we actually insert, not the cluster's
-            # claim — keeps list badges aligned with trip detail after save.
-            media_count = len(media_items)
-            if media_count == 0:
-                # Still allow empty clusters to be skipped entirely (no ghost trips).
-                continue
-            cover_id = c.get("cover_media_id")
-            try:
-                cover_id = int(cover_id) if cover_id is not None else None
-            except (TypeError, ValueError):
-                cover_id = None
-            media_id_set = {item["media_id"] for item in media_items}
-            if cover_id not in media_id_set:
-                cover_id = media_items[0]["media_id"]
-            execute_write(
-                """
-                INSERT INTO trips (source_id, title, start_date, end_date, start_time, end_time, place_name, center_lat, center_lon, media_count, cover_media_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    source_id,
-                    c.get("title", "Trip"),
-                    c.get("start_date", ""),
-                    c.get("end_date", ""),
-                    c.get("start_time", 0),
-                    c.get("end_time", 0),
-                    c.get("place_name"),
-                    c.get("center_lat"),
-                    c.get("center_lon"),
-                    media_count,
-                    cover_id,
-                    int(c.get("created_at", 0) or 0),
-                ),
-            )
-            trip_row = execute_read_one(
-                "SELECT id FROM trips WHERE source_id = ? AND start_time = ? ORDER BY id DESC LIMIT 1",
-                (source_id, c.get("start_time", 0)),
-            )
-            if not trip_row:
-                continue
-            trip_id = trip_row["id"]
-            for item in media_items:
-                execute_write(
-                    """
-                    INSERT INTO trip_media (trip_id, media_id, source_type, source_key, relative_path, cap_time)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT DO NOTHING
-                    """,
-                    (
-                        trip_id,
-                        item["media_id"],
-                        item["source_type"],
-                        item["source_key"],
-                        item["relative_path"],
-                        item["cap_time"],
-                    ),
-                )
+        _save_trip_clusters_postgres(source_id, clusters)
         return
     db_save_trip_clusters(source_id, clusters)
+
+
+def _save_trip_clusters_postgres(source_id: str, clusters: List[Dict[str, Any]]) -> None:
+    """Replace a source's trips atomically.
+
+    A phone may retry ``/trips/recluster`` while an earlier request is still
+    geocoding.  These calls can land on different Gunicorn workers, so issuing
+    individual delete/insert statements lets the later request delete a trip
+    between the earlier request's parent and ``trip_media`` inserts.  Hold a
+    transaction-scoped PostgreSQL advisory lock and use one connection for the
+    complete replacement to make that interleaving impossible.
+    """
+    from database_pg import get_pg_connection
+
+    with get_pg_connection() as conn:
+        try:
+            with conn.cursor() as cur:
+                    # The lock is scoped to this source, so separate devices
+                    # can still recluster concurrently.  It is released on
+                    # commit/rollback even if a request is interrupted.
+                    cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (source_id,))
+                    cur.execute(
+                        "DELETE FROM trip_media WHERE trip_id IN (SELECT id FROM trips WHERE source_id = %s)",
+                        (source_id,),
+                    )
+                    cur.execute("DELETE FROM trips WHERE source_id = %s", (source_id,))
+
+                    for cluster in clusters:
+                        media_items = _trip_media_items_from_cluster(source_id, cluster)
+                        # Persist the count of rows we actually insert, not
+                        # the cluster's claim, so badges match trip detail.
+                        if not media_items:
+                            continue
+                        cover_id = cluster.get("cover_media_id")
+                        try:
+                            cover_id = int(cover_id) if cover_id is not None else None
+                        except (TypeError, ValueError):
+                            cover_id = None
+                        media_id_set = {item["media_id"] for item in media_items}
+                        if cover_id not in media_id_set:
+                            cover_id = media_items[0]["media_id"]
+
+                        cur.execute(
+                            """
+                            INSERT INTO trips
+                                (source_id, title, start_date, end_date, start_time, end_time,
+                                 place_name, center_lat, center_lon, media_count, cover_media_id, created_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING id
+                            """,
+                            (
+                                source_id,
+                                cluster.get("title", "Trip"),
+                                cluster.get("start_date", ""),
+                                cluster.get("end_date", ""),
+                                cluster.get("start_time", 0),
+                                cluster.get("end_time", 0),
+                                cluster.get("place_name"),
+                                cluster.get("center_lat"),
+                                cluster.get("center_lon"),
+                                len(media_items),
+                                cover_id,
+                                int(cluster.get("created_at", 0) or 0),
+                            ),
+                        )
+                        trip_id = cur.fetchone()[0]
+                        cur.executemany(
+                            """
+                            INSERT INTO trip_media
+                                (trip_id, media_id, source_type, source_key, relative_path, cap_time)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            ON CONFLICT DO NOTHING
+                            """,
+                            [
+                                (
+                                    trip_id,
+                                    item["media_id"],
+                                    item["source_type"],
+                                    item["source_key"],
+                                    item["relative_path"],
+                                    item["cap_time"],
+                                )
+                                for item in media_items
+                            ],
+                        )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            # Do not fall back to SQLite here: this replacement uses the
+            # PostgreSQL trip schema and a partial fallback would leave the
+            # two databases disagreeing.  The caller receives the actual
+            # database failure instead.
+            raise
 
 
 def get_cached_geocode(lat: float, lon: float) -> str | None:
