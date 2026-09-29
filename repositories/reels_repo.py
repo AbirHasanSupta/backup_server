@@ -560,13 +560,23 @@ def record_reel_telemetry(device_id: str, events: List[Dict[str, Any]]) -> int:
             except (TypeError, ValueError):
                 media_id = None
             try:
-                watch_time = max(0.0, min(float(ev.get("watch_time_sec", 0.0)), 8 * 60 * 60))
-                duration = max(0.0, min(float(ev.get("duration_sec", 0.0)), 8 * 60 * 60))
-                completion = max(0.0, min(float(ev.get("completion_rate", 0.0)), 10.0))
-                loops = max(0, min(int(ev.get("loops", 0)), 100))
+                watch_time = max(0.0, min(float(ev.get("watch_time_sec") or ev.get("watch_time") or 0.0), 8 * 60 * 60))
+                duration = max(0.0, min(float(ev.get("duration_sec") or ev.get("duration") or 0.0), 8 * 60 * 60))
+                completion = max(0.0, min(float(ev.get("completion_rate") or 0.0), 10.0))
+                loops = max(0, min(int(ev.get("loops") or 0), 100))
             except (TypeError, ValueError):
                 continue
-            values.append((device_id, share_id, media_id, watch_time, duration, completion, loops, bool(ev.get("skipped")), now))
+            skipped = 1 if ev.get("skipped") else 0
+            try:
+                raw_ts = ev.get("timestamp")
+                ts = int(raw_ts) if raw_ts is not None else now
+                if ts > 10000000000:
+                    ts = int(ts / 1000)
+                if ts <= 0 or ts > now + 86400:
+                    ts = now
+            except (TypeError, ValueError):
+                ts = now
+            values.append((device_id, share_id, media_id, watch_time, duration, completion, loops, skipped, ts))
 
         if not values:
             return 0
