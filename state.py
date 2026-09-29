@@ -5,18 +5,30 @@ The GUI (tkinter thread) and the API (asyncio thread) communicate via:
   • pending_connections  – dict of connection-approval requests awaiting user action
   • resolve_connection() – called by tkinter to accept/reject a pending request
   • add_log / get_logs   – ring buffer of recent activity messages
+
+When Redis is available (Docker), activity and logs are also mirrored there so
+the isolated sync-api and app-api containers share the same operator-visible
+status. Desktop/SQLite without Redis keeps the previous process-local behavior.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import threading
 import time
 from typing import Any
+
+logger = logging.getLogger("backup_server.state")
 
 # ─── Connection approval ──────────────────────────────────────────────────────
 # Keyed by a UUID request ID.
 # Each entry: {'name': str, 'ip': str, 'future': asyncio.Future, 'loop': asyncio.AbstractEventLoop, '_shown': bool}
 pending_connections: dict[str, dict[str, Any]] = {}
+
+_REDIS_ACTIVITY_HASH = "backup:activity:map"
+_REDIS_LOGS_LIST = "backup:activity:logs"
+_ACTIVITY_TTL_SEC = 15 * 60
 
 
 def resolve_connection(req_id: str, accepted: bool) -> None:
@@ -43,6 +55,15 @@ _active_activities: dict[str, dict[str, Any]] = {}
 _device_name_cache: dict[str, str] = {}
 _device_name_cache_lock = threading.Lock()
 _last_cache_refresh = 0.0
+
+
+def _redis():
+    """Best-effort Redis client; never raises into request handlers."""
+    try:
+        from services.redis_service import get_redis_client
+        return get_redis_client()
+    except Exception:
+        return None
 
 
 def update_device_display_name_cache(
@@ -107,13 +128,42 @@ def _resolve_device_names_in_message(msg: str) -> str:
 
 def add_log(message: str) -> None:
     resolved = _resolve_device_names_in_message(message)
+    entry = {"time": int(time.time()), "message": resolved}
     with _logs_lock:
-        _logs.append({"time": int(time.time()), "message": resolved})
+        _logs.append(entry)
         del _logs[:-_LOG_LIMIT]
 
+    client = _redis()
+    if not client:
+        return
+    try:
+        pipe = client.pipeline()
+        pipe.rpush(_REDIS_LOGS_LIST, json.dumps(entry, separators=(",", ":")))
+        pipe.ltrim(_REDIS_LOGS_LIST, -_LOG_LIMIT, -1)
+        pipe.execute()
+    except Exception as exc:
+        logger.debug("Redis activity log mirror failed: %s", exc)
 
 
 def get_logs() -> list[dict]:
+    client = _redis()
+    if client:
+        try:
+            raw_items = client.lrange(_REDIS_LOGS_LIST, 0, -1)
+            if raw_items:
+                parsed: list[dict] = []
+                for raw in raw_items:
+                    try:
+                        item = json.loads(raw)
+                    except Exception:
+                        continue
+                    if isinstance(item, dict) and "message" in item:
+                        parsed.append(item)
+                if parsed:
+                    return parsed
+        except Exception as exc:
+            logger.debug("Redis activity log read failed: %s", exc)
+
     with _logs_lock:
         return list(_logs)
 
@@ -121,6 +171,13 @@ def get_logs() -> list[dict]:
 def clear_logs() -> None:
     with _logs_lock:
         _logs.clear()
+    client = _redis()
+    if not client:
+        return
+    try:
+        client.delete(_REDIS_LOGS_LIST)
+    except Exception as exc:
+        logger.debug("Redis activity log clear failed: %s", exc)
 
 
 def set_current_activity(
@@ -129,31 +186,80 @@ def set_current_activity(
     device_id: str | None = None,
 ) -> None:
     key = device_id or device_ip or "default"
+    payload = None
     with _activity_lock:
         if message:
-            _active_activities[key] = {
+            payload = {
                 "time": int(time.time()),
                 "message": message,
                 "device_ip": device_ip,
                 "device_id": device_id,
             }
+            _active_activities[key] = payload
         else:
             _active_activities.pop(key, None)
 
+    client = _redis()
+    if not client:
+        return
+    try:
+        if payload is not None:
+            client.hset(_REDIS_ACTIVITY_HASH, key, json.dumps(payload, separators=(",", ":")))
+        else:
+            client.hdel(_REDIS_ACTIVITY_HASH, key)
+    except Exception as exc:
+        logger.debug("Redis activity mirror failed: %s", exc)
+
+
+def _merged_activities() -> list[dict[str, Any]]:
+    """Combine local + Redis activities, dropping stale Redis entries."""
+    merged: dict[str, dict[str, Any]] = {}
+    now = int(time.time())
+
+    with _activity_lock:
+        for key, value in _active_activities.items():
+            merged[key] = dict(value)
+
+    client = _redis()
+    if client:
+        try:
+            remote = client.hgetall(_REDIS_ACTIVITY_HASH) or {}
+            stale_fields: list[str] = []
+            for field, raw in remote.items():
+                key = str(field)
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    stale_fields.append(key)
+                    continue
+                if not isinstance(data, dict):
+                    stale_fields.append(key)
+                    continue
+                age = now - int(data.get("time") or 0)
+                if age > _ACTIVITY_TTL_SEC:
+                    stale_fields.append(key)
+                    continue
+                existing = merged.get(key)
+                if existing is None or int(data.get("time") or 0) >= int(existing.get("time") or 0):
+                    merged[key] = data
+            if stale_fields:
+                client.hdel(_REDIS_ACTIVITY_HASH, *stale_fields)
+        except Exception as exc:
+            logger.debug("Redis activity read failed: %s", exc)
+
+    return list(merged.values())
+
 
 def get_current_activity() -> dict[str, Any] | None:
-    with _activity_lock:
-        if not _active_activities:
-            return None
-        # Return the most recent activity
-        latest = max(_active_activities.values(), key=lambda a: a.get("time", 0))
-        active_count = len(_active_activities)
-        res = dict(latest)
-        if active_count > 1:
-            res["active_devices_count"] = active_count
-        return res
+    activities = _merged_activities()
+    if not activities:
+        return None
+    latest = max(activities, key=lambda a: a.get("time", 0))
+    res = dict(latest)
+    if len(activities) > 1:
+        res["active_devices_count"] = len(activities)
+    return res
 
 
 def get_all_active_activities() -> list[dict[str, Any]]:
-    with _activity_lock:
-        return [dict(a) for a in _active_activities.values()]
+    return _merged_activities()

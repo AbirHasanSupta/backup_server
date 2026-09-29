@@ -200,6 +200,12 @@ unique secret, set `ADVERTISED_IPS` to this machine's LAN IPv4 address (phones
 cannot see Docker bridge `172.x` addresses), run `python scripts/sync_version.py`,
 then run `docker compose up -d --build`.
 
+Phone sync/upload is isolated in a dedicated `sync_api` container
+(`SERVICE_ROLE=sync`); feed, reels, library, and memories stay on `api`
+(`SERVICE_ROLE=app`). Nginx path-routes `/upload*`, `/files/check`, and
+`/sync/*` so Android keeps one host:port. Reload a page after sync to see
+newly uploaded media.
+
 Nginx publishes both **port 80** (admin UI) and **port 8000** (Android discovery
 default). Terminate TLS at a configured reverse proxy/load balancer before
 allowing non-private-network access.

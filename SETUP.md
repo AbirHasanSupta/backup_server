@@ -149,7 +149,9 @@ Important environment settings are:
 | `DATABASE_BACKEND` | `sqlite` (default) or `postgres` |
 | `POSTGRES_URL` | PostgreSQL connection URL when the backend is `postgres` |
 | `REDIS_URL`, `CELERY_ENABLED` | Enable Redis-backed caching/locks and Celery tasks |
-| `API_THREADPOOL_WORKERS`, `THUMBNAIL_WORKERS` | Per-Gunicorn-process cap for blocking work and concurrent cold-gallery thumbnail encodes (Docker defaults: 24 / 2) |
+| `API_THREADPOOL_WORKERS`, `THUMBNAIL_WORKERS` | Per-Gunicorn-process cap for blocking work and concurrent cold-gallery thumbnail encodes on app-api |
+| `SYNC_GUNICORN_WORKERS`, `SYNC_API_THREADPOOL_WORKERS` | Worker/thread pool for the isolated sync-api container (uploads only) |
+| `SERVICE_ROLE` | `all` (desktop monolith), `app`, or `sync` — set by Compose; do not set manually in `.env` for Docker |
 | `PG_POOL_MIN_SIZE`, `PG_POOL_MAX_SIZE` | Per-process PostgreSQL connection-pool bounds (Docker defaults: 1 / 8) |
 | `CELERY_*_CONCURRENCY`, `FFMPEG_THREADS`, `REWIND_SEGMENT_WORKERS` | Docker CPU budget for video, rewind, indexing, and FFmpeg subprocesses |
 | `CORS_ORIGINS` | Comma-separated allowlist for browser clients; leave empty for native-only use |
@@ -163,10 +165,14 @@ successful multi-user deployment.
 
 ## 6. Run the Docker deployment
 
-The Compose deployment starts Nginx on port 80, the API, three isolated Celery
-workers (video, rewind, and indexing),
-PostgreSQL, and Redis. Its Docker volumes retain the database, backups, caches,
-and Redis state.
+The Compose deployment starts Nginx on port 80, two FastAPI services
+(`api` / `SERVICE_ROLE=app` for feed·reels·library·memories, and `sync_api` /
+`SERVICE_ROLE=sync` for phone uploads), three isolated Celery workers (video,
+rewind, and indexing), PostgreSQL, and Redis. Nginx path-routes `/upload*`,
+`/files/check`, and `/sync/*` to `sync_api` so bulk sync cannot starve
+interactive pages. Other features use already-backed-up files; reload a page
+after sync to see newly uploaded media. Its Docker volumes retain the database,
+backups, caches, and Redis state.
 
 1. Copy the supplied environment template and replace every placeholder with a
    long random value. Percent-encode special characters in the PostgreSQL URL.
@@ -188,7 +194,7 @@ and Redis state.
 
    ```powershell
    docker compose ps
-   docker compose logs --follow api
+   docker compose logs --follow api sync_api
    ```
 
 4. Stop the stack without deleting data:
@@ -324,6 +330,6 @@ a backup is only useful if it can be restored.
 | Phone cannot discover the server | Confirm both devices are on the same subnet, server firewall permits the configured TCP/UDP port, and no second server process owns the port. Enter the server IP manually to isolate discovery. |
 | Pairing is rejected or times out | Verify the API key, accept the desktop approval prompt within 30 seconds, and remove a stale device entry before re-pairing if necessary. |
 | Videos have no preview or rewind fails | Run `ffmpeg -version` and `ffprobe -version` from the same terminal that starts the server. |
-| Docker API stays unhealthy | Use `docker compose logs api postgres redis`; verify `.env` contains matching `POSTGRES_PASSWORD` and `POSTGRES_URL`. |
+| Docker API stays unhealthy | Use `docker compose logs api sync_api postgres redis`; verify `.env` contains matching `POSTGRES_PASSWORD` and `POSTGRES_URL`. Confirm both `api` and `sync_api` are healthy (`docker compose ps`). |
 | App reports an unknown version | Run from a tagged Git checkout, or set `PHONE_BACKUP_VERSION` to a valid SemVer value for an intentional non-Git deployment. |
 | Android build rejects a version code | Use a numeric three-part semantic tag with each component from 0 through 999, and ensure each new release tag produces a higher numeric code. |

@@ -3,8 +3,8 @@
 #
 # SHARED STORAGE STRATEGY
 # ════════════════════════
-# All containers (API, Celery workers) AND the desktop app share the SAME
-# physical directories on the host.  This means:
+# All containers (app-api, sync-api, Celery workers) AND the desktop app share
+# the SAME physical directories on the host.  This means:
 #
 #   • Phone backups (actual media files)  → D:\PhoneBackup  (BACKUP_ROOT)
 #   • App data (DB¹, config, posts, reels, memories, caches)
@@ -13,6 +13,13 @@
 # ¹ Docker uses PostgreSQL; desktop EXE uses SQLite in the same APP_DATA_DIR.
 #   Both can coexist — the .db file is only written by whichever process holds it.
 #   Run the migration script to seed PG from the SQLite file.
+#
+# SERVICE SPLIT
+# ═════════════
+#   api       (SERVICE_ROLE=app)  — feed, reels, library, memories, admin, WS
+#   sync_api  (SERVICE_ROLE=sync) — /upload*, /files/check, /sync/*
+# Nginx path-routes so Android keeps one host:port. Interactive pages only need
+# already-backed-up files; reload the page after sync to see newly uploaded media.
 #
 # HOW TO START:
 #   1. Copy .env.example → .env and fill in secrets
@@ -47,15 +54,18 @@ services:
     depends_on:
       api:
         condition: service_healthy
+      sync_api:
+        condition: service_healthy
     networks:
       - backup_net
 
-  # ── 2. FastAPI API Gateway (Gunicorn + Uvicorn workers) ───────────────────
+  # ── 2. Interactive App API (feed / reels / library / memories) ─────────────
   api:
     build: .
     container_name: backup_api
     restart: unless-stopped
     environment:
+      - SERVICE_ROLE=app
       - API_KEY=${API_KEY:?Set API_KEY in .env}
       - DATABASE_BACKEND=postgres
       - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
@@ -97,6 +107,61 @@ services:
         source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
         target: /app_data
       # Shared host drives
+      - type: bind
+        source: ${SHARED_DRIVE_G:-G:\}
+        target: /host_g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/ping >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - backup_net
+
+  # ── 2b. Sync / Upload API (isolated Gunicorn pool) ────────────────────────
+  # Owns /files/check, /upload*, /sync/* so bulk phone backups cannot starve
+  # interactive feed/reels/library workers. Shares Postgres + BACKUP_ROOT.
+  sync_api:
+    build: .
+    container_name: backup_sync_api
+    restart: unless-stopped
+    environment:
+      - SERVICE_ROLE=sync
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
+      - DATABASE_BACKEND=postgres
+      - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_ENABLED=true
+      - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
+      - BACKUP_ROOT=/backup_storage
+      - APP_DATA_DIR=/app_data
+      - ADVERTISED_IPS=${ADVERTISED_IPS:-}
+      - ADVERTISED_PORT=${ADVERTISED_PORT:-8000}
+      - TAILSCALE_IPS=${TAILSCALE_IPS:-}
+      - TAILSCALE_DNS_NAME=${TAILSCALE_DNS_NAME:-}
+      - ADVERTISED_TAILSCALE_IPS=${ADVERTISED_TAILSCALE_IPS:-}
+      - ADVERTISED_TAILSCALE_DNS=${ADVERTISED_TAILSCALE_DNS:-}
+      # I/O-oriented but connection-budget aware: app(4×8) + sync(2×8) +
+      # Celery(5×8) stays under POSTGRES_MAX_CONNECTIONS=96.
+      - GUNICORN_WORKERS=${SYNC_GUNICORN_WORKERS:-2}
+      - API_THREADPOOL_WORKERS=${SYNC_API_THREADPOOL_WORKERS:-16}
+      - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
+      - PG_POOL_MAX_SIZE=${PG_POOL_MAX_SIZE:-8}
+      - GUNICORN_MAX_REQUESTS=${GUNICORN_MAX_REQUESTS:-10000}
+      - GUNICORN_MAX_REQUESTS_JITTER=${GUNICORN_MAX_REQUESTS_JITTER:-1000}
+    volumes:
+      - type: bind
+        source: ${BACKUP_ROOT:-D:\PhoneBackup}
+        target: /backup_storage
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
       - type: bind
         source: ${SHARED_DRIVE_G:-G:\}
         target: /host_g
