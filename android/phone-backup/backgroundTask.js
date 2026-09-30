@@ -55,16 +55,83 @@ import { setPendingBackupFromSync } from './pendingBackup';
 import { triggerWidgetRefresh } from './widget';
 
 let _isUIPriorityActive = false;
+const UI_PRIORITY_STORAGE_KEY = 'ui_priority_mode_v1';
+let _lastUIPriorityDiskReadAt = 0;
+const UI_PRIORITY_DISK_POLL_MS = 400;
+/** Ignore sticky priority left behind if the UI process was killed mid-focus. */
+const UI_PRIORITY_MAX_AGE_MS = 90_000;
+let _uiPriorityHeartbeat = null;
 
 /**
  * Dynamically yields background upload concurrency and adds network/flash yields
  * when the user is actively viewing Reels, Feed, Library, or Memories.
+ *
+ * Persisted to AsyncStorage (with a freshness timestamp) so the background-actions
+ * JS context can observe the flag while the UI context sets it. A heartbeat keeps
+ * the timestamp fresh while focused; a force-killed UI stops heartbeating so sync
+ * can resume after UI_PRIORITY_MAX_AGE_MS instead of hanging forever.
  */
 export function setUIPriorityMode(active) {
   _isUIPriorityActive = !!active;
+  try {
+    const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+    const value = active ? `1:${Date.now()}` : '0';
+    AsyncStorage.setItem(UI_PRIORITY_STORAGE_KEY, value).catch(() => {});
+  } catch {
+    /* ignore */
+  }
+
+  if (active) {
+    if (!_uiPriorityHeartbeat) {
+      _uiPriorityHeartbeat = setInterval(() => {
+        if (!_isUIPriorityActive) return;
+        try {
+          const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+          AsyncStorage.setItem(UI_PRIORITY_STORAGE_KEY, `1:${Date.now()}`).catch(() => {});
+        } catch {
+          /* ignore */
+        }
+      }, 20_000);
+    }
+  } else if (_uiPriorityHeartbeat) {
+    clearInterval(_uiPriorityHeartbeat);
+    _uiPriorityHeartbeat = null;
+  }
 }
 
 export function isUIPriorityMode() {
+  return _isUIPriorityActive;
+}
+
+function _parseUIPriorityValue(raw) {
+  if (!raw || raw === '0') return false;
+  // Legacy bare "1" (no timestamp) is treated as stale so a killed UI cannot
+  // permanently block background sync after an app upgrade.
+  if (raw === '1') return false;
+  const colon = raw.indexOf(':');
+  if (colon <= 0) return false;
+  if (raw.slice(0, colon) !== '1') return false;
+  const ts = Number(raw.slice(colon + 1));
+  if (!Number.isFinite(ts)) return false;
+  return Date.now() - ts < UI_PRIORITY_MAX_AGE_MS;
+}
+
+/** Cross-context read used by the upload worker loop. */
+async function readUIPriorityMode() {
+  const now = Date.now();
+  // Always re-poll AsyncStorage on an interval so clearing priority in the UI
+  // context is visible to the background-actions runtime (and vice versa).
+  if (now - _lastUIPriorityDiskReadAt < UI_PRIORITY_DISK_POLL_MS) {
+    return _isUIPriorityActive;
+  }
+  _lastUIPriorityDiskReadAt = now;
+  try {
+    const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+    const v = await AsyncStorage.getItem(UI_PRIORITY_STORAGE_KEY);
+    _isUIPriorityActive = _parseUIPriorityValue(v);
+  } catch {
+    /* keep in-memory value */
+  }
   return _isUIPriorityActive;
 }
 
@@ -790,6 +857,12 @@ export async function performActualSync(onProgress, runOptions = {}) {
     // Two-way server-side check for Refresh Folder / Refresh All Backups
     for (const batch of chunk(files, CHECK_BATCH_SIZE)) {
       if (await shouldAbortSync()) { stoppedDuringCheck = true; break; }
+      // Yield disk/network to interactive API calls while the user is browsing.
+      while (await readUIPriorityMode()) {
+        if (await shouldAbortSync()) { stoppedDuringCheck = true; break; }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      if (stoppedDuringCheck) break;
       const res = await checkServerFiles(batch, { verifyDisk: true });
       const statuses = res.files;
       serverDeviceTotalFiles = res.deviceTotalFiles;
@@ -857,20 +930,18 @@ export async function performActualSync(onProgress, runOptions = {}) {
     while (nextIndex < pending.length) {
       if (await shouldAbortSync()) break;
 
-      // In UI Priority mode (user is active in Reels, Feed, Library, Memories),
-      // auxiliary workers yield to keep network sockets and flash I/O free for the UI
-      if (_isUIPriorityActive && workerId > 0) {
-        await new Promise((r) => setTimeout(r, 200));
+      // UI Priority: pause ALL upload workers while the user is on interactive
+      // screens. Uploads use Expo FileSystem (not RN OkHttp), so they otherwise
+      // saturate Wi‑Fi/flash and starve feed/reels/library/memories requests.
+      // Persist the flag so this also works when sync runs in the background
+      // JS context.
+      if (await readUIPriorityMode()) {
+        await new Promise((r) => setTimeout(r, 1500));
         continue;
       }
 
       let file = pending[nextIndex++];
       if (!file) break;
-
-      // Small pacing yield in UI priority mode
-      if (_isUIPriorityActive) {
-        await new Promise((r) => setTimeout(r, 50));
-      }
 
       if (onProgress) {
         await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
@@ -893,9 +964,17 @@ export async function performActualSync(onProgress, runOptions = {}) {
           }
           if (res.status === 'skipped') {
             skipped++;
+            if (runOptions.sessionBuilder) {
+              runOptions.sessionBuilder.skippedCount =
+                (runOptions.sessionBuilder.skippedCount || 0) + 1;
+            }
           } else {
             uploaded++;
             uploadedBytes += Number(file.size) || 0;
+            if (runOptions.sessionBuilder) {
+              runOptions.sessionBuilder.uploadedCount =
+                (runOptions.sessionBuilder.uploadedCount || 0) + 1;
+            }
           }
         } else {
           errors++;
@@ -1035,6 +1114,8 @@ export async function runSync(onProgress, runOptions = {}) {
     startedAt:     Date.now(),
     trigger:       isAuto ? 'auto' : 'manual',
     uploadedFiles: [],
+    uploadedCount: 0,
+    skippedCount:  0,
     errorDetails:  [],
   };
   // Thread through so worker can accumulate files/errors
@@ -1220,7 +1301,7 @@ export async function runSync(onProgress, runOptions = {}) {
         endedAt:    failedAt,
         durationMs: failedAt - sessionBuilder.startedAt,
         outcome:    'force_stopped',
-        uploaded:   sessionBuilder.uploadedFiles.length,
+        uploaded:   sessionBuilder.uploadedCount || 0,
         errors:     sessionBuilder.errorDetails.length,
       }).catch(() => {});
       postSyncSession({
@@ -1229,6 +1310,9 @@ export async function runSync(onProgress, runOptions = {}) {
         duration_ms: failedAt - sessionBuilder.startedAt,
         trigger:     sessionBuilder.trigger,
         outcome:     'force_stopped',
+        uploaded:    sessionBuilder.uploadedCount || 0,
+        skipped:     sessionBuilder.skippedCount || 0,
+        errors:      sessionBuilder.errorDetails?.length ?? 0,
       }).catch(() => {});
       return;  // swallow the thrown abort error
     }
@@ -1244,6 +1328,7 @@ export async function runSync(onProgress, runOptions = {}) {
       endedAt:      failedAt,
       durationMs:   failedAt - sessionBuilder.startedAt,
       outcome:      'failed',
+      uploaded:     sessionBuilder.uploadedCount || 0,
       errors:       (sessionBuilder.errorDetails.length || 0) + 1,
       errorDetails: [
         ...sessionBuilder.errorDetails,
@@ -1256,7 +1341,9 @@ export async function runSync(onProgress, runOptions = {}) {
       duration_ms: failedAt - sessionBuilder.startedAt,
       trigger:     sessionBuilder.trigger,
       outcome:     'failed',
-      errors:      1,
+      uploaded:    sessionBuilder.uploadedCount || 0,
+      skipped:     sessionBuilder.skippedCount || 0,
+      errors:      (sessionBuilder.errorDetails?.length || 0) + 1,
     }).catch(() => {});
     await clearSyncRuntimeState().catch(() => {});
     currentSyncState = { active: false, phase: 'idle', stopRequested: false, stopping: false, forceStop: false };

@@ -16,6 +16,8 @@ celery[redis]>=5.3.6
 # Image & Media Processing
 pillow>=10.2.0
 pillow-heif>=0.15.0
+# IANA zones for zoneinfo (required on Windows; harmless elsewhere)
+tzdata>=2024.1
 
 # Optional GUI components (for local desktop run)
 customtkinter>=5.2.0; platform_system == "Windows"

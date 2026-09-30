@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from typing import Any, Dict, List
 from services.redis_service import publish_event
 
 logger = logging.getLogger("backup_server.ws_service")
+
+# Coalesce per-file upload WS storms during bulk sync so app workers / Redis
+# are not woken thousands of times per minute while the user browses.
+_UPLOAD_COALESCE_SECONDS = 2.0
+_upload_lock = threading.Lock()
+_upload_pending: dict[str, dict[str, Any]] = {}
+_upload_timer: threading.Timer | None = None
 
 
 class WebSocketService:
@@ -67,14 +76,70 @@ class WebSocketService:
         })
 
     @staticmethod
-    def notify_file_uploaded(device_id: str, relative_path: str, size: int, device_total_files: int = 0, device_total_size: int = 0) -> None:
-        WebSocketService.broadcast_event("file_uploaded", {
-            "device_id": device_id,
-            "relative_path": relative_path,
-            "size": size,
-            "device_total_files": device_total_files,
-            "device_total_size": device_total_size,
-        })
+    def _flush_coalesced_uploads() -> None:
+        global _upload_timer
+        with _upload_lock:
+            pending = dict(_upload_pending)
+            _upload_pending.clear()
+            timer = _upload_timer
+            _upload_timer = None
+
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+        for device_id, entry in pending.items():
+            try:
+                WebSocketService.broadcast_event("file_uploaded", {
+                    "device_id": device_id,
+                    "relative_path": entry.get("relative_path") or "",
+                    "size": int(entry.get("size") or 0),
+                    "device_total_files": int(entry.get("device_total_files") or 0),
+                    "device_total_size": int(entry.get("device_total_size") or 0),
+                    "batched_count": int(entry.get("batched_count") or 1),
+                })
+            except Exception:
+                logger.debug("Failed to flush coalesced upload event for %s", device_id, exc_info=True)
+
+    @staticmethod
+    def flush_coalesced_uploads() -> None:
+        """Flush any pending coalesced upload events immediately (e.g. session end)."""
+        WebSocketService._flush_coalesced_uploads()
+
+    @staticmethod
+    def notify_file_uploaded(
+        device_id: str,
+        relative_path: str,
+        size: int,
+        device_total_files: int = 0,
+        device_total_size: int = 0,
+    ) -> None:
+        """Broadcast upload completion, coalesced across bulk sync bursts."""
+        global _upload_timer
+        with _upload_lock:
+            entry = _upload_pending.get(device_id) or {
+                "batched_count": 0,
+                "size": 0,
+                "relative_path": relative_path,
+            }
+            entry["batched_count"] = int(entry.get("batched_count") or 0) + 1
+            entry["relative_path"] = relative_path
+            entry["size"] = size
+            entry["device_total_files"] = device_total_files
+            entry["device_total_size"] = device_total_size
+            entry["updated_at"] = time.time()
+            _upload_pending[device_id] = entry
+
+            if _upload_timer is None:
+                timer = threading.Timer(
+                    _UPLOAD_COALESCE_SECONDS,
+                    WebSocketService._flush_coalesced_uploads,
+                )
+                timer.daemon = True
+                _upload_timer = timer
+                timer.start()
 
     @staticmethod
     def notify_new_share(
@@ -141,4 +206,3 @@ class WebSocketService:
 
 
 ws_service = WebSocketService()
-

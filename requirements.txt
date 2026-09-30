@@ -7,3 +7,4 @@ pillow
 pillow-heif
 pystray
 tkinterdnd2
+tzdata

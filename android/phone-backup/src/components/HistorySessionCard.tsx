@@ -5,6 +5,7 @@ import { AppColors, Radius, Shadows, Spacing, TextScale } from '@/constants/them
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
+import { formatLocalDateTime } from '@/utils/dateFormat';
 
 export type SyncOutcome = 'completed' | 'stopped' | 'force_stopped' | 'failed';
 
@@ -60,9 +61,8 @@ function formatDuration(ms: number): string {
 }
 
 function formatTime(ts: number): string {
-  const d = new Date(ts);
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
-    '  ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  // Session timestamps are milliseconds.
+  return formatLocalDateTime(ts, false);
 }
 
 function formatBytes(bytes: number): string {

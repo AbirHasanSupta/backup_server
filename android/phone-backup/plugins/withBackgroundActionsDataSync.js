@@ -353,8 +353,23 @@ public class BackupWidgetProvider extends AppWidgetProvider {
       }
 
       String baseUrl = "http://" + ip + ":" + port;
+      // Pass the device's local calendar day so Docker UTC servers still return
+      // On-This-Day for the phone's timezone.
+      java.util.Calendar cal = java.util.Calendar.getInstance();
+      String localDate = String.format(
+        java.util.Locale.US,
+        "%04d-%02d-%02d",
+        cal.get(java.util.Calendar.YEAR),
+        cal.get(java.util.Calendar.MONTH) + 1,
+        cal.get(java.util.Calendar.DAY_OF_MONTH)
+      );
+      int tzOffsetMinutes = cal.get(java.util.Calendar.ZONE_OFFSET) + cal.get(java.util.Calendar.DST_OFFSET);
+      // JS getTimezoneOffset is minutes *behind* UTC; Java ZONE_OFFSET is ms east of UTC.
+      int jsTzOffsetMinutes = -(tzOffsetMinutes / 60000);
       String todayUrl = baseUrl + "/memories/today?device_id=" + URLEncoder.encode(deviceId, "UTF-8")
-        + "&token=" + URLEncoder.encode(token == null ? "" : token, "UTF-8");
+        + "&token=" + URLEncoder.encode(token == null ? "" : token, "UTF-8")
+        + "&local_date=" + URLEncoder.encode(localDate, "UTF-8")
+        + "&tz_offset_minutes=" + jsTzOffsetMinutes;
 
       String json = httpGetString(todayUrl);
       if (json == null) {

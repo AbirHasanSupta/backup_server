@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from api.v1.health import router as health_router
 from api.v1.auth import router as auth_router
+from api.v1.status import router as status_router
 from api.v1.sync import router as sync_router
 from api.v1.files import router as files_router
 from api.v1.feed import router as feed_router
@@ -30,11 +31,14 @@ def build_v1_router(role: str = "all") -> APIRouter:
 
     ``all``  — desktop / local monolith (sync + social + admin).
     ``app``  — Docker interactive API (feed/reels/library/memories); no sync uploads.
-    ``sync`` — Docker upload/sync API only (+ health ping).
+    ``sync`` — Docker upload/sync API only (+ health ping + status probes).
     """
     role = normalize_service_role(role)
     router = APIRouter()
     router.include_router(health_router)
+    # Status probes are mounted on both app and sync so nginx can steer
+    # phone sync heartbeats off interactive workers during bulk uploads.
+    router.include_router(status_router)
 
     if role == "sync":
         router.include_router(sync_router)

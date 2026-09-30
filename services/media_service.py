@@ -3,21 +3,41 @@
 from __future__ import annotations
 
 import random
-from datetime import date, datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
-from repositories import media_repo, device_repo
+from core.timeutil import resolve_local_today
+from repositories import media_repo
 from memories import get_todays_memories, get_recent_memories
 
 
 class MediaService:
     @staticmethod
-    def get_memories_today(device_id: str) -> Dict[str, Any]:
-        return get_todays_memories(device_id)
+    def get_memories_today(
+        device_id: str,
+        *,
+        local_date: str | None = None,
+        tz_offset_minutes: int | None = None,
+    ) -> Dict[str, Any]:
+        return get_todays_memories(
+            device_id,
+            local_date=local_date,
+            tz_offset_minutes=tz_offset_minutes,
+        )
 
     @staticmethod
-    def get_memories_recent(device_id: str, days_back: int = 7) -> Dict[str, Any]:
-        return get_recent_memories(device_id, days=days_back)
+    def get_memories_recent(
+        device_id: str,
+        days_back: int = 7,
+        *,
+        local_date: str | None = None,
+        tz_offset_minutes: int | None = None,
+    ) -> Dict[str, Any]:
+        return get_recent_memories(
+            device_id,
+            days=days_back,
+            local_date=local_date,
+            tz_offset_minutes=tz_offset_minutes,
+        )
 
     @staticmethod
     def get_flashback(device_id: str) -> Dict[str, Any] | None:
@@ -46,7 +66,7 @@ class MediaService:
         
         all_years = media_repo.get_distinct_cap_years(sources)
         if len(all_years) < 2:
-            current_year = date.today().year
+            current_year = resolve_local_today().year
             all_years = list(range(current_year - 5, current_year + 1))
 
         selected = random.sample(pool, min(count, len(pool)))

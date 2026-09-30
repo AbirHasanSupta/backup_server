@@ -365,7 +365,7 @@ function renderDashboardActivities() {
   }
   actEl.innerHTML = _recentActivities.slice(0, 8).map(a => `
     <div class="flex items-center gap-2.5 text-xs py-1.5 px-2 rounded-lg bg-zinc-800/40">
-      <span class="text-zinc-500 font-mono text-[11px] shrink-0">${new Date(a.time * 1000).toLocaleTimeString()}</span>
+      <span class="text-zinc-500 font-mono text-[11px] shrink-0">${new Date(a.time * 1000).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true })}</span>
       <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold ${a.badgeClass}">${a.badge}</span>
       <span class="text-zinc-300 truncate">${escHtml(a.text)}</span>
     </div>
@@ -1640,7 +1640,7 @@ function renderLogLines() {
     : _logLines;
 
   con.innerHTML = visible.map(l => {
-    const t = new Date(l.time * 1000).toLocaleTimeString();
+    const t = new Date(l.time * 1000).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
     const color = l.level === 'error' ? 'text-red-400 font-semibold' : l.level === 'warn' ? 'text-amber-400' : 'text-zinc-300';
     return `<div class="flex gap-2.5 leading-relaxed"><span class="text-zinc-500 shrink-0 select-none">${t}</span><span class="${color}">${escHtml(l.message)}</span></div>`;
   }).join('');
@@ -2011,7 +2011,7 @@ function initWebSocketListeners() {
       if (con) {
         const filter = _logFilter.toLowerCase();
         if (!filter || message.toLowerCase().includes(filter) || level === filter) {
-          const t = new Date(time * 1000).toLocaleTimeString();
+          const t = new Date(time * 1000).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
           const color = level === 'error' ? 'text-red-400 font-semibold' : level === 'warn' ? 'text-amber-400' : 'text-zinc-300';
           con.insertAdjacentHTML('beforeend', `<div class="flex gap-2.5 leading-relaxed"><span class="text-zinc-500 shrink-0 select-none">${t}</span><span class="${color}">${escHtml(message)}</span></div>`);
           if (_logAutoScroll) con.scrollTop = con.scrollHeight;

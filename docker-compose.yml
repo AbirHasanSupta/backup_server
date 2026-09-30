@@ -77,6 +77,10 @@ services:
       # All containers write config/cache/posts/reels/memories here
       # — same physical folder as the desktop EXE's AppData directory
       - APP_DATA_DIR=/app_data
+      # Local calendar for On-This-Day / capture-day bucketing.
+      # Default Asia/Dhaka; override via TZ/APP_TZ in .env if needed.
+      - TZ=${TZ:-Asia/Dhaka}
+      - APP_TZ=${APP_TZ:-${TZ:-Asia/Dhaka}}
       # Host LAN IPs for phone discovery (comma-separated). Required in Docker
       # because container networking only sees unreachable 172.x bridge addresses.
       - ADVERTISED_IPS=${ADVERTISED_IPS:-}
@@ -141,6 +145,8 @@ services:
       - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
       - BACKUP_ROOT=/backup_storage
       - APP_DATA_DIR=/app_data
+      - TZ=${TZ:-Asia/Dhaka}
+      - APP_TZ=${APP_TZ:-${TZ:-Asia/Dhaka}}
       - ADVERTISED_IPS=${ADVERTISED_IPS:-}
       - ADVERTISED_PORT=${ADVERTISED_PORT:-8000}
       - TAILSCALE_IPS=${TAILSCALE_IPS:-}
@@ -193,6 +199,8 @@ services:
       - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
       - BACKUP_ROOT=/backup_storage
       - APP_DATA_DIR=/app_data
+      - TZ=${TZ:-Asia/Dhaka}
+      - APP_TZ=${APP_TZ:-${TZ:-Asia/Dhaka}}
       # Limit threads inside each FFmpeg process; without this, two video
       # tasks can each consume all host cores and delay API traffic.
       - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
@@ -230,6 +238,8 @@ services:
       - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
       - BACKUP_ROOT=/backup_storage
       - APP_DATA_DIR=/app_data
+      - TZ=${TZ:-Asia/Dhaka}
+      - APP_TZ=${APP_TZ:-${TZ:-Asia/Dhaka}}
       - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
       - REWIND_SEGMENT_WORKERS=${REWIND_SEGMENT_WORKERS:-2}
       - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
@@ -266,6 +276,8 @@ services:
       - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
       - BACKUP_ROOT=/backup_storage
       - APP_DATA_DIR=/app_data
+      - TZ=${TZ:-Asia/Dhaka}
+      - APP_TZ=${APP_TZ:-${TZ:-Asia/Dhaka}}
       - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
       - PG_POOL_MAX_SIZE=${PG_POOL_MAX_SIZE:-8}
     volumes:

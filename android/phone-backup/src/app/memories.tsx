@@ -32,6 +32,7 @@ import { ShareModal } from '@/components/ShareModal';
 import {
   getRecentMemories,
   getCachedRecentMemories,
+  invalidateMemoriesCache,
   getConfig,
   buildPreviewUrl,
   buildVideoPreviewUrl,
@@ -47,6 +48,7 @@ import {
 } from '../../downloader';
 import { setUIPriorityMode } from '../../backgroundTask';
 import { consumePendingFlashbackItem } from '../../notificationService';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
 
 const DAY_CARD_W = 132;
 const DAY_CARD_H = 208;
@@ -125,15 +127,7 @@ function dayItemCount(day: DayMemory): number {
  * is provided, or an empty string when capture_time is null/undefined.
  */
 function formatCaptureDate(captureTime: number | null | undefined): string {
-  if (!captureTime) return '';
-  try {
-    const d = new Date(captureTime * 1000);
-    const datePart = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-    const timePart = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-    return `${datePart} · ${timePart}`;
-  } catch {
-    return '';
-  }
+  return formatCaptureDateTime(captureTime);
 }
 
 function flattenGroupItems(group: YearGroup): StoryItem[] {
@@ -245,17 +239,22 @@ export default function MemoriesScreen() {
     setRewindPickerVisible(true);
   }, []);
 
-  const fetchMemories = useCallback(async (opts?: { silent?: boolean }) => {
+  const fetchMemories = useCallback(async (opts?: { silent?: boolean; force?: boolean }) => {
     if (!opts?.silent) {
       setLoading(true);
       setError(null);
     }
     try {
+      if (opts?.force) invalidateMemoriesCache();
       const [cfg, res] = await Promise.all([getConfig(), getRecentMemories(7)]);
       setServerConfig(cfg);
       serverConfigRef.current = cfg;
       setData(res);
       setError(null);
+      // Keep the header date in sync with the phone calendar after midnight.
+      setTodayDateStr(
+        new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
+      );
     } catch (err: any) {
       if (!opts?.silent) {
         setError(sanitizeErrorMessage(err, 'Could not load your memories right now.'));
@@ -268,7 +267,7 @@ export default function MemoriesScreen() {
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await fetchMemories({ silent: true });
+      await fetchMemories({ silent: true, force: true });
     } finally {
       setRefreshing(false);
     }
@@ -637,6 +636,8 @@ export default function MemoriesScreen() {
   useFocusEffect(
     useCallback(() => {
       setUIPriorityMode(true);
+      // Silent SWR refresh. Cache is date-keyed in downloader; force only on
+      // pull-to-refresh / manual refresh so focus does not thrash the network.
       void fetchMemories({ silent: true });
       return () => {
         setUIPriorityMode(false);
@@ -860,10 +861,9 @@ export default function MemoriesScreen() {
     return '';
   };
 
-  const todayDateStr = useMemo(() => {
-    const d = new Date();
-    return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
-  }, []);
+  const [todayDateStr, setTodayDateStr] = useState(() =>
+    new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
+  );
 
   return (
     <View style={styles.root}>
@@ -885,7 +885,7 @@ export default function MemoriesScreen() {
           <TouchableOpacity style={styles.surpriseBtn} onPress={() => router.push('/wrapped')}>
             <AppIcon androidName="insights" iosName="chart.bar.fill" color={colors.primary} size={18} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.refreshBtn} onPress={() => fetchMemories()} disabled={loading}>
+          <TouchableOpacity style={styles.refreshBtn} onPress={() => fetchMemories({ force: true })} disabled={loading}>
             <AppIcon androidName="refresh" iosName="arrow.clockwise" color={colors.primary} size={20} />
           </TouchableOpacity>
         </View>

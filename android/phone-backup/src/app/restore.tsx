@@ -38,6 +38,7 @@ import * as MediaLibrary from 'expo-media-library/legacy';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { ShareModal } from '@/components/ShareModal';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
 import { ReactorsListSheet } from '@/components/ReactorsListSheet';
 import { DirectPostModal, DeviceFileItem } from '@/components/DirectPostModal';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
@@ -269,9 +270,7 @@ function formatSize(bytes: number) {
 
 function formatDate(ts: number | undefined): string {
   if (!ts) return '—';
-  return new Date(ts * 1000).toLocaleDateString(undefined, {
-    year: 'numeric', month: 'short', day: 'numeric',
-  });
+  return formatCaptureDateTime(ts) || '—';
 }
 
 // Relative time for comments (created_at is a unix second timestamp).

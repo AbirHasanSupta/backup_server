@@ -83,6 +83,8 @@ class ServiceRoleTests(unittest.TestCase):
         self.assertIn("/upload", paths)
         self.assertIn("/files/check", paths)
         self.assertIn("/ping", paths)
+        self.assertIn("/status", paths)
+        self.assertIn("/status/activity", paths)
         self.assertNotIn("/feed", paths)
         self.assertNotIn("/reels", paths)
         self.assertNotIn("/memories/today", paths)
@@ -142,6 +144,8 @@ class ServiceRoleTests(unittest.TestCase):
         self.assertIn("location ^~ /upload", text)
         self.assertIn("location ^~ /api/v1/upload", text)
         self.assertIn("location ^~ /sync/", text)
+        self.assertIn("location = /status", text)
+        self.assertIn("location = /status/activity", text)
         self.assertIn("proxy_pass http://sync_upstream", text)
         self.assertIn("proxy_pass http://app_upstream", text)
         # Admin sync history must stay on app-api (not phone /sync/*).

@@ -27,6 +27,12 @@ except Exception:
     pass
 
 from config import load_config
+from core.timeutil import (
+    datetime_from_timestamp,
+    naive_local_to_epoch,
+    resolve_local_today,
+    seconds_until_next_local_midnight,
+)
 from repositories.device_repo import get_devices, get_device_display_name
 from repositories.file_repo import get_files_for_device
 from repositories.media_repo import (
@@ -73,8 +79,26 @@ def _parse_date_str(val: str) -> int | None:
     if not val or not isinstance(val, str):
         return None
     val = val.strip()
+    if not val:
+        return None
 
-    # Common EXIF date formats
+    # Timezone-aware ISO (ffprobe often emits ...Z or ...+00:00). Parse as a
+    # true instant — never reinterpret the wall clock in APP_TZ.
+    try:
+        iso = val.replace("Z", "+00:00").replace("z", "+00:00")
+        # fromisoformat rejects the EXIF-style "YYYY:MM:DD" separator.
+        if "T" in iso or (len(iso) > 10 and iso[10] == " "):
+            iso_norm = iso.replace(" ", "T", 1) if "T" not in iso else iso
+            # Normalize "+06:00" already fine; "+0600" → "+06:00"
+            if len(iso_norm) >= 5 and iso_norm[-5] in "+-" and iso_norm[-3] != ":":
+                iso_norm = iso_norm[:-2] + ":" + iso_norm[-2:]
+            dt = datetime.fromisoformat(iso_norm)
+            if dt.tzinfo is not None:
+                return int(dt.timestamp())
+    except Exception:
+        pass
+
+    # Common EXIF date formats (naive wall-clock → APP_TZ / host local)
     for fmt in (
         "%Y:%m:%d %H:%M:%S",
         "%Y-%m-%d %H:%M:%S",
@@ -83,17 +107,17 @@ def _parse_date_str(val: str) -> int | None:
     ):
         try:
             dt = datetime.strptime(val, fmt)
-            return int(time_module.mktime(dt.timetuple()))
+            return naive_local_to_epoch(dt)
         except Exception:
             pass
 
-    # ISO 8601 format (e.g. 2023-08-14T15:30:00.000000Z)
+    # ISO 8601 without zone (e.g. 2023-08-14T15:30:00.000000)
     try:
-        iso_clean = val.rstrip("Z").split(".")[0].replace("T", " ")
+        iso_clean = val.split(".")[0].replace("T", " ")
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
             try:
                 dt = datetime.strptime(iso_clean, fmt)
-                return int(time_module.mktime(dt.timetuple()))
+                return naive_local_to_epoch(dt)
             except Exception:
                 pass
     except Exception:
@@ -348,7 +372,9 @@ def _extract_media_row_metadata(item: dict) -> dict:
     cap_month, cap_day, cap_year = None, None, None
     if cap_time is not None:
         try:
-            dt = datetime.fromtimestamp(cap_time)
+            # Prefer APP_TZ/TZ (default Asia/Dhaka) so capture days match
+            # the household calendar / phone On-This-Day.
+            dt = datetime_from_timestamp(cap_time)
             cap_month, cap_day, cap_year = dt.month, dt.day, dt.year
         except Exception:
             pass
@@ -766,9 +792,9 @@ def startup_scan_loop() -> None:
             is_leader = _try_become_or_refresh_scan_leader()
             if is_leader:
                 reindex_all()
-                now = datetime.now()
-                tomorrow = datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
-                sleep_sec = max(10, (tomorrow - now).total_seconds() + 2)
+                # Sleep until next APP_TZ/local midnight so day buckets refresh
+                # on the operator calendar (Docker often otherwise uses UTC).
+                sleep_sec = seconds_until_next_local_midnight()
                 # Refresh leadership periodically during the long sleep so TTL does not expire.
                 deadline = time_module.monotonic() + sleep_sec
                 while time_module.monotonic() < deadline:
@@ -844,20 +870,31 @@ def _build_day_memories(
     }
 
 
-def get_todays_memories(device_id: str) -> dict:
-    today = date.today()
+def get_todays_memories(
+    device_id: str,
+    *,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
+) -> dict:
+    today = resolve_local_today(local_date, tz_offset_minutes)
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
     day_data = _build_day_memories(device_id, today, sources, shared_labels)
 
     return {
-        "today": {"month": today.month, "day": today.day},
+        "today": {"month": today.month, "day": today.day, "year": today.year},
         "groups": day_data["groups"],
     }
 
 
-def get_recent_memories(device_id: str, days: int = 7) -> dict:
-    today = date.today()
+def get_recent_memories(
+    device_id: str,
+    days: int = 7,
+    *,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
+) -> dict:
+    today = resolve_local_today(local_date, tz_offset_minutes)
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
 
@@ -937,10 +974,15 @@ def _safe_anniversary(year: int, month: int, day: int) -> date:
     return date(year, month, min(day, max_day))
 
 
-def get_random_flashback(device_id: str) -> dict | None:
+def get_random_flashback(
+    device_id: str,
+    *,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
+) -> dict | None:
     """Pick one random media item from roughly 'N years ago this week',
     weighted toward more recent years so flashbacks feel closer to home."""
-    today = date.today()
+    today = resolve_local_today(local_date, tz_offset_minutes)
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
 

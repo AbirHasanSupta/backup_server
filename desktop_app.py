@@ -329,7 +329,51 @@ def fmt_bytes(n: int | float) -> str:
 def fmt_ts(ts: int | None) -> str:
     if not ts:
         return "Never"
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d  %H:%M:%S")
+    try:
+        from core.timeutil import format_local_ampm
+        formatted = format_local_ampm(ts, with_seconds=True)
+        if formatted:
+            return formatted
+    except Exception:
+        pass
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d  %I:%M:%S %p")
+
+
+def fmt_time_only(ts: int | None) -> str:
+    """Time-only AM/PM in APP_TZ/host local (for live log lines)."""
+    if not ts:
+        return ""
+    try:
+        from core.timeutil import format_time_ampm
+        formatted = format_time_ampm(ts, with_seconds=True)
+        if formatted:
+            return formatted
+    except Exception:
+        pass
+    return datetime.fromtimestamp(ts).strftime("%I:%M:%S %p")
+
+
+def fmt_ts_short(ts: int | None) -> str:
+    """Compact date+time AM/PM (no seconds)."""
+    if not ts:
+        return "never"
+    try:
+        from core.timeutil import format_local_ampm
+        formatted = format_local_ampm(ts, with_seconds=False)
+        if formatted:
+            return formatted
+    except Exception:
+        pass
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %I:%M %p")
+
+
+def fmt_now_time() -> str:
+    """Current wall-clock time in APP_TZ/host local, AM/PM."""
+    try:
+        from core.timeutil import local_now
+        return local_now().strftime("%I:%M:%S %p")
+    except Exception:
+        return datetime.now().strftime("%I:%M:%S %p")
 
 
 def fmt_rel(ts: int | None) -> str:
@@ -1170,7 +1214,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _insert_log_line(self, box: ctk.CTkTextbox, entry: dict):
         box.configure(state="normal")
-        ts = datetime.fromtimestamp(entry["time"]).strftime("%H:%M:%S")
+        ts = fmt_time_only(entry["time"])
         msg: str = entry["message"]
 
         txt: tk.Text = box._textbox
@@ -3849,7 +3893,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 import memories
                 stats = memories.get_memory_index_stats()
                 last = stats.get("last_indexed_at")
-                last_txt = datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "never"
+                last_txt = fmt_ts_short(last) if last else "never"
                 text = f"{stats['files']:,} indexed files · last run {last_txt}"
             except Exception:
                 text = "Memory index stats unavailable."
@@ -4030,7 +4074,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _copy_all_logs(self):
         logs = get_logs()
-        txt = "\n".join(f"[{datetime.fromtimestamp(e['time']).strftime('%Y-%m-%d %H:%M:%S')}] {e['message']}" for e in logs)
+        txt = "\n".join(f"[{fmt_ts(e['time'])}] {e['message']}" for e in logs)
         self.clipboard_clear()
         self.clipboard_append(txt)
         messagebox.showinfo("Logs", "All activity logs copied to clipboard.")
@@ -4355,8 +4399,16 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         }
 
         def _fmt_ts(ts):
-            try:    return datetime.fromtimestamp(ts / 1000).strftime("%b %d, %H:%M")
-            except: return ""
+            try:
+                # Sync session timestamps are milliseconds.
+                from core.timeutil import datetime_from_timestamp
+                dt = datetime_from_timestamp(ts / 1000)
+                return dt.strftime("%b %d, %I:%M %p")
+            except Exception:
+                try:
+                    return datetime.fromtimestamp(ts / 1000).strftime("%b %d, %I:%M %p")
+                except Exception:
+                    return ""
 
         def _fmt_dur(ms):
             secs = max(0, ms // 1000)
@@ -4870,7 +4922,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         for label, val in [
             ("Device Name", device_name),
             ("IP Address",  device_ip),
-            ("Time",        datetime.now().strftime("%H:%M:%S")),
+            ("Time",        fmt_now_time()),
         ]:
             row = ctk.CTkFrame(info, fg_color="transparent")
             row.pack(fill="x", padx=16, pady=5)

@@ -10,6 +10,8 @@ const _uiMemoryCache = {
   browseShared: {},
   recentMemories: {},
   todaysMemories: null,
+  /** YYYY-MM-DD of the phone calendar when memories cache was filled. */
+  _memoriesDateKey: null,
   placeClusters: null,
   placeItems: {},
   quizRound: null,
@@ -182,11 +184,45 @@ export function getCachedBrowseSharedFiles(sourceId, prefix = '') {
 }
 
 export function getCachedRecentMemories(days = 7) {
+  _ensureMemoriesCacheFresh();
   return _uiMemoryCache.recentMemories[days] || null;
 }
 
 export function getCachedTodaysMemories() {
+  _ensureMemoriesCacheFresh();
   return _uiMemoryCache.todaysMemories;
+}
+
+export function invalidateMemoriesCache() {
+  _uiMemoryCache.recentMemories = {};
+  _uiMemoryCache.todaysMemories = null;
+  _uiMemoryCache._memoriesDateKey = null;
+}
+
+function _localDateKey() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/** Query params so Docker (often UTC) resolves On-This-Day on the phone's calendar. */
+function _clientCalendarQuery() {
+  const localDate = _localDateKey();
+  const tzOffset = new Date().getTimezoneOffset();
+  return `local_date=${encodeURIComponent(localDate)}&tz_offset_minutes=${encodeURIComponent(tzOffset)}`;
+}
+
+function _ensureMemoriesCacheFresh() {
+  const key = _localDateKey();
+  if (_uiMemoryCache._memoriesDateKey !== key) {
+    // Drop yesterday's payload, but do NOT stamp the new date key until a
+    // successful fetch — otherwise a failed midnight refresh looks "fresh"
+    // with an empty cache and silent focus reloads stop retrying meaningfully.
+    _uiMemoryCache.recentMemories = {};
+    _uiMemoryCache.todaysMemories = null;
+  }
 }
 
 export function getCachedPlaceClusters() {
@@ -608,14 +644,16 @@ export async function getSharedFilePreviewUrl(sourceId, relativePath) {
  * @returns {Promise<{today: {month: number, day: number}, groups: Array<{year: number, years_ago: number, items: Array<any>}>}>}
  */
 export async function getTodaysMemories() {
+  _ensureMemoriesCacheFresh();
   const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
-      url: `http://${ip}:${port}/memories/today?device_id=${encodeURIComponent(deviceId)}`,
+      url: `http://${ip}:${port}/memories/today?device_id=${encodeURIComponent(deviceId)}&${_clientCalendarQuery()}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
   _uiMemoryCache.todaysMemories = res;
+  _uiMemoryCache._memoriesDateKey = _localDateKey();
   return res;
 }
 
@@ -624,14 +662,16 @@ export async function getTodaysMemories() {
  * @returns {Promise<{days: Array<{date: {month: number, day: number, year: number}, days_ago: number, is_today: boolean, groups: Array<{year: number, years_ago: number, items: Array<any>}>}>}>}
  */
 export async function getRecentMemories(days = 7) {
+  _ensureMemoriesCacheFresh();
   const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
-      url: `http://${ip}:${port}/memories/recent?device_id=${encodeURIComponent(deviceId)}&days=${encodeURIComponent(days)}`,
+      url: `http://${ip}:${port}/memories/recent?device_id=${encodeURIComponent(deviceId)}&days=${encodeURIComponent(days)}&${_clientCalendarQuery()}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
   _uiMemoryCache.recentMemories[days] = res;
+  _uiMemoryCache._memoriesDateKey = _localDateKey();
   return res;
 }
 
@@ -750,7 +790,7 @@ export async function getRandomFlashback() {
   return fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
-      url: `http://${ip}:${port}/memories/flashback?device_id=${encodeURIComponent(deviceId)}`,
+      url: `http://${ip}:${port}/memories/flashback?device_id=${encodeURIComponent(deviceId)}&${_clientCalendarQuery()}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
@@ -764,7 +804,7 @@ export async function getYearWrapped(year) {
   const res = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
-      url: `http://${ip}:${port}/memories/wrapped?device_id=${encodeURIComponent(deviceId)}&year=${encodeURIComponent(year)}`,
+      url: `http://${ip}:${port}/memories/wrapped?device_id=${encodeURIComponent(deviceId)}&year=${encodeURIComponent(year)}&${_clientCalendarQuery()}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });

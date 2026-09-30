@@ -462,6 +462,11 @@ async def record_sync_session(
             trigger_background_clustering(body.device_id)
         except Exception:
             pass
+        try:
+            from services.ws_service import ws_service
+            ws_service.flush_coalesced_uploads()
+        except Exception:
+            pass
 
     return {"ok": True}
 

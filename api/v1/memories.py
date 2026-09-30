@@ -10,6 +10,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse
 
 from core.security import verify_api_key_or_device_token
+from core.timeutil import resolve_local_today
 from repositories import device_repo
 from services.preview_service import preview_service
 from services import places_trips_cache
@@ -25,15 +26,34 @@ class RewindGenerateRequest(BaseModel):
     month: int | None = None
 
 
+def _client_calendar_kwargs(
+    local_date: str | None,
+    tz_offset_minutes: int | None,
+) -> dict:
+    return {
+        "local_date": local_date,
+        "tz_offset_minutes": tz_offset_minutes,
+    }
+
+
 @router.get("/memories/today")
 @router.get("/api/memories/today")
 async def get_memories_today(
     device_id: str,
+    local_date: str | None = Query(None, description="Client local calendar day YYYY-MM-DD"),
+    tz_offset_minutes: int | None = Query(
+        None,
+        description="JS Date.getTimezoneOffset() — minutes behind UTC",
+    ),
     authorization: str = Header(None),
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    res = await asyncio.to_thread(memories.get_todays_memories, device_id)
+    res = await asyncio.to_thread(
+        memories.get_todays_memories,
+        device_id,
+        **_client_calendar_kwargs(local_date, tz_offset_minutes),
+    )
     return res
 
 
@@ -42,11 +62,21 @@ async def get_memories_today(
 async def get_memories_recent(
     device_id: str,
     days: int = 7,
+    local_date: str | None = Query(None, description="Client local calendar day YYYY-MM-DD"),
+    tz_offset_minutes: int | None = Query(
+        None,
+        description="JS Date.getTimezoneOffset() — minutes behind UTC",
+    ),
     authorization: str = Header(None),
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    res = await asyncio.to_thread(memories.get_recent_memories, device_id, days)
+    res = await asyncio.to_thread(
+        memories.get_recent_memories,
+        device_id,
+        days,
+        **_client_calendar_kwargs(local_date, tz_offset_minutes),
+    )
     return res
 
 
@@ -72,11 +102,20 @@ async def trigger_reindex(
 @router.get("/api/memories/flashback")
 async def get_flashback(
     device_id: str,
+    local_date: str | None = Query(None, description="Client local calendar day YYYY-MM-DD"),
+    tz_offset_minutes: int | None = Query(
+        None,
+        description="JS Date.getTimezoneOffset() — minutes behind UTC",
+    ),
     authorization: str = Header(None),
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    res = await asyncio.to_thread(memories.get_random_flashback, device_id)
+    res = await asyncio.to_thread(
+        memories.get_random_flashback,
+        device_id,
+        **_client_calendar_kwargs(local_date, tz_offset_minutes),
+    )
     return res
 
 
@@ -85,11 +124,13 @@ async def get_flashback(
 async def get_wrapped(
     device_id: str,
     year: int | None = None,
+    local_date: str | None = Query(None),
+    tz_offset_minutes: int | None = Query(None),
     authorization: str = Header(None),
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    target_year = year or date.today().year
+    target_year = year or resolve_local_today(local_date, tz_offset_minutes).year
     res = await asyncio.to_thread(memories.get_wrapped, device_id, target_year)
     return res
 

@@ -620,6 +620,7 @@ def finish_upload_record(
     device_stats = touch_device_and_get_stats(device_ip, device_id=device_id, files_delta=1, size_delta=size)
     dev_name = get_device_display_name(device_id or device_ip)
     add_log(f"Uploaded: {relative_path} ({dev_name})")
+    # Debounced (30s) — also triggered at /sync/session end when uploaded > 0.
     if device_id:
         trigger_background_clustering(device_id)
 
@@ -1316,6 +1317,11 @@ async def record_sync_session(
 
     if body.device_id and body.uploaded > 0:
         trigger_background_clustering(body.device_id)
+        try:
+            from services.ws_service import ws_service
+            ws_service.flush_coalesced_uploads()
+        except Exception:
+            pass
 
     return {"ok": True, "id": session_id}
 
@@ -1589,24 +1595,39 @@ async def thumbnail_shared_file(
 @router.get("/memories/today")
 async def get_memories_today(
     device_id: str,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return await asyncio.to_thread(memories.get_todays_memories, device_id)
+    return await asyncio.to_thread(
+        memories.get_todays_memories,
+        device_id,
+        local_date=local_date,
+        tz_offset_minutes=tz_offset_minutes,
+    )
 
 
 @router.get("/memories/recent")
 async def get_memories_recent(
     device_id: str,
     days: int = 7,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return await asyncio.to_thread(memories.get_recent_memories, device_id, days)
+    return await asyncio.to_thread(
+        memories.get_recent_memories,
+        device_id,
+        days,
+        local_date=local_date,
+        tz_offset_minutes=tz_offset_minutes,
+    )
 
 
 @router.post("/memories/reindex")
@@ -1624,26 +1645,38 @@ async def reindex_memories(
 @router.get("/memories/flashback")
 async def get_memories_flashback(
     device_id: str,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return await asyncio.to_thread(memories.get_random_flashback, device_id)
+    return await asyncio.to_thread(
+        memories.get_random_flashback,
+        device_id,
+        local_date=local_date,
+        tz_offset_minutes=tz_offset_minutes,
+    )
 
 
 @router.get("/memories/wrapped")
 async def get_memories_wrapped(
     device_id: str,
-    year: int,
+    year: int | None = None,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    if year < 1970 or year > 2100:
+    from core.timeutil import resolve_local_today
+
+    target_year = year or resolve_local_today(local_date, tz_offset_minutes).year
+    if target_year < 1970 or target_year > 2100:
         raise HTTPException(status_code=400, detail="Invalid year")
-    return await asyncio.to_thread(memories.get_wrapped, device_id, year)
+    return await asyncio.to_thread(memories.get_wrapped, device_id, target_year)
 
 
 @router.get("/memories/quiz")

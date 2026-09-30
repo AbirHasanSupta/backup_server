@@ -13,6 +13,7 @@ import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { ShareModal } from '@/components/ShareModal';
 import { setUIPriorityMode } from '../../backgroundTask';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
 import {
   getRouletteItem,
 
@@ -52,15 +53,7 @@ const SHAKE_DEBOUNCE_MS = 3000;
  * Returns the source label fallback string when capture_time is absent.
  */
 function formatCaptureDate(captureTime: number | null | undefined, fallback: string): string {
-  if (!captureTime) return fallback;
-  try {
-    const d = new Date(captureTime * 1000);
-    const datePart = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-    const timePart = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-    return `${datePart} · ${timePart}`;
-  } catch {
-    return fallback;
-  }
+  return formatCaptureDateTime(captureTime) || fallback;
 }
 
 interface ServerConfig {

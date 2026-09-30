@@ -7,7 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libheif-dev \
     libmagic1 \
     curl \
-    && rm -rf /var/lib/apt/lists/*
+    tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -snf /usr/share/zoneinfo/Asia/Dhaka /etc/localtime \
+    && echo Asia/Dhaka > /etc/timezone
 
 WORKDIR /app
 
@@ -25,6 +28,10 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 ENV HOST=0.0.0.0
 ENV PORT=8000
+# Default household calendar (override via compose/env). Keeps On-This-Day and
+# capture-day buckets aligned when phones are in Bangladesh.
+ENV TZ=Asia/Dhaka
+ENV APP_TZ=Asia/Dhaka
 
 EXPOSE 8000
 

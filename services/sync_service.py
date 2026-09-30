@@ -86,7 +86,8 @@ class SyncService:
             relative_path, size, modified_time, now, device_ip, external_id, sha256, device_id=device_id
         )
         dev_name = device_repo.get_device_display_name(device_id or device_ip)
-        # Broadcast real-time upload event via WebSocket
+        # Broadcast real-time upload event via WebSocket (coalesced in ws_service
+        # so bulk sync does not storm Redis / app workers).
         try:
             from services.ws_service import ws_service
             ws_service.notify_file_uploaded(
@@ -99,7 +100,9 @@ class SyncService:
         except Exception:
             pass
 
-        # Debounced background clustering
+        # Debounced trip clustering (30s window in trips.py). Kept as a safety
+        # net when /sync/session is never posted (force-kill, legacy clients).
+        # Session-end also triggers clustering when uploaded > 0.
         if device_id:
             try:
                 from trips import trigger_background_clustering
