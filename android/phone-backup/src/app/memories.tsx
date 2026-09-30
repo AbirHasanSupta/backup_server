@@ -687,10 +687,16 @@ export default function MemoriesScreen() {
     const sub = AppState.addEventListener('change', (state) => {
       if (state !== 'active') {
         stopAllPlayback();
+        return;
+      }
+      // Only re-fetch when the phone calendar day rolled over while backgrounded.
+      const cached = getCachedRecentMemories(7);
+      if (!cached) {
+        void fetchMemories({ silent: true, force: true });
       }
     });
     return () => sub.remove();
-  }, [stopAllPlayback]);
+  }, [stopAllPlayback, fetchMemories]);
 
   const handleSaveRewind = async () => {
     if (!rewindYear || rewindSaving) return;

@@ -6,6 +6,7 @@ import * as FileSystem from 'expo-file-system';
 
 import { AppIcon } from '@/components/AppIcon';
 import { Radius, Spacing, TextScale } from '@/constants/theme';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
 
 export const QUIZ_CARD_WIDTH = 360;
 export const QUIZ_CARD_HEIGHT = 640;
@@ -50,13 +51,7 @@ interface QuizShareCardsProps {
 }
 
 function formatCaptureDate(captureTime: number | null | undefined): string {
-  if (!captureTime) return '';
-  try {
-    const d = new Date(captureTime * 1000);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  } catch {
-    return '';
-  }
+  return formatCaptureDateTime(captureTime);
 }
 
 function QuizScoreShareCard({

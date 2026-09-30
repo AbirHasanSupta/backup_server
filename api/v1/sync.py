@@ -20,6 +20,23 @@ from state import add_log, set_current_activity
 
 router = APIRouter(tags=["Sync & Upload"])
 
+# Bulk sync can upload hundreds of files/min. Per-file activity logs flood Redis
+# and wake desktop/admin log consumers on the app side — rate-limit the chatter.
+_UPLOAD_LOG_MIN_INTERVAL_SEC = 5.0
+_upload_log_lock = __import__("threading").Lock()
+_upload_log_last: dict[str, float] = {}
+
+
+def _log_upload_progress(relative_path: str, dev_name: str, device_key: str) -> None:
+    now = time.monotonic()
+    key = device_key or "default"
+    with _upload_log_lock:
+        last = _upload_log_last.get(key, 0.0)
+        if now - last < _UPLOAD_LOG_MIN_INTERVAL_SEC:
+            return
+        _upload_log_last[key] = now
+    add_log(f"Uploading: {relative_path} ({dev_name})")
+
 
 class CheckFilesItem(BaseModel):
     relative_path: str
@@ -161,7 +178,7 @@ async def upload_file_raw(
 
     set_current_activity(f"Uploading {relative_path}", device_ip, device_id)
     dev_name = await asyncio.to_thread(device_repo.get_device_display_name, device_id or device_ip)
-    add_log(f"Uploading: {relative_path} ({dev_name})")
+    _log_upload_progress(relative_path, dev_name, device_id or device_ip)
 
     storage = get_storage()
     expected_sha = _validate_sha256_format(sha256)
@@ -209,7 +226,7 @@ async def upload_file_multipart(
 
     set_current_activity(f"Uploading {relative_path}", device_ip, device_id)
     dev_name = await asyncio.to_thread(device_repo.get_device_display_name, device_id or device_ip)
-    add_log(f"Uploading: {relative_path} ({dev_name})")
+    _log_upload_progress(relative_path, dev_name, device_id or device_ip)
 
     storage = get_storage()
     expected_sha = _validate_sha256_format(sha256)

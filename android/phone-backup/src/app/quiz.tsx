@@ -16,8 +16,9 @@ import {
 } from '@/components/QuizShareCards';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
-import { getQuizRound, getConfig, buildPreviewUrl, buildThumbnailUrl, createQuizShare } from '../../downloader';
+import { getQuizRound, getConfig, buildPreviewUrl, createQuizShare } from '../../downloader';
 import { setUIPriorityMode } from '../../backgroundTask';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
 
 
 interface QuizItem {
@@ -39,13 +40,7 @@ interface ServerConfig {
 type AnswerState = 'unanswered' | 'correct' | 'wrong';
 
 function formatCaptureDate(captureTime: number | null | undefined): string {
-  if (!captureTime) return '';
-  try {
-    const d = new Date(captureTime * 1000);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  } catch {
-    return '';
-  }
+  return formatCaptureDateTime(captureTime);
 }
 
 function getScoreMessage(score: number, total: number): string {
@@ -142,8 +137,9 @@ export default function QuizScreen() {
   }, [router, sharing]);
 
   const currentItem = items[roundIdx] ?? null;
+  // Full download URL — thumbnails are too soft for Guess-the-Year gameplay.
   const imageUrl = currentItem && serverConfig
-    ? buildThumbnailUrl(serverConfig, currentItem.relative_path, currentItem.source_type, currentItem.source_id)
+    ? buildPreviewUrl(serverConfig, currentItem.relative_path, currentItem.source_type, currentItem.source_id)
     : '';
   const scoreMessage = getScoreMessage(score, items.length);
 

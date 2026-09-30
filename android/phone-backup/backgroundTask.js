@@ -117,7 +117,7 @@ function _parseUIPriorityValue(raw) {
 }
 
 /** Cross-context read used by the upload worker loop. */
-async function readUIPriorityMode() {
+export async function readUIPriorityMode() {
   const now = Date.now();
   // Always re-poll AsyncStorage on an interval so clearing priority in the UI
   // context is visible to the background-actions runtime (and vice versa).

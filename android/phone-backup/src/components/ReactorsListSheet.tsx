@@ -14,6 +14,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { getMediaReactions } from '../../downloader';
+import { formatLocalDate } from '@/utils/dateFormat';
 
 const { height: SCREEN_H } = Dimensions.get('window');
 
@@ -34,7 +35,7 @@ function formatTimeAgo(ts: number | undefined): string {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return new Date(ts * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  return formatLocalDate(ts);
 }
 
 export function ReactorsListSheet({
