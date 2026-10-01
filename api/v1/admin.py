@@ -79,6 +79,7 @@ import rewind
 import thumbnail
 from version import APP_VERSION
 import video_preview
+from core.timeutil import format_local_ampm
 
 router = APIRouter(tags=["Admin Panel"])
 
@@ -509,7 +510,7 @@ async def get_cache_maintenance_stats(
         },
         "memory_index": {
             **m_stats,
-            "last_indexed_text": time.strftime("%Y-%m-%d %H:%M", time.localtime(m_stats["last_indexed_at"])) if m_stats.get("last_indexed_at") else "never",
+            "last_indexed_text": format_local_ampm(m_stats.get("last_indexed_at")) or "never",
         },
     }
 

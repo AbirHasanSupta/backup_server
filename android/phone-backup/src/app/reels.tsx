@@ -28,6 +28,7 @@ import { useFocusEffect, useNavigation, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
+import { formatRelativeOrLocal } from '@/utils/dateFormat';
 import { ShareModal } from '@/components/ShareModal';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
@@ -926,11 +927,7 @@ const ReelCard = React.memo(ReelCardBase);
 // ─── Comments sheet ───────────────────────────────────────────────────────────
 
 function formatTimeAgo(ts: number): string {
-  const d = Math.floor(Date.now() / 1000) - ts;
-  if (d < 60) return 'just now';
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  return `${Math.floor(d / 86400)}d ago`;
+  return formatRelativeOrLocal(ts);
 }
 
 function CommentsSheet({

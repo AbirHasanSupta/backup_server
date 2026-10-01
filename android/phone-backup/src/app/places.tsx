@@ -27,6 +27,7 @@ import { AnimatedListItem } from '@/components/AnimatedListItem';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticMedium, hapticLight } from '@/utils/haptics';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
 import { getPlaceName } from '@/utils/geocode';
 import { ShareModal } from '@/components/ShareModal';
 import { setUIPriorityMode } from '../../backgroundTask';
@@ -1180,6 +1181,11 @@ export default function PlacesScreen() {
               {activeViewerItem?.source_label ? (
                 <Text style={styles.viewerSubText} numberOfLines={1}>
                   {activeViewerItem.source_label}
+                </Text>
+              ) : null}
+              {activeViewerItem?.capture_time ? (
+                <Text style={styles.viewerSubText} numberOfLines={1}>
+                  {formatCaptureDateTime(activeViewerItem.capture_time)}
                 </Text>
               ) : null}
             </View>

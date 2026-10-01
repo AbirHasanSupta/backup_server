@@ -38,7 +38,7 @@ import * as MediaLibrary from 'expo-media-library/legacy';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { ShareModal } from '@/components/ShareModal';
-import { formatCaptureDateTime } from '@/utils/dateFormat';
+import { formatCaptureDateTime, formatRelativeOrLocal } from '@/utils/dateFormat';
 import { ReactorsListSheet } from '@/components/ReactorsListSheet';
 import { DirectPostModal, DeviceFileItem } from '@/components/DirectPostModal';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
@@ -275,13 +275,7 @@ function formatDate(ts: number | undefined): string {
 
 // Relative time for comments (created_at is a unix second timestamp).
 function formatTimeAgo(ts: number | undefined): string {
-  if (!ts) return '';
-  const diff = Math.floor(Date.now() / 1000) - ts;
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return formatDate(ts);
+  return formatRelativeOrLocal(ts);
 }
 
 function formatMediaTime(sec: number): string {

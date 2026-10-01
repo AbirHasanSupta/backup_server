@@ -5,7 +5,7 @@ import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { SwipeableRow } from '@/components/SwipeableRow';
 import { useAppTheme } from '@/hooks/use-app-theme';
-import { formatLocalDate } from '@/utils/dateFormat';
+import { formatLocalDateTime } from '@/utils/dateFormat';
 
 export interface Folder {
   uri: string;
@@ -70,7 +70,7 @@ export function FolderCard({ folder, onRemove, onRefresh, refreshDisabled }: Pro
           </Text>
           <Text style={styles.meta} numberOfLines={1}>
             {folder.addedAt
-              ? `Added ${formatLocalDate(folder.addedAt, false)}`
+              ? `Added ${formatLocalDateTime(folder.addedAt, false)}`
               : 'Ready for automatic backup'}
           </Text>
         </View>

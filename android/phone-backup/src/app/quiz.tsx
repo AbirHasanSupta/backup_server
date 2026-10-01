@@ -68,7 +68,7 @@ export default function QuizScreen() {
   const [feedShareVisible, setFeedShareVisible] = useState(false);
   const [sharing, setSharing] = useState(false);
 
-  const { shotRef, spec: captureSpec, captureCards, cancelCapture, onQuestionImageLoad } = useQuizCardCapture();
+  const { shotRef, spec: captureSpec, captureCards, cancelCapture, onQuestionImageLoad, onQuestionImageError } = useQuizCardCapture();
   const skipNextFocusLoadRef = useRef(false);
   const mountedRef = useRef(true);
 
@@ -277,6 +277,7 @@ export default function QuizScreen() {
         scoreMessage={scoreMessage}
         primaryColor={colors.primary}
         onQuestionImageLoad={onQuestionImageLoad}
+        onQuestionImageError={onQuestionImageError}
       />
 
       <View style={styles.header}>

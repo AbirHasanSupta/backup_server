@@ -7,7 +7,7 @@ import os
 from datetime import date
 from pydantic import BaseModel
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from core.security import verify_api_key_or_device_token
 from core.timeutil import resolve_local_today
@@ -18,6 +18,9 @@ import memories
 import rewind
 
 router = APIRouter(tags=["Memories & Rewind"])
+
+# Date-keyed calendars must never be cached by browsers/proxies across midnight.
+_NO_STORE_HEADERS = {"Cache-Control": "private, no-store"}
 
 
 class RewindGenerateRequest(BaseModel):
@@ -34,6 +37,10 @@ def _client_calendar_kwargs(
         "local_date": local_date,
         "tz_offset_minutes": tz_offset_minutes,
     }
+
+
+def _no_store_json(payload):
+    return JSONResponse(content=payload, headers=_NO_STORE_HEADERS)
 
 
 @router.get("/memories/today")
@@ -54,7 +61,7 @@ async def get_memories_today(
         device_id,
         **_client_calendar_kwargs(local_date, tz_offset_minutes),
     )
-    return res
+    return _no_store_json(res)
 
 
 @router.get("/memories/recent")
@@ -77,7 +84,7 @@ async def get_memories_recent(
         days,
         **_client_calendar_kwargs(local_date, tz_offset_minutes),
     )
-    return res
+    return _no_store_json(res)
 
 
 @router.post("/memories/reindex")
@@ -116,7 +123,7 @@ async def get_flashback(
         device_id,
         **_client_calendar_kwargs(local_date, tz_offset_minutes),
     )
-    return res
+    return _no_store_json(res)
 
 
 @router.get("/memories/wrapped")

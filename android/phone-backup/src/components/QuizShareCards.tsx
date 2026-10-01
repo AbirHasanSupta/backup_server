@@ -48,6 +48,7 @@ interface QuizShareCardsProps {
   spec: QuizCaptureSpec | null;
   shotRef: React.RefObject<React.ElementRef<typeof ViewShot> | null>;
   onQuestionImageLoad?: () => void;
+  onQuestionImageError?: () => void;
 }
 
 function formatCaptureDate(captureTime: number | null | undefined): string {
@@ -145,6 +146,7 @@ export function QuizShareCaptureView({
   spec,
   shotRef,
   onQuestionImageLoad,
+  onQuestionImageError,
 }: QuizShareCardsProps) {
   return (
     <View style={captureStyles.offscreen} pointerEvents="none" collapsable={false}>
@@ -160,7 +162,7 @@ export function QuizShareCaptureView({
             chosenYear={spec.chosenYear}
             imageUrl={spec.imageUrl}
             onImageLoad={onQuestionImageLoad}
-            onImageError={onQuestionImageLoad}
+            onImageError={onQuestionImageError}
           />
         ) : null}
       </ViewShot>
@@ -204,13 +206,18 @@ export function useQuizCardCapture() {
     setImageReady(true);
   }, []);
 
+  const onQuestionImageError = useCallback(() => {
+    void rejectPending(new Error('Quiz share image failed to load.'));
+  }, [rejectPending]);
+
   useEffect(() => {
     if (!spec || spec.kind !== 'question' || imageReady) return;
+    // Slow mesh/full-res loads: fail the card rather than capture a blank tile.
     const timeout = setTimeout(() => {
-      setImageReady(true);
-    }, 8000);
+      void rejectPending(new Error('Quiz share image timed out.'));
+    }, 15000);
     return () => clearTimeout(timeout);
-  }, [spec, imageReady]);
+  }, [spec, imageReady, rejectPending]);
 
   useEffect(() => {
     if (!spec || !pendingRef.current || !imageReady) return;
@@ -282,7 +289,7 @@ export function useQuizCardCapture() {
     void rejectPending(new QuizCaptureCancelledError());
   }, [rejectPending]);
 
-  return { shotRef, spec, captureCards, cancelCapture, onQuestionImageLoad };
+  return { shotRef, spec, captureCards, cancelCapture, onQuestionImageLoad, onQuestionImageError };
 }
 
 const captureStyles = StyleSheet.create({

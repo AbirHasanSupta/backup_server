@@ -28,6 +28,7 @@ import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticLight, hapticMedium, hapticSelection, hapticSuccess, hapticError } from '@/utils/haptics';
+import { todayStr as localTodayStr } from '../../streak';
 import { ShareModal } from '@/components/ShareModal';
 import {
   getRecentMemories,
@@ -169,6 +170,12 @@ export default function MemoriesScreen() {
   const [data, setData] = useState<MemoriesResponse | null>(cachedData);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const serverConfigRef = useRef<ServerConfig | null>(null);
+  // Ignore stale responses when focus/AppState/pull-to-refresh overlap.
+  const fetchGenRef = useRef(0);
+  const [todayDateStr, setTodayDateStr] = useState(() =>
+    new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
+  );
+  const [calendarDayKey, setCalendarDayKey] = useState(() => localTodayStr());
 
   // Story Viewer state
   const [activeDayIdx, setActiveDayIdx] = useState<number | null>(null);
@@ -239,7 +246,14 @@ export default function MemoriesScreen() {
     setRewindPickerVisible(true);
   }, []);
 
+  const syncHeaderDate = useCallback(() => {
+    const now = new Date();
+    setTodayDateStr(now.toLocaleDateString('en-US', { month: 'long', day: 'numeric' }));
+    setCalendarDayKey(localTodayStr(now));
+  }, []);
+
   const fetchMemories = useCallback(async (opts?: { silent?: boolean; force?: boolean }) => {
+    const gen = ++fetchGenRef.current;
     if (!opts?.silent) {
       setLoading(true);
       setError(null);
@@ -247,22 +261,21 @@ export default function MemoriesScreen() {
     try {
       if (opts?.force) invalidateMemoriesCache();
       const [cfg, res] = await Promise.all([getConfig(), getRecentMemories(7)]);
+      if (gen !== fetchGenRef.current) return;
       setServerConfig(cfg);
       serverConfigRef.current = cfg;
       setData(res);
       setError(null);
-      // Keep the header date in sync with the phone calendar after midnight.
-      setTodayDateStr(
-        new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
-      );
+      syncHeaderDate();
     } catch (err: any) {
+      if (gen !== fetchGenRef.current) return;
       if (!opts?.silent) {
         setError(sanitizeErrorMessage(err, 'Could not load your memories right now.'));
       }
     } finally {
-      if (!opts?.silent) setLoading(false);
+      if (gen === fetchGenRef.current && !opts?.silent) setLoading(false);
     }
-  }, []);
+  }, [syncHeaderDate]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -272,6 +285,29 @@ export default function MemoriesScreen() {
       setRefreshing(false);
     }
   }, [fetchMemories]);
+
+  // While Memories stays focused overnight, force a rollover refresh at local midnight.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      const now = new Date();
+      const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 2, 0);
+      timer = setTimeout(() => {
+        // Drop yesterday's React state immediately so we never present it as "Today".
+        setData(null);
+        setLoading(true);
+        syncHeaderDate();
+        invalidateMemoriesCache();
+        void fetchMemories({ force: true });
+        schedule();
+      }, Math.max(1000, next.getTime() - now.getTime()));
+    };
+    schedule();
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [fetchMemories, syncHeaderDate]);
 
   useEffect(() => {
     let active = true;
@@ -689,14 +725,16 @@ export default function MemoriesScreen() {
         stopAllPlayback();
         return;
       }
-      // Only re-fetch when the phone calendar day rolled over while backgrounded.
-      const cached = getCachedRecentMemories(7);
-      if (!cached) {
+      const today = localTodayStr();
+      // Calendar day changed while backgrounded, or in-memory cache was cleared for today.
+      if (today !== calendarDayKey || !getCachedRecentMemories(7)) {
+        setData(null);
+        syncHeaderDate();
         void fetchMemories({ silent: true, force: true });
       }
     });
     return () => sub.remove();
-  }, [stopAllPlayback, fetchMemories]);
+  }, [stopAllPlayback, fetchMemories, calendarDayKey, syncHeaderDate]);
 
   const handleSaveRewind = async () => {
     if (!rewindYear || rewindSaving) return;
@@ -866,10 +904,6 @@ export default function MemoriesScreen() {
     if (video) return buildThumbnailUrl(serverConfig, video.relative_path, video.source_type, video.source_id);
     return '';
   };
-
-  const [todayDateStr, setTodayDateStr] = useState(() =>
-    new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
-  );
 
   return (
     <View style={styles.root}>

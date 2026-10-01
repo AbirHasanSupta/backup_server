@@ -2368,7 +2368,7 @@ def get_quiz_photo_pool(
 
     # Cap the pool so huge libraries don't load the entire index into RAM.
     sql = f"""
-        SELECT source_type, source_key, relative_path, cap_year
+        SELECT source_type, source_key, relative_path, cap_year, cap_time
         FROM media_index
         WHERE ({where_source}) AND cap_year IS NOT NULL
         ORDER BY RANDOM()

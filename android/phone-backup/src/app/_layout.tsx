@@ -96,7 +96,8 @@ function TabIcon({ androidName, androidNameFocused, iosName, iosNameFocused, foc
 }
 
 async function checkAndNotifyMemories() {
-  const todayStr = new Date().toISOString().slice(0, 10);
+  // Phone local calendar day — never UTC via toISOString (wrong near midnight in +TZ).
+  const todayStr = streakTodayStr();
   const lastNotified = await getLastMemoryNotifiedDate();
   if (lastNotified === todayStr) return;
 

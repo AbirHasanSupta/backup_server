@@ -5,7 +5,7 @@ import { AppColors, Radius, Shadows, Spacing, TextScale } from '@/constants/them
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
-import { formatLocalDateTime } from '@/utils/dateFormat';
+import { formatLocalDateTimeLong } from '@/utils/dateFormat';
 
 export type SyncOutcome = 'completed' | 'stopped' | 'force_stopped' | 'failed';
 
@@ -61,8 +61,8 @@ function formatDuration(ms: number): string {
 }
 
 function formatTime(ts: number): string {
-  // Session timestamps are milliseconds.
-  return formatLocalDateTime(ts, false);
+  // Session timestamps are milliseconds; include year for cross-year history.
+  return formatLocalDateTimeLong(ts, false);
 }
 
 function formatBytes(bytes: number): string {

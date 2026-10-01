@@ -25,7 +25,14 @@ export function fmtBytes(n) {
 export function fmtTs(ts) {
   if (!ts) return 'Never';
   const ms = ts > 1e11 ? Number(ts) : Number(ts) * 1000;
-  return new Date(ms).toLocaleString();
+  return new Date(ms).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
 }
 
 export function fmtRel(ts) {
@@ -36,8 +43,15 @@ export function fmtRel(ts) {
   if (secs < 60) return 'Just now';
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
-  if (secs < 86400 * 30) return `${Math.floor(secs / 86400)}d ago`;
-  return new Date(ms).toLocaleDateString();
+  if (secs < 86400 * 7) return `${Math.floor(secs / 86400)}d ago`;
+  return new Date(ms).toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  });
 }
 
 export function formatDuration(secs) {

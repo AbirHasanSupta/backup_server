@@ -682,6 +682,53 @@ function raceWithAbort(promise) {
   });
 }
 
+/**
+ * Like raceWithAbort, but also abandons the JS wait when UI priority flips on
+ * mid-upload so workers re-enter the pause loop instead of holding the radio
+ * slot until a large file finishes. Native FileSystem.uploadAsync cannot be
+ * cancelled; the server skip-if-exists path makes a later retry safe.
+ */
+function raceWithAbortOrUIPriority(promise) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let pollTimer = null;
+    const { signal } = syncAbortController || {};
+
+    const cleanup = () => {
+      if (pollTimer) clearInterval(pollTimer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+    };
+    const settle = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(val);
+    };
+    const onAbort = () => settle(reject, new Error('aborted'));
+
+    if (signal) {
+      if (signal.aborted) {
+        reject(new Error('aborted'));
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    pollTimer = setInterval(() => {
+      Promise.resolve(readUIPriorityMode())
+        .then((active) => {
+          if (active) settle(reject, new Error('ui_priority'));
+        })
+        .catch(() => {});
+    }, 500);
+
+    promise.then(
+      (val) => settle(resolve, val),
+      (err) => settle(reject, err),
+    );
+  });
+}
+
 
 async function updateIdleNotification(force = false) {
   if (!BackgroundService?.isRunning()) return;
@@ -947,12 +994,24 @@ export async function performActualSync(onProgress, runOptions = {}) {
         await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
       }
 
+      let countCompleted = true;
       try {
         file = await enrichFileMetadata(file);
 
-        if (await shouldAbortSync()) break;
+        if (await shouldAbortSync()) {
+          countCompleted = false;
+          break;
+        }
 
-        const res = await raceWithAbort(uploadFile(file, () => {}, { verifyDisk: isTwoWay }));
+        // Re-check before starting — priority may have flipped during enrich.
+        if (await readUIPriorityMode()) {
+          countCompleted = false;
+          pending.splice(nextIndex, 0, file);
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+
+        const res = await raceWithAbortOrUIPriority(uploadFile(file, () => {}, { verifyDisk: isTwoWay }));
 
         if (res.success) {
           serverDeviceTotalFiles = res.deviceTotalFiles;
@@ -981,8 +1040,15 @@ export async function performActualSync(onProgress, runOptions = {}) {
           lastError = 'Server rejected the file. Check server logs.';
         }
       } catch (err) {
+        // Abandoned so interactive screens can reclaim Wi‑Fi — re-queue and pause.
+        if (err?.message === 'ui_priority') {
+          countCompleted = false;
+          pending.splice(nextIndex, 0, file);
+          continue;
+        }
         // Abandoned via force-stop or abort — not a real upload error.
         if (isForceStop() || isAborted()) {
+          countCompleted = false;
           break;
         }
         console.warn('[BackupTask] Upload failed:', file.relativePath, err?.message);
@@ -996,14 +1062,19 @@ export async function performActualSync(onProgress, runOptions = {}) {
           runOptions.sessionBuilder.errorDetails.push(`${file.name || file.relativePath.split('/').pop()}: ${friendlyMsg}`);
         }
       } finally {
-        completed++;
-        if (onProgress && !isForceStop() && !isAborted()) {
-          await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
+        if (countCompleted) {
+          completed++;
+          if (onProgress && !isForceStop() && !isAborted()) {
+            await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
+          }
         }
         // Graceful stop: break immediately after the current file completes.
         // Workers will not pick up another file from the shared queue.
-        if (isForceStop() || isAborted() || isStopRequested()) break;
+        if (isForceStop() || isAborted() || isStopRequested()) {
+          // fall through; while-loop checks shouldAbortSync next
+        }
       }
+      if (isForceStop() || isAborted() || isStopRequested()) break;
     }
   }
 

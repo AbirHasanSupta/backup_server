@@ -87,3 +87,24 @@ export function formatLocalDateTimeLong(ts: number | null | undefined, assumeSec
     return '';
   }
 }
+
+/**
+ * Relative for recent times; absolute local AM/PM after `maxRelativeSeconds` (default 7d).
+ * Accepts unix seconds or ms.
+ */
+export function formatRelativeOrLocal(
+  ts: number | null | undefined,
+  opts?: { assumeSeconds?: boolean; maxRelativeSeconds?: number; neverLabel?: string },
+): string {
+  if (ts == null || !Number.isFinite(ts)) return opts?.neverLabel ?? '';
+  const assumeSeconds = opts?.assumeSeconds !== false;
+  const maxRel = opts?.maxRelativeSeconds ?? 604800;
+  const d = toDate(ts, assumeSeconds);
+  const diffSec = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (diffSec < 0) return 'just now';
+  if (diffSec < 60) return 'just now';
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  if (diffSec < maxRel) return `${Math.floor(diffSec / 86400)}d ago`;
+  return formatCaptureDateTime(ts, assumeSeconds);
+}

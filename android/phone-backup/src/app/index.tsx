@@ -52,17 +52,15 @@ import { StreakBadge } from '@/components/StreakBadge';
 import { getPendingBackupSummary, invalidatePendingBackupCache } from '../../pendingBackup';
 import { getCleanupSummary, invalidateCleanupCache, formatFreeUpBytes } from '../../freeUpStorage';
 import { hapticMedium, hapticWarning, hapticError } from '@/utils/haptics';
+import { formatRelativeOrLocal } from '@/utils/dateFormat';
 
 function formatRelativeTime(ts: number | null): string {
-  if (!ts) return 'Never';
-  const seconds = Math.floor((Date.now() - ts) / 1000);
-  if (seconds < 60) return 'Just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  // After 24h show absolute local AM/PM so "Last sync" isn't forever "Nd ago".
+  return formatRelativeOrLocal(ts, {
+    assumeSeconds: false,
+    maxRelativeSeconds: 86400,
+    neverLabel: 'Never',
+  });
 }
 
 function applyProgressUpdate(
