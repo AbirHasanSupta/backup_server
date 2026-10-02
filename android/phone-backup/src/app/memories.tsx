@@ -172,6 +172,8 @@ export default function MemoriesScreen() {
   const serverConfigRef = useRef<ServerConfig | null>(null);
   // Ignore stale responses when focus/AppState/pull-to-refresh overlap.
   const fetchGenRef = useRef(0);
+  const dataRef = useRef<MemoriesResponse | null>(cachedData);
+  dataRef.current = data;
   const [todayDateStr, setTodayDateStr] = useState(() =>
     new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
   );
@@ -269,11 +271,16 @@ export default function MemoriesScreen() {
       syncHeaderDate();
     } catch (err: any) {
       if (gen !== fetchGenRef.current) return;
-      if (!opts?.silent) {
+      // Surface errors whenever the list is empty so a silent focus refresh
+      // that supersedes the mount load cannot leave a blank forever-spinner.
+      if (!opts?.silent || !dataRef.current) {
         setError(sanitizeErrorMessage(err, 'Could not load your memories right now.'));
       }
     } finally {
-      if (gen === fetchGenRef.current && !opts?.silent) setLoading(false);
+      // Always clear loading for the latest generation. A silent focus/AppState
+      // refresh that supersedes a non-silent mount fetch must not leave
+      // loading===true forever (games cards / rewind would stay unreachable).
+      if (gen === fetchGenRef.current) setLoading(false);
     }
   }, [syncHeaderDate]);
 
@@ -297,6 +304,7 @@ export default function MemoriesScreen() {
         // Drop yesterday's React state immediately so we never present it as "Today".
         setData(null);
         setLoading(true);
+        setError(null);
         syncHeaderDate();
         invalidateMemoriesCache();
         void fetchMemories({ force: true });
@@ -726,11 +734,25 @@ export default function MemoriesScreen() {
         return;
       }
       const today = localTodayStr();
-      // Calendar day changed while backgrounded, or in-memory cache was cleared for today.
-      if (today !== calendarDayKey || !getCachedRecentMemories(7)) {
+      // Calendar day rolled over while backgrounded — clear stale "Today" and refetch.
+      if (today !== calendarDayKey) {
         setData(null);
+        setLoading(true);
+        setError(null);
         syncHeaderDate();
-        void fetchMemories({ silent: true, force: true });
+        invalidateMemoriesCache();
+        void fetchMemories({ force: true });
+        return;
+      }
+      // In-memory cache was cleared for today; refresh without blanking existing rows.
+      // If we have nothing on screen, use a non-silent fetch so the list spinner shows
+      // instead of a false "No Memories Yet" flash.
+      if (!getCachedRecentMemories(7)) {
+        if (dataRef.current) {
+          void fetchMemories({ silent: true, force: true });
+        } else {
+          void fetchMemories({ force: true });
+        }
       }
     });
     return () => sub.remove();
@@ -931,96 +953,19 @@ export default function MemoriesScreen() {
         </View>
       </View>
 
-      {/* Body Content */}
-      {loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color={colors.primary} />
-          <Text style={styles.loadingText}>Finding your memories…</Text>
-        </View>
-      ) : error ? (
-        <ScrollView
-          contentContainerStyle={[styles.centered, { flexGrow: 1 }]}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={colors.primary}
-              colors={[colors.primary]}
-            />
-          }
-        >
-          <AppIcon androidName="cloud_off" iosName="wifi.slash" color={colors.error} size={48} />
-          <Text style={styles.errorText}>Server Unreachable</Text>
-          <Text style={styles.errorSubtext}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={() => fetchMemories()}>
-            <Text style={styles.retryBtnText}>Retry</Text>
-          </TouchableOpacity>
-        </ScrollView>
-      ) : !data || !data.days || data.days.length === 0 || totalItemsAcrossAllDays === 0 ? (
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={colors.primary}
-              colors={[colors.primary]}
-            />
-          }
-        >
-          <View style={styles.gamesRow}>
-            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/roulette')} activeOpacity={0.85}>
-              <View style={[styles.gameIconWrap, { backgroundColor: '#F59E0B22' }]}>
-                <AppIcon androidName="casino" iosName="die.face.5.fill" color="#F59E0B" size={20} />
-              </View>
-              <Text style={styles.gameCardText}>Photo Roulette</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/quiz')} activeOpacity={0.85}>
-              <View style={[styles.gameIconWrap, { backgroundColor: '#8B5CF622' }]}>
-                <AppIcon androidName="psychology" iosName="brain" color="#8B5CF6" size={20} />
-              </View>
-              <Text style={styles.gameCardText}>Guess the Year</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.gameCard}
-              onPress={() => openRewindPicker()}
-              activeOpacity={0.85}
-            >
-              <View style={[styles.gameIconWrap, { backgroundColor: '#06B6D422' }]}>
-                <AppIcon androidName="movie" iosName="film" color="#06B6D4" size={20} />
-              </View>
-              <Text style={styles.gameCardText}>Rewind Reel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/places')} activeOpacity={0.85}>
-              <View style={[styles.gameIconWrap, { backgroundColor: '#10B98122' }]}>
-                <AppIcon androidName="place" iosName="mappin.and.ellipse" color="#10B981" size={20} />
-              </View>
-              <Text style={styles.gameCardText}>Places</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.centeredEmpty}>
-            <View style={styles.emptyIconBg}>
-              <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={40} />
-            </View>
-            <Text style={styles.emptyTitle}>No Memories Yet</Text>
-            <Text style={styles.emptySubtitle}>Check back over the next few days to relive photos and videos from past years — or try Roulette, Guess the Year, Rewind, and Places above.</Text>
-          </View>
-        </ScrollView>
-      ) : (
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={colors.primary}
-              colors={[colors.primary]}
-            />
-          }
-        >
-          {/* Games Shelf */}
+      {/* Body: games always available; memories list loads independently */}
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={colors.primary}
+            colors={[colors.primary]}
+          />
+        }
+      >
           <View style={styles.gamesRow}>
             <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/roulette')} activeOpacity={0.85}>
               <View style={[styles.gameIconWrap, { backgroundColor: '#F59E0B22' }]}>
@@ -1052,6 +997,30 @@ export default function MemoriesScreen() {
             </TouchableOpacity>
           </View>
 
+        {loading && !data ? (
+          <View style={styles.listLoadingBlock}>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <Text style={styles.loadingText}>Finding your memories…</Text>
+          </View>
+        ) : error && !data ? (
+          <View style={styles.listLoadingBlock}>
+            <AppIcon androidName="cloud_off" iosName="wifi.slash" color={colors.error} size={48} />
+            <Text style={styles.errorText}>Server Unreachable</Text>
+            <Text style={styles.errorSubtext}>{error}</Text>
+            <TouchableOpacity style={styles.retryBtn} onPress={() => fetchMemories()}>
+              <Text style={styles.retryBtnText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        ) : !data || !data.days || data.days.length === 0 || totalItemsAcrossAllDays === 0 ? (
+          <View style={styles.centeredEmpty}>
+            <View style={styles.emptyIconBg}>
+              <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={40} />
+            </View>
+            <Text style={styles.emptyTitle}>No Memories Yet</Text>
+            <Text style={styles.emptySubtitle}>Check back over the next few days to relive photos and videos from past years — or try Roulette, Guess the Year, Rewind, and Places above.</Text>
+          </View>
+        ) : (
+          <>
           {/* Today Section — highlighted and featured at the top */}
           <View style={styles.sectionHeaderRow}>
             <View style={styles.todayBadge}>
@@ -1205,8 +1174,9 @@ export default function MemoriesScreen() {
               </ScrollView>
             </>
           )}
-        </ScrollView>
-      )}
+          </>
+        )}
+      </ScrollView>
 
       {/* Full-Screen Story Viewer Modal */}
       {activeDay && currentItem && (
@@ -1982,6 +1952,7 @@ const createStyles = (colors: AppColors, insets: any) =>
 
     centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.five },
     centeredEmpty: { alignItems: 'center', justifyContent: 'center', padding: Spacing.five, paddingTop: Spacing.eight },
+    listLoadingBlock: { alignItems: 'center', justifyContent: 'center', paddingVertical: Spacing.eight, paddingHorizontal: Spacing.five },
     loadingText: { marginTop: Spacing.three, fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '600' },
     errorText: { fontSize: TextScale.lg, fontWeight: '800', color: colors.error, marginTop: Spacing.two },
     errorSubtext: { fontSize: TextScale.xs, color: colors.textSecondary, textAlign: 'center', marginTop: 4 },

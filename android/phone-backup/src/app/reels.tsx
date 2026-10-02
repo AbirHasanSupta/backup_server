@@ -192,7 +192,9 @@ function VideoReelPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, o
     p.muted = muted;
     p.preservesPitch = true;
     p.bufferOptions = {
-      preferredForwardBufferDuration: 15,
+      // Larger forward buffer only — reduces mid-reel underrun stalls.
+      // minBufferForPlayback stays low so recovery after a stall is quick.
+      preferredForwardBufferDuration: 25,
       minBufferForPlayback: 0.25,
       prioritizeTimeOverSizeThreshold: true,
     };

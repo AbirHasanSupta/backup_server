@@ -199,7 +199,7 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
     p.muted = muted;
     p.preservesPitch = true;
     p.bufferOptions = {
-      preferredForwardBufferDuration: 15,
+      preferredForwardBufferDuration: 25,
       minBufferForPlayback: 0.25,
       prioritizeTimeOverSizeThreshold: true,
     };

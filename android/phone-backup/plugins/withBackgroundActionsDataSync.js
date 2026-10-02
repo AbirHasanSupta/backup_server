@@ -781,10 +781,12 @@ function customizeMainApplication(contents, language) {
     OkHttpClientProvider.setOkHttpClientFactory(object : OkHttpClientFactory {
       override fun createNewNetworkModuleClient(): OkHttpClient {
         val dispatcher = Dispatcher().apply {
-          maxRequests = 128
-          maxRequestsPerHost = 64
+          // High enough that feed/reels thumbs + API calls never queue behind
+          // each other under multi-user Docker / LAN load.
+          maxRequests = 256
+          maxRequestsPerHost = 128
         }
-        val connectionPool = ConnectionPool(32, 5, TimeUnit.MINUTES)
+        val connectionPool = ConnectionPool(64, 5, TimeUnit.MINUTES)
         return OkHttpClientProvider.createClientBuilder()
           .dispatcher(dispatcher)
           .connectionPool(connectionPool)
@@ -840,9 +842,9 @@ function customizeMainApplication(contents, language) {
       @Override
       public OkHttpClient createNewNetworkModuleClient() {
         Dispatcher dispatcher = new Dispatcher();
-        dispatcher.setMaxRequests(128);
-        dispatcher.setMaxRequestsPerHost(64);
-        ConnectionPool connectionPool = new ConnectionPool(32, 5, TimeUnit.MINUTES);
+        dispatcher.setMaxRequests(256);
+        dispatcher.setMaxRequestsPerHost(128);
+        ConnectionPool connectionPool = new ConnectionPool(64, 5, TimeUnit.MINUTES);
         return OkHttpClientProvider.createClientBuilder()
           .dispatcher(dispatcher)
           .connectionPool(connectionPool)
