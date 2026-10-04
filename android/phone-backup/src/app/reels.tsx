@@ -18,6 +18,7 @@ import {
   RefreshControl,
   PanResponder,
   Alert,
+  BackHandler,
   DeviceEventEmitter,
   AppState,
   Switch,
@@ -47,6 +48,7 @@ import {
   deleteComment,
   repostReel,
   cancelRepostReel,
+  createDeviceShare,
   toggleSaveReel,
   saveReelToDevice,
   markShareNotificationsSeen,
@@ -377,11 +379,14 @@ type ReelCardProps = {
   onOpenSettings: (item: ReelItem) => void;
   onReact: (item: ReelItem, emoji: string) => void;
   onOpenComments: (item: ReelItem) => void;
-  onOpenRepost: (item: ReelItem) => void;
+  onOpenRepost?: (item: ReelItem) => void;
+  onOpenShare?: (item: ReelItem) => void;
+  onOpenAuthorFilter?: (authorId: string, authorName: string) => void;
   onToggleSave: (item: ReelItem) => void;
   onSpeedModeChange?: (reelId: string, isFastForwarding: boolean) => void;
   onPlaybackTelemetry?: (ev: PlaybackTelemetryEvent) => void;
   colors: AppColors;
+  isLibrary?: boolean;
 };
 
 function ReelCardBase({
@@ -398,9 +403,13 @@ function ReelCardBase({
   onReact,
   onOpenComments,
   onOpenRepost,
+  onOpenShare,
+  onOpenAuthorFilter,
   onToggleSave,
   onSpeedModeChange,
   onPlaybackTelemetry,
+  colors,
+  isLibrary = false,
 }: ReelCardProps) {
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(1.0);
@@ -842,24 +851,43 @@ function ReelCardBase({
           </Text>
         </TouchableOpacity>
 
-        {/* Repost Button */}
-        <TouchableOpacity
-          style={s.actionBtn}
-          onPress={() => { hapticLight(); onOpenRepost(item); }}
-          activeOpacity={0.75}
-        >
-          <View style={s.actionIconWrap}>
-            <AppIcon
-              androidName="repeat"
-              iosName="arrow.2.squarepath"
-              color={item.user_has_reposted ? '#38BDF8' : '#FFFFFF'}
-              size={23}
-            />
-          </View>
-          <Text style={s.actionCount}>
-            {(item.repost_count || 0) > 0 ? item.repost_count : 'Repost'}
-          </Text>
-        </TouchableOpacity>
+        {/* Share Button (Backup & Shared Folders) or Repost Button (Main Reels) */}
+        {isLibrary ? (
+          <TouchableOpacity
+            style={s.actionBtn}
+            onPress={() => { hapticLight(); onOpenShare?.(item); }}
+            activeOpacity={0.75}
+            accessibilityLabel="Share reel to feed"
+          >
+            <View style={s.actionIconWrap}>
+              <AppIcon
+                androidName="share"
+                iosName="square.and.arrow.up"
+                color="#FFFFFF"
+                size={23}
+              />
+            </View>
+            <Text style={s.actionCount}>Share</Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity
+            style={s.actionBtn}
+            onPress={() => { hapticLight(); onOpenRepost?.(item); }}
+            activeOpacity={0.75}
+          >
+            <View style={s.actionIconWrap}>
+              <AppIcon
+                androidName="repeat"
+                iosName="arrow.2.squarepath"
+                color={item.user_has_reposted ? '#38BDF8' : '#FFFFFF'}
+                size={23}
+              />
+            </View>
+            <Text style={s.actionCount}>
+              {(item.repost_count || 0) > 0 ? item.repost_count : 'Repost'}
+            </Text>
+          </TouchableOpacity>
+        )}
 
         {/* Save / Bookmark Button */}
         <TouchableOpacity
@@ -901,18 +929,44 @@ function ReelCardBase({
       {/* Author & Caption Info (Bottom Left) */}
       <View
         style={[s.authorInfo, show2x && s.fastForwardHidden]}
-        pointerEvents="none"
+        pointerEvents={show2x ? 'none' : 'box-none'}
         importantForAccessibility={show2x ? 'no-hide-descendants' : 'auto'}
       >
         {item.is_repost && (
-          <View style={s.repostBadge}>
+          <TouchableOpacity
+            style={s.repostBadge}
+            activeOpacity={onOpenAuthorFilter ? 0.8 : 1}
+            disabled={!onOpenAuthorFilter}
+            onPress={() => {
+              const repId = item.reposted_by?.device_id || item.shared_by_device_id;
+              const repName = item.reposted_by?.display_name || item.shared_by;
+              if (repId && onOpenAuthorFilter) {
+                hapticLight();
+                onOpenAuthorFilter(repId, repName);
+              }
+            }}
+          >
             <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color="#FFFFFF" size={13} />
             <Text style={s.repostBadgeText} numberOfLines={1}>
               Reposted by {item.reposted_by?.display_name || item.shared_by}
             </Text>
-          </View>
+          </TouchableOpacity>
         )}
-        <View style={s.authorRow}>
+        <TouchableOpacity
+          style={s.authorRow}
+          activeOpacity={onOpenAuthorFilter ? 0.8 : 1}
+          disabled={!onOpenAuthorFilter}
+          onPress={() => {
+            const authorId = item.original_author?.device_id || item.shared_by_device_id || (item as any).source_key;
+            const authorName = item.is_repost
+              ? (item.original_author?.display_name || 'Original creator')
+              : (item.shared_by || 'Unknown');
+            if (authorId && onOpenAuthorFilter) {
+              hapticLight();
+              onOpenAuthorFilter(authorId, authorName);
+            }
+          }}
+        >
           <View style={s.avatar}>
             {initial ? (
               <Text style={s.avatarInitial}>{initial}</Text>
@@ -925,7 +979,7 @@ function ReelCardBase({
               ? (item.original_author?.display_name || 'Original creator')
               : (item.shared_by || 'Unknown')}
           </Text>
-        </View>
+        </TouchableOpacity>
         {!!item.caption && (
           <Text style={s.caption} numberOfLines={3}>
             {item.caption}
@@ -1376,6 +1430,8 @@ export default function ReelsScreen() {
   const [serverConfig, setServerConfig] = useState<ServerConfig>(null);
   const [commentsTarget, setCommentsTarget] = useState<ReelItem | null>(null);
   const [repostTarget, setRepostTarget] = useState<ReelItem | null>(null);
+  const [shareTarget, setShareTarget] = useState<ReelItem | null>(null);
+  const [authorFilter, setAuthorFilter] = useState<{ id: string; name: string } | null>(null);
   const [settingsTarget, setSettingsTarget] = useState<ReelItem | null>(null);
   const [muted, setMuted] = useState(false);
   const [autoScroll, setAutoScroll] = useState(false);
@@ -1396,6 +1452,90 @@ export default function ReelsScreen() {
   useEffect(() => {
     reelsRef.current = reels;
   }, [reels]);
+
+  const openAuthorFilter = useCallback((authorId: string, authorName: string) => {
+    if (!authorId && !authorName) return;
+    setAuthorFilter({ id: authorId, name: authorName });
+    setActiveIndex(0);
+    listRef.current?.scrollToOffset({ offset: 0, animated: false });
+  }, []);
+
+  const closeAuthorFilter = useCallback(() => {
+    setAuthorFilter(null);
+    setActiveIndex(0);
+    listRef.current?.scrollToOffset({ offset: 0, animated: false });
+  }, []);
+
+  useFocusEffect(useCallback(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (authorFilter) {
+        closeAuthorFilter();
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [authorFilter, closeAuthorFilter]));
+
+  const handleOpenShare = useCallback((item: ReelItem) => {
+    setShareTarget(item);
+  }, []);
+
+  const handleShareSubmit = useCallback(async (targetDeviceIds: string[], caption: string) => {
+    if (!shareTarget) return;
+    const cfg = serverConfig || await getConfig().catch(() => null);
+    const currentDeviceId = cfg?.deviceId || '';
+    const isSharedSection = reelSectionRef.current === 'shared' || shareTarget.library_source === 'reel_shared';
+    const sourceType = isSharedSection ? 'shared' : 'phone';
+    let defaultSourceKey = currentDeviceId || shareTarget.shared_by_device_id;
+    if (isSharedSection) {
+      defaultSourceKey = (shareTarget as any).source_key || shareTarget.reel_id.split(':')[2] || shareTarget.shared_by_device_id;
+    }
+    if (!defaultSourceKey) {
+      hapticError();
+      Alert.alert('Error', 'Could not determine source device or folder.');
+      return;
+    }
+    const items = [{
+      source_type: sourceType,
+      source_key: defaultSourceKey,
+      relative_path: shareTarget.path,
+      size: shareTarget.size ?? 0,
+      modified_time: shareTarget.created_at ?? 0,
+    }];
+    if (engineStateRef.current) {
+      const creatorKey = shareTarget.original_author?.device_id || shareTarget.shared_by_device_id || shareTarget.shared_by;
+      processPlaybackTelemetry(engineStateRef.current, {
+        share_id: shareTarget.share_id,
+        reel_id: shareTarget.reel_id,
+        media_id: shareTarget.media_id,
+        author_key: creatorKey,
+        watch_time_sec: 12.0,
+        duration_sec: shareTarget.duration || 15.0,
+        completion_rate: 1.0,
+        loops: 1,
+        skipped: false,
+        tokens: shareTarget.tokens,
+        group_id: shareTarget.group_id,
+        timestamp: Date.now(),
+      });
+      persistHyperPulseState(engineStateRef.current, reelEngineScope(reelSectionRef.current)).catch(() => {});
+    }
+    try {
+      const res = await createDeviceShare(targetDeviceIds, caption, items);
+      const shared = res?.count ?? 1;
+      hapticSuccess();
+      setShareTarget(null);
+      Alert.alert(
+        'Shared',
+        `Sent ${shared} ${shared === 1 ? 'reel' : 'reels'} to ${targetDeviceIds.length} ${targetDeviceIds.length === 1 ? 'device' : 'devices'}.`,
+      );
+    } catch (err: any) {
+      hapticError();
+      Alert.alert('Share Failed', err?.message || 'Could not share the reel.');
+    }
+  }, [shareTarget, serverConfig]);
+
   const hasMoreRef = useRef(false);
   const offsetRef = useRef(0);
   const loadingMoreRef = useRef(false);
@@ -1524,6 +1664,7 @@ export default function ReelsScreen() {
   const selectReelSection = useCallback((nextSection: ReelSection) => {
     hapticSelection();
     setSectionPickerVisible(false);
+    setAuthorFilter(null);
     if (nextSection === reelSectionRef.current) return;
     reelSectionRef.current = nextSection;
     setReelSection(nextSection);
@@ -1610,10 +1751,41 @@ export default function ReelsScreen() {
     loadReels(false).finally(() => { loadingMoreRef.current = false; });
   }, [loadReels]);
 
+  const displayedReels = useMemo(() => {
+    if (!authorFilter) return reels;
+    const targetId = authorFilter.id.toLowerCase();
+    const targetName = authorFilter.name.toLowerCase();
+    return reels.filter(r => {
+      const origId = (r.original_author?.device_id || '').toLowerCase();
+      const sharedId = (r.shared_by_device_id || '').toLowerCase();
+      const sourceKey = ((r as any).source_key || '').toLowerCase();
+      const repId = (r.reposted_by?.device_id || '').toLowerCase();
+      const authorName = (r.is_repost ? (r.original_author?.display_name || '') : (r.shared_by || '')).toLowerCase();
+      const sharedByName = (r.shared_by || '').toLowerCase();
+      const origName = (r.original_author?.display_name || '').toLowerCase();
+      const repName = (r.reposted_by?.display_name || '').toLowerCase();
+      return (
+        origId === targetId ||
+        sharedId === targetId ||
+        sourceKey === targetId ||
+        repId === targetId ||
+        (authorName && authorName === targetName) ||
+        (sharedByName && sharedByName === targetName) ||
+        (origName && origName === targetName) ||
+        (repName && repName === targetName)
+      );
+    });
+  }, [reels, authorFilter]);
+
+  const displayedReelsRef = useRef<ReelItem[]>(displayedReels);
+  useEffect(() => {
+    displayedReelsRef.current = displayedReels;
+  }, [displayedReels]);
+
   const handlePlaybackComplete = useCallback((itemIndex: number) => {
     if (!autoScroll) return;
     const nextIndex = itemIndex + 1;
-    if (nextIndex < reelsRef.current.length) {
+    if (nextIndex < displayedReelsRef.current.length) {
       listRef.current?.scrollToIndex({
         index: nextIndex,
         animated: true,
@@ -1627,7 +1799,7 @@ export default function ReelsScreen() {
     if (viewableItems.length === 0) return;
     const idx = viewableItems[0].index ?? 0;
     setActiveIndex(idx);
-    const reel = reelsRef.current[idx];
+    const reel = displayedReelsRef.current[idx];
     if (reel) {
       if (reel.is_unseen && reel.group_id) {
         markShareNotificationsSeen([reel.group_id]).catch(() => {});
@@ -1999,7 +2171,9 @@ export default function ReelsScreen() {
     autoScroll,
     viewportHeight,
     viewportWidth,
-  }), [activeIndex, screenFocused, muted, autoScroll, viewportHeight, viewportWidth]);
+    reelSection,
+    authorFilter,
+  }), [activeIndex, screenFocused, muted, autoScroll, viewportHeight, viewportWidth, reelSection, authorFilter]);
 
   const getItemLayout = useCallback((_: unknown, index: number) => {
     const h = Math.round(viewportHeight);
@@ -2019,6 +2193,9 @@ export default function ReelsScreen() {
     });
   }, []);
 
+  const isLibrary = isLibrarySection(reelSection);
+  const canFilterAuthor = reelSection === 'for-you' || reelSection === 'shared';
+
   const renderItem = useCallback(({ item, index }: { item: ReelItem; index: number }) => {
     const isNearActive = Math.abs(index - activeIndex) <= 1;
     return (
@@ -2036,14 +2213,36 @@ export default function ReelsScreen() {
         onOpenSettings={setSettingsTarget}
         onReact={handleReact}
         onOpenComments={setCommentsTarget}
-        onOpenRepost={handleOpenRepost}
+        onOpenRepost={isLibrary ? undefined : handleOpenRepost}
+        onOpenShare={isLibrary ? handleOpenShare : undefined}
+        onOpenAuthorFilter={canFilterAuthor ? openAuthorFilter : undefined}
         onToggleSave={handleToggleSave}
         onSpeedModeChange={handleSpeedModeChange}
         onPlaybackTelemetry={handlePlaybackTelemetry}
         colors={colors}
+        isLibrary={isLibrary}
       />
     );
-  }, [activeIndex, screenFocused, viewportWidth, viewportHeight, serverConfig, muted, autoScroll, handlePlaybackComplete, handleReact, handleOpenRepost, handleToggleSave, handleSpeedModeChange, handlePlaybackTelemetry, colors]);
+  }, [
+    activeIndex,
+    screenFocused,
+    viewportWidth,
+    viewportHeight,
+    serverConfig,
+    muted,
+    autoScroll,
+    handlePlaybackComplete,
+    handleReact,
+    isLibrary,
+    handleOpenRepost,
+    handleOpenShare,
+    canFilterAuthor,
+    openAuthorFilter,
+    handleToggleSave,
+    handleSpeedModeChange,
+    handlePlaybackTelemetry,
+    colors,
+  ]);
 
   return (
     <View
@@ -2068,16 +2267,30 @@ export default function ReelsScreen() {
         pointerEvents={isFastForwarding ? 'none' : 'box-none'}
         importantForAccessibility={isFastForwarding ? 'no-hide-descendants' : 'auto'}
       >
-        <TouchableOpacity
-          style={s.headerTitleButton}
-          onPress={() => { hapticLight(); setSectionPickerVisible(true); }}
-          hitSlop={10}
-          accessibilityLabel="Choose reels section"
-          accessibilityHint="Opens the Reels, Backup Folders, and Shared Folders selector"
-        >
-          <Text style={s.headerTitle}>{reelSectionTitle(reelSection)}</Text>
-          <AppIcon androidName="arrow_drop_down" iosName="chevron.down" color="#fff" size={20} />
-        </TouchableOpacity>
+        {authorFilter ? (
+          <View style={s.headerAuthorRow}>
+            <TouchableOpacity
+              style={s.headerBackBtn}
+              onPress={closeAuthorFilter}
+              hitSlop={10}
+              accessibilityLabel="Back to all reels"
+            >
+              <AppIcon androidName="arrow_back" iosName="chevron.left" color="#fff" size={22} />
+            </TouchableOpacity>
+            <Text style={s.headerTitle} numberOfLines={1}>{authorFilter.name}</Text>
+          </View>
+        ) : (
+          <TouchableOpacity
+            style={s.headerTitleButton}
+            onPress={() => { hapticLight(); setSectionPickerVisible(true); }}
+            hitSlop={10}
+            accessibilityLabel="Choose reels section"
+            accessibilityHint="Opens the Reels, Backup Folders, and Shared Folders selector"
+          >
+            <Text style={s.headerTitle}>{reelSectionTitle(reelSection)}</Text>
+            <AppIcon androidName="arrow_drop_down" iosName="chevron.down" color="#fff" size={20} />
+          </TouchableOpacity>
+        )}
 
         <View style={s.headerRightActions}>
           {/* Reels Library Screen Redirect (Saved, Liked, Reposts) */}
@@ -2109,25 +2322,35 @@ export default function ReelsScreen() {
             <ActivityIndicator color="#fff" size="large" />
             <Text style={s.loadingText}>Loading Reels…</Text>
           </View>
-        ) : reels.length === 0 ? (
+        ) : displayedReels.length === 0 ? (
           <View style={s.center}>
-            <AppIcon androidName="videocam_off" iosName="video.slash" color="rgba(255,255,255,0.55)" size={52} />
-            <Text style={s.emptyTitle}>No Reels Yet</Text>
+            <AppIcon
+              androidName={authorFilter ? "person_off" : "videocam_off"}
+              iosName={authorFilter ? "person.slash" : "video.slash"}
+              color="rgba(255,255,255,0.55)"
+              size={52}
+            />
+            <Text style={s.emptyTitle}>{authorFilter ? "No Reels Found" : "No Reels Yet"}</Text>
             <Text style={s.emptyBody}>
-              {error || (reelSection === 'backups'
-                ? 'Videos backed up from this device will appear here.'
-                : reelSection === 'shared'
-                  ? 'Videos from desktop folders shared with this device will appear here.'
-                  : 'Post a video to the feed and it will appear here as a reel.')}
+              {authorFilter
+                ? `No reels found for ${authorFilter.name}.`
+                : error || (reelSection === 'backups'
+                  ? 'Videos backed up from this device will appear here.'
+                  : reelSection === 'shared'
+                    ? 'Videos from desktop folders shared with this device will appear here.'
+                    : 'Post a video to the feed and it will appear here as a reel.')}
             </Text>
-            <TouchableOpacity style={s.retryBtn} onPress={() => loadReels(true)}>
-              <Text style={s.retryText}>Retry</Text>
+            <TouchableOpacity
+              style={s.retryBtn}
+              onPress={authorFilter ? closeAuthorFilter : () => loadReels(true)}
+            >
+              <Text style={s.retryText}>{authorFilter ? "Show All Reels" : "Retry"}</Text>
             </TouchableOpacity>
           </View>
         ) : (
           <FlatList
             ref={listRef}
-            data={reels}
+            data={displayedReels}
             keyExtractor={item => item.reel_id}
             renderItem={renderItem}
             getItemLayout={getItemLayout}
@@ -2174,6 +2397,15 @@ export default function ReelsScreen() {
         onClose={() => setCommentsTarget(null)}
         onCommentAdded={(count) => commentsTarget && handleCommentAdded(commentsTarget.reel_id, count)}
         onCommentDeleted={(count) => commentsTarget && handleCommentDeleted(commentsTarget.reel_id, count)}
+      />
+
+      <ShareModal
+        visible={shareTarget != null}
+        count={1}
+        colors={colors}
+        excludeDeviceIds={serverConfig?.deviceId ? [serverConfig.deviceId] : []}
+        onClose={() => setShareTarget(null)}
+        onSubmit={handleShareSubmit}
       />
 
       <ShareModal
@@ -2326,6 +2558,17 @@ const s = StyleSheet.create({
     alignItems: 'center',
     gap: 2,
     maxWidth: '72%',
+  },
+  headerAuthorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two + 2,
+    maxWidth: '72%',
+  },
+  headerBackBtn: {
+    padding: 4,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   headerTitle: {
     color: '#FFFFFF',

@@ -2862,6 +2862,8 @@ async def get_shared_and_backups_reels(
                 "is_unseen": False,
                 "group_id": None,
                 "library_source": r["source_type"],
+                "source_type": "phone" if r["source_type"] == "reel_backup" else "shared",
+                "source_key": r["source_key"],
             })
 
         # Each catalogue is ranked server-side before pagination. This prevents
