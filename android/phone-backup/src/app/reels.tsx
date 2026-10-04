@@ -223,6 +223,7 @@ function VideoReelPlayer({
   const onProgressRef = useRef(onProgress);
   const onPlaybackCompleteRef = useRef(onPlaybackComplete);
   const completionFiredRef = useRef(false);
+  const hasFinishedRef = useRef(false);
 
   useEffect(() => {
     if (playerRef) {
@@ -242,14 +243,16 @@ function VideoReelPlayer({
     } catch {}
   }, [autoScroll, player]);
 
-  // Reset completion flag whenever uri or isActive changes
+  // Reset completion flag whenever uri changes
   useEffect(() => {
     completionFiredRef.current = false;
-  }, [uri, isActive]);
+    hasFinishedRef.current = false;
+  }, [uri]);
 
   useEffect(() => {
     if (!autoScroll || !isActive) return;
     const sub = (player as any)?.addListener?.('playToEnd', () => {
+      hasFinishedRef.current = true;
       if (!completionFiredRef.current) {
         completionFiredRef.current = true;
         onPlaybackCompleteRef.current?.();
@@ -267,7 +270,15 @@ function VideoReelPlayer({
         onReadyRef.current();
       }
       if (isActive && isPlaying) {
-        try { player.play(); } catch {}
+        try {
+          const dur = player.duration || 0;
+          const cur = player.currentTime || 0;
+          if (hasFinishedRef.current || (dur > 0 && cur >= dur - 0.5)) {
+            player.currentTime = 0;
+            hasFinishedRef.current = false;
+          }
+          player.play();
+        } catch {}
       }
     }
   }, [status, isActive, isPlaying, player]);
@@ -287,6 +298,7 @@ function VideoReelPlayer({
         if (dur > 0) {
           onProgressRef.current(cur, dur);
           if (autoScroll && dur > 1.0 && cur >= dur - 0.25) {
+            hasFinishedRef.current = true;
             if (!completionFiredRef.current) {
               completionFiredRef.current = true;
               onPlaybackCompleteRef.current?.();
@@ -294,6 +306,7 @@ function VideoReelPlayer({
           }
           if (cur < dur - 1.0) {
             completionFiredRef.current = false;
+            hasFinishedRef.current = false;
           }
         }
       } catch {}
@@ -304,9 +317,21 @@ function VideoReelPlayer({
   useEffect(() => {
     try {
       if (isActive && isPlaying) {
+        completionFiredRef.current = false;
+        const dur = player.duration || 0;
+        const cur = player.currentTime || 0;
+        if (hasFinishedRef.current || (dur > 0 && cur >= dur - 0.5)) {
+          player.currentTime = 0;
+          hasFinishedRef.current = false;
+        }
         player.play();
       } else {
         player.pause();
+        const dur = player.duration || 0;
+        const cur = player.currentTime || 0;
+        if (dur > 0 && cur >= dur - 0.5) {
+          hasFinishedRef.current = true;
+        }
       }
     } catch {}
   }, [isActive, isPlaying, player]);

@@ -487,11 +487,6 @@ export function scoreReelCandidate(
   const watchRecord = state.watched[item.reel_id];
   const isWatched = Boolean(watchRecord);
 
-  // A watched reel never belongs in the discover feed.  The server applies
-  // the same rule using persisted telemetry; keeping it here makes cached and
-  // in-flight pages obey it immediately as well.
-  if (isWatched) return Number.NEGATIVE_INFINITY;
-
   // Top Priority: Direct newly received unseen shared/reposted reel
   if (!isWatched && item.is_unseen) {
     return 100000 + (item.created_at || 0);
@@ -633,33 +628,27 @@ export function buildDiverseReelSlate(
   state: HyperPulseState,
   sessionSeed: number,
 ): ReelItem[] {
-  const scored = [...items].flatMap(item => {
-    const watchRecord = state.watched[item.reel_id];
-    const isWatched = Boolean(watchRecord);
-    if (isWatched) return [];
-    return [{
-      item,
-      score: scoreReelCandidate(item, state, sessionSeed),
-    }];
-  });
+  const scored = items.map(item => ({
+    item,
+    score: scoreReelCandidate(item, state, sessionSeed),
+  }));
 
   scored.sort((a, b) => b.score - a.score);
 
-  // Keep direct, unread shares prominent without reintroducing watched media.
+  // Keep direct, unread shares prominent
   const unseenDirect: ReelItem[] = [];
-  const freshUnwatched: ReelItem[] = [];
+  const candidatePool: ReelItem[] = [];
 
   for (const entry of scored) {
     const { item } = entry;
     if (item.is_unseen) {
       unseenDirect.push(item);
     } else {
-      freshUnwatched.push(item);
+      candidatePool.push(item);
     }
   }
 
   const result: ReelItem[] = [...unseenDirect];
-  const candidatePool = [...freshUnwatched];
 
   // Slate diversification trackers
   const recentAuthors: string[] = result.map(

@@ -83,16 +83,7 @@ class ReelsService:
             return s["source_type"] in ("rewind", "rewind_shared") or ext in _REEL_VIDEO_EXTS
 
         reel_shares = [s for s in all_shares if _is_video(s)]
-        # A reel should not re-enter the normal feed once this viewer has
-        # watched it.  Check both share and media IDs so reposts cannot cause
-        # the same video to recur under a new share card.  Personalization is
-        # still applied below to every remaining, unseen candidate.
         watched_share_ids, watched_media_ids = reels_repo.get_recently_watched_reel_ids(device_id)
-        reel_shares = [
-            share for share in reel_shares
-            if share["share_id"] not in watched_share_ids
-            and (not share.get("media_id") or share["media_id"] not in watched_media_ids)
-        ]
         media_ids = [s["media_id"] for s in reel_shares if s.get("media_id")]
 
         counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
@@ -177,7 +168,9 @@ class ReelsService:
             q = r.get("quality_score", 0.0)
             jitter = self.deterministic_seed_jitter(str(r["reel_id"]), seed) * 0.30
             social_boost = 0.08 if r.get("is_repost") else 0.0
-            return (10000.0 if is_unseen else 0.0) + (recency * 0.40) + (q * 0.35) + social_boost + jitter
+            is_watched = r["share_id"] in watched_share_ids or (r.get("media_id") and r["media_id"] in watched_media_ids)
+            watch_penalty = -2.0 if is_watched else 0.5
+            return (10000.0 if is_unseen else 0.0) + (recency * 0.40) + (q * 0.35) + social_boost + watch_penalty + jitter
 
         reels.sort(key=_candidate_rank, reverse=True)
         total = len(reels)

@@ -280,9 +280,6 @@ async def get_shared_and_backups_reels(
     materialized: list[dict] = []
     scan_offset = offset
     has_more_candidates = False
-    # A run of previously watched items must not leave a short page or cause a
-    # duplicate on the next request.  Advance the server cursor past every
-    # scanned candidate, but only materialize the requested page size.
     while len(materialized) < limit:
         remaining = limit - len(materialized)
         candidate_page = await _catalog_page(scan_offset, remaining + 1)
@@ -294,11 +291,7 @@ async def get_shared_and_backups_reels(
         catalog_rows = await asyncio.to_thread(
             reels_repo.bulk_get_or_create_library_reel_shares, candidates
         )
-        materialized.extend(
-            item for item in catalog_rows
-            if item["share_id"] not in watched_share_ids
-            and (not item.get("media_id") or item["media_id"] not in watched_media_ids)
-        )
+        materialized.extend(catalog_rows)
         if len(materialized) >= limit or not has_more_candidates:
             break
 
@@ -367,7 +360,9 @@ async def get_shared_and_backups_reels(
         quality = reel.get("quality_score") or 0.0
         source_jitter = reels_service.deterministic_seed_jitter(f"catalog:{reel['reel_id']}", seed) * 0.30
         source_boost = 0.03 if reel.get("library_source") == "reel_shared" else 0.0
-        return recency * 0.50 + quality * 0.25 + source_boost + source_jitter
+        is_watched = reel["share_id"] in watched_share_ids or (reel.get("media_id") and reel["media_id"] in watched_media_ids)
+        watch_penalty = -2.0 if is_watched else 0.5
+        return recency * 0.50 + quality * 0.25 + source_boost + watch_penalty + source_jitter
 
     reels.sort(key=_catalog_rank, reverse=True)
     return {
