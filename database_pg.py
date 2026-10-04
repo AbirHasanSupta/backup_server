@@ -278,18 +278,25 @@ def init_pg_db():
                 source_id VARCHAR(64) NOT NULL,
                 emoji VARCHAR(16) NOT NULL,
                 created_at BIGINT NOT NULL,
-                UNIQUE (media_id, source_id, emoji)
+                scope VARCHAR(16) NOT NULL DEFAULT 'post'
             );
+            ALTER TABLE reactions ADD COLUMN IF NOT EXISTS scope VARCHAR(16) NOT NULL DEFAULT 'post';
+            ALTER TABLE reactions DROP CONSTRAINT IF EXISTS reactions_media_id_source_id_emoji_key;
             CREATE INDEX IF NOT EXISTS idx_reactions_media ON reactions(media_id);
+            CREATE INDEX IF NOT EXISTS idx_reactions_media_scope ON reactions(media_id, scope);
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_reactions_media_source_emoji_scope ON reactions(media_id, source_id, emoji, scope);
 
             CREATE TABLE IF NOT EXISTS comments (
                 id BIGSERIAL PRIMARY KEY,
                 media_id BIGINT NOT NULL,
                 source_id VARCHAR(64) NOT NULL,
                 text TEXT NOT NULL,
-                created_at BIGINT NOT NULL
+                created_at BIGINT NOT NULL,
+                scope VARCHAR(16) NOT NULL DEFAULT 'post'
             );
+            ALTER TABLE comments ADD COLUMN IF NOT EXISTS scope VARCHAR(16) NOT NULL DEFAULT 'post';
             CREATE INDEX IF NOT EXISTS idx_comments_media ON comments(media_id, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_comments_media_scope ON comments(media_id, scope);
             """)
 
             # 7. Device Shares & Share Groups

@@ -19,6 +19,7 @@ import {
   Alert,
   BackHandler,
   DeviceEventEmitter,
+  Switch,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
@@ -45,6 +46,7 @@ import {
   repostReel,
   cancelRepostReel,
   toggleSaveReel,
+  saveReelToDevice,
 } from '../../downloader';
 import { setUIPriorityMode } from '../../backgroundTask';
 import { hapticLight, hapticSuccess, hapticError, hapticLongPress, hapticSelection } from '@/utils/haptics';
@@ -122,7 +124,7 @@ type Comment = {
 };
 
 const MUTED_KEY = 'reels_muted_v1';
-const REACTION_EMOJIS = ['❤️', '😂', '😮', '👍'] as const;
+const AUTO_SCROLL_KEY = 'reels_auto_scroll_v1';
 
 function formatMediaTime(sec: number): string {
   const s = Math.max(0, Math.floor(sec || 0));
@@ -180,12 +182,25 @@ type VideoPlayerProps = {
   isPlaying: boolean;
   speed: number;
   muted: boolean;
+  autoScroll?: boolean;
+  onPlaybackComplete?: () => void;
   onProgress: (current: number, total: number) => void;
   onReady: () => void;
   playerRef?: React.RefObject<any>;
 };
 
-function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onReady, playerRef }: VideoPlayerProps) {
+function VideoPlayer({
+  uri,
+  isActive,
+  isPlaying,
+  speed,
+  muted,
+  autoScroll = false,
+  onPlaybackComplete,
+  onProgress,
+  onReady,
+  playerRef,
+}: VideoPlayerProps) {
   const mod = expoVideoModule!;
 
   const source = useMemo<VideoSource>(() => ({
@@ -195,7 +210,7 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
   }), [uri]);
 
   const player = mod.useVideoPlayer(source, (p) => {
-    p.loop = true;
+    p.loop = !autoScroll;
     p.muted = muted;
     p.preservesPitch = true;
     p.bufferOptions = {
@@ -209,6 +224,8 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
   const readyFiredRef = useRef(false);
   const onReadyRef = useRef(onReady);
   const onProgressRef = useRef(onProgress);
+  const onPlaybackCompleteRef = useRef(onPlaybackComplete);
+  const completionFiredRef = useRef(false);
 
   useEffect(() => {
     if (playerRef) playerRef.current = player;
@@ -217,7 +234,31 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
   useEffect(() => {
     onReadyRef.current = onReady;
     onProgressRef.current = onProgress;
-  }, [onReady, onProgress]);
+    onPlaybackCompleteRef.current = onPlaybackComplete;
+  }, [onReady, onProgress, onPlaybackComplete]);
+
+  useEffect(() => {
+    try {
+      player.loop = !autoScroll;
+    } catch {}
+  }, [autoScroll, player]);
+
+  useEffect(() => {
+    completionFiredRef.current = false;
+  }, [uri, isActive]);
+
+  useEffect(() => {
+    if (!autoScroll || !isActive) return;
+    const sub = (player as any)?.addListener?.('playToEnd', () => {
+      if (!completionFiredRef.current) {
+        completionFiredRef.current = true;
+        onPlaybackCompleteRef.current?.();
+      }
+    });
+    return () => {
+      sub?.remove?.();
+    };
+  }, [player, autoScroll, isActive]);
 
   useEffect(() => {
     if (status === 'readyToPlay') {
@@ -249,11 +290,23 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
     const interval = setInterval(() => {
       try {
         const dur = player.duration || 0;
-        if (dur > 0) onProgressRef.current(player.currentTime || 0, dur);
+        const cur = player.currentTime || 0;
+        if (dur > 0) {
+          onProgressRef.current(cur, dur);
+          if (autoScroll && dur > 1.0 && cur >= dur - 0.25) {
+            if (!completionFiredRef.current) {
+              completionFiredRef.current = true;
+              onPlaybackCompleteRef.current?.();
+            }
+          }
+          if (cur < dur - 1.0) {
+            completionFiredRef.current = false;
+          }
+        }
       } catch {}
     }, 200);
     return () => clearInterval(interval);
-  }, [player, isActive, isPlaying]);
+  }, [player, isActive, isPlaying, autoScroll]);
 
   useEffect(() => {
     try {
@@ -289,9 +342,11 @@ type SavedReelCardProps = {
   isMounted?: boolean;
   serverConfig: ServerConfig;
   muted: boolean;
+  autoScroll: boolean;
+  onPlaybackComplete: () => void;
+  onOpenSettings: (item: SavedReelItem) => void;
   segmentTitle?: string;
   segmentIndexText?: string;
-  onToggleMute: () => void;
   onReact: (item: SavedReelItem, emoji: string) => void;
   onOpenComments: (item: SavedReelItem) => void;
   onOpenRepost: (item: SavedReelItem) => void;
@@ -305,9 +360,11 @@ function SavedReelCardBase({
   isMounted = true,
   serverConfig,
   muted,
+  autoScroll,
+  onPlaybackComplete,
+  onOpenSettings,
   segmentTitle,
   segmentIndexText,
-  onToggleMute,
   onReact,
   onOpenComments,
   onOpenRepost,
@@ -323,7 +380,6 @@ function SavedReelCardBase({
   const [isLoading, setIsLoading] = useState(true);
   const [showControls, setShowControls] = useState(false);
   const [show2x, setShow2x] = useState(false);
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showHeart, setShowHeart] = useState(false);
   const heartScale = useMemo(() => new Animated.Value(0), []);
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -365,7 +421,6 @@ function SavedReelCardBase({
     if (isLongPressingRef.current || (Date.now() - lastLongPressEndRef.current < 400)) {
       return;
     }
-    if (showEmojiPicker) { setShowEmojiPicker(false); return; }
     const now = Date.now();
     const isDouble = now - lastTapRef.current < 300;
     lastTapRef.current = now;
@@ -395,7 +450,7 @@ function SavedReelCardBase({
         flashControls();
       }, 300);
     }
-  }, [showEmojiPicker, item, onReact, heartScale, flashControls]);
+  }, [item, onReact, heartScale, flashControls]);
 
   const handleLongPress = useCallback(() => {
     if (singleTapTimerRef.current) {
@@ -405,7 +460,6 @@ function SavedReelCardBase({
     isLongPressingRef.current = true;
     hapticLongPress();
     setShowControls(false);
-    setShowEmojiPicker(false);
     setSpeed(2.0);
     setShow2x(true);
   }, []);
@@ -431,7 +485,6 @@ function SavedReelCardBase({
       if (!readyOnceRef.current) setIsLoading(true);
     } else {
       setIsPlaying(false);
-      setShowEmojiPicker(false);
       setShow2x(false);
       setSpeed(1.0);
       setIsSeeking(false);
@@ -462,8 +515,8 @@ function SavedReelCardBase({
 
   const toggleHeartLike = useCallback(() => {
     hapticLight();
-    onReact(item, myReaction || '❤️');
-  }, [myReaction, item, onReact]);
+    onReact(item, '❤️');
+  }, [item, onReact]);
 
   const seekPanResponder = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
@@ -555,6 +608,8 @@ function SavedReelCardBase({
           isPlaying={isPlaying && isActive}
           speed={speed}
           muted={muted}
+          autoScroll={autoScroll}
+          onPlaybackComplete={onPlaybackComplete}
           onProgress={handleProgress}
           onReady={handleReady}
           playerRef={playerRef}
@@ -631,20 +686,15 @@ function SavedReelCardBase({
         <TouchableOpacity
           style={s.actionBtn}
           onPress={toggleHeartLike}
-          onLongPress={() => { hapticLongPress(); setShowEmojiPicker(p => !p); }}
           activeOpacity={0.75}
         >
           <View style={s.actionIconWrap}>
-            {myReaction && myReaction !== '❤️' ? (
-              <Text style={s.actionEmojiText}>{myReaction}</Text>
-            ) : (
-              <AppIcon
-                androidName={isLiked ? 'favorite' : 'favorite_border'}
-                iosName={isLiked ? 'heart.fill' : 'heart'}
-                color={isLiked ? '#FF2D55' : '#FFFFFF'}
-                size={24}
-              />
-            )}
+            <AppIcon
+              androidName={isLiked ? 'favorite' : 'favorite_border'}
+              iosName={isLiked ? 'heart.fill' : 'heart'}
+              color={isLiked ? '#FF2D55' : '#FFFFFF'}
+              size={24}
+            />
           </View>
           <Text style={s.actionCount}>{totalReactions > 0 ? totalReactions : 'Like'}</Text>
         </TouchableOpacity>
@@ -692,41 +742,23 @@ function SavedReelCardBase({
           <Text style={s.actionCount}>{item.is_saved ? 'Saved' : 'Save'}</Text>
         </TouchableOpacity>
 
+        {/* Settings / Options Button (More) */}
         <TouchableOpacity
           style={s.actionBtn}
-          onPress={() => { hapticSelection(); onToggleMute(); }}
+          onPress={() => { hapticLight(); onOpenSettings(item); }}
           activeOpacity={0.75}
         >
           <View style={s.actionIconWrap}>
             <AppIcon
-              androidName={muted ? 'volume_off' : 'volume_up'}
-              iosName={muted ? 'speaker.slash.fill' : 'speaker.wave.2.fill'}
+              androidName="more_vert"
+              iosName="ellipsis"
               color="#FFFFFF"
-              size={21}
+              size={22}
             />
           </View>
-          <Text style={s.actionCount}>{muted ? 'Muted' : 'Sound'}</Text>
+          <Text style={s.actionCount}>More</Text>
         </TouchableOpacity>
       </View>
-
-      {/* Floating Emoji Picker */}
-      {showEmojiPicker && !show2x && (
-        <View style={[s.emojiPicker, { bottom: lowerContentBottom + 101 }]}>
-          {REACTION_EMOJIS.map(emoji => {
-            const active = item.user_reactions?.includes(emoji);
-            return (
-              <TouchableOpacity
-                key={emoji}
-                onPress={() => { hapticSuccess(); onReact(item, emoji); setShowEmojiPicker(false); }}
-                style={[s.emojiBtn, active && s.emojiBtnActive]}
-                activeOpacity={0.75}
-              >
-                <Text style={s.emojiText}>{emoji}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      )}
 
       <View
         style={[s.authorInfo, { bottom: lowerContentBottom }, show2x && s.fastForwardHidden]}
@@ -830,7 +862,7 @@ function CommentsSheet({
     let active = true;
     setLoading(true);
     setComments([]);
-    getComments(mediaId)
+    getComments(mediaId, 'reel')
       .then(res => { if (active) setComments(Array.isArray(res?.comments) ? res.comments : []); })
       .catch(() => { if (active) setComments([]); })
       .finally(() => { if (active) setLoading(false); });
@@ -841,9 +873,9 @@ function CommentsSheet({
     if (!text.trim() || mediaId == null) return;
     setSubmitting(true);
     try {
-      await addComment(mediaId, text.trim());
+      await addComment(mediaId, text.trim(), 'reel');
       setText('');
-      const res = await getComments(mediaId);
+      const res = await getComments(mediaId, 'reel');
       const nextComments = Array.isArray(res?.comments) ? res.comments : [];
       setComments(nextComments);
       onCommentAdded(nextComments.length);
@@ -941,6 +973,223 @@ function CommentsSheet({
   );
 }
 
+// ─── Reels Settings Modal ───────────────────────────────────────────────────
+
+type ReelsSettingsModalProps = {
+  visible: boolean;
+  item: SavedReelItem | null;
+  autoScroll: boolean;
+  onToggleAutoScroll: (val: boolean) => void;
+  muted: boolean;
+  onToggleMute: () => void;
+  colors: AppColors;
+  onClose: () => void;
+};
+
+function ReelsSettingsModal({
+  visible,
+  item,
+  autoScroll,
+  onToggleAutoScroll,
+  muted,
+  onToggleMute,
+  colors,
+  onClose,
+}: ReelsSettingsModalProps) {
+  const insets = useSafeAreaInsets();
+  const [saving, setSaving] = useState(false);
+  const [saveProgress, setSaveProgress] = useState(0);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  useEffect(() => {
+    if (!visible) {
+      setSaving(false);
+      setSaveProgress(0);
+      setSaveSuccess(false);
+    }
+  }, [visible]);
+
+  const handleSaveToDevice = async () => {
+    if (!item || saving) return;
+    setSaving(true);
+    setSaveProgress(0);
+    setSaveSuccess(false);
+    try {
+      await saveReelToDevice(item.share_id, item.path, (p) => {
+        setSaveProgress(p);
+      });
+      setSaveSuccess(true);
+      hapticSuccess();
+      Alert.alert('Saved to device', 'This reel video has been saved to your photo gallery.');
+    } catch (err: any) {
+      hapticError();
+      Alert.alert('Save failed', err?.message || 'Could not save video to device.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={sm.backdrop} onPress={onClose} />
+      <View
+        style={[
+          sm.sheet,
+          {
+            backgroundColor: colors.surface,
+            paddingBottom: Math.max(insets.bottom, Spacing.four) + Spacing.two,
+          },
+        ]}
+      >
+        <View style={sm.handle} />
+        <View style={[sm.header, { borderBottomColor: colors.surfaceBorder }]}>
+          <Text style={[sm.title, { color: colors.text }]}>Reel Options</Text>
+          <TouchableOpacity onPress={onClose} hitSlop={12}>
+            <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={20} />
+          </TouchableOpacity>
+        </View>
+
+        <View style={sm.optionsList}>
+          {/* Save to Device */}
+          <TouchableOpacity
+            style={[sm.optionRow, { borderBottomColor: colors.surfaceBorder }]}
+            onPress={handleSaveToDevice}
+            disabled={saving}
+            activeOpacity={0.7}
+          >
+            <View style={[sm.iconCircle, { backgroundColor: colors.surfaceSoft }]}>
+              {saving ? (
+                <ActivityIndicator size="small" color={colors.primary} />
+              ) : saveSuccess ? (
+                <AppIcon androidName="check" iosName="checkmark" color="#10B981" size={20} />
+              ) : (
+                <AppIcon androidName="file_download" iosName="arrow.down.to.line" color={colors.text} size={20} />
+              )}
+            </View>
+            <View style={sm.optionTextWrap}>
+              <Text style={[sm.optionTitle, { color: colors.text }]}>Save to device</Text>
+              <Text style={[sm.optionSubtitle, { color: colors.textMuted }]}>
+                {saving
+                  ? `Downloading… ${Math.round(saveProgress * 100)}%`
+                  : saveSuccess
+                    ? 'Saved to gallery'
+                    : 'Download reel to device gallery'}
+              </Text>
+            </View>
+            {!saving && !saveSuccess && (
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
+            )}
+          </TouchableOpacity>
+
+          {/* Auto Scroll */}
+          <View style={[sm.optionRow, { borderBottomColor: colors.surfaceBorder }]}>
+            <View style={[sm.iconCircle, { backgroundColor: colors.surfaceSoft }]}>
+              <AppIcon androidName="swipe_vertical" iosName="arrow.up.and.down" color={colors.text} size={20} />
+            </View>
+            <View style={sm.optionTextWrap}>
+              <Text style={[sm.optionTitle, { color: colors.text }]}>Auto-scroll</Text>
+              <Text style={[sm.optionSubtitle, { color: colors.textMuted }]}>
+                Play next reel when finished
+              </Text>
+            </View>
+            <Switch
+              value={autoScroll}
+              onValueChange={(val) => {
+                hapticSelection();
+                onToggleAutoScroll(val);
+              }}
+              trackColor={{ false: colors.surfaceBorder, true: colors.primary }}
+              thumbColor="#FFFFFF"
+            />
+          </View>
+
+          {/* Volume / Sound */}
+          <View style={sm.optionRow}>
+            <View style={[sm.iconCircle, { backgroundColor: colors.surfaceSoft }]}>
+              <AppIcon
+                androidName={muted ? 'volume_off' : 'volume_up'}
+                iosName={muted ? 'speaker.slash.fill' : 'speaker.wave.2.fill'}
+                color={colors.text}
+                size={20}
+              />
+            </View>
+            <View style={sm.optionTextWrap}>
+              <Text style={[sm.optionTitle, { color: colors.text }]}>Sound</Text>
+              <Text style={[sm.optionSubtitle, { color: colors.textMuted }]}>
+                {muted ? 'Audio is muted' : 'Playing with sound'}
+              </Text>
+            </View>
+            <Switch
+              value={!muted}
+              onValueChange={() => {
+                hapticSelection();
+                onToggleMute();
+              }}
+              trackColor={{ false: colors.surfaceBorder, true: colors.primary }}
+              thumbColor="#FFFFFF"
+            />
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const sm = StyleSheet.create({
+  backdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.5)' },
+  sheet: {
+    borderTopLeftRadius: Radius.xl,
+    borderTopRightRadius: Radius.xl,
+    marginTop: 'auto',
+  },
+  handle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(128,128,128,0.35)',
+    marginVertical: Spacing.two,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.four,
+    paddingBottom: Spacing.three,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  title: { fontSize: TextScale.base, fontWeight: '700' },
+  optionsList: {
+    paddingHorizontal: Spacing.four,
+    paddingTop: Spacing.two,
+  },
+  optionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: Spacing.three,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: Spacing.three,
+  },
+  iconCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  optionTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  optionTitle: {
+    fontSize: TextScale.sm,
+    fontWeight: '600',
+  },
+  optionSubtitle: {
+    fontSize: TextScale.xs,
+  },
+});
+
 // ─── Main Reels Library Screen (Saved, Liked, Reposts) ────────────────────────
 
 export default function SavedReelsScreen() {
@@ -964,7 +1213,9 @@ export default function SavedReelsScreen() {
   const [activeViewerIndex, setActiveViewerIndex] = useState(0);
   const [commentsTarget, setCommentsTarget] = useState<SavedReelItem | null>(null);
   const [repostTarget, setRepostTarget] = useState<SavedReelItem | null>(null);
+  const [settingsTarget, setSettingsTarget] = useState<SavedReelItem | null>(null);
   const [muted, setMuted] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(false);
 
   const viewerListRef = useRef<FlatList<SavedReelItem>>(null);
 
@@ -996,7 +1247,17 @@ export default function SavedReelsScreen() {
       }
       if (likedRes.status === 'fulfilled') {
         const list = Array.isArray(likedRes.value?.reels) ? likedRes.value.reels : [];
-        setLikedReels(list.filter(r => isNotOwnReel(r, config?.deviceId)));
+        const notOwn = list.filter(r => isNotOwnReel(r, config?.deviceId));
+        const seen = new Set<string>();
+        const deduped: SavedReelItem[] = [];
+        for (const r of notOwn) {
+          const key = r.reel_id || String(r.share_id) || String(r.media_id);
+          if (!seen.has(key)) {
+            seen.add(key);
+            deduped.push(r);
+          }
+        }
+        setLikedReels(deduped);
       }
       if (repostedRes.status === 'fulfilled') {
         const list = Array.isArray(repostedRes.value?.reels) ? repostedRes.value.reels : [];
@@ -1027,7 +1288,8 @@ export default function SavedReelsScreen() {
 
   useEffect(() => {
     AsyncStorage.getItem(MUTED_KEY).then(v => { if (v != null) setMuted(v === '1'); }).catch(() => {});
-  }, []);
+    AsyncStorage.getItem(AUTO_SCROLL_KEY).then(v => { if (v != null) setAutoScroll(v === '1'); }).catch(() => {});
+  }, [viewerIndex]);
 
   // Sync state changes across screens (e.g. actions done on the main reels feed)
   useEffect(() => {
@@ -1127,16 +1389,32 @@ export default function SavedReelsScreen() {
     });
   }, []);
 
-  const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    void loadData();
-  }, [loadData]);
+  const handleToggleAutoScroll = useCallback((val: boolean) => {
+    setAutoScroll(val);
+    AsyncStorage.setItem(AUTO_SCROLL_KEY, val ? '1' : '0').catch(() => {});
+  }, []);
 
   const currentReels = useMemo(() => {
     if (activeSegment === 'saved') return savedReels;
     if (activeSegment === 'liked') return likedReels;
     return repostedReels;
   }, [activeSegment, savedReels, likedReels, repostedReels]);
+
+  const handlePlaybackComplete = useCallback((itemIndex: number) => {
+    if (!autoScroll) return;
+    const nextIndex = itemIndex + 1;
+    if (nextIndex < currentReels.length) {
+      viewerListRef.current?.scrollToIndex({
+        index: nextIndex,
+        animated: true,
+      });
+    }
+  }, [autoScroll, currentReels.length]);
+
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    void loadData();
+  }, [loadData]);
 
   const handleToggleSave = useCallback(async (item: SavedReelItem) => {
     hapticSelection();
@@ -1226,7 +1504,7 @@ export default function SavedReelsScreen() {
   const handleReact = useCallback(async (item: SavedReelItem, emoji: string) => {
     if (item.media_id == null) return;
     try {
-      const res = await reactToMedia(item.media_id, emoji);
+      const res = await reactToMedia(item.media_id, emoji, 'reel');
       const isNowReacted = (res.user_reactions?.length ?? 0) > 0;
       const nextCounts = res.counts ?? item.reaction_counts;
       const nextUserReactions = res.user_reactions ?? item.user_reactions;
@@ -1643,6 +1921,7 @@ export default function SavedReelsScreen() {
               maxToRenderPerBatch={2}
               onViewableItemsChanged={onViewerItemsChanged}
               viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
+              extraData={{ activeViewerIndex, muted, autoScroll }}
               onScrollToIndexFailed={info => {
                 setTimeout(() => {
                   viewerListRef.current?.scrollToIndex({ index: Math.min(info.index, currentReels.length - 1), animated: false });
@@ -1656,9 +1935,11 @@ export default function SavedReelsScreen() {
                   isMounted={Math.abs(index - activeViewerIndex) <= 1}
                   serverConfig={serverConfig}
                   muted={muted}
+                  autoScroll={autoScroll}
+                  onPlaybackComplete={() => handlePlaybackComplete(index)}
+                  onOpenSettings={setSettingsTarget}
                   segmentTitle={segmentTitle}
                   segmentIndexText={`${index + 1} / ${currentReels.length}`}
-                  onToggleMute={handleToggleMute}
                   onReact={handleReact}
                   onOpenComments={setCommentsTarget}
                   onOpenRepost={handleOpenRepost}
@@ -1697,6 +1978,18 @@ export default function SavedReelsScreen() {
         }
         onClose={() => setRepostTarget(null)}
         onSubmit={handleRepostSubmit}
+      />
+
+      {/* Reels Settings Modal */}
+      <ReelsSettingsModal
+        visible={settingsTarget != null}
+        item={settingsTarget}
+        autoScroll={autoScroll}
+        onToggleAutoScroll={handleToggleAutoScroll}
+        muted={muted}
+        onToggleMute={handleToggleMute}
+        colors={colors}
+        onClose={() => setSettingsTarget(null)}
       />
     </View>
   );

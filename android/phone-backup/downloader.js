@@ -254,6 +254,7 @@ export function getCachedTripMedia(tripId) {
 }
 
 import * as FileSystem from 'expo-file-system/legacy';
+import * as MediaLibrary from 'expo-media-library/legacy';
 import { getServerIp, getServerPort, getApiKey, getDeviceId, getDeviceToken, resolveReachableServer, formatHostForUrl } from './settings';
 
 export async function getConfig() {
@@ -984,9 +985,10 @@ export async function reclusterTrips(sourceId) {
  * Toggle emoji reaction on a media item.
  * @param {number} mediaId
  * @param {string} emoji
- * @returns {Promise<{status: 'added'|'removed', media_id: number, emoji: string, counts: Record<string, number>, user_reactions: string[]}>}
+ * @param {string} [scope='post']
+ * @returns {Promise<{status: 'added'|'removed', media_id: number, emoji: string, scope?: string, counts: Record<string, number>, user_reactions: string[]}>}
  */
-export async function reactToMedia(mediaId, emoji) {
+export async function reactToMedia(mediaId, emoji, scope = 'post') {
   return fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
@@ -994,7 +996,7 @@ export async function reactToMedia(mediaId, emoji) {
       options: {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-        body: JSON.stringify({ source_id: deviceId, emoji }),
+        body: JSON.stringify({ source_id: deviceId, emoji, scope }),
       },
     };
   });
@@ -1003,12 +1005,13 @@ export async function reactToMedia(mediaId, emoji) {
 /**
  * Fetch reactions for a media item.
  * @param {number} mediaId
+ * @param {string} [scope='post']
  */
-export async function getMediaReactions(mediaId) {
+export async function getMediaReactions(mediaId, scope = 'post') {
   return fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
-      url: `http://${ip}:${port}/api/media/${encodeURIComponent(mediaId)}/reactions?device_id=${encodeURIComponent(deviceId)}`,
+      url: `http://${ip}:${port}/api/media/${encodeURIComponent(mediaId)}/reactions?device_id=${encodeURIComponent(deviceId)}&scope=${encodeURIComponent(scope)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
@@ -1660,12 +1663,13 @@ export async function removeShareTargetByShareId(shareId, targetDeviceId) {
  * Fetch comments for a media item.
  * Uses mesh-aware retry for resilience against mid-session mesh roaming.
  * @param {number} mediaId
+ * @param {string} [scope='post']
  */
-export async function getComments(mediaId) {
+export async function getComments(mediaId, scope = 'post') {
   return fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
-      url: `http://${ip}:${port}/api/media/${encodeURIComponent(mediaId)}/comments?device_id=${encodeURIComponent(deviceId)}`,
+      url: `http://${ip}:${port}/api/media/${encodeURIComponent(mediaId)}/comments?device_id=${encodeURIComponent(deviceId)}&scope=${encodeURIComponent(scope)}`,
       options: { headers: { Authorization: `Bearer ${key}` } },
     };
   });
@@ -1675,8 +1679,9 @@ export async function getComments(mediaId) {
  * Add a comment to a media item.
  * @param {number} mediaId
  * @param {string} text
+ * @param {string} [scope='post']
  */
-export async function addComment(mediaId, text) {
+export async function addComment(mediaId, text, scope = 'post') {
   return fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
@@ -1684,7 +1689,7 @@ export async function addComment(mediaId, text) {
       options: {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-        body: JSON.stringify({ source_id: deviceId, text }),
+        body: JSON.stringify({ source_id: deviceId, text, scope }),
       },
     };
   });
@@ -1734,3 +1739,40 @@ export async function getLibraryReels(source, offset = 0, limit = 30, seed = 0) 
   }
   return res;
 }
+
+/**
+ * Save a shared reel to device photo/video library.
+ * @param {number} shareId
+ * @param {string} relativePath
+ * @param {(progress: number) => void} [onProgress]
+ */
+export async function saveReelToDevice(shareId, relativePath, onProgress) {
+  const { status } = await MediaLibrary.requestPermissionsAsync();
+  if (status !== 'granted') {
+    throw new Error('Media permission denied. Enable photo/video access in device settings.');
+  }
+
+  const ext = (relativePath || '').split('.').pop()?.toLowerCase() || 'mp4';
+  const filename = `reel_${shareId}_${Date.now()}.${ext}`;
+  const tmpUri = `${FileSystem.cacheDirectory}${filename}`;
+
+  try {
+    const result = await downloadShareFile(shareId, tmpUri, (written, total) => {
+      if (total > 0) {
+        onProgress?.(written / total);
+      }
+    });
+    if (result && result.status >= 400) {
+      throw new Error(`Download failed with server status ${result.status}`);
+    }
+    const info = await FileSystem.getInfoAsync(tmpUri);
+    if (!info.exists || info.size === 0) {
+      throw new Error('Downloaded video is empty or missing');
+    }
+    await MediaLibrary.saveToLibraryAsync(tmpUri);
+    return true;
+  } finally {
+    await FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+  }
+}
+

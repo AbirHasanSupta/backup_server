@@ -283,7 +283,7 @@ def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> List[Di
 def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
     if is_postgres():
         sql = """
-        SELECT ds.share_id, ds.share_id AS reel_id, MAX(r.created_at) AS liked_at, r.emoji AS liked_emoji,
+        SELECT ds.share_id, ds.share_id AS reel_id, MAX(r.created_at) AS liked_at, '❤️' AS liked_emoji,
                ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
                ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
                ds.created_at, ds.share_group_id,
@@ -298,6 +298,7 @@ def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> List[Di
         LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.group_id = ds.share_group_id
         WHERE r.source_id = ?
+          AND r.scope = 'reel'
           AND (
             ds.is_library_reel = 1
             OR (
@@ -309,7 +310,7 @@ def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> List[Di
         GROUP BY ds.share_id, ds.media_id, ds.source_type, ds.source_key, ds.relative_path, ds.size, ds.modified_time,
                  ds.caption, ds.shared_by_device_id, ds.created_at, ds.share_group_id,
                  ds.original_shared_by_device_id, ds.repost_of_share_id, ds.is_library_reel,
-                 d.device_name, d.username, orig_d.device_name, orig_d.username, dsg.caption, dsg.post_kind, dsg.post_title, r.emoji
+                 d.device_name, d.username, orig_d.device_name, orig_d.username, dsg.caption, dsg.post_kind, dsg.post_title
         ORDER BY liked_at DESC
         LIMIT ? OFFSET ?
         """

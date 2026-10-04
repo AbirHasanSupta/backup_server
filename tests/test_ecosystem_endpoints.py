@@ -67,6 +67,8 @@ def async_request(method: str, path: str, headers: dict | None = None, body: byt
 class EcosystemEndpointsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        from database import init_db
+        init_db()
         cfg = load_config()
         cls.api_key = cfg.get("API_KEY", "")
         cls.orig_approval = cfg.get("REQUIRE_APPROVAL", True)

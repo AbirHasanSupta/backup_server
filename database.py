@@ -645,7 +645,8 @@ def init_db():
             source_id   TEXT    NOT NULL,
             emoji       TEXT    NOT NULL,
             created_at  INTEGER NOT NULL,
-            UNIQUE (media_id, source_id, emoji)
+            scope       TEXT    NOT NULL DEFAULT 'post',
+            UNIQUE (media_id, source_id, emoji, scope)
         )
         """
     )
@@ -681,7 +682,8 @@ def init_db():
             media_id    INTEGER NOT NULL,
             source_id   TEXT    NOT NULL,
             text        TEXT    NOT NULL,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            scope       TEXT    NOT NULL DEFAULT 'post'
         )
         """
     )
@@ -795,6 +797,57 @@ def init_db():
         conn.execute("ALTER TABLE device_share_groups ADD COLUMN post_kind TEXT")
     if "post_title" not in existing_group_cols:
         conn.execute("ALTER TABLE device_share_groups ADD COLUMN post_title TEXT")
+
+    # Migration: upgrade reactions table schema to include scope in UNIQUE constraint
+    reactions_sql_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='reactions'"
+    ).fetchone()
+    reactions_sql = (reactions_sql_row[0] if reactions_sql_row else "") or ""
+    if reactions_sql and "UNIQUE" in reactions_sql.upper() and ", SCOPE)" not in reactions_sql.upper() and ",SCOPE)" not in reactions_sql.upper():
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("ALTER TABLE reactions RENAME TO reactions_old")
+        conn.execute("""
+            CREATE TABLE reactions
+            (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                media_id    INTEGER NOT NULL,
+                source_id   TEXT    NOT NULL,
+                emoji       TEXT    NOT NULL,
+                created_at  INTEGER NOT NULL,
+                scope       TEXT    NOT NULL DEFAULT 'post',
+                UNIQUE (media_id, source_id, emoji, scope)
+            )
+        """)
+        old_cols = {row['name'] for row in conn.execute("PRAGMA table_info(reactions_old)").fetchall()}
+        if "scope" in old_cols:
+            conn.execute("""
+                INSERT OR IGNORE INTO reactions (id, media_id, source_id, emoji, created_at, scope)
+                SELECT id, media_id, source_id, emoji, created_at, COALESCE(scope, 'post')
+                FROM reactions_old
+            """)
+        else:
+            conn.execute("""
+                INSERT OR IGNORE INTO reactions (id, media_id, source_id, emoji, created_at, scope)
+                SELECT id, media_id, source_id, emoji, created_at, 'post'
+                FROM reactions_old
+            """)
+        conn.execute("DROP TABLE reactions_old")
+        conn.execute("PRAGMA foreign_keys=ON")
+    else:
+        existing_reaction_cols = {row[1] for row in conn.execute("PRAGMA table_info(reactions)").fetchall()}
+        if "scope" not in existing_reaction_cols:
+            conn.execute("ALTER TABLE reactions ADD COLUMN scope TEXT NOT NULL DEFAULT 'post'")
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reactions_media ON reactions(media_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reactions_source ON reactions(source_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reactions_lookup ON reactions(media_id, source_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reactions_media_scope ON reactions(media_id, scope)")
+
+    # Migration: add scope to comments if not present
+    existing_comment_cols = {row[1] for row in conn.execute("PRAGMA table_info(comments)").fetchall()}
+    if "scope" not in existing_comment_cols:
+        conn.execute("ALTER TABLE comments ADD COLUMN scope TEXT NOT NULL DEFAULT 'post'")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_media_scope ON comments(media_id, scope)")
 
     # 17. saved_reels table for bookmarked reels
     conn.execute(
@@ -2368,7 +2421,7 @@ def get_quiz_photo_pool(
 
     # Cap the pool so huge libraries don't load the entire index into RAM.
     sql = f"""
-        SELECT source_type, source_key, relative_path, cap_year, cap_time
+        SELECT source_type, source_key, relative_path, cap_year, capture_time AS cap_time
         FROM media_index
         WHERE ({where_source}) AND cap_year IS NOT NULL
         ORDER BY RANDOM()
@@ -2923,61 +2976,78 @@ def _normalize_reaction_emoji(emoji: str) -> str:
     return cleaned
 
 
-def toggle_reaction(media_id: int, source_id: str, emoji: str) -> dict:
+def toggle_reaction(media_id: int, source_id: str, emoji: str, scope: str = "post") -> dict:
     """Toggle a reaction on/off. Return status ('added'|'removed'), counts and user reactions."""
-    emoji = _normalize_reaction_emoji(emoji)
-    if emoji not in ALLOWED_REACTION_EMOJIS:
-        raise ValueError("Unsupported reaction emoji")
+    scope = (scope or "post").strip().lower()
+    if scope not in ("post", "reel"):
+        scope = "post"
+
+    if scope == "reel":
+        emoji = "❤️"
+    else:
+        emoji = _normalize_reaction_emoji(emoji)
+        if emoji not in ALLOWED_REACTION_EMOJIS:
+            raise ValueError("Unsupported reaction emoji")
+
     conn = get_conn()
     now_ts = int(_time.time())
 
     # Check if already exists
     existing = conn.execute(
-        "SELECT id FROM reactions WHERE media_id = ? AND source_id = ? AND emoji = ?",
-        (media_id, source_id, emoji),
+        "SELECT id FROM reactions WHERE media_id = ? AND source_id = ? AND emoji = ? AND scope = ?",
+        (media_id, source_id, emoji, scope),
     ).fetchone()
 
     if existing:
         conn.execute(
-            "DELETE FROM reactions WHERE media_id = ? AND source_id = ? AND emoji = ?",
-            (media_id, source_id, emoji),
+            "DELETE FROM reactions WHERE id = ?",
+            (existing["id"],),
         )
         status = "removed"
     else:
+        # If reel, remove any previous reaction by this user on this reel so user only has 1 react
+        if scope == "reel":
+            conn.execute(
+                "DELETE FROM reactions WHERE media_id = ? AND source_id = ? AND scope = 'reel'",
+                (media_id, source_id),
+            )
         conn.execute(
-            "INSERT OR IGNORE INTO reactions (media_id, source_id, emoji, created_at) VALUES (?, ?, ?, ?)",
-            (media_id, source_id, emoji, now_ts),
+            "INSERT OR IGNORE INTO reactions (media_id, source_id, emoji, created_at, scope) VALUES (?, ?, ?, ?, ?)",
+            (media_id, source_id, emoji, now_ts, scope),
         )
         status = "added"
 
     conn.commit()
 
-    # Get updated counts for media_id
+    # Get updated counts for media_id in this scope
     counts_rows = conn.execute(
-        "SELECT emoji, COUNT(*) AS c FROM reactions WHERE media_id = ? GROUP BY emoji",
-        (media_id,),
+        "SELECT emoji, COUNT(*) AS c FROM reactions WHERE media_id = ? AND scope = ? GROUP BY emoji",
+        (media_id, scope),
     ).fetchall()
     counts = {r["emoji"]: r["c"] for r in counts_rows}
 
-    # Get user reactions
+    # Get user reactions in this scope
     user_rows = conn.execute(
-        "SELECT emoji FROM reactions WHERE media_id = ? AND source_id = ?",
-        (media_id, source_id),
+        "SELECT emoji FROM reactions WHERE media_id = ? AND source_id = ? AND scope = ?",
+        (media_id, source_id, scope),
     ).fetchall()
     user_reactions = [r["emoji"] for r in user_rows]
 
     conn.close()
     return {
         "status": status,
+        "action": status,
         "media_id": media_id,
         "emoji": emoji,
+        "scope": scope,
         "counts": counts,
         "user_reactions": user_reactions,
     }
 
 
-def get_media_reactions(media_id: int) -> dict:
+def get_media_reactions(media_id: int, scope: str = "post") -> dict:
     """Return full reaction list and counts for a media item, with reactor display names."""
+    scope = (scope or "post").strip().lower()
     conn = get_read_conn()
     rows = conn.execute(
         """
@@ -2985,10 +3055,10 @@ def get_media_reactions(media_id: int) -> dict:
                d.device_name AS device_name, d.username AS username
         FROM reactions r
         LEFT JOIN devices d ON d.device_id = r.source_id
-        WHERE r.media_id = ?
+        WHERE r.media_id = ? AND r.scope = ?
         ORDER BY r.created_at ASC
         """,
-        (media_id,),
+        (media_id, scope),
     ).fetchall()
     conn.close()
 
@@ -3005,12 +3075,13 @@ def get_media_reactions(media_id: int) -> dict:
 
 
 def get_reactions_for_media_ids(
-    media_ids: list[int], current_source_id: str | None = None
+    media_ids: list[int], current_source_id: str | None = None, scope: str = "post"
 ) -> tuple[dict[int, dict[str, int]], dict[int, list[str]]]:
     """Bulk fetch reaction counts and current user reactions for a list of media IDs."""
     if not media_ids:
         return {}, {}
 
+    scope = (scope or "post").strip().lower()
     conn = get_read_conn()
     counts_map: dict[int, dict[str, int]] = {}
     user_map: dict[int, list[str]] = {}
@@ -3022,8 +3093,8 @@ def get_reactions_for_media_ids(
 
         # Fetch counts
         rows = conn.execute(
-            f"SELECT media_id, emoji, COUNT(*) AS c FROM reactions WHERE media_id IN ({placeholders}) GROUP BY media_id, emoji",
-            chunk,
+            f"SELECT media_id, emoji, COUNT(*) AS c FROM reactions WHERE media_id IN ({placeholders}) AND scope = ? GROUP BY media_id, emoji",
+            chunk + [scope],
         ).fetchall()
         for r in rows:
             mid = r["media_id"]
@@ -3032,8 +3103,8 @@ def get_reactions_for_media_ids(
         # Fetch current user reactions if source_id provided
         if current_source_id:
             u_rows = conn.execute(
-                f"SELECT media_id, emoji FROM reactions WHERE media_id IN ({placeholders}) AND source_id = ?",
-                chunk + [current_source_id],
+                f"SELECT media_id, emoji FROM reactions WHERE media_id IN ({placeholders}) AND source_id = ? AND scope = ?",
+                chunk + [current_source_id, scope],
             ).fetchall()
             for r in u_rows:
                 mid = r["media_id"]
@@ -3115,13 +3186,14 @@ def save_cached_geocode(lat: float, lon: float, place_name: str) -> None:
 MAX_COMMENT_LENGTH = 2000
 
 
-def add_comment(media_id: int, source_id: str, text: str) -> dict:
+def add_comment(media_id: int, source_id: str, text: str, scope: str = "post") -> dict:
     """Insert a comment on a media item and return it with the commenter's device_name and display_name."""
+    scope = (scope or "post").strip().lower()
     now_ts = int(_time.time())
     conn = get_conn()
     cur = conn.execute(
-        "INSERT INTO comments (media_id, source_id, text, created_at) VALUES (?, ?, ?, ?)",
-        (media_id, source_id, text, now_ts),
+        "INSERT INTO comments (media_id, source_id, text, created_at, scope) VALUES (?, ?, ?, ?, ?)",
+        (media_id, source_id, text, now_ts, scope),
     )
     conn.commit()
     cid = cur.lastrowid
@@ -3147,11 +3219,13 @@ def add_comment(media_id: int, source_id: str, text: str) -> dict:
         "display_name": display_name,
         "text": text,
         "created_at": now_ts,
+        "scope": scope,
     }
 
 
-def get_comments_for_media(media_id: int) -> list[dict]:
+def get_comments_for_media(media_id: int, scope: str = "post") -> list[dict]:
     """Return all comments for a media item, oldest first, with commenter device_name."""
+    scope = (scope or "post").strip().lower()
     conn = get_read_conn()
     rows = conn.execute(
         """
@@ -3159,19 +3233,20 @@ def get_comments_for_media(media_id: int) -> list[dict]:
                d.device_name AS device_name, d.username AS username
         FROM comments c
         LEFT JOIN devices d ON d.device_id = c.source_id
-        WHERE c.media_id = ?
+        WHERE c.media_id = ? AND c.scope = ?
         ORDER BY c.created_at ASC, c.id ASC
         """,
-        (media_id,),
+        (media_id, scope),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def get_comment_counts_for_media_ids(media_ids: list[int]) -> dict[int, int]:
+def get_comment_counts_for_media_ids(media_ids: list[int], scope: str = "post") -> dict[int, int]:
     """Bulk fetch comment counts for a list of media IDs (chunked to stay under SQLite's param cap)."""
     if not media_ids:
         return {}
+    scope = (scope or "post").strip().lower()
     conn = get_read_conn()
     counts: dict[int, int] = {}
     chunk_size = 500
@@ -3179,8 +3254,8 @@ def get_comment_counts_for_media_ids(media_ids: list[int]) -> dict[int, int]:
         chunk = media_ids[i:i + chunk_size]
         placeholders = ",".join(["?"] * len(chunk))
         rows = conn.execute(
-            f"SELECT media_id, COUNT(*) AS c FROM comments WHERE media_id IN ({placeholders}) GROUP BY media_id",
-            chunk,
+            f"SELECT media_id, COUNT(*) AS c FROM comments WHERE media_id IN ({placeholders}) AND scope = ? GROUP BY media_id",
+            chunk + [scope],
         ).fetchall()
         for r in rows:
             counts[r["media_id"]] = r["c"]
@@ -4340,7 +4415,7 @@ def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
     conn = get_read_conn()
     rows = conn.execute(
         """
-        SELECT ds.id AS share_id, ds.id AS reel_id, MAX(r.created_at) AS liked_at, r.emoji AS liked_emoji,
+        SELECT ds.id AS share_id, ds.id AS reel_id, MAX(r.created_at) AS liked_at, '❤️' AS liked_emoji,
                ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
                ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
                ds.created_at, ds.share_group_id,
@@ -4355,6 +4430,7 @@ def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
         LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE r.source_id = ?
+          AND r.scope = 'reel'
           AND (
             ds.is_library_reel = 1
             OR (

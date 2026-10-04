@@ -100,11 +100,13 @@ def _schedule_feed_thumbnail_warm(posts: list[dict], *, offset: int = 0, limit: 
 class ReactRequest(BaseModel):
     source_id: str
     emoji: str
+    scope: str = "post"
 
 
 class CommentRequest(BaseModel):
     source_id: str
     text: str
+    scope: str = "post"
 
 
 class CommentDeleteRequest(BaseModel):
@@ -286,14 +288,15 @@ async def react_media(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, body.source_id, device_repo.verify_device_token)
-    res = social_repo.toggle_reaction(media_id, body.source_id, body.emoji.strip())
+    res = social_repo.toggle_reaction(media_id, body.source_id, body.emoji.strip(), scope=body.scope)
     try:
         from services.ws_service import ws_service
         ws_service.notify_new_reaction(
             media_id=media_id,
-            reaction=body.emoji.strip(),
+            reaction=res.get("emoji", body.emoji.strip()),
             device_id=body.source_id,
             counts=res.get("counts", {}),
+            scope=body.scope,
         )
     except Exception:
         pass
@@ -305,11 +308,12 @@ async def react_media(
 async def get_media_reactions(
     media_id: int,
     device_id: str | None = None,
+    scope: str = Query("post"),
     authorization: str = Header(None),
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    res = social_repo.get_media_reactions(media_id)
+    res = social_repo.get_media_reactions(media_id, scope=scope)
     for r in res.get("reactions", []):
         r["display_name"] = feed_service.format_display_name(r.get("username"), r.get("device_name")) or r["source_id"]
         r["is_own"] = device_id is not None and r["source_id"] == device_id
@@ -321,11 +325,12 @@ async def get_media_reactions(
 async def list_comments(
     media_id: int,
     device_id: str | None = None,
+    scope: str = Query("post"),
     authorization: str = Header(None),
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    comments = social_repo.get_comments_for_media(media_id)
+    comments = social_repo.get_comments_for_media(media_id, scope=scope)
     is_creator = social_repo.is_media_or_post_creator(media_id, device_id) if device_id else False
     for c in comments:
         c["is_own"] = device_id is not None and c["source_id"] == device_id
@@ -346,7 +351,7 @@ async def add_comment(
     text = (body.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Comment cannot be empty")
-    comment = social_repo.add_comment(media_id, body.source_id, text[:2000])
+    comment = social_repo.add_comment(media_id, body.source_id, text[:2000], scope=body.scope)
     comment["is_own"] = True
     comment["can_delete"] = True
     comment["display_name"] = feed_service.format_display_name(comment.get("username"), comment.get("device_name")) or body.source_id
@@ -357,6 +362,7 @@ async def add_comment(
             media_id=media_id,
             comment=text[:2000],
             device_id=body.source_id,
+            scope=body.scope,
         )
     except Exception:
         pass

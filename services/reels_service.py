@@ -95,8 +95,8 @@ class ReelsService:
         ]
         media_ids = [s["media_id"] for s in reel_shares if s.get("media_id")]
 
-        counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id)
-        comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids)
+        counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
+        comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids, scope="reel")
         repost_counts = reels_repo.get_repost_counts_for_media_ids(media_ids)
         user_reposted_media, user_reposted_shares = reels_repo.get_user_reposted_info(device_id)
         share_ids = [s["share_id"] for s in reel_shares]

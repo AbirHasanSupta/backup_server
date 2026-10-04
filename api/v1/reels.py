@@ -310,8 +310,8 @@ async def get_shared_and_backups_reels(
         reactions_result, comment_counts, repost_counts, reposted_result,
         saved_ids, view_counts, durations_map,
     ) = await asyncio.gather(
-        asyncio.to_thread(social_repo.get_reactions_for_media_ids, media_ids, device_id),
-        asyncio.to_thread(social_repo.get_comment_counts_for_media_ids, media_ids),
+        asyncio.to_thread(social_repo.get_reactions_for_media_ids, media_ids, device_id, "reel"),
+        asyncio.to_thread(social_repo.get_comment_counts_for_media_ids, media_ids, "reel"),
         asyncio.to_thread(reels_repo.get_repost_counts_for_media_ids, media_ids),
         asyncio.to_thread(reels_repo.get_user_reposted_info, device_id),
         asyncio.to_thread(reels_repo.get_saved_reel_ids, device_id),
@@ -453,8 +453,8 @@ async def get_saved_reels(
     saved_rows = reels_repo.get_saved_reels(device_id, offset, limit)
     media_ids = [s["media_id"] for s in saved_rows if s.get("media_id")]
 
-    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id)
-    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids)
+    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
+    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids, scope="reel")
     repost_counts = reels_repo.get_repost_counts_for_media_ids(media_ids)
     user_reposted_media, user_reposted_shares = reels_repo.get_user_reposted_info(device_id)
 
@@ -551,12 +551,13 @@ async def get_liked_reels(
     media_ids = [s["media_id"] for s in video_rows if s.get("media_id")]
 
     saved_ids = reels_repo.get_saved_reel_ids(device_id)
-    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id)
-    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids)
+    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
+    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids, scope="reel")
     repost_counts = reels_repo.get_repost_counts_for_media_ids(media_ids)
     user_reposted_media, user_reposted_shares = reels_repo.get_user_reposted_info(device_id)
 
     reels = []
+    seen_reel_keys = set()
     for s in video_rows:
         is_library_reel = bool(s.get("is_library_reel"))
         library_label = _library_reel_label_for_device(
@@ -571,6 +572,11 @@ async def get_liked_reels(
             continue
 
         reel_id = f"library:{s['source_type']}:{s['source_key']}:{s['share_id']}" if is_library_reel else str(s["share_id"])
+        dedup_key = reel_id or str(s.get("media_id"))
+        if dedup_key in seen_reel_keys:
+            continue
+        seen_reel_keys.add(dedup_key)
+
         if is_library_reel:
             orig_id = f"library:{s['source_type']}:{s['source_key']}"
 
@@ -612,7 +618,7 @@ async def get_liked_reels(
             "caption": s.get("group_caption") or s.get("caption"),
             "created_at": s["created_at"],
             "liked_at": s.get("liked_at"),
-            "liked_emoji": s.get("liked_emoji"),
+            "liked_emoji": s.get("liked_emoji") or "❤️",
             "reaction_counts": counts_map.get(s["media_id"], {}) if s.get("media_id") else {},
             "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
             "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
@@ -652,8 +658,8 @@ async def get_reposted_reels(
     media_ids = [s["media_id"] for s in video_rows if s.get("media_id")]
 
     saved_ids = reels_repo.get_saved_reel_ids(device_id)
-    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id)
-    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids)
+    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
+    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids, scope="reel")
     repost_counts = reels_repo.get_repost_counts_for_media_ids(media_ids)
 
     reels = []

@@ -37,11 +37,13 @@ export function ReactorsListSheet({
   mediaId,
   colors,
   onClose,
+  scope = 'post',
 }: {
   visible: boolean;
   mediaId?: number | null;
   colors: AppColors;
   onClose: () => void;
+  scope?: string;
 }) {
   const insets = useSafeAreaInsets();
   const [loading, setLoading] = useState(false);
@@ -56,7 +58,7 @@ export function ReactorsListSheet({
     setLoading(true);
     setFilter('all');
      
-    getMediaReactions(mediaId)
+    getMediaReactions(mediaId, scope)
       .then((res) => {
         if (!active) return;
         setReactions(Array.isArray(res?.reactions) ? res.reactions : []);
@@ -65,7 +67,7 @@ export function ReactorsListSheet({
       .catch(() => { if (active) { setReactions([]); setCounts({}); } })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [visible, mediaId]);
+  }, [visible, mediaId, scope]);
 
   const emojiTabs = useMemo(() => Object.keys(counts).filter((e) => counts[e] > 0), [counts]);
   const total = useMemo(() => Object.values(counts).reduce((a, b) => a + b, 0), [counts]);

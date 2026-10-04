@@ -88,8 +88,8 @@ class FeedService:
 
         all_media_ids = [item["media_id"] for g in sorted_groups for item in g["items"]]
 
-        counts_map, user_map = social_repo.get_reactions_for_media_ids(all_media_ids, current_source_id=device_id)
-        comment_counts = social_repo.get_comment_counts_for_media_ids(all_media_ids)
+        counts_map, user_map = social_repo.get_reactions_for_media_ids(all_media_ids, current_source_id=device_id, scope="post")
+        comment_counts = social_repo.get_comment_counts_for_media_ids(all_media_ids, scope="post")
 
         posts = []
         for g in sorted_groups:

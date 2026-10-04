@@ -162,21 +162,23 @@ class WebSocketService:
         WebSocketService.broadcast_event("new_post", event_data)
 
     @staticmethod
-    def notify_new_reaction(media_id: int, reaction: str, device_id: str, counts: Dict[str, int] | None = None) -> None:
+    def notify_new_reaction(media_id: int, reaction: str, device_id: str, counts: Dict[str, int] | None = None, scope: str = "post") -> None:
         WebSocketService.broadcast_event("new_reaction", {
             "media_id": media_id,
             "reaction": reaction,
             "device_id": device_id,
             "counts": counts or {},
+            "scope": scope,
         })
 
     @staticmethod
-    def notify_new_comment(media_id: int, comment: str, device_id: str, total_comments: int = 0) -> None:
+    def notify_new_comment(media_id: int, comment: str, device_id: str, total_comments: int = 0, scope: str = "post") -> None:
         WebSocketService.broadcast_event("new_comment", {
             "media_id": media_id,
             "comment": comment,
             "device_id": device_id,
             "total_comments": total_comments,
+            "scope": scope,
         })
 
     @staticmethod

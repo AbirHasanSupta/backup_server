@@ -33,42 +33,54 @@ from database import (
 )
 
 
-def toggle_reaction(media_id: int, source_id: str, emoji: str) -> Dict[str, Any]:
+def toggle_reaction(media_id: int, source_id: str, emoji: str, scope: str = "post") -> Dict[str, Any]:
+    scope = (scope or "post").strip().lower()
+    if scope not in ("post", "reel"):
+        scope = "post"
+    if scope == "reel":
+        emoji = "❤️"
     if is_postgres():
         existing = execute_read_one(
-            "SELECT id FROM reactions WHERE media_id = ? AND source_id = ? AND emoji = ?",
-            (media_id, source_id, emoji),
+            "SELECT id FROM reactions WHERE media_id = ? AND source_id = ? AND emoji = ? AND scope = ?",
+            (media_id, source_id, emoji, scope),
         )
         if existing:
             execute_write("DELETE FROM reactions WHERE id = ?", (existing["id"],))
             action = "removed"
         else:
             now = int(time.time())
+            if scope == "reel":
+                execute_write(
+                    "DELETE FROM reactions WHERE media_id = ? AND source_id = ? AND scope = 'reel'",
+                    (media_id, source_id),
+                )
             execute_write(
-                "INSERT INTO reactions (media_id, source_id, emoji, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (media_id, source_id, emoji, now),
+                "INSERT INTO reactions (media_id, source_id, emoji, created_at, scope) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (media_id, source_id, emoji, now, scope),
             )
             action = "added"
         # Fetch the user's current reactions after the toggle (for glow indicator)
         user_rows = execute_read_query(
-            "SELECT emoji FROM reactions WHERE media_id = ? AND source_id = ?",
-            (media_id, source_id),
+            "SELECT emoji FROM reactions WHERE media_id = ? AND source_id = ? AND scope = ?",
+            (media_id, source_id, scope),
         )
         user_reactions = [r["emoji"] for r in user_rows]
-        media_data = get_media_reactions(media_id)
+        media_data = get_media_reactions(media_id, scope=scope)
         return {
             "status": action,
             "action": action,
             "emoji": emoji,
             "media_id": media_id,
+            "scope": scope,
             "counts": media_data.get("counts", {}),
             "reactions": media_data.get("reactions", []),
             "user_reactions": user_reactions,
         }
-    return db_toggle_reaction(media_id, source_id, emoji)
+    return db_toggle_reaction(media_id, source_id, emoji, scope=scope)
 
 
-def get_media_reactions(media_id: int) -> Dict[str, Any]:
+def get_media_reactions(media_id: int, scope: str = "post") -> Dict[str, Any]:
+    scope = (scope or "post").strip().lower()
     if is_postgres():
         rows = execute_read_query(
             """
@@ -76,10 +88,10 @@ def get_media_reactions(media_id: int) -> Dict[str, Any]:
                    d.device_name AS device_name, d.username AS username
             FROM reactions r
             LEFT JOIN devices d ON d.device_id = r.source_id
-            WHERE r.media_id = ?
+            WHERE r.media_id = ? AND r.scope = ?
             ORDER BY r.created_at ASC
             """,
-            (media_id,),
+            (media_id, scope),
         )
         reactions = list(rows)
         counts: Dict[str, int] = {}
@@ -87,15 +99,19 @@ def get_media_reactions(media_id: int) -> Dict[str, Any]:
             em = r["emoji"]
             counts[em] = counts.get(em, 0) + 1
         return {"media_id": media_id, "reactions": reactions, "counts": counts}
-    return db_get_media_reactions(media_id)
+    return db_get_media_reactions(media_id, scope=scope)
 
 
-def get_reactions_for_media_ids(media_ids: List[int], current_source_id: str | None = None) -> Tuple[Dict[int, Dict[str, int]], Dict[int, List[str]]]:
+def get_reactions_for_media_ids(media_ids: List[int], current_source_id: str | None = None, scope: str = "post") -> Tuple[Dict[int, Dict[str, int]], Dict[int, List[str]]]:
+    scope = (scope or "post").strip().lower()
     if is_postgres():
         if not media_ids:
             return {}, {}
         placeholders = ",".join(["?"] * len(media_ids))
-        rows = execute_read_query(f"SELECT media_id, emoji, source_id FROM reactions WHERE media_id IN ({placeholders})", media_ids)
+        rows = execute_read_query(
+            f"SELECT media_id, emoji, source_id FROM reactions WHERE media_id IN ({placeholders}) AND scope = ?",
+            media_ids + [scope],
+        )
         counts: Dict[int, Dict[str, int]] = {}
         user_reacts: Dict[int, List[str]] = {}
         for r in rows:
@@ -106,23 +122,31 @@ def get_reactions_for_media_ids(media_ids: List[int], current_source_id: str | N
             if current_source_id and r["source_id"] == current_source_id:
                 user_reacts.setdefault(mid, []).append(em)
         return counts, user_reacts
-    return db_get_reactions_for_media_ids(media_ids, current_source_id)
+    return db_get_reactions_for_media_ids(media_ids, current_source_id, scope=scope)
 
 
-def get_comment_counts_for_media_ids(media_ids: List[int]) -> Dict[int, int]:
+def get_comment_counts_for_media_ids(media_ids: List[int], scope: str = "post") -> Dict[int, int]:
+    scope = (scope or "post").strip().lower()
     if is_postgres():
         if not media_ids:
             return {}
         placeholders = ",".join(["?"] * len(media_ids))
-        rows = execute_read_query(f"SELECT media_id, COUNT(*) as cnt FROM comments WHERE media_id IN ({placeholders}) GROUP BY media_id", media_ids)
+        rows = execute_read_query(
+            f"SELECT media_id, COUNT(*) as cnt FROM comments WHERE media_id IN ({placeholders}) AND scope = ? GROUP BY media_id",
+            media_ids + [scope],
+        )
         return {r["media_id"]: r["cnt"] for r in rows}
-    return db_get_comment_counts_for_media_ids(media_ids)
+    return db_get_comment_counts_for_media_ids(media_ids, scope=scope)
 
 
-def add_comment(media_id: int, source_id: str, text: str) -> Dict[str, Any]:
+def add_comment(media_id: int, source_id: str, text: str, scope: str = "post") -> Dict[str, Any]:
+    scope = (scope or "post").strip().lower()
     if is_postgres():
         now = int(time.time())
-        execute_write("INSERT INTO comments (media_id, source_id, text, created_at) VALUES (?, ?, ?, ?)", (media_id, source_id, text[:MAX_COMMENT_LENGTH], now))
+        execute_write(
+            "INSERT INTO comments (media_id, source_id, text, created_at, scope) VALUES (?, ?, ?, ?, ?)",
+            (media_id, source_id, text[:MAX_COMMENT_LENGTH], now, scope),
+        )
         row = execute_read_one(
             """
             SELECT c.id, c.media_id, c.source_id, c.text, c.created_at,
@@ -135,23 +159,26 @@ def add_comment(media_id: int, source_id: str, text: str) -> Dict[str, Any]:
             (media_id, source_id, now),
         )
         if row:
-            return dict(row)
-        return {"media_id": media_id, "source_id": source_id, "text": text, "created_at": now, "device_name": None, "username": None}
-    return db_add_comment(media_id, source_id, text)
+            d = dict(row)
+            d["scope"] = scope
+            return d
+        return {"media_id": media_id, "source_id": source_id, "text": text, "created_at": now, "device_name": None, "username": None, "scope": scope}
+    return db_add_comment(media_id, source_id, text, scope=scope)
 
 
-def get_comments_for_media(media_id: int) -> List[Dict[str, Any]]:
+def get_comments_for_media(media_id: int, scope: str = "post") -> List[Dict[str, Any]]:
+    scope = (scope or "post").strip().lower()
     if is_postgres():
         sql = """
         SELECT c.id, c.media_id, c.source_id, c.text, c.created_at,
                d.device_name, d.device_model, d.username
         FROM comments c
         LEFT JOIN devices d ON d.device_id = c.source_id
-        WHERE c.media_id = ?
+        WHERE c.media_id = ? AND c.scope = ?
         ORDER BY c.created_at ASC, c.id ASC
         """
-        return execute_read_query(sql, (media_id,))
-    return db_get_comments_for_media(media_id)
+        return execute_read_query(sql, (media_id, scope))
+    return db_get_comments_for_media(media_id, scope=scope)
 
 
 def delete_comment(comment_id: int, source_id: str) -> bool:

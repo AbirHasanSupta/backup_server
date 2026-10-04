@@ -1908,6 +1908,7 @@ async def recluster_trips(
 class ReactRequest(BaseModel):
     source_id: str
     emoji: str
+    scope: str = "post"
 
 
 @router.post("/api/media/{media_id}/react")
@@ -1923,7 +1924,7 @@ async def react_to_media(
     if not emoji:
         raise HTTPException(status_code=400, detail="Emoji cannot be empty")
     try:
-        res = await asyncio.to_thread(toggle_reaction, media_id, body.source_id, emoji)
+        res = await asyncio.to_thread(toggle_reaction, media_id, body.source_id, emoji, body.scope)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return res
@@ -1934,11 +1935,12 @@ async def react_to_media(
 async def get_reactions(
     media_id: int,
     device_id: str | None = None,
+    scope: str = "post",
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
-    result = await asyncio.to_thread(get_media_reactions, media_id)
+    result = await asyncio.to_thread(get_media_reactions, media_id, scope)
     for r in result["reactions"]:
         r["display_name"] = format_display_name(r.get("username"), r.get("device_name")) or r["source_id"]
         r["is_own"] = device_id is not None and r["source_id"] == device_id
@@ -1952,6 +1954,7 @@ async def get_reactions(
 class CommentRequest(BaseModel):
     source_id: str
     text: str
+    scope: str = "post"
 
 
 class CommentDeleteRequest(BaseModel):
@@ -1963,11 +1966,12 @@ class CommentDeleteRequest(BaseModel):
 async def list_media_comments(
     media_id: int,
     device_id: str | None = None,
+    scope: str = "post",
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
-    comments = await asyncio.to_thread(get_comments_for_media, media_id)
+    comments = await asyncio.to_thread(get_comments_for_media, media_id, scope)
     is_post_creator = False
     if device_id:
         is_post_creator = await asyncio.to_thread(is_media_or_post_creator, media_id, device_id)
@@ -1993,7 +1997,7 @@ async def add_media_comment(
         raise HTTPException(status_code=400, detail="Comment cannot be empty")
     if len(text) > MAX_COMMENT_LENGTH:
         text = text[:MAX_COMMENT_LENGTH]
-    comment = await asyncio.to_thread(add_comment, media_id, body.source_id, text)
+    comment = await asyncio.to_thread(add_comment, media_id, body.source_id, text, body.scope)
     comment["is_own"] = True
     comment["can_delete"] = True
     # Ensure display_name is present (add_comment now returns it, but guard for safety)
@@ -2642,8 +2646,8 @@ async def get_unified_feed(
         all_media_ids = [item["media_id"] for g in sorted_groups for item in g["items"]]
 
         # Use first item's media_id as the reaction anchor for the group
-        counts_map, user_map = get_reactions_for_media_ids(all_media_ids, current_source_id=device_id)
-        comment_counts = get_comment_counts_for_media_ids(all_media_ids)
+        counts_map, user_map = get_reactions_for_media_ids(all_media_ids, current_source_id=device_id, scope="post")
+        comment_counts = get_comment_counts_for_media_ids(all_media_ids, scope="post")
 
         # Build final post list with reaction/comment data attached to group
         posts = []
@@ -3285,12 +3289,13 @@ async def get_liked_reels_endpoint(
         media_ids = [s["media_id"] for s in video_rows if s.get("media_id")]
 
         saved_ids = get_saved_reel_ids(device_id)
-        counts_map, user_map = get_reactions_for_media_ids(media_ids, current_source_id=device_id)
-        comment_counts = get_comment_counts_for_media_ids(media_ids)
+        counts_map, user_map = get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
+        comment_counts = get_comment_counts_for_media_ids(media_ids, scope="reel")
         repost_counts = get_repost_counts_for_media_ids(media_ids)
         user_reposted_media, user_reposted_shares = get_user_reposted_info(device_id)
 
         reels = []
+        seen_reel_keys = set()
         for s in video_rows:
             is_library_reel = bool(s.get("is_library_reel"))
             library_label = _library_reel_label_for_device(
@@ -3308,6 +3313,11 @@ async def get_liked_reels_endpoint(
                 f"library:{s['source_type']}:{s['source_key']}:{s['share_id']}"
                 if is_library_reel else str(s["share_id"])
             )
+            dedup_key = reel_id or str(s.get("media_id"))
+            if dedup_key in seen_reel_keys:
+                continue
+            seen_reel_keys.add(dedup_key)
+
             if is_library_reel:
                 orig_id = f"library:{s['source_type']}:{s['source_key']}"
 
@@ -3347,7 +3357,7 @@ async def get_liked_reels_endpoint(
                 "caption": s.get("group_caption") or s.get("caption"),
                 "created_at": s["created_at"],
                 "liked_at": s.get("liked_at"),
-                "liked_emoji": s.get("liked_emoji"),
+                "liked_emoji": s.get("liked_emoji") or "❤️",
                 "reaction_counts": counts_map.get(s["media_id"], {}) if s.get("media_id") else {},
                 "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
                 "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
