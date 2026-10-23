@@ -793,13 +793,15 @@ function SharedFeedCard({
             const category = getFileCategory(subItem.path);
             const isVideo = subItem.is_video ?? category === 'video';
             const effectiveSourceId = subItem.source_id ?? item.source_id ?? sourceId;
-            const thumbUrl = !serverConfig
-              ? ''
-              : subItem.share_id != null
-                ? buildShareThumbnailUrl(serverConfig, subItem.share_id)
-                : isVideo
-                  ? buildThumbnailUrl(serverConfig, subItem.path, 'shared', effectiveSourceId)
-                  : buildPreviewUrl(serverConfig, subItem.path, 'shared', effectiveSourceId);
+            const thumbUrl = (subItem as any).uri
+              ? (subItem as any).uri
+              : !serverConfig
+                ? ''
+                : subItem.share_id != null
+                  ? buildShareThumbnailUrl(serverConfig, subItem.share_id)
+                  : isVideo
+                    ? buildThumbnailUrl(serverConfig, subItem.path, 'shared', effectiveSourceId)
+                    : buildPreviewUrl(serverConfig, subItem.path, 'shared', effectiveSourceId);
 
             return (
               <TouchableOpacity
@@ -1466,9 +1468,11 @@ function ManageShareModal({
                 </Text>
                 <View style={modalSheetStyles.fileListContainer}>
                   {files.map((file, idx) => {
-                    const thumbUrl = file.share_id != null && serverConfig
-                      ? buildShareThumbnailUrl(serverConfig, file.share_id)
-                      : null;
+                    const thumbUrl = (file as any).uri
+                      ? (file as any).uri
+                      : file.share_id != null && serverConfig
+                        ? buildShareThumbnailUrl(serverConfig, file.share_id)
+                        : null;
                     const fileName = (file.path ? file.path.split(/[\\/]/).pop() : '') || `File ${idx + 1}`;
                     const isRemoving = removingFileId === file.share_id;
                     const category = getFileCategory(file.path);
@@ -2505,7 +2509,9 @@ const PreviewModal = React.memo(function PreviewModal({
   // 'shared' mode with the item's own source_id (the modal's sourceMode is
   // 'phone' in the Feed tab). Library rows keep the modal's sourceMode.
   const getUrlForFile = useCallback((f: RemoteFile | null): string => {
-    if (!f || !serverConfig) return '';
+    if (!f) return '';
+    if ((f as any).uri) return (f as any).uri;
+    if (!serverConfig) return '';
     if (f.kind === 'share' && f.share_id != null) {
       return buildShareDownloadUrl(serverConfig, f.share_id);
     }
@@ -2516,7 +2522,9 @@ const PreviewModal = React.memo(function PreviewModal({
   }, [serverConfig, sourceMode, selectedSourceId]);
 
   const getVideoPreviewUrlForFile = useCallback((f: RemoteFile | null): string => {
-    if (!f || !serverConfig) return '';
+    if (!f) return '';
+    if ((f as any).uri) return (f as any).uri;
+    if (!serverConfig) return '';
     if (f.kind === 'share' && f.share_id != null) {
       return buildSharePreviewUrl(serverConfig, f.share_id);
     }

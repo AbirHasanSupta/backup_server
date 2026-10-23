@@ -561,8 +561,8 @@ function ReelCardBase({
   useEffect(() => { seekBarWidthRef.current = cardWidth || SCREEN_W; }, [cardWidth]);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
-  const videoUrl = serverConfig ? buildSharePreviewUrl(serverConfig, item.share_id) : '';
-  const thumbUrl = serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
+  const videoUrl = item.uri ? item.uri : serverConfig ? buildSharePreviewUrl(serverConfig, item.share_id) : '';
+  const thumbUrl = item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
   const totalReactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
   const myReaction = item.user_reactions?.[0];
   const isLiked = !!myReaction;

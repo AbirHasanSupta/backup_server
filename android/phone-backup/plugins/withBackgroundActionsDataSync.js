@@ -641,6 +641,535 @@ final class BackupRewindNotifier {
 
   writeJavaFile(
     javaDir,
+    'BackupP2PServerModule.java',
+    `package ${packageName};
+
+import android.content.Context;
+import android.net.wifi.WifiManager;
+import android.util.Base64;
+import android.util.Log;
+
+import androidx.annotation.NonNull;
+
+import com.facebook.react.bridge.Arguments;
+import com.facebook.react.bridge.Promise;
+import com.facebook.react.bridge.ReactApplicationContext;
+import com.facebook.react.bridge.ReactContextBaseJavaModule;
+import com.facebook.react.bridge.ReactMethod;
+import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.modules.core.DeviceEventManagerModule;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketException;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class BackupP2PServerModule extends ReactContextBaseJavaModule {
+  private static final String MODULE_NAME = "PhoneBackupP2PServer";
+  private static final String TAG = "P2PServer";
+
+  private static ServerSocket serverSocket;
+  private static ExecutorService executorService;
+  private static final AtomicBoolean isRunning = new AtomicBoolean(false);
+  private static int activePort = 8088;
+
+  private static String deviceId = "";
+  private static String deviceName = "";
+  private static String username = "";
+  private static WifiManager.MulticastLock multicastLock;
+
+  public BackupP2PServerModule(ReactApplicationContext reactContext) {
+    super(reactContext);
+  }
+
+  @NonNull
+  @Override
+  public String getName() {
+    return MODULE_NAME;
+  }
+
+  private void emitEvent(String eventName, WritableMap params) {
+    try {
+      getReactApplicationContext()
+        .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+        .emit(eventName, params);
+    } catch (Exception e) {
+      Log.w(TAG, "Failed to emit event: " + eventName, e);
+    }
+  }
+
+  @ReactMethod
+  public void startServer(int port, String configJson, Promise promise) {
+    synchronized (BackupP2PServerModule.class) {
+      try {
+        if (configJson != null && !configJson.isEmpty()) {
+          JSONObject cfg = new JSONObject(configJson);
+          deviceId = cfg.optString("deviceId", deviceId);
+          deviceName = cfg.optString("deviceName", deviceName);
+          username = cfg.optString("username", username);
+        }
+
+        if (isRunning.get() && serverSocket != null && !serverSocket.isClosed()) {
+          WritableMap res = Arguments.createMap();
+          res.putBoolean("running", true);
+          res.putInt("port", activePort);
+          res.putString("deviceId", deviceId);
+          promise.resolve(res);
+          return;
+        }
+
+        activePort = (port >= 1024 && port <= 65535) ? port : 8088;
+
+        try {
+          serverSocket = new ServerSocket();
+          serverSocket.setReuseAddress(true);
+          serverSocket.bind(new java.net.InetSocketAddress(activePort));
+        } catch (Exception bindEx) {
+          serverSocket = new ServerSocket();
+          serverSocket.setReuseAddress(true);
+          serverSocket.bind(new java.net.InetSocketAddress(0));
+          activePort = serverSocket.getLocalPort();
+        }
+
+        isRunning.set(true);
+        executorService = Executors.newCachedThreadPool();
+
+        executorService.execute(new Runnable() {
+          @Override
+          public void run() {
+            while (isRunning.get()) {
+              try {
+                Socket clientSocket = serverSocket.accept();
+                executorService.execute(new ClientHandler(clientSocket));
+              } catch (SocketException se) {
+                break;
+              } catch (Exception e) {
+                if (isRunning.get()) {
+                  Log.e(TAG, "Accept error", e);
+                }
+              }
+            }
+          }
+        });
+
+        acquireMulticastLockInternal();
+
+        WritableMap res = Arguments.createMap();
+        res.putBoolean("running", true);
+        res.putInt("port", activePort);
+        res.putString("deviceId", deviceId);
+        promise.resolve(res);
+      } catch (Exception e) {
+        promise.reject("E_P2P_START_FAILED", e.getMessage(), e);
+      }
+    }
+  }
+
+  @ReactMethod
+  public void stopServer(Promise promise) {
+    synchronized (BackupP2PServerModule.class) {
+      try {
+        isRunning.set(false);
+        if (serverSocket != null && !serverSocket.isClosed()) {
+          serverSocket.close();
+        }
+        serverSocket = null;
+
+        if (executorService != null) {
+          executorService.shutdownNow();
+          executorService = null;
+        }
+
+        releaseMulticastLockInternal();
+        promise.resolve(true);
+      } catch (Exception e) {
+        promise.reject("E_P2P_STOP_FAILED", e.getMessage(), e);
+      }
+    }
+  }
+
+  @ReactMethod
+  public void getServerStatus(Promise promise) {
+    WritableMap res = Arguments.createMap();
+    res.putBoolean("running", isRunning.get());
+    res.putInt("port", activePort);
+    res.putString("deviceId", deviceId);
+    res.putString("deviceName", deviceName);
+    res.putString("username", username);
+    promise.resolve(res);
+  }
+
+  @ReactMethod
+  public void updateIdentity(String configJson, Promise promise) {
+    try {
+      if (configJson != null && !configJson.isEmpty()) {
+        JSONObject cfg = new JSONObject(configJson);
+        deviceId = cfg.optString("deviceId", deviceId);
+        deviceName = cfg.optString("deviceName", deviceName);
+        username = cfg.optString("username", username);
+      }
+      promise.resolve(true);
+    } catch (Exception e) {
+      promise.reject("E_P2P_IDENTITY_FAILED", e.getMessage(), e);
+    }
+  }
+
+  private void acquireMulticastLockInternal() {
+    try {
+      Context context = getReactApplicationContext().getApplicationContext();
+      WifiManager wifi = (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
+      if (wifi != null && (multicastLock == null || !multicastLock.isHeld())) {
+        multicastLock = wifi.createMulticastLock("PhoneBackupP2PMulticast");
+        multicastLock.setReferenceCounted(true);
+        multicastLock.acquire();
+      }
+    } catch (Exception ignored) {}
+  }
+
+  private void releaseMulticastLockInternal() {
+    try {
+      if (multicastLock != null && multicastLock.isHeld()) {
+        multicastLock.release();
+        multicastLock = null;
+      }
+    } catch (Exception ignored) {}
+  }
+
+  private class ClientHandler implements Runnable {
+    private final Socket socket;
+
+    ClientHandler(Socket socket) {
+      this.socket = socket;
+    }
+
+    @Override
+    public void run() {
+      try {
+        socket.setSoTimeout(15000);
+        InputStream in = socket.getInputStream();
+        OutputStream out = new BufferedOutputStream(socket.getOutputStream());
+
+        String requestLine = readLine(in);
+        if (requestLine == null || requestLine.isEmpty()) {
+          socket.close();
+          return;
+        }
+
+        String[] parts = requestLine.split(" ");
+        if (parts.length < 2) {
+          socket.close();
+          return;
+        }
+
+        String method = parts[0].toUpperCase();
+        String path = parts[1];
+
+        int contentLength = 0;
+        String contentType = "";
+        String headerLine;
+        while ((headerLine = readLine(in)) != null && !headerLine.isEmpty()) {
+          int colonIdx = headerLine.indexOf(":");
+          if (colonIdx > 0) {
+            String name = headerLine.substring(0, colonIdx).trim().toLowerCase();
+            String value = headerLine.substring(colonIdx + 1).trim();
+            if ("content-length".equals(name)) {
+              try { contentLength = Integer.parseInt(value); } catch (Exception ignored) {}
+            } else if ("content-type".equals(name)) {
+              contentType = value;
+            }
+          }
+        }
+
+        if ("OPTIONS".equals(method)) {
+          writeCorsResponse(out, 200, "OK");
+          out.flush();
+          socket.close();
+          return;
+        }
+
+        if ("GET".equals(method) && path.startsWith("/p2p/ping")) {
+          JSONObject resp = new JSONObject();
+          resp.put("status", "ok");
+          resp.put("service", "phone-backup-p2p");
+          resp.put("device_id", deviceId);
+          resp.put("device_name", deviceName);
+          resp.put("username", username);
+          resp.put("p2p_port", activePort);
+          resp.put("protocol_version", 1);
+          writeJsonResponse(out, 200, resp.toString());
+        } else if ("POST".equals(method) && path.startsWith("/p2p/pair")) {
+          byte[] bodyBytes = readExactBytes(in, contentLength);
+          String bodyStr = new String(bodyBytes, StandardCharsets.UTF_8);
+          JSONObject req = new JSONObject(bodyStr);
+
+          String action = req.optString("action", "request");
+          String peerDeviceId = req.optString("device_id", "");
+          String peerDeviceName = req.optString("device_name", "Nearby Peer");
+          String peerUsername = req.optString("username", "");
+          String pin = req.optString("pin", "");
+          int peerPort = req.optInt("port", 8088);
+          String remoteIp = socket.getInetAddress() != null ? socket.getInetAddress().getHostAddress() : "";
+
+          WritableMap eventParams = Arguments.createMap();
+          eventParams.putString("action", action);
+          eventParams.putString("deviceId", peerDeviceId);
+          eventParams.putString("deviceName", peerDeviceName);
+          eventParams.putString("username", peerUsername);
+          eventParams.putString("pin", pin);
+          eventParams.putString("ip", remoteIp);
+          eventParams.putInt("port", peerPort);
+          emitEvent("p2p_pair_request", eventParams);
+
+          JSONObject resp = new JSONObject();
+          resp.put("status", "pending");
+          resp.put("peer_device_id", deviceId);
+          resp.put("peer_device_name", deviceName);
+          resp.put("peer_username", username);
+          resp.put("pin", pin);
+          writeJsonResponse(out, 200, resp.toString());
+        } else if ("POST".equals(method) && path.startsWith("/p2p/upload")) {
+          String query = "";
+          int qIdx = path.indexOf("?");
+          if (qIdx >= 0) {
+            query = path.substring(qIdx + 1);
+          }
+          String shareId = "p2p_" + System.currentTimeMillis();
+          String originalName = "media_" + System.currentTimeMillis();
+          for (String pair : query.split("&")) {
+            int eq = pair.indexOf("=");
+            if (eq > 0) {
+              String k = pair.substring(0, eq).trim();
+              String v = pair.substring(eq + 1).trim();
+              try { v = java.net.URLDecoder.decode(v, "UTF-8"); } catch (Exception ignored) {}
+              if ("share_id".equals(k)) shareId = v;
+              else if ("name".equals(k)) originalName = v;
+            }
+          }
+
+          File p2pDir = new File(getReactApplicationContext().getCacheDir(), "p2p_shared");
+          if (!p2pDir.exists()) p2pDir.mkdirs();
+
+          String safeName = shareId + "_" + System.currentTimeMillis() + "_" + new File(originalName).getName();
+          File targetFile = new File(p2pDir, safeName);
+          FileOutputStream fos = new FileOutputStream(targetFile);
+
+          byte[] buf = new byte[65536];
+          long bytesRemaining = contentLength;
+          while (bytesRemaining > 0) {
+            int toRead = (int) Math.min(buf.length, bytesRemaining);
+            int read = in.read(buf, 0, toRead);
+            if (read == -1) break;
+            fos.write(buf, 0, read);
+            bytesRemaining -= read;
+          }
+          fos.flush();
+          fos.close();
+
+          JSONObject resp = new JSONObject();
+          resp.put("ok", true);
+          resp.put("fileName", safeName);
+          resp.put("uri", "file://" + targetFile.getAbsolutePath());
+          resp.put("size", targetFile.length());
+          writeJsonResponse(out, 200, resp.toString());
+        } else if ("POST".equals(method) && path.startsWith("/p2p/share")) {
+          byte[] bodyBytes = readExactBytes(in, contentLength);
+          String bodyStr = new String(bodyBytes, StandardCharsets.UTF_8);
+          JSONObject req = new JSONObject(bodyStr);
+
+          String shareId = req.optString("share_id", "p2p_" + System.currentTimeMillis());
+          String sharedByDeviceId = req.optString("shared_by_device_id", "");
+          String sharedByDeviceName = req.optString("shared_by_device_name", "Peer");
+          String sharedByUsername = req.optString("shared_by_username", "");
+          String caption = req.optString("caption", "");
+          String postKind = req.optString("post_kind", "direct_post");
+          long createdAt = req.optLong("created_at", System.currentTimeMillis());
+
+          File p2pDir = new File(getReactApplicationContext().getCacheDir(), "p2p_shared");
+          if (!p2pDir.exists()) p2pDir.mkdirs();
+
+          JSONArray filesArr = req.optJSONArray("files");
+          JSONArray savedFilesArr = new JSONArray();
+
+          if (filesArr != null) {
+            for (int i = 0; i < filesArr.length(); i++) {
+              JSONObject fObj = filesArr.getJSONObject(i);
+              String originalName = fObj.optString("name", "file_" + i);
+              String safeName = shareId + "_" + System.currentTimeMillis() + "_" + new File(originalName).getName();
+              String b64 = fObj.optString("base64", "");
+
+              String preUploadedName = fObj.optString("fileName", "");
+              if (!preUploadedName.isEmpty()) {
+                File targetFile = new File(p2pDir, preUploadedName);
+                if (targetFile.exists()) {
+                  JSONObject savedObj = new JSONObject();
+                  savedObj.put("name", originalName);
+                  savedObj.put("fileName", preUploadedName);
+                  savedObj.put("uri", "file://" + targetFile.getAbsolutePath());
+                  savedObj.put("size", targetFile.length());
+                  savedFilesArr.put(savedObj);
+                  continue;
+                }
+              }
+
+              if (!b64.isEmpty()) {
+                byte[] decoded = Base64.decode(b64, Base64.DEFAULT);
+                File targetFile = new File(p2pDir, safeName);
+                FileOutputStream fos = new FileOutputStream(targetFile);
+                fos.write(decoded);
+                fos.flush();
+                fos.close();
+
+                JSONObject savedObj = new JSONObject();
+                savedObj.put("name", originalName);
+                savedObj.put("fileName", safeName);
+                savedObj.put("uri", "file://" + targetFile.getAbsolutePath());
+                savedObj.put("size", targetFile.length());
+                savedFilesArr.put(savedObj);
+              }
+            }
+          }
+
+          WritableMap eventParams = Arguments.createMap();
+          eventParams.putString("shareId", shareId);
+          eventParams.putString("sharedByDeviceId", sharedByDeviceId);
+          eventParams.putString("sharedByDeviceName", sharedByDeviceName);
+          eventParams.putString("sharedByUsername", sharedByUsername);
+          eventParams.putString("caption", caption);
+          eventParams.putString("postKind", postKind);
+          eventParams.putDouble("createdAt", (double) createdAt);
+          eventParams.putString("filesJson", savedFilesArr.toString());
+          emitEvent("p2p_incoming_share", eventParams);
+
+          JSONObject resp = new JSONObject();
+          resp.put("ok", true);
+          resp.put("share_id", shareId);
+          writeJsonResponse(out, 200, resp.toString());
+        } else if ("GET".equals(method) && path.startsWith("/p2p/files/")) {
+          String rawFilename = path.substring("/p2p/files/".length());
+          String safeFilename = new File(rawFilename).getName();
+          File p2pDir = new File(getReactApplicationContext().getCacheDir(), "p2p_shared");
+          File targetFile = new File(p2pDir, safeFilename);
+
+          if (targetFile.exists() && targetFile.isFile()) {
+            writeFileResponse(out, targetFile);
+          } else {
+            writeNotFound(out);
+          }
+        } else {
+          writeNotFound(out);
+        }
+
+        out.flush();
+      } catch (Exception e) {
+        Log.w(TAG, "Request handle error", e);
+      } finally {
+        try { socket.close(); } catch (Exception ignored) {}
+      }
+    }
+
+    private String readLine(InputStream in) throws IOException {
+      StringBuilder sb = new StringBuilder();
+      int c;
+      while ((c = in.read()) != -1) {
+        if (c == '\\r') {
+          int next = in.read();
+          if (next == '\\n' || next == -1) break;
+          sb.append((char) c).append((char) next);
+        } else if (c == '\\n') {
+          break;
+        } else {
+          sb.append((char) c);
+        }
+      }
+      return sb.toString();
+    }
+
+    private byte[] readExactBytes(InputStream in, int length) throws IOException {
+      byte[] data = new byte[length];
+      int totalRead = 0;
+      while (totalRead < length) {
+        int read = in.read(data, totalRead, length - totalRead);
+        if (read == -1) break;
+        totalRead += read;
+      }
+      return data;
+    }
+
+    private void writeJsonResponse(OutputStream out, int status, String json) throws IOException {
+      byte[] jsonBytes = json.getBytes(StandardCharsets.UTF_8);
+      String header = "HTTP/1.1 " + status + " OK\\r\\n" +
+        "Content-Type: application/json; charset=utf-8\\r\\n" +
+        "Content-Length: " + jsonBytes.length + "\\r\\n" +
+        "Access-Control-Allow-Origin: *\\r\\n" +
+        "Connection: close\\r\\n\\r\n";
+      out.write(header.getBytes(StandardCharsets.UTF_8));
+      out.write(jsonBytes);
+    }
+
+    private void writeCorsResponse(OutputStream out, int status, String msg) throws IOException {
+      String header = "HTTP/1.1 " + status + " " + msg + "\\r\\n" +
+        "Access-Control-Allow-Origin: *\\r\\n" +
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\\r\\n" +
+        "Access-Control-Allow-Headers: Content-Type, Authorization, X-Device-Id\\r\\n" +
+        "Content-Length: 0\\r\\n" +
+        "Connection: close\\r\\n\\r\\n";
+      out.write(header.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void writeFileResponse(OutputStream out, File file) throws IOException {
+      String contentType = "application/octet-stream";
+      String lower = file.getName().toLowerCase();
+      if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) contentType = "image/jpeg";
+      else if (lower.endsWith(".png")) contentType = "image/png";
+      else if (lower.endsWith(".webp")) contentType = "image/webp";
+      else if (lower.endsWith(".mp4")) contentType = "video/mp4";
+
+      String header = "HTTP/1.1 200 OK\\r\\n" +
+        "Content-Type: " + contentType + "\\r\\n" +
+        "Content-Length: " + file.length() + "\\r\\n" +
+        "Access-Control-Allow-Origin: *\\r\\n" +
+        "Connection: close\\r\\n\\r\\n";
+      out.write(header.getBytes(StandardCharsets.UTF_8));
+
+      FileInputStream fis = new FileInputStream(file);
+      byte[] buf = new byte[8192];
+      int n;
+      while ((n = fis.read(buf)) != -1) {
+        out.write(buf, 0, n);
+      }
+      fis.close();
+    }
+
+    private void writeNotFound(OutputStream out) throws IOException {
+      String body = "{\\"error\\":\\"not_found\\"}";
+      byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+      String header = "HTTP/1.1 404 Not Found\\r\\n" +
+        "Content-Type: application/json\\r\\n" +
+        "Content-Length: " + bytes.length + "\\r\\n" +
+        "Connection: close\\r\\n\\r\\n";
+      out.write(header.getBytes(StandardCharsets.UTF_8));
+      out.write(bytes);
+    }
+  }
+}
+`
+  );
+
+  writeJavaFile(
+    javaDir,
     'BackupWakeLockPackage.java',
     `package ${packageName};
 
@@ -658,7 +1187,8 @@ public class BackupWakeLockPackage implements ReactPackage {
   public List<NativeModule> createNativeModules(ReactApplicationContext reactContext) {
     return Arrays.<NativeModule>asList(
       new BackupWakeLockModule(reactContext),
-      new BackupWidgetModule(reactContext));
+      new BackupWidgetModule(reactContext),
+      new BackupP2PServerModule(reactContext));
   }
 
   @Override
@@ -899,6 +1429,8 @@ module.exports = function withBackgroundActionsDataSync(config) {
 
     ensureUsesPermission(androidManifest, 'android.permission.FOREGROUND_SERVICE');
     ensureUsesPermission(androidManifest, DATA_SYNC_PERMISSION);
+    ensureUsesPermission(androidManifest, 'android.permission.ACCESS_WIFI_STATE');
+    ensureUsesPermission(androidManifest, 'android.permission.CHANGE_WIFI_MULTICAST_STATE');
     ensureBackgroundActionsService(androidManifest);
     ensureWidgetReceiver(androidManifest, packageName);
 

@@ -56,6 +56,14 @@ import { checkDeviceConnection } from '../../uploader';
 import { updateUsernameOnServer } from '../../downloader';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
+import { P2PDiscoverySheet } from '@/components/P2PDiscoverySheet';
+import {
+  isP2PEnabled,
+  setP2PEnabled,
+  getPairedPeers,
+  removePairedPeer,
+} from '../../p2pSettings';
+import { startP2PServer, stopP2PServer, getP2PServerStatus } from '../../p2pServer';
 import { AppIcon } from '@/components/AppIcon';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
@@ -101,6 +109,10 @@ export default function SettingsScreen() {
   const [discoveryVisible, setDiscoveryVisible] = useState(false);
   const [savedServers, setSavedServers] = useState<any[]>([]);
   const [pullRefreshing, setPullRefreshing] = useState(false);
+  const [p2pEnabled, setP2PEnabledState] = useState(true);
+  const [p2pStatus, setP2PStatus] = useState<any>({ running: false, port: 8088 });
+  const [pairedPeers, setPairedPeersState] = useState<any[]>([]);
+  const [p2pDiscoveryVisible, setP2PDiscoveryVisible] = useState(false);
 
   type ServerStatus = 'connected' | 'disconnected' | 'unknown' | 'checking';
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
@@ -157,6 +169,16 @@ export default function SettingsScreen() {
       getUsername(),
       getConnectionMode(),
     ]);
+    try {
+      const [p2pOn, peers, status] = await Promise.all([
+        isP2PEnabled(),
+        getPairedPeers(),
+        getP2PServerStatus(),
+      ]);
+      setP2PEnabledState(p2pOn);
+      setPairedPeersState(peers || []);
+      setP2PStatus(status || { running: false, port: 8088 });
+    } catch {}
     setServerIpState(ip);
     setServerPortState(String(port));
     setApiKeyState(key);
@@ -229,6 +251,23 @@ export default function SettingsScreen() {
     } finally {
       setSavingUsername(false);
     }
+  };
+
+  const handleToggleP2P = async (val: boolean) => {
+    setP2PEnabledState(val);
+    await setP2PEnabled(val);
+    if (val) {
+      const st = await startP2PServer();
+      setP2PStatus(st);
+    } else {
+      await stopP2PServer();
+      setP2PStatus({ running: false, port: 8088 });
+    }
+  };
+
+  const handleRemovePeer = async (peerId: string) => {
+    const updated = await removePairedPeer(peerId);
+    setPairedPeersState(updated);
   };
 
   const handleSaveServer = async () => {
@@ -731,6 +770,86 @@ export default function SettingsScreen() {
           </SettingsCard>
         </Animated.View>
 
+        <Animated.View entering={FadeInDown.duration(300).delay(120)}>
+          <SectionHeader title="Direct Phone-to-Phone (P2P)" styles={styles} />
+          <SettingsCard styles={styles}>
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleIcon}>
+                <AppIcon
+                  androidName="wifi"
+                  iosName="wifi"
+                  color={p2pEnabled ? colors.primary : colors.textMuted}
+                  size={20}
+                  fallback="W"
+                />
+              </View>
+              <View style={styles.toggleInfo}>
+                <Text style={styles.toggleLabel}>Local Wi-Fi P2P</Text>
+                <Text style={styles.toggleSub}>
+                  {p2pEnabled
+                    ? `Active on port ${p2pStatus?.port || 8088}. Connect phone-to-phone without desktop server.`
+                    : 'Disabled. Devices communicate through desktop server only.'}
+                </Text>
+              </View>
+              <Switch
+                value={p2pEnabled}
+                onValueChange={handleToggleP2P}
+                trackColor={{ false: colors.surfaceBorder, true: colors.primarySoft }}
+                thumbColor={p2pEnabled ? colors.primary : colors.textMuted}
+                accessibilityLabel="Toggle direct P2P mode"
+              />
+            </View>
+
+            {p2pEnabled && (
+              <>
+                <View style={styles.divider} />
+                <View style={styles.buttonRow}>
+                  <AnimatedPressable
+                    style={styles.outlineBtn}
+                    onPress={() => setP2PDiscoveryVisible(true)}
+                    scaleDown={0.95}
+                    accessibilityLabel="Find nearby phones on Wi-Fi"
+                  >
+                    <AppIcon androidName="phone_android" iosName="iphone" color={colors.primary} size={18} fallback="P" />
+                    <Text style={styles.outlineBtnText}>Find Nearby Phones</Text>
+                  </AnimatedPressable>
+                </View>
+
+                {pairedPeers.length > 0 && (
+                  <>
+                    <View style={styles.divider} />
+                    <FieldLabel text={`Paired Devices (${pairedPeers.length})`} styles={styles} />
+                    <View style={styles.savedServersList}>
+                      {pairedPeers.map((peer) => (
+                        <View key={peer.peerId} style={styles.savedServerRow}>
+                          <View style={styles.savedServerIcon}>
+                            <AppIcon androidName="phone_android" iosName="iphone" size={16} color={colors.primary} fallback="D" />
+                          </View>
+                          <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+                            <Text style={styles.savedServerName} numberOfLines={1}>
+                              {peer.username ? `${peer.username} (${peer.deviceName})` : peer.deviceName}
+                            </Text>
+                            <Text style={styles.savedServerMeta} numberOfLines={1}>
+                              {peer.ip ? `${peer.ip}:${peer.port}` : 'Local Wi-Fi'}
+                            </Text>
+                          </View>
+                          <TouchableOpacity
+                            onPress={() => handleRemovePeer(peer.peerId)}
+                            hitSlop={8}
+                            style={styles.removeSavedBtn}
+                          >
+                            <AppIcon androidName="close" iosName="xmark" size={14} color={colors.textMuted} fallback="x" />
+                          </TouchableOpacity>
+                        </View>
+                      ))}
+                    </View>
+                  </>
+                )}
+              </>
+            )}
+          </SettingsCard>
+        </Animated.View>
+
         <Animated.View entering={FadeInDown.duration(300).delay(150)}>
           <SectionHeader title="Sync schedule" styles={styles} />
           <SettingsCard styles={styles}>
@@ -953,6 +1072,11 @@ export default function SettingsScreen() {
           onClose={() => setDiscoveryVisible(false)}
         />
       ) : null}
+      <P2PDiscoverySheet
+        visible={p2pDiscoveryVisible}
+        colors={colors}
+        onClose={() => setP2PDiscoveryVisible(false)}
+      />
     </View>
   );
 }

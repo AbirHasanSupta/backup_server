@@ -33,6 +33,7 @@ import {
 } from '../../settings';
 import { getTodaysMemories, getRandomFlashback, generateRewindReel, getRewindReelStatus } from '../../downloader';
 import { connectWebSocket, disconnectWebSocket } from '../../websocketClient';
+import { initializeP2PServer } from '../../p2pServer';
 import {
   getStreakData,
 
@@ -207,6 +208,7 @@ function RootLayoutContent() {
       syncWidgetServerConfig().catch(() => {});
       resolveReachableServer().catch(() => {});
       connectWebSocket().catch(() => {});
+      initializeP2PServer();
       checkAndNotifyMemories().catch(() => {});
       checkAndNotifyFlashback().catch(() => {});
       checkAndNotifyStreakRisk().catch(() => {});

@@ -104,6 +104,8 @@ export type SavedReelItem = {
   is_own_post: boolean;
   is_saved?: boolean;
   group_id?: string | null;
+  uri?: string | null;
+  is_p2p?: boolean;
 };
 
 export type LibrarySegment = 'saved' | 'liked' | 'reposts';
@@ -429,8 +431,8 @@ function SavedReelCardBase({
   useEffect(() => { durationRef.current = duration; }, [duration]);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
-  const videoUrl = serverConfig ? buildSharePreviewUrl(serverConfig, item.share_id) : '';
-  const thumbUrl = serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
+  const videoUrl = item.uri ? item.uri : serverConfig ? buildSharePreviewUrl(serverConfig, item.share_id) : '';
+  const thumbUrl = item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
   const totalReactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
   const myReaction = item.user_reactions?.[0];
   const isLiked = !!myReaction;
@@ -1691,7 +1693,7 @@ export default function SavedReelsScreen() {
   }, []);
 
   const renderGridItem = useCallback(({ item, index }: { item: SavedReelItem; index: number }) => {
-    const thumbUrl = serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
+    const thumbUrl = item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
     const authorName = item.is_repost
       ? (item.original_author?.display_name || item.shared_by)
       : item.shared_by;
