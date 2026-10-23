@@ -22,6 +22,28 @@ router = APIRouter(tags=["Reels"])
 
 _REEL_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
 
+
+def _collect_shared_videos_from_dir(root: str) -> list[dict]:
+    items = []
+    if not os.path.isdir(root):
+        return items
+    for dirpath, _, filenames in os.walk(root):
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in _REEL_VIDEO_EXTS:
+                full = os.path.join(dirpath, fname)
+                try:
+                    st = os.stat(full)
+                    rel = os.path.relpath(full, root).replace("\\", "/")
+                    items.append({
+                        "path": rel,
+                        "size": st.st_size,
+                        "modified_time": int(st.st_mtime),
+                    })
+                except OSError:
+                    pass
+    return items
+
 _reel_warm_lock = threading.Lock()
 _reel_warm_active = False
 
@@ -231,6 +253,33 @@ async def get_shared_and_backups_reels(
                 reels_repo.get_indexed_shared_video_candidates,
                 list(shared_labels), page_limit, page_offset,
             )
+            if not rows:
+                disk_candidates = []
+                for entry in shared_entries:
+                    sid = str(entry.get("id"))
+                    root = os.path.abspath(normalize_fs_path(entry.get("path") or ""))
+                    if not root or not os.path.isdir(root):
+                        continue
+                    collected = await asyncio.to_thread(_collect_shared_videos_from_dir, root)
+                    for f in collected:
+                        disk_candidates.append({
+                            "source_type": "reel_shared",
+                            "source_key": sid,
+                            "path": f["path"],
+                            "size": f.get("size", 0),
+                            "modified_time": f.get("modified_time", 0),
+                            "label": shared_labels.get(sid, "Shared folder"),
+                        })
+                if disk_candidates:
+                    try:
+                        await asyncio.to_thread(
+                            reels_repo.bulk_get_or_create_library_reel_shares, disk_candidates
+                        )
+                    except Exception:
+                        pass
+                    disk_candidates.sort(key=lambda r: (-int(r.get("modified_time") or 0), str(r.get("path"))))
+                    return disk_candidates[page_offset:page_offset + page_limit]
+
             return [{
                 "source_type": "reel_shared", "source_key": row["source_key"],
                 "path": row["path"], "size": row.get("size", 0),
@@ -351,6 +400,8 @@ async def get_shared_and_backups_reels(
             "is_unseen": False,
             "group_id": None,
             "library_source": r["source_type"],
+            "source_type": "phone" if r["source_type"] == "reel_backup" else "shared",
+            "source_key": r["source_key"],
         })
 
     def _catalog_rank(reel: dict) -> float:

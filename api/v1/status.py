@@ -11,7 +11,7 @@ from fastapi import APIRouter, Header, Query, Request
 from pydantic import BaseModel
 
 from core.security import verify_api_key_or_device_token
-from network_info import get_all_local_ips, get_tailscale_network_info
+from network_info import get_all_local_ips, get_client_ip, get_tailscale_network_info
 from repositories import device_repo
 from state import get_current_activity, set_current_activity
 from version import APP_VERSION
@@ -68,7 +68,7 @@ async def get_server_status(
     token: str = Query(None),
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
-    device_ip = request.client.host if request.client else "127.0.0.1"
+    device_ip = get_client_ip(request)
     is_known = device_repo.is_device_known(device_ip, device_id)
     dev_obj = device_repo.get_device_by_id(device_id) if device_id else None
     local_ips, tailscale, hostname = await asyncio.to_thread(_cached_network_snapshot)

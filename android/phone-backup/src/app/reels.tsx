@@ -111,6 +111,25 @@ function expectedLibrarySource(section: 'backups' | 'shared'): 'reel_backup' | '
   return section === 'backups' ? 'reel_backup' : 'reel_shared';
 }
 
+function matchesLibrarySource(r: ReelItem, target: 'reel_backup' | 'reel_shared'): boolean {
+  if (r.library_source === target) return true;
+  if (target === 'reel_shared') {
+    return (
+      r.library_source === 'reel_shared' ||
+      (r as any).source_type === 'shared' ||
+      (typeof r.reel_id === 'string' && r.reel_id.startsWith('library:reel_shared:'))
+    );
+  }
+  if (target === 'reel_backup') {
+    return (
+      r.library_source === 'reel_backup' ||
+      (r as any).source_type === 'phone' ||
+      (typeof r.reel_id === 'string' && r.reel_id.startsWith('library:reel_backup:'))
+    );
+  }
+  return false;
+}
+
 type Comment = {
   id: number;
   text: string;
@@ -284,6 +303,13 @@ function VideoReelPlayer({
       }
     }
   }, [status, isActive, isPlaying, player]);
+
+  useEffect(() => {
+    if (status === 'error' && !readyFiredRef.current) {
+      readyFiredRef.current = true;
+      onReadyRef.current();
+    }
+  }, [status]);
 
   // Reset ready flag per source so that swiping back to a cached reel fires
   // onReady again if needed (e.g. the card was recycled while off-screen).
@@ -1600,7 +1626,7 @@ export default function ReelsScreen() {
             setServerConfig(cfg);
             engineStateRef.current = eState;
             const filtered = isLibrarySection(requestedSection)
-              ? (cached.reels || []).filter((r: ReelItem) => r.library_source === expectedLibrarySource(requestedSection))
+              ? (cached.reels || []).filter((r: ReelItem) => matchesLibrarySource(r, expectedLibrarySource(requestedSection)))
               : (cached.reels || []).filter((r: ReelItem) => !r.is_own_post && (!cfg?.deviceId || r.shared_by_device_id !== cfg.deviceId));
             const rankedCached = buildDiverseReelSlate(filtered, eState, Date.now());
             if (rankedCached.length > 0) {
@@ -1637,7 +1663,7 @@ export default function ReelsScreen() {
       // Keep the shelves strictly separated even if a stale server does not
       // yet honour the source query parameter.
       const filteredRaw = isLibrarySection(requestedSection)
-        ? (raw || []).filter(r => r.library_source === expectedLibrarySource(requestedSection))
+        ? (raw || []).filter(r => matchesLibrarySource(r, expectedLibrarySource(requestedSection)))
         : (raw || []).filter(r => !r.is_own_post && (!config?.deviceId || r.shared_by_device_id !== config.deviceId));
       const ranked = buildDiverseReelSlate(filteredRaw, engineState, currentSeed);
       setReels(prev => {

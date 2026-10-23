@@ -43,7 +43,7 @@ def get_indexed_shared_video_candidates(
     should be a database read, not another recursive filesystem scan.
     """
     keys = [str(source_keys)] if isinstance(source_keys, str) else [str(key) for key in source_keys if key]
-    if is_postgres() and keys:
+    if keys:
         path_predicates = " OR ".join(["LOWER(relative_path) LIKE ?"] * len(_VIDEO_PATH_PATTERNS))
         key_placeholders = ", ".join(["?"] * len(keys))
         sql = f"""
@@ -60,7 +60,27 @@ def get_indexed_shared_video_candidates(
     return []
 
 
-def get_or_create_media_id(source_type: str, source_key: str, relative_path: str, cap_time: int | None = None) -> int:
+def get_or_create_media_id(
+    source_type: str,
+    source_key: str,
+    relative_path: str,
+    *args,
+    size: int = 0,
+    modified_time: int = 0,
+    cap_time: int | None = None,
+    **kwargs,
+) -> int:
+    if len(args) == 1:
+        if cap_time is None:
+            cap_time = args[0]
+        if not modified_time:
+            modified_time = args[0] or 0
+    elif len(args) >= 2:
+        size = args[0] or 0
+        modified_time = args[1] or 0
+        if len(args) >= 3 and cap_time is None:
+            cap_time = args[2]
+
     if is_postgres():
         row = execute_read_one(
             "SELECT id FROM media_index WHERE source_type = ? AND source_key = ? AND relative_path = ?",
@@ -69,16 +89,17 @@ def get_or_create_media_id(source_type: str, source_key: str, relative_path: str
         if row:
             return row["id"]
         now = int(time.time())
+        effective_cap = cap_time if cap_time is not None else (modified_time or now)
         execute_write(
-            "INSERT INTO media_index (source_type, source_key, relative_path, size, modified_time, cap_time, indexed_at) VALUES (?, ?, ?, 0, 0, ?, ?) ON CONFLICT DO NOTHING",
-            (source_type, source_key, relative_path, cap_time, now),
+            "INSERT INTO media_index (source_type, source_key, relative_path, size, modified_time, cap_time, indexed_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            (source_type, source_key, relative_path, size, modified_time, effective_cap, now),
         )
         row = execute_read_one(
             "SELECT id FROM media_index WHERE source_type = ? AND source_key = ? AND relative_path = ?",
             (source_type, source_key, relative_path),
         )
         return row["id"] if row else 0
-    return db_get_or_create_media_id(source_type, source_key, relative_path, cap_time)
+    return db_get_or_create_media_id(source_type, source_key, relative_path, size, modified_time)
 
 
 def bulk_get_or_create_library_reel_shares(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -196,6 +217,7 @@ def bulk_get_or_create_library_reel_shares(candidates: List[Dict[str, Any]]) -> 
                 "created_at": created_at,
             })
         return results
+    return db_bulk_get_or_create_library_reel_shares(candidates)
 def get_or_create_library_reel_share(source_type: str, source_key: str, relative_path: str, size: int = 0, modified_time: int = 0) -> Dict[str, Any]:
     res = bulk_get_or_create_library_reel_shares([{"source_type": source_type, "source_key": source_key, "relative_path": relative_path, "size": size, "modified_time": modified_time}])
     return res[0] if res else {}

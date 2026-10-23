@@ -27,6 +27,7 @@ except Exception:
     pass
 
 from config import load_config
+from core.path_utils import normalize_fs_path
 from core.timeutil import (
     datetime_from_timestamp,
     naive_local_to_epoch,
@@ -419,6 +420,36 @@ def _resolve_worker_counts() -> tuple[int, int]:
     return max(2, image_workers), max(1, video_workers)
 
 
+def _extract_and_flush_items(items: list[dict], batch_size: int = 200) -> int:
+    if not items:
+        return 0
+    image_items = [it for it in items if it["ext"] in IMAGE_EXTS]
+    video_items = [it for it in items if it["ext"] not in IMAGE_EXTS]
+    image_workers, video_workers = _resolve_worker_counts()
+
+    total_flushed = 0
+    batch: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=image_workers) as img_ex, \
+         concurrent.futures.ThreadPoolExecutor(max_workers=video_workers) as vid_ex:
+        futures = [img_ex.submit(_extract_media_row_metadata, it) for it in image_items]
+        futures += [vid_ex.submit(_extract_media_row_metadata, it) for it in video_items]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                row = fut.result()
+                if row:
+                    batch.append(row)
+                    if len(batch) >= batch_size:
+                        batch_upsert_media_index_rows(batch)
+                        total_flushed += len(batch)
+                        batch = []
+            except Exception:
+                pass
+        if batch:
+            batch_upsert_media_index_rows(batch)
+            total_flushed += len(batch)
+    return total_flushed
+
+
 def _run_extraction(items: list[dict]) -> list[dict]:
     image_items = [it for it in items if it["ext"] in IMAGE_EXTS]
     video_items = [it for it in items if it["ext"] not in IMAGE_EXTS]
@@ -430,7 +461,12 @@ def _run_extraction(items: list[dict]) -> list[dict]:
         futures = [img_ex.submit(_extract_media_row_metadata, it) for it in image_items]
         futures += [vid_ex.submit(_extract_media_row_metadata, it) for it in video_items]
         for fut in concurrent.futures.as_completed(futures):
-            rows.append(fut.result())
+            try:
+                row = fut.result()
+                if row:
+                    rows.append(row)
+            except Exception:
+                pass
     return rows
 
 
@@ -445,7 +481,8 @@ def reindex_device(device_id: str, trigger_cluster: bool = True) -> None:
     cache = get_media_index_cache("phone", device_id)
     try:
         device_root = resolve_backup_root(device_id)
-    except Exception:
+    except Exception as exc:
+        add_log(f"[Memories] Could not resolve backup root for device {device_id}: {exc}")
         return
 
     seen_paths: set[str] = set()
@@ -489,7 +526,7 @@ def reindex_device(device_id: str, trigger_cluster: bool = True) -> None:
         })
 
     if to_process:
-        _flush_rows(_run_extraction(to_process))
+        _extract_and_flush_items(to_process)
 
     prune_media_index("phone", device_id, seen_paths, existing_paths=set(cache.keys()))
     try:
@@ -507,11 +544,14 @@ def _rel_dirname(rel_path: str) -> str:
 
 
 def _rel_to_abs(root_path: str, rel_path: str) -> str:
-    return os.path.join(root_path, *rel_path.split("/"))
+    norm = normalize_fs_path(root_path) or root_path
+    return os.path.join(norm, *rel_path.split("/"))
 
 
 def reindex_shared(source_id: str, root_path: str) -> None:
-    if not os.path.isdir(root_path):
+    norm_root = normalize_fs_path(root_path)
+    if not norm_root or not os.path.isdir(norm_root):
+        add_log(f"[Memories] Shared folder {source_id} directory not accessible: {root_path} (normalized: {norm_root})")
         return
 
     cache = get_media_index_cache("shared", source_id)
@@ -525,7 +565,7 @@ def reindex_shared(source_id: str, root_path: str) -> None:
     now_ts = int(time_module.time())
     to_process: list[dict] = []
 
-    stack: list[tuple[str, str]] = [("", root_path)]
+    stack: list[tuple[str, str]] = [("", norm_root)]
     while stack:
         rel_dir, abs_dir = stack.pop()
         try:
@@ -546,7 +586,7 @@ def reindex_shared(source_id: str, root_path: str) -> None:
                 missing_gps = ext in IMAGE_EXTS and not cached_entry[4]
                 if not (stale_fallback or missing_gps):
                     continue
-                full_path = _rel_to_abs(root_path, rel_path)
+                full_path = _rel_to_abs(norm_root, rel_path)
                 if not os.path.isfile(full_path):
                     continue
                 to_process.append({
@@ -600,7 +640,7 @@ def reindex_shared(source_id: str, root_path: str) -> None:
                 stack.append((child_rel, entry.path))
 
     if to_process:
-        _flush_rows(_run_extraction(to_process))
+        _extract_and_flush_items(to_process)
 
     prune_media_index("shared", source_id, seen_paths, existing_paths=set(cache.keys()))
     upsert_scan_dirs("shared", source_id, dir_updates)
@@ -708,7 +748,8 @@ def _do_reindex_all() -> None:
                 else:
                     reindex_shared(key, path)
             except Exception as e:
-                add_log(f"[Memories] Error reindexing {kind} {get_device_display_name(key)}: {e}")
+                name = get_device_display_name(key) if kind == "device" else key
+                add_log(f"[Memories] Error reindexing {kind} {name}: {e}")
 
         max_workers = min(4, max(1, len(tasks)))
         if tasks:
@@ -767,18 +808,56 @@ def reindex_all() -> None:
                 pass
 
 
-def reset_and_reindex_all() -> dict:
+def reset_and_reindex_all(background: bool = False) -> dict:
     """Clear the media_index/scan_dirs cache entirely and rebuild it from scratch."""
+    client = _redis_client_or_none()
+    redis_token = None
+    if client:
+        redis_token = f"admin-reset:{os.getpid()}:{time_module.time_ns()}"
+        try:
+            client.set("lock:memories-reindex", redis_token, ex=60 * 60)
+        except Exception:
+            redis_token = None
+
     if not _reindex_lock.acquire(blocking=True, timeout=10):
+        if client and redis_token:
+            try:
+                client.delete("lock:memories-reindex")
+            except Exception:
+                pass
         add_log("[Memories] Reset skipped: indexing already in progress.")
         return {"ok": False, "error": "Indexing already in progress, try again shortly."}
+
+    def _execute():
+        try:
+            _do_reindex_all()
+        finally:
+            _reindex_lock.release()
+            if client and redis_token:
+                try:
+                    if client.get("lock:memories-reindex") == redis_token:
+                        client.delete("lock:memories-reindex")
+                except Exception:
+                    pass
+
     try:
         cleared = clear_media_index()
         add_log(f"[Memories] Memory index cleared ({cleared} rows). Starting full rescan...")
-        _do_reindex_all()
-        return {"ok": True, "cleared": cleared}
-    finally:
+        if background:
+            threading.Thread(target=_execute, daemon=True, name="memories-reindex-worker").start()
+            return {"ok": True, "cleared": cleared, "status": "started"}
+        else:
+            _execute()
+            return {"ok": True, "cleared": cleared}
+    except Exception as exc:
         _reindex_lock.release()
+        if client and redis_token:
+            try:
+                client.delete("lock:memories-reindex")
+            except Exception:
+                pass
+        add_log(f"[Memories] Reset and reindex failed: {exc}")
+        return {"ok": False, "error": str(exc)}
 
 
 def get_memory_index_stats() -> dict:

@@ -375,6 +375,8 @@ def init_pg_db():
             # Resetting here is a no-op on empty tables and prevents duplicate-key
             # failures that would otherwise appear on the first write after migration.
             _sequence_map = [
+                ("devices_id_seq",                "devices",              "id"),
+                ("files_id_seq",                  "files",                "id"),
                 ("device_shares_share_id_seq",  "device_shares",        "share_id"),
                 ("sync_sessions_id_seq",         "sync_sessions",        "id"),
                 ("media_index_id_seq",            "media_index",          "id"),

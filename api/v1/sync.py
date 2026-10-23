@@ -13,6 +13,7 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request
 from core.security import verify_api_key_or_device_token
 from core.locks import acquire_lock
 from core.config import load_config
+from network_info import get_client_ip
 from repositories import device_repo, file_repo
 from services.sync_service import sync_service
 from storage.manager import get_storage
@@ -171,7 +172,7 @@ async def upload_file_raw(
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     device_id = await asyncio.to_thread(_require_accepted_device, device_id)
-    device_ip = request.client.host if request.client else "127.0.0.1"
+    device_ip = get_client_ip(request)
 
     if await asyncio.to_thread(sync_service.should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
         return await asyncio.to_thread(sync_service.skipped_upload, device_ip, device_id)
@@ -219,7 +220,7 @@ async def upload_file_multipart(
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     device_id = await asyncio.to_thread(_require_accepted_device, device_id)
-    device_ip = request.client.host if request.client else "127.0.0.1"
+    device_ip = get_client_ip(request)
 
     if await asyncio.to_thread(sync_service.should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
         return await asyncio.to_thread(sync_service.skipped_upload, device_ip, device_id)
@@ -317,7 +318,7 @@ async def complete_chunked_upload(
     verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
     body.device_id = await asyncio.to_thread(_require_accepted_device, body.device_id)
     _validate_chunk_parameters(body.upload_id, 0, body.total_chunks)
-    device_ip = request.client.host if request.client else "127.0.0.1"
+    device_ip = get_client_ip(request)
 
     # A completed response can be lost during a network handoff.  Do not make
     # the client rebuild the entire file in that case.

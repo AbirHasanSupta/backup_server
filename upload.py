@@ -22,6 +22,7 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from config import load_config, APP_DATA_DIR, SHARED_QUIZ_DIR
+from core.path_utils import normalize_fs_path
 from repositories.device_repo import (
     find_device_by_name_model,
     format_device_display_name,
@@ -115,7 +116,7 @@ from video_preview import (
     is_video_path,
     preview_request_is_active,
 )
-from network_info import get_tailscale_network_info
+from network_info import get_client_ip, get_tailscale_network_info
 from version import APP_VERSION
 
 router = APIRouter()
@@ -323,7 +324,7 @@ async def connect_device(
     """
     verify_connect_auth(authorization)
 
-    device_ip = request.client.host
+    device_ip = get_client_ip(request)
     device_name = body.device_name.strip() or device_ip
     device_id = body.device_id
     device_model = (body.device_model or "").strip() or None
@@ -360,7 +361,8 @@ async def connect_device(
     )
 
     # Already registered — just refresh the record, no dialog needed
-    if is_device_known(device_ip, device_id):
+    device_exists = bool(get_device_by_id(device_id)) if device_id else False
+    if device_exists:
         upsert_device(device_name, device_ip, device_id, device_model, username)
         add_log(f"📱 Re-connected: {dev_name} ({device_ip})")
         return await accepted_response()
@@ -370,7 +372,7 @@ async def connect_device(
     # (same device_name + model).  If so, silently re-link the new ID to the
     # existing device row and migrate all file records — the old backup folder
     # is preserved, and already-uploaded files are not re-uploaded.
-    if device_id:
+    if device_id and not device_exists:
         existing = find_device_by_name_model(device_name, device_model)
         if existing and existing.get("device_id") and existing["device_id"] != device_id:
             old_id = existing["device_id"]
@@ -538,7 +540,7 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
     Files deleted from the PC are reported as missing even when an old DB row exists.
     """
     verify_auth(authorization, body.device_id)
-    device_ip = request.client.host
+    device_ip = get_client_ip(request)
     device_id = body.device_id
     verify_known_device(device_ip, device_id)
     return await asyncio.to_thread(_check_files_sync, body, device_ip, device_id)
@@ -669,7 +671,7 @@ async def upload_file_raw(
 ):
     verify_auth(authorization, device_id)
 
-    device_ip = request.client.host
+    device_ip = get_client_ip(request)
     verify_known_device(device_ip, device_id)
 
     if await asyncio.to_thread(should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
@@ -713,7 +715,7 @@ async def upload_file(
 ):
     verify_auth(authorization, device_id)
 
-    device_ip = request.client.host
+    device_ip = get_client_ip(request)
     verify_known_device(device_ip, device_id)
 
     if await asyncio.to_thread(should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
@@ -872,7 +874,7 @@ async def search_shared_files(
     q = q.strip()
     if not q:
         return {"files": []}
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         return {"files": []}
     files = await asyncio.to_thread(_search_shared_dir, root, q)
@@ -896,7 +898,7 @@ async def browse_shared_files(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     norm_prefix = prefix.strip("/").replace("\\", "/")
     target_dir = os.path.join(root, norm_prefix) if norm_prefix else root
     target_dir = os.path.abspath(target_dir)
@@ -957,7 +959,7 @@ async def get_shared_feed(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         return {"items": [], "source_id": source_id, "label": entry["label"]}
 
@@ -1186,7 +1188,7 @@ async def warm_shared_preview_files(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     armed = False
     scheduled = False
     # Do not loop: all remaining paths are adjacent/list warmups and must never
@@ -1434,7 +1436,7 @@ async def list_shared_files(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         return {"files": [], "warning": "Directory does not exist on server"}
 
@@ -1488,7 +1490,7 @@ async def download_shared_file(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         raise HTTPException(status_code=404, detail="Shared directory not found on server")
 
@@ -1521,7 +1523,7 @@ async def preview_shared_file(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         raise HTTPException(status_code=404, detail="Shared directory not found on server")
 
@@ -1568,7 +1570,7 @@ async def thumbnail_shared_file(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         raise HTTPException(status_code=404, detail="Shared directory not found on server")
 
@@ -2798,7 +2800,7 @@ async def get_shared_and_backups_reels(
                     continue
                 if not entry.get("available_in_reels", entry.get("available_in_reel", True)):
                     continue
-                root = os.path.abspath(entry.get("path") or "")
+                root = os.path.abspath(normalize_fs_path(entry.get("path") or ""))
                 if not os.path.isdir(root):
                     continue
                 for f in _collect_shared_media(root):
@@ -3693,7 +3695,7 @@ def _resolve_share_path(share: dict) -> str:
         entry = _find_shared_dir(source_key)
         if not entry:
             raise HTTPException(status_code=404, detail="Shared source not found")
-        root = os.path.abspath(entry["path"])
+        root = os.path.abspath(normalize_fs_path(entry["path"]))
         if not os.path.isdir(root):
             raise HTTPException(status_code=404, detail="Shared directory not found on server")
         safe_rel = os.path.normpath(relative_path.replace("\\", "/"))

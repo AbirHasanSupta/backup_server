@@ -20,7 +20,7 @@ from state import (
     pending_connections,
     resolve_connection,
 )
-from network_info import get_all_local_ips, get_tailscale_network_info
+from network_info import get_all_local_ips, get_client_ip, get_tailscale_network_info
 from version import APP_VERSION
 
 router = APIRouter(tags=["Authentication & Devices"])
@@ -48,18 +48,21 @@ async def connect_device(
     cfg = load_config()
     verify_api_key_or_device_token(authorization, token, None, None)
 
-    device_ip = request.client.host if request.client else "127.0.0.1"
+    device_ip = get_client_ip(request)
     device_name = body.device_name.strip() or device_ip
     device_id = (body.device_id or "").strip() or str(uuid.uuid4())
     device_model = (body.device_model or "").strip() or None
     username = (body.username or "").strip() or None
 
     require_approval = cfg.get("REQUIRE_APPROVAL", True)
-    is_known = device_repo.is_device_known(device_ip, device_id)
+    device_record = device_repo.get_device_by_id(device_id) if device_id else None
+    is_known = device_record is not None or device_repo.is_device_known(device_ip, device_id)
     recovery_available = False
 
     # Check for reinstall / migration if device_id changed
-    if device_id and not is_known:
+    # If this device_id is not already registered in the system, check if an existing
+    # device with matching device_name and hardware device_model exists under an older ID.
+    if device_id and not device_record:
         existing = device_repo.find_device_by_name_model(device_name, device_model)
         if existing and existing.get("device_id") and existing["device_id"] != device_id:
             old_id = existing["device_id"]

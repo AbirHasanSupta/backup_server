@@ -528,10 +528,12 @@ def clear_media_index(source_type: str | None = None, source_key: str | None = N
             row = execute_read_one("SELECT COUNT(*) AS c FROM media_index WHERE source_type = ? AND source_key = ?", (source_type, source_key))
             count = row["c"] if row else 0
             execute_write("DELETE FROM media_index WHERE source_type = ? AND source_key = ?", (source_type, source_key))
+            execute_write("DELETE FROM scan_dirs WHERE source_type = ? AND source_key = ?", (source_type, source_key))
             return count
         row = execute_read_one("SELECT COUNT(*) AS c FROM media_index")
         count = row["c"] if row else 0
         execute_write("DELETE FROM media_index")
+        execute_write("DELETE FROM scan_dirs")
         return count
     if source_type and source_key:
         return db_clear_media_index()

@@ -5,6 +5,7 @@ import re
 import threading
 
 from config import load_config
+from core.path_utils import normalize_fs_path
 
 # Lazy import to avoid circular dependency — database imports config, not storage.
 _get_device_folder_name = None
@@ -21,12 +22,20 @@ def _resolve_device_folder(device_id: str) -> str:
     global _get_device_folder_name
     if _get_device_folder_name is None:
         try:
-            from database import get_device_folder_name as _fn
+            from repositories.device_repo import get_device_folder_name as _fn
             _get_device_folder_name = _fn
         except Exception:
-            _get_device_folder_name = lambda did: None  # noqa: E731
+            try:
+                from database import get_device_folder_name as _fn
+                _get_device_folder_name = _fn
+            except Exception:
+                _get_device_folder_name = lambda did: None  # noqa: E731
 
-    folder = _get_device_folder_name(device_id)
+    folder = None
+    try:
+        folder = _get_device_folder_name(device_id)
+    except Exception:
+        pass
     if folder:
         return folder
     # Fallback: sanitize device_id itself (keeps old behaviour for legacy rows)
@@ -50,7 +59,9 @@ def sanitize_relative_path(relative_path: str) -> str:
 
 
 def resolve_backup_root(device_id: str | None = None) -> str:
-    root = os.path.abspath(_backup_root())
+    raw_root = _backup_root()
+    norm_root = normalize_fs_path(raw_root) or raw_root
+    root = os.path.abspath(norm_root)
     if device_id:
         folder = _resolve_device_folder(device_id)
         root = os.path.join(root, folder)

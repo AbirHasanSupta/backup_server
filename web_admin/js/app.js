@@ -1276,14 +1276,26 @@ function renderSharedFolders() {
   }).join('');
 }
 
-window.openAddSharedFolderModal = function() {
+window.openAddSharedFolderModal = async function() {
   openModal('shared-folder-modal');
   el('shared-modal-title').textContent = 'Add Shared Folder';
-  el('shared-path-input').value = '';
+  const pathInp = el('shared-path-input');
+  pathInp.value = '';
+  pathInp.readOnly = false;
+  pathInp.classList.remove('opacity-75');
+  const browseBtn = pathInp.parentElement?.querySelector('button');
+  if (browseBtn) browseBtn.style.display = '';
+
   el('shared-label-input').value = '';
   el('shared-all-devices-chk').checked = true;
   el('shared-reels-chk').checked = true;
 
+  if (!_devices || !_devices.length) {
+    try {
+      const res = await api.get('/api/admin/devices');
+      _devices = res.devices || [];
+    } catch (_) {}
+  }
   renderSharedFolderDevicesChecklist(['all']);
 
   el('shared-save-btn').onclick = async () => {
@@ -1311,13 +1323,26 @@ window.openAddSharedFolderModal = function() {
   };
 };
 
-function openManageSharedFolderAccess(folderId) {
+async function openManageSharedFolderAccess(folderId) {
   const f = _sharedFolders.find(x => x.id === folderId);
   if (!f) return;
 
+  if (!_devices || !_devices.length) {
+    try {
+      const res = await api.get('/api/admin/devices');
+      _devices = res.devices || [];
+    } catch (_) {}
+  }
+
   openModal('shared-folder-modal');
   el('shared-modal-title').textContent = `Manage Folder Access: ${f.label || f.path}`;
-  el('shared-path-input').value = f.path || '';
+  const pathInp = el('shared-path-input');
+  pathInp.value = f.path || '';
+  pathInp.readOnly = true;
+  pathInp.classList.add('opacity-75');
+  const browseBtn = pathInp.parentElement?.querySelector('button');
+  if (browseBtn) browseBtn.style.display = 'none';
+
   el('shared-label-input').value = f.label || '';
   const currentTags = f.device_ids || ['all'];
   const isAll = !currentTags.length || currentTags.includes('all');
@@ -1327,7 +1352,6 @@ function openManageSharedFolderAccess(folderId) {
   renderSharedFolderDevicesChecklist(currentTags);
 
   el('shared-save-btn').onclick = async () => {
-    const path = el('shared-path-input').value.trim();
     const label = el('shared-label-input').value.trim();
     const isAllNow = el('shared-all-devices-chk').checked;
     const deviceIds = isAllNow ? ['all'] : qsa('.shared-dev-chk:checked').map(c => c.value);
@@ -1336,14 +1360,13 @@ function openManageSharedFolderAccess(folderId) {
     try {
       await api.post('/api/admin/shared-folders/update', {
         id: folderId,
-        path,
         label,
         device_ids: deviceIds,
         available_in_reels: availableInReels,
       });
       closeModal('shared-folder-modal');
       loadSharedFolders();
-      showToast('Shared folder updated.');
+      showToast('Shared folder access updated.');
     } catch (e) {
       showToast(e.message, 'error');
     }
@@ -1357,13 +1380,18 @@ function renderSharedFolderDevicesChecklist(selected) {
   const isAll = !selected.length || selected.includes('all');
   const selSet = new Set(selected);
 
+  if (!_devices || !_devices.length) {
+    con.innerHTML = `<div class="text-[11px] text-zinc-500 p-2 text-center">No paired devices found. "Allow all paired devices" applies to all devices once connected.</div>`;
+    return;
+  }
+
   con.innerHTML = _devices.map(d => {
     const checked = isAll || selSet.has(d.device_id) ? 'checked' : '';
     const disabled = isAll ? 'disabled' : '';
     return `
     <label class="flex items-center gap-2 cursor-pointer text-xs p-1 rounded hover:bg-zinc-800">
       <input type="checkbox" class="rounded shared-dev-chk" value="${escHtml(d.device_id)}" ${checked} ${disabled}>
-      <span class="text-zinc-200">${escHtml(d.display_name || d.device_name)}</span>
+      <span class="text-zinc-200">${escHtml(d.display_name || d.device_name || d.device_id)}</span>
       <span class="text-[10px] text-zinc-500 ml-auto">${escHtml(d.device_model || '')}</span>
     </label>`;
   }).join('');

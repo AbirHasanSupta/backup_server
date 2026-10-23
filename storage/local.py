@@ -12,6 +12,7 @@ from typing import AsyncGenerator, BinaryIO, Tuple
 
 from core.config import APP_DATA_DIR, load_config
 from core.exceptions import StoragePathTraversalError
+from core.path_utils import normalize_fs_path
 from storage.base import StorageBackend
 
 _BUFFER_SIZE = 4 * 1024 * 1024  # 4MB high-throughput buffer block
@@ -24,7 +25,9 @@ class LocalStorageBackend(StorageBackend):
         self._custom_root = custom_root
 
     def _get_root(self, device_id: str | None = None) -> str:
-        base_root = os.path.abspath(self._custom_root or load_config().get("BACKUP_ROOT", "D:\\PhoneBackup"))
+        raw_base = self._custom_root or load_config().get("BACKUP_ROOT", "D:\\PhoneBackup")
+        norm_base = normalize_fs_path(raw_base) or raw_base
+        base_root = os.path.abspath(norm_base)
         if device_id:
             try:
                 from repositories.device_repo import get_device_folder_name

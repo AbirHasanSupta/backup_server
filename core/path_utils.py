@@ -28,6 +28,44 @@ def normalize_fs_path(path: str | None) -> str:
 
     normalized = raw.replace("\\", "/")
 
+    # 0. Clean accidental container working directory prepended to a Windows drive path
+    # (e.g. /app/G:/Photos or /app/G:\Photos caused by os.path.abspath on Linux)
+    drive_match = re.search(r'(?:^|/)([a-zA-Z]:(?:/.*)?)$', normalized)
+    if drive_match:
+        drive_path = drive_match.group(1)
+        # If running on Windows and the raw drive path exists, return it
+        if os.name == "nt":
+            win_candidate = drive_path.replace("/", "\\")
+            if os.path.exists(win_candidate):
+                return os.path.abspath(win_candidate)
+        normalized = drive_path
+
+    # Reverse mapping for Windows when paths stored in config or DB use container mounts
+    if os.name == "nt":
+        if normalized.startswith("/host_") and len(normalized) > 7 and normalized[7] == "/":
+            drive = normalized[6].upper()
+            rest = normalized[8:].replace("/", "\\")
+            cand = f"{drive}:\\{rest}"
+            if os.path.exists(cand):
+                return os.path.abspath(cand)
+            return cand
+        if normalized.startswith("/backup_storage"):
+            rest = normalized[len("/backup_storage"):].lstrip("/").replace("/", "\\")
+            try:
+                b_root = os.path.abspath(load_config().get("BACKUP_ROOT", "D:\\PhoneBackup"))
+            except Exception:
+                b_root = "D:\\PhoneBackup"
+            cand = os.path.join(b_root, rest)
+            if os.path.exists(cand):
+                return os.path.abspath(cand)
+            return cand
+        if normalized.startswith("/app_data"):
+            rest = normalized[len("/app_data"):].lstrip("/").replace("/", "\\")
+            cand = os.path.join(APP_DATA_DIR, rest)
+            if os.path.exists(cand):
+                return os.path.abspath(cand)
+            return cand
+
     # 1. Check for AppData subdirectories (shared_direct_posts, shared_quiz_cards, etc.)
     app_data_subs = (
         "shared_direct_posts",
@@ -67,23 +105,35 @@ def normalize_fs_path(path: str | None) -> str:
         rest = normalized[2:].lstrip("/")
 
         # If drive is D (backup drive default)
-        if drive == "d" and ("phonebackup" in rest.lower() or os.path.isdir(backup_root)):
-            if rest.lower().startswith("phonebackup/"):
-                rest_sub = rest[len("phonebackup/"):].lstrip("/")
-            else:
-                rest_sub = rest
-            candidate = os.path.join(backup_root, rest_sub)
-            if os.path.exists(candidate):
-                return candidate
-
-        # If drive is C and contains AppData/PhoneBackupServer
-        if drive == "c" and "phonebackupserver" in rest.lower():
-            idx = rest.lower().find("phonebackupserver/")
-            if idx != -1:
-                appdata_rel = rest[idx + len("phonebackupserver/"):].lstrip("/")
-                candidate = os.path.join(APP_DATA_DIR, appdata_rel)
+        if drive == "d":
+            if "phonebackup" in rest.lower() or os.path.isdir(backup_root):
+                if rest.lower().startswith("phonebackup/"):
+                    rest_sub = rest[len("phonebackup/"):].lstrip("/")
+                else:
+                    rest_sub = rest
+                candidate = os.path.join(backup_root, rest_sub)
                 if os.path.exists(candidate):
                     return candidate
+            for prefix in ("/host_d", "/mnt/d", "/d"):
+                if os.path.isdir(prefix):
+                    cand = os.path.join(prefix, rest)
+                    if os.path.exists(cand):
+                        return cand
+
+        # If drive is C
+        if drive == "c":
+            if "phonebackupserver" in rest.lower():
+                idx = rest.lower().find("phonebackupserver/")
+                if idx != -1:
+                    appdata_rel = rest[idx + len("phonebackupserver/"):].lstrip("/")
+                    candidate = os.path.join(APP_DATA_DIR, appdata_rel)
+                    if os.path.exists(candidate):
+                        return candidate
+            for prefix in ("/host_c", "/mnt/c", "/c"):
+                if os.path.isdir(prefix):
+                    cand = os.path.join(prefix, rest)
+                    if os.path.exists(cand):
+                        return cand
 
         # Standard container drive mounts: /host_g, /mnt/g, /g
         for prefix in (f"/host_{drive}", f"/mnt/{drive}", f"/{drive}"):

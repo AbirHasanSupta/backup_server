@@ -384,3 +384,25 @@ def get_all_local_ips() -> list[str]:
         return (3, ip_str)
 
     return sorted(ips, key=_sort_key)
+
+
+def get_client_ip(request: object = None) -> str:
+    """Extract real client IP address, properly handling reverse proxy headers (Nginx/Traefik)."""
+    if not request:
+        return "127.0.0.1"
+    headers = getattr(request, "headers", None)
+    if headers:
+        # Standard X-Forwarded-For header contains comma-separated client/proxy chain.
+        # The leftmost entry is the original client IP.
+        forwarded = headers.get("x-forwarded-for") or headers.get("X-Forwarded-For")
+        if forwarded:
+            client_ip = forwarded.split(",")[0].strip()
+            if client_ip:
+                return client_ip
+        real_ip = headers.get("x-real-ip") or headers.get("X-Real-IP")
+        if real_ip and real_ip.strip():
+            return real_ip.strip()
+    client = getattr(request, "client", None)
+    if client and getattr(client, "host", None):
+        return client.host
+    return "127.0.0.1"

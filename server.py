@@ -167,6 +167,9 @@ def create_app(service_role: str | None = None) -> FastAPI:
     )
     application.state.service_role = role
 
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+    application.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+
     application.add_middleware(
         CORSMiddleware,
         # A wildcard origin combined with credential support is both unsafe and

@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import string
 import subprocess
@@ -65,6 +66,7 @@ from fastapi import APIRouter, File, Header, HTTPException, Query, UploadFile, s
 from pydantic import BaseModel
 
 from config import APP_DATA_DIR, SHARED_DIRECT_POST_DIR, load_config, save_config
+from core.path_utils import normalize_fs_path
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo, file_repo, media_repo, social_repo
 import memories
@@ -305,10 +307,9 @@ def _get_system_roots() -> list[str]:
                 roots.append(drive)
     else:
         roots.append("/")
-        if os.path.exists("/app"):
-            roots.append("/app")
-        if os.path.exists("/storage"):
-            roots.append("/storage")
+        for candidate in ("/host_g", "/host_d", "/host_c", "/backup_storage", "/app_data", "/app", "/storage"):
+            if os.path.exists(candidate) and candidate not in roots:
+                roots.append(candidate)
             
     cfg_root = load_config().get("BACKUP_ROOT")
     if cfg_root and os.path.exists(cfg_root):
@@ -350,11 +351,14 @@ async def browse_server_fs(
         else:
             path = os.getcwd()
 
-    norm_path = os.path.abspath(os.path.expandvars(os.path.expanduser(path.strip())))
+    raw_path = path.strip()
+    norm_path = normalize_fs_path(raw_path) if not os.path.exists(raw_path) else os.path.abspath(raw_path)
     if not os.path.exists(norm_path):
-        raise HTTPException(status_code=404, detail=f"Path not found: {norm_path}")
+        norm_path = os.path.abspath(os.path.expandvars(os.path.expanduser(raw_path)))
+    if not os.path.exists(norm_path):
+        raise HTTPException(status_code=404, detail=f"Path not found: {raw_path}")
     if not os.path.isdir(norm_path):
-        raise HTTPException(status_code=400, detail=f"Path is not a directory: {norm_path}")
+        raise HTTPException(status_code=400, detail=f"Path is not a directory: {raw_path}")
 
     dirs = []
     files = []
@@ -591,7 +595,7 @@ async def reindex_memory_index(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    result = await asyncio.to_thread(memories.reset_and_reindex_all)
+    result = await asyncio.to_thread(memories.reset_and_reindex_all, background=True)
     return result
 
 
@@ -744,7 +748,18 @@ async def list_admin_shared_folders(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    dirs = list(load_config().get("SHARED_DIRS", []))
+    cfg = load_config()
+    dirs = list(cfg.get("SHARED_DIRS", []))
+    cleaned = False
+    for d in dirs:
+        p = d.get("path", "")
+        m = re.search(r'(?:^/app/)([a-zA-Z]:(?:[\\/].*)?)$', p.replace("\\", "/"))
+        if m:
+            d["path"] = m.group(1).replace("/", "\\")
+            cleaned = True
+    if cleaned:
+        cfg["SHARED_DIRS"] = dirs
+        save_config(cfg)
     return {"shared_dirs": dirs}
 
 
@@ -762,13 +777,21 @@ async def add_admin_shared_folder(
     token: str = Query(None),
 ):
     _auth(authorization, token)
-    folder_path = os.path.abspath(os.path.expandvars(os.path.expanduser(body.path.strip())))
-    if not os.path.exists(folder_path):
-        raise HTTPException(status_code=400, detail=f"Directory does not exist: {folder_path}")
-    if not os.path.isdir(folder_path):
-        raise HTTPException(status_code=400, detail=f"Path is not a directory: {folder_path}")
+    raw_path = body.path.strip()
+    norm_path = normalize_fs_path(raw_path)
+    target = norm_path if (norm_path and os.path.exists(norm_path)) else os.path.abspath(os.path.expandvars(os.path.expanduser(raw_path)))
+    if not os.path.exists(target):
+        raise HTTPException(status_code=400, detail=f"Directory does not exist: {raw_path}")
+    if not os.path.isdir(target):
+        raise HTTPException(status_code=400, detail=f"Path is not a directory: {raw_path}")
 
-    label = body.label.strip() if body.label else os.path.basename(folder_path) or folder_path
+    # Preserve host Windows drive paths without prepending /app/ in container
+    if re.match(r'^[a-zA-Z]:[\\/]', raw_path):
+        folder_path = raw_path
+    else:
+        folder_path = target
+
+    label = body.label.strip() if body.label else os.path.basename(raw_path.rstrip("\\/")) or raw_path
     cfg = load_config()
     dirs = list(cfg.get("SHARED_DIRS", []))
     
@@ -809,9 +832,26 @@ async def update_admin_shared_folder(
         raise HTTPException(status_code=404, detail="Shared folder entry not found")
     
     entry = dirs[idx]
-    if body.path is not None:
-        entry["path"] = os.path.abspath(os.path.expandvars(os.path.expanduser(body.path.strip())))
-    if body.label is not None:
+    if body.path is not None and body.path.strip():
+        raw_path = body.path.strip()
+        norm_path = normalize_fs_path(raw_path)
+        target = norm_path if (norm_path and os.path.exists(norm_path)) else os.path.abspath(os.path.expandvars(os.path.expanduser(raw_path)))
+        if not os.path.exists(target):
+            raise HTTPException(status_code=400, detail=f"Directory does not exist: {raw_path}")
+        if not os.path.isdir(target):
+            raise HTTPException(status_code=400, detail=f"Path is not a directory: {raw_path}")
+        if re.match(r'^[a-zA-Z]:[\\/]', raw_path):
+            entry["path"] = raw_path
+        else:
+            entry["path"] = target
+    else:
+        # Heal any existing accidental /app/ drive prefix
+        p = entry.get("path", "")
+        m = re.search(r'(?:^/app/)([a-zA-Z]:(?:[\\/].*)?)$', p.replace("\\", "/"))
+        if m:
+            entry["path"] = m.group(1).replace("/", "\\")
+
+    if body.label is not None and body.label.strip():
         entry["label"] = body.label.strip()
     if body.device_ids is not None:
         entry["device_ids"] = body.device_ids
