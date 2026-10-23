@@ -1,4 +1,4 @@
-import { DeviceEventEmitter } from 'react-native';
+import { NativeModules, DeviceEventEmitter } from 'react-native';
 import { formatHostForUrl, parseServerAddress, isLocalLanSubnet } from './settings';
 import {
   getP2PPort,
@@ -159,6 +159,12 @@ export async function discoverPeers(onProgress, options = {}) {
 
   if (!deviceIp || deviceIp === '0.0.0.0') {
     throw new Error('Could not determine local device Wi-Fi IP address');
+  }
+
+  // Phase 0: Broadcast UDP beacon on port 8822 for instant peer response
+  const P2PServerModule = NativeModules.PhoneBackupP2PServer;
+  if (P2PServerModule?.broadcastUdpBeacon) {
+    P2PServerModule.broadcastUdpBeacon().catch(() => {});
   }
 
   const targetPort = options.p2pPort || defaultPort;

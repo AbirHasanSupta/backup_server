@@ -670,6 +670,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
@@ -683,6 +686,8 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
   private static final String TAG = "P2PServer";
 
   private static ServerSocket serverSocket;
+  private static DatagramSocket udpBeaconSocket;
+  private static final int UDP_BEACON_PORT = 8822;
   private static ExecutorService executorService;
   private static final AtomicBoolean isRunning = new AtomicBoolean(false);
   private static int activePort = 8088;
@@ -767,6 +772,7 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
         });
 
         acquireMulticastLockInternal();
+        startUdpBeaconListenerInternal();
 
         WritableMap res = Arguments.createMap();
         res.putBoolean("running", true);
@@ -788,6 +794,11 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
           serverSocket.close();
         }
         serverSocket = null;
+
+        if (udpBeaconSocket != null && !udpBeaconSocket.isClosed()) {
+          udpBeaconSocket.close();
+        }
+        udpBeaconSocket = null;
 
         if (executorService != null) {
           executorService.shutdownNow();
@@ -844,6 +855,73 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
     }
   }
 
+  @ReactMethod
+  public void broadcastUdpBeacon(Promise promise) {
+    if (executorService == null) {
+      promise.resolve(false);
+      return;
+    }
+    executorService.execute(new Runnable() {
+      @Override
+      public void run() {
+        try {
+          DatagramSocket socket = new DatagramSocket();
+          socket.setBroadcast(true);
+          JSONObject probe = new JSONObject();
+          probe.put("type", "p2p_probe");
+          probe.put("service", "phone-backup-p2p");
+          probe.put("device_id", deviceId);
+          byte[] data = probe.toString().getBytes(StandardCharsets.UTF_8);
+          DatagramPacket packet = new DatagramPacket(data, data.length, InetAddress.getByName("255.255.255.255"), UDP_BEACON_PORT);
+          socket.send(packet);
+          socket.close();
+          promise.resolve(true);
+        } catch (Exception e) {
+          promise.resolve(false);
+        }
+      }
+    });
+  }
+
+  private void startUdpBeaconListenerInternal() {
+    try {
+      udpBeaconSocket = new DatagramSocket(UDP_BEACON_PORT);
+      udpBeaconSocket.setBroadcast(true);
+      executorService.execute(new Runnable() {
+        @Override
+        public void run() {
+          byte[] buf = new byte[1024];
+          while (isRunning.get() && udpBeaconSocket != null && !udpBeaconSocket.isClosed()) {
+            try {
+              DatagramPacket packet = new DatagramPacket(buf, buf.length);
+              udpBeaconSocket.receive(packet);
+              String msg = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
+              if (msg.contains("p2p_probe") || msg.contains("phone-backup-p2p")) {
+                JSONObject reply = new JSONObject();
+                reply.put("service", "phone-backup-p2p");
+                reply.put("status", "ok");
+                reply.put("device_id", deviceId);
+                reply.put("device_name", deviceName);
+                reply.put("username", username);
+                reply.put("p2p_port", activePort);
+                reply.put("protocol_version", 1);
+                byte[] replyBytes = reply.toString().getBytes(StandardCharsets.UTF_8);
+                DatagramPacket replyPacket = new DatagramPacket(replyBytes, replyBytes.length, packet.getAddress(), packet.getPort());
+                udpBeaconSocket.send(replyPacket);
+              }
+            } catch (SocketException se) {
+              break;
+            } catch (Exception e) {
+              if (isRunning.get()) Log.w(TAG, "UDP beacon error", e);
+            }
+          }
+        }
+      });
+    } catch (Exception e) {
+      Log.w(TAG, "Could not bind UDP beacon port " + UDP_BEACON_PORT, e);
+    }
+  }
+
   private void acquireMulticastLockInternal() {
     try {
       Context context = getReactApplicationContext().getApplicationContext();
@@ -896,6 +974,7 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
 
         int contentLength = 0;
         String contentType = "";
+        String rangeHeader = "";
         String headerLine;
         while ((headerLine = readLine(in)) != null && !headerLine.isEmpty()) {
           int colonIdx = headerLine.indexOf(":");
@@ -906,6 +985,8 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
               try { contentLength = Integer.parseInt(value); } catch (Exception ignored) {}
             } else if ("content-type".equals(name)) {
               contentType = value;
+            } else if ("range".equals(name)) {
+              rangeHeader = value;
             }
           }
         }
@@ -927,6 +1008,18 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
           resp.put("p2p_port", activePort);
           resp.put("protocol_version", 1);
           writeJsonResponse(out, 200, resp.toString());
+        } else if ("GET".equals(method) && path.startsWith("/p2p/status")) {
+          JSONObject st = new JSONObject();
+          st.put("status", "ok");
+          st.put("device_id", deviceId);
+          st.put("device_name", deviceName);
+          st.put("username", username);
+          st.put("running", isRunning.get());
+          st.put("port", activePort);
+          File cacheDir = getReactApplicationContext().getCacheDir();
+          st.put("free_space", cacheDir.getFreeSpace());
+          st.put("total_space", cacheDir.getTotalSpace());
+          writeJsonResponse(out, 200, st.toString());
         } else if ("POST".equals(method) && path.startsWith("/p2p/pair")) {
           byte[] bodyBytes = readExactBytes(in, contentLength);
           String bodyStr = new String(bodyBytes, StandardCharsets.UTF_8);
@@ -1120,7 +1213,7 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
           File targetFile = new File(p2pDir, safeFilename);
 
           if (targetFile.exists() && targetFile.isFile()) {
-            writeFileResponse(out, targetFile);
+            writeFileResponse(out, targetFile, rangeHeader);
           } else {
             writeNotFound(out);
           }

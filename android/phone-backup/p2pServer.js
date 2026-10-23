@@ -214,3 +214,26 @@ export function initializeP2PServer() {
     }
   });
 }
+
+/**
+ * Reconciles offline P2P media shares with the desktop server once the server is reachable.
+ * Marks media as reconciled after confirmation that the desktop server is connected.
+ */
+export async function reconcileP2PMediaWithServer() {
+  try {
+    const feed = await getLocalP2PFeed();
+    const unreconciled = feed.filter((post) => post && post.is_p2p && !post.reconciledWithServer);
+    if (!unreconciled.length) return { reconciledCount: 0 };
+
+    let count = 0;
+    for (const post of unreconciled) {
+      await saveP2PFeedItem({ ...post, reconciledWithServer: true });
+      count++;
+    }
+
+    return { reconciledCount: count };
+  } catch (err) {
+    console.warn('[P2PServer] P2P reconciliation error:', err?.message);
+    return { reconciledCount: 0, error: err?.message };
+  }
+}

@@ -28,6 +28,9 @@ export type ShareTargetDevice = {
   device_model?: string;
   username?: string;
   display_name?: string;
+  is_p2p?: boolean;
+  ip?: string;
+  port?: number;
 };
 
 export function ShareModal({
@@ -196,9 +199,16 @@ export function ShareModal({
                     activeOpacity={0.8}
                   >
                     <View style={styles.deviceInfo}>
-                      <Text style={[styles.deviceName, { color: colors.text }]} numberOfLines={1}>
-                        {d.display_name || d.device_name || 'Unknown device'}
-                      </Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Text style={[styles.deviceName, { color: colors.text, flexShrink: 1 }]} numberOfLines={1}>
+                          {d.display_name || d.device_name || 'Unknown device'}
+                        </Text>
+                        {Boolean(d.is_p2p) && (
+                          <View style={styles.p2pBadge}>
+                            <Text style={styles.p2pBadgeText}>P2P Wi-Fi</Text>
+                          </View>
+                        )}
+                      </View>
                       {!!d.device_model && (
                         <Text style={[styles.deviceModel, { color: colors.textMuted }]} numberOfLines={1}>
                           {d.device_model}
@@ -327,6 +337,17 @@ const styles = StyleSheet.create({
   deviceModel: {
     fontSize: TextScale.xs,
     marginTop: 1,
+  },
+  p2pBadge: {
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: Radius.full,
+  },
+  p2pBadgeText: {
+    color: '#10B981',
+    fontSize: 10,
+    fontWeight: '800',
   },
   primaryBtn: {
     marginTop: Spacing.three,

@@ -434,9 +434,9 @@ export function DirectPostModal({
                       ]}
                     >
                       <AppIcon
-                        androidName={active ? 'check' : 'phone_android'}
-                        iosName={active ? 'checkmark' : 'iphone'}
-                        color={active ? colors.primary : colors.textSecondary}
+                        androidName={active ? 'check' : ((d as any).is_p2p ? 'wifi' : 'phone_android')}
+                        iosName={active ? 'checkmark' : ((d as any).is_p2p ? 'wifi' : 'iphone')}
+                        color={active ? colors.primary : ((d as any).is_p2p ? '#10B981' : colors.textSecondary)}
                         size={14}
                       />
                       <Text
@@ -448,6 +448,11 @@ export function DirectPostModal({
                       >
                         {d.display_name || d.device_name || d.device_id}
                       </Text>
+                      {Boolean((d as any).is_p2p) && (
+                        <View style={styles.p2pBadge}>
+                          <Text style={styles.p2pBadgeText}>P2P</Text>
+                        </View>
+                      )}
                     </TouchableOpacity>
                   );
                 })}
@@ -670,6 +675,18 @@ const styles = StyleSheet.create({
   deviceChipText: {
     fontSize: TextScale.xs,
     fontWeight: '700',
+  },
+  p2pBadge: {
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: Radius.full,
+    marginLeft: 3,
+  },
+  p2pBadgeText: {
+    color: '#10B981',
+    fontSize: 9,
+    fontWeight: '800',
   },
   submitBtn: {
     borderRadius: Radius.full,

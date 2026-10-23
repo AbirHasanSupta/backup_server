@@ -32,6 +32,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { addSharedPostTapListener } from '../../notificationService';
+import { getPairedPeers } from '../../p2pSettings';
 import { setUIPriorityMode, getCurrentSyncState } from '../../backgroundTask';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
@@ -4028,6 +4029,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<{ current: number; total: number; fileName: string; bytesWritten: number; bytesTotal: number } | null>(null);
   const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
+  const [pairedPeers, setPairedPeers] = useState<any[]>([]);
   const downloadActiveRef = useRef(false);
   const navigation = useNavigation();
   const listRef = useRef<FlatList<any>>(null);
@@ -4046,6 +4048,12 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     sortFieldRef.current = sortField;
     sortDirRef.current = sortDir;
   }, [sortField, sortDir]);
+
+  useEffect(() => {
+    getPairedPeers().then(setPairedPeers).catch(() => {});
+    const peersSub = DeviceEventEmitter.addListener('p2p-peers-updated', (p) => setPairedPeers(p || []));
+    return () => { peersSub.remove(); };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -4569,7 +4577,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   // Fetch files from server
   const handleFetch = useCallback(async (opts?: { quiet?: boolean; ignoreOffline?: boolean; preserveSelection?: boolean }) => {
     if (fetchingRef.current || isDownloading) return;
-    if (!opts?.ignoreOffline && isOffline) return;
+    if (!opts?.ignoreOffline && isOffline && !isFeedMode) return;
     if (sourceMode === 'shared' && !selectedSourceId) {
       if (!opts?.quiet) Alert.alert('No Source', 'Please select a shared folder first.');
       return;
@@ -4679,7 +4687,19 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   useEffect(() => {
     const feedSub = DeviceEventEmitter.addListener('feed_updated', () => {
       if (isFeedMode && restoreMountedRef.current) {
-        void handleFetch({ quiet: true, preserveSelection: true });
+        void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
+      }
+    });
+
+    const p2pFeedSub = DeviceEventEmitter.addListener('p2p-feed-updated', () => {
+      if (isFeedMode && restoreMountedRef.current) {
+        void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
+      }
+    });
+
+    const p2pShareSub = DeviceEventEmitter.addListener('p2p-share-received', () => {
+      if (isFeedMode && restoreMountedRef.current) {
+        void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
       }
     });
 
@@ -4701,6 +4721,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
     return () => {
       feedSub.remove();
+      p2pFeedSub.remove();
+      p2pShareSub.remove();
       socialSub.remove();
     };
   }, [isFeedMode, handleFetch]);
@@ -4754,8 +4776,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   }, []);
 
   const pickDirectPostFiles = useCallback(async (append = false) => {
-    if (isOffline) {
-      Alert.alert('Server Offline', 'Please connect to the backup server first before sharing a post.');
+    if (isOffline && pairedPeers.length === 0) {
+      Alert.alert('No Connection', 'Connect to the backup server or pair a nearby phone before sharing a post.');
       return;
     }
 
@@ -4826,7 +4848,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     } finally {
       setIsOpeningFolder(false);
     }
-  }, [isOffline, buildDirectPostFileItems]);
+  }, [isOffline, pairedPeers.length, buildDirectPostFileItems]);
 
   const handleOpenDirectPost = useCallback(async () => {
     await pickDirectPostFiles(false);
@@ -4845,7 +4867,10 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       onProgress?: (statusText: string) => void
     ) => {
       if (isOffline) {
-        throw new Error('Server is offline. Connect to the backup server and try again.');
+        const hasP2P = targetIds.some((id) => (pairedPeers || []).some((p) => p.peerId === id));
+        if (!hasP2P) {
+          throw new Error('Server is offline. Connect to the backup server or select a nearby peer.');
+        }
       }
       if (!targetIds.length) {
         throw new Error('Select at least one target device.');
@@ -4875,7 +4900,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         `Successfully shared ${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'} to the feed.`
       );
     },
-    [handleFetch, isOffline]
+    [handleFetch, isOffline, pairedPeers]
   );
 
   const handleHidePost = useCallback((file: RemoteFile) => {
@@ -5590,7 +5615,11 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
               {isFeedMode
                 ? feedDeviceFilter
                   ? `${baseFeedFiles.length} ${baseFeedFiles.length === 1 ? 'post' : 'posts'} shared by ${feedDeviceFilter.name}`
-                  : 'Your feed'
+                  : isOffline
+                    ? pairedPeers.length > 0
+                      ? `P2P Wi-Fi Active • ${pairedPeers.length} peer${pairedPeers.length === 1 ? '' : 's'} paired`
+                      : 'Standalone P2P Mode • Server offline'
+                    : 'Connected to Desktop Server'
                 : files.length > 0
                   ? isFiltering
                     ? `${filteredFiles.length.toLocaleString()} matching of ${files.length.toLocaleString()} files`
@@ -5602,8 +5631,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             {isFeedMode && (
               <AnimatedPressable
                 onPress={handleOpenDirectPost}
-                style={[styles.actionBtn, (isOpeningFolder || isOffline) && styles.disabledBtn]}
-                disabled={isOpeningFolder || isOffline}
+                style={[styles.actionBtn, (isOpeningFolder || (isOffline && pairedPeers.length === 0)) && styles.disabledBtn]}
+                disabled={isOpeningFolder || (isOffline && pairedPeers.length === 0)}
                 scaleDown={0.92}
                 haptic
                 accessibilityLabel="Add post from device files"
@@ -5612,8 +5641,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
                   <ActivityIndicator size="small" color={colors.primary} />
                 ) : (
                   <>
-                    <AppIcon androidName="add" iosName="plus" color={isOffline ? colors.textMuted : colors.primary} size={17} fallback="+" />
-                    <Text style={[styles.actionBtnText, { color: isOffline ? colors.textMuted : colors.primary }]}>Post</Text>
+                    <AppIcon androidName="add" iosName="plus" color={(isOffline && pairedPeers.length === 0) ? colors.textMuted : colors.primary} size={17} fallback="+" />
+                    <Text style={[styles.actionBtnText, { color: (isOffline && pairedPeers.length === 0) ? colors.textMuted : colors.primary }]}>Post</Text>
                   </>
                 )}
               </AnimatedPressable>

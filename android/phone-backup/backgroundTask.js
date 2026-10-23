@@ -53,6 +53,7 @@ import {
 } from './streak';
 import { setPendingBackupFromSync } from './pendingBackup';
 import { triggerWidgetRefresh } from './widget';
+import { reconcileP2PMediaWithServer } from './p2pServer';
 
 let _isUIPriorityActive = false;
 const UI_PRIORITY_STORAGE_KEY = 'ui_priority_mode_v1';
@@ -663,6 +664,7 @@ async function recoverStaleSyncStateOnStartup() {
  * immediately with an 'aborted' error — the native upload continues in the
  * background but JS abandons it, giving a truly instant force-stop.
  */
+/* eslint-disable-next-line no-unused-vars */
 function raceWithAbort(promise) {
   if (!syncAbortController) return promise;
   const { signal } = syncAbortController;
@@ -1343,6 +1345,7 @@ export async function runSync(onProgress, runOptions = {}) {
     if ((!isBackgroundFetch || result.uploaded > 0) && !result.stopped && !wasForceStopped) {
       await showSyncCompleteNotification(result.uploaded, result.skipped);
     }
+    reconcileP2PMediaWithServer().catch(() => {});
 
     emitSyncCompleted({
       lastSyncTime: wasForceStopped ? undefined : now,
