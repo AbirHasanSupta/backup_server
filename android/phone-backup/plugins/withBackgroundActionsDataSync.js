@@ -857,11 +857,7 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
 
   @ReactMethod
   public void broadcastUdpBeacon(Promise promise) {
-    if (executorService == null) {
-      promise.resolve(false);
-      return;
-    }
-    executorService.execute(new Runnable() {
+    Executors.newSingleThreadExecutor().execute(new Runnable() {
       @Override
       public void run() {
         try {
@@ -885,8 +881,13 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
 
   private void startUdpBeaconListenerInternal() {
     try {
-      udpBeaconSocket = new DatagramSocket(UDP_BEACON_PORT);
+      if (udpBeaconSocket != null && !udpBeaconSocket.isClosed()) {
+        try { udpBeaconSocket.close(); } catch (Exception ignored) {}
+      }
+      udpBeaconSocket = new DatagramSocket(null);
+      udpBeaconSocket.setReuseAddress(true);
       udpBeaconSocket.setBroadcast(true);
+      udpBeaconSocket.bind(new java.net.InetSocketAddress(UDP_BEACON_PORT));
       executorService.execute(new Runnable() {
         @Override
         public void run() {
@@ -1229,10 +1230,10 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
               String jsonStr = new String(data, StandardCharsets.UTF_8);
               writeJsonResponse(out, 200, jsonStr);
             } catch (Exception e) {
-              writeJsonResponse(out, 200, "{\"items\":[],\"status\":\"ok\"}");
+              writeJsonResponse(out, 200, "{\\"items\\":[],\\"status\\":\\"ok\\"}");
             }
           } else {
-            writeJsonResponse(out, 200, "{\"items\":[],\"status\":\"ok\"}");
+            writeJsonResponse(out, 200, "{\\"items\\":[],\\"status\\":\\"ok\\"}");
           }
         } else {
           writeNotFound(out);
@@ -1280,7 +1281,7 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
         "Content-Type: application/json; charset=utf-8\\r\\n" +
         "Content-Length: " + jsonBytes.length + "\\r\\n" +
         "Access-Control-Allow-Origin: *\\r\\n" +
-        "Connection: close\\r\\n\\r\n";
+        "Connection: close\\r\\n\\r\\n";
       out.write(header.getBytes(StandardCharsets.UTF_8));
       out.write(jsonBytes);
     }
@@ -1296,6 +1297,10 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
     }
 
     private void writeFileResponse(OutputStream out, File file) throws IOException {
+      writeFileResponse(out, file, "");
+    }
+
+    private void writeFileResponse(OutputStream out, File file, String rangeHeader) throws IOException {
       String contentType = "application/octet-stream";
       String lower = file.getName().toLowerCase();
       if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) contentType = "image/jpeg";
@@ -1303,20 +1308,85 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
       else if (lower.endsWith(".webp")) contentType = "image/webp";
       else if (lower.endsWith(".mp4")) contentType = "video/mp4";
 
-      String header = "HTTP/1.1 200 OK\\r\\n" +
-        "Content-Type: " + contentType + "\\r\\n" +
-        "Content-Length: " + file.length() + "\\r\\n" +
-        "Access-Control-Allow-Origin: *\\r\\n" +
-        "Connection: close\\r\\n\\r\\n";
-      out.write(header.getBytes(StandardCharsets.UTF_8));
+      long fileLength = file.length();
+      long start = 0;
+      long end = fileLength - 1;
+      boolean isRange = false;
 
-      FileInputStream fis = new FileInputStream(file);
-      byte[] buf = new byte[8192];
-      int n;
-      while ((n = fis.read(buf)) != -1) {
-        out.write(buf, 0, n);
+      if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+        String rangeSpec = rangeHeader.substring("bytes=".length()).trim();
+        int dashIdx = rangeSpec.indexOf("-");
+        if (dashIdx >= 0) {
+          try {
+            String startStr = rangeSpec.substring(0, dashIdx).trim();
+            String endStr = rangeSpec.substring(dashIdx + 1).trim();
+            if (!startStr.isEmpty()) {
+              start = Long.parseLong(startStr);
+            }
+            if (!endStr.isEmpty()) {
+              end = Long.parseLong(endStr);
+            }
+            if (end >= fileLength) {
+              end = fileLength - 1;
+            }
+            if (start <= end && start < fileLength) {
+              isRange = true;
+            }
+          } catch (Exception ignored) {}
+        }
       }
-      fis.close();
+
+      if (isRange) {
+        long contentLength = end - start + 1;
+        String header = "HTTP/1.1 206 Partial Content\\r\\n" +
+          "Content-Type: " + contentType + "\\r\\n" +
+          "Content-Length: " + contentLength + "\\r\\n" +
+          "Content-Range: bytes " + start + "-" + end + "/" + fileLength + "\\r\\n" +
+          "Accept-Ranges: bytes\\r\\n" +
+          "Access-Control-Allow-Origin: *\\r\\n" +
+          "Connection: close\\r\\n\\r\\n";
+        out.write(header.getBytes(StandardCharsets.UTF_8));
+
+        FileInputStream fis = new FileInputStream(file);
+        try {
+          long toSkip = start;
+          while (toSkip > 0) {
+            long skipped = fis.skip(toSkip);
+            if (skipped <= 0) break;
+            toSkip -= skipped;
+          }
+          byte[] buf = new byte[8192];
+          long remaining = contentLength;
+          while (remaining > 0) {
+            int toRead = (int) Math.min((long) buf.length, remaining);
+            int n = fis.read(buf, 0, toRead);
+            if (n == -1) break;
+            out.write(buf, 0, n);
+            remaining -= n;
+          }
+        } finally {
+          fis.close();
+        }
+      } else {
+        String header = "HTTP/1.1 200 OK\\r\\n" +
+          "Content-Type: " + contentType + "\\r\\n" +
+          "Content-Length: " + fileLength + "\\r\\n" +
+          "Accept-Ranges: bytes\\r\\n" +
+          "Access-Control-Allow-Origin: *\\r\\n" +
+          "Connection: close\\r\\n\\r\\n";
+        out.write(header.getBytes(StandardCharsets.UTF_8));
+
+        FileInputStream fis = new FileInputStream(file);
+        try {
+          byte[] buf = new byte[8192];
+          int n;
+          while ((n = fis.read(buf)) != -1) {
+            out.write(buf, 0, n);
+          }
+        } finally {
+          fis.close();
+        }
+      }
     }
 
     private void writeNotFound(OutputStream out) throws IOException {
