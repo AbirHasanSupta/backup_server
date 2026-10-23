@@ -1,11 +1,12 @@
 import { NativeModules, DeviceEventEmitter, Platform, Alert } from 'react-native';
-import * as MediaLibrary from 'expo-media-library';
+import * as MediaLibrary from 'expo-media-library/legacy';
 import {
   isP2PEnabled,
   getP2PPort,
   getLocalPeerIdentity,
   saveP2PFeedItem,
   savePairedPeer,
+  getLocalP2PFeed,
 } from './p2pSettings';
 import { showNewSharePostNotification } from './notificationService';
 
@@ -95,6 +96,21 @@ export async function getP2PServerStatus() {
 }
 
 /**
+ * Synchronizes the local JavaScript P2P feed manifest with the native HTTP server.
+ * This ensures peers requesting GET /p2p/feed receive the full list of shared media.
+ */
+export async function syncFeedManifest(feedItems = null) {
+  if (Platform.OS !== 'android' || !P2PServerModule?.updateFeedManifest) return;
+  try {
+    const feed = feedItems || (await getLocalP2PFeed());
+    const payload = JSON.stringify({ items: feed || [], status: 'ok' });
+    await P2PServerModule.updateFeedManifest(payload);
+  } catch (err) {
+    console.warn('[P2PServer] syncFeedManifest error:', err?.message);
+  }
+}
+
+/**
  * Initializes listeners for incoming P2P events from the native Android HTTP server.
  */
 export function initializeP2PServer() {
@@ -124,6 +140,7 @@ export function initializeP2PServer() {
       };
 
       await saveP2PFeedItem(feedPost);
+      syncFeedManifest().catch(() => {});
 
       // Automatically save to device Media Library (gallery) so user can view offline
       // and background sync will archive it to the desktop server once connected
@@ -190,10 +207,10 @@ export function initializeP2PServer() {
     );
   });
 
-  // Automatically start daemon if P2P mode is enabled
+  // Automatically start daemon and sync feed manifest if P2P mode is enabled
   isP2PEnabled().then((enabled) => {
     if (enabled) {
-      startP2PServer().catch(() => {});
+      startP2PServer().then(() => syncFeedManifest()).catch(() => {});
     }
   });
 }

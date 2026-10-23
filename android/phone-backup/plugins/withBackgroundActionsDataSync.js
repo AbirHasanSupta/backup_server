@@ -667,6 +667,7 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
@@ -824,6 +825,22 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
       promise.resolve(true);
     } catch (Exception e) {
       promise.reject("E_P2P_IDENTITY_FAILED", e.getMessage(), e);
+    }
+  }
+
+  @ReactMethod
+  public void updateFeedManifest(String feedManifestJson, Promise promise) {
+    try {
+      File p2pDir = new File(getReactApplicationContext().getCacheDir(), "p2p_shared");
+      if (!p2pDir.exists()) p2pDir.mkdirs();
+      File manifestFile = new File(p2pDir, "feed_manifest.json");
+      FileOutputStream fos = new FileOutputStream(manifestFile);
+      fos.write(feedManifestJson.getBytes(StandardCharsets.UTF_8));
+      fos.flush();
+      fos.close();
+      promise.resolve(true);
+    } catch (Exception e) {
+      promise.reject("E_P2P_MANIFEST_FAILED", e.getMessage(), e);
     }
   }
 
@@ -1054,6 +1071,45 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
           emitEvent("p2p_incoming_share", eventParams);
 
           JSONObject resp = new JSONObject();
+          try {
+            File manifestFile = new File(p2pDir, "feed_manifest.json");
+            JSONArray manifestItems = new JSONArray();
+            if (manifestFile.exists() && manifestFile.isFile()) {
+              FileInputStream fis = new FileInputStream(manifestFile);
+              byte[] mData = new byte[(int) manifestFile.length()];
+              fis.read(mData);
+              fis.close();
+              JSONObject mObj = new JSONObject(new String(mData, StandardCharsets.UTF_8));
+              manifestItems = mObj.optJSONArray("items");
+              if (manifestItems == null) manifestItems = new JSONArray();
+            }
+            JSONObject newPost = new JSONObject();
+            newPost.put("id", shareId);
+            newPost.put("shared_by_device_id", sharedByDeviceId);
+            newPost.put("shared_by_device_name", sharedByDeviceName);
+            newPost.put("shared_by_username", sharedByUsername);
+            newPost.put("caption", caption);
+            newPost.put("post_kind", postKind);
+            newPost.put("created_at", createdAt);
+            newPost.put("files", savedFilesArr);
+
+            JSONArray updatedItems = new JSONArray();
+            updatedItems.put(newPost);
+            for (int j = 0; j < Math.min(manifestItems.length(), 199); j++) {
+              updatedItems.put(manifestItems.get(j));
+            }
+            JSONObject fullManifest = new JSONObject();
+            fullManifest.put("items", updatedItems);
+            fullManifest.put("status", "ok");
+
+            FileOutputStream mFos = new FileOutputStream(manifestFile);
+            mFos.write(fullManifest.toString().getBytes(StandardCharsets.UTF_8));
+            mFos.flush();
+            mFos.close();
+          } catch (Exception eManifest) {
+            Log.w(TAG, "Failed updating manifest", eManifest);
+          }
+
           resp.put("ok", true);
           resp.put("share_id", shareId);
           writeJsonResponse(out, 200, resp.toString());
@@ -1067,6 +1123,23 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
             writeFileResponse(out, targetFile);
           } else {
             writeNotFound(out);
+          }
+        } else if ("GET".equals(method) && path.startsWith("/p2p/feed")) {
+          File p2pDir = new File(getReactApplicationContext().getCacheDir(), "p2p_shared");
+          File manifestFile = new File(p2pDir, "feed_manifest.json");
+          if (manifestFile.exists() && manifestFile.isFile()) {
+            try {
+              FileInputStream fis = new FileInputStream(manifestFile);
+              byte[] data = new byte[(int) manifestFile.length()];
+              fis.read(data);
+              fis.close();
+              String jsonStr = new String(data, StandardCharsets.UTF_8);
+              writeJsonResponse(out, 200, jsonStr);
+            } catch (Exception e) {
+              writeJsonResponse(out, 200, "{\"items\":[],\"status\":\"ok\"}");
+            }
+          } else {
+            writeJsonResponse(out, 200, "{\"items\":[],\"status\":\"ok\"}");
           }
         } else {
           writeNotFound(out);

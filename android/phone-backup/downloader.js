@@ -2,6 +2,20 @@
 // Fast UI In-Memory SWR Cache (Parallel Instant Navigation)
 // ─────────────────────────────────────────────────────────────────────────────
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as MediaLibrary from 'expo-media-library/legacy';
+import {
+  getServerIp,
+  getServerPort,
+  getApiKey,
+  getDeviceId,
+  getDeviceToken,
+  resolveReachableServer,
+  formatHostForUrl,
+  formatDisplayName,
+} from './settings';
+import { getPairedPeers, getLocalP2PFeed } from './p2pSettings';
+import { sendDirectShareToPeer } from './p2pClient';
 
 const _uiMemoryCache = {
   feed: null,
@@ -252,12 +266,6 @@ export function getCachedTrips(sourceId = '') {
 export function getCachedTripMedia(tripId) {
   return _uiMemoryCache.tripMedia[tripId] || _uiMemoryCache.tripMedia[String(tripId)] || null;
 }
-
-import * as FileSystem from 'expo-file-system/legacy';
-import * as MediaLibrary from 'expo-media-library/legacy';
-import { getServerIp, getServerPort, getApiKey, getDeviceId, getDeviceToken, resolveReachableServer, formatHostForUrl, formatDisplayName } from './settings';
-import { getPairedPeers, getLocalP2PFeed } from './p2pSettings';
-import { sendDirectShareToPeer } from './p2pClient';
 
 export async function getConfig() {
   const [rawIp, port, apiKey, deviceId, deviceToken] = await Promise.all([
@@ -1204,35 +1212,42 @@ export async function createDirectPostShare(targetDeviceIds, caption, files, onP
     }
   }
 
-  // Pre-flight: ensure the current IP is reachable before building the FormData
-  // payload. If the device has roamed to a new mesh AP, resolve the new IP now
-  // so the upload goes to the correct address on the first attempt.
-  let config = await getConfig();
+  // Check if target devices include P2P peers
+  let p2pTargets = [];
   try {
-    const preflightController = new AbortController();
-    const preflightTimer = setTimeout(() => preflightController.abort(), 3000);
+    const paired = await getPairedPeers();
+    p2pTargets = (paired || []).filter((p) => targetDeviceIds.includes(p.peerId));
+  } catch {}
+  const serverTargets = targetDeviceIds.filter((id) => !p2pTargets.some((p) => p.peerId === id));
+
+  // Pre-flight: Only ping desktop server if there are non-P2P server targets
+  let config = await getConfig();
+  if (serverTargets.length > 0 || p2pTargets.length === 0) {
     try {
-      const preflight = await fetch(`http://${config.ip}:${config.port}/ping`, {
-        method: 'GET',
-        signal: preflightController.signal,
-      });
-      clearTimeout(preflightTimer);
-      if (!preflight.ok) throw new Error(`Preflight ${preflight.status}`);
-    } catch (innerErr) {
-      clearTimeout(preflightTimer);
-      throw innerErr;
-    }
-  } catch (preflightErr) {
-    if (isNetworkFailure(preflightErr)) {
+      const preflightController = new AbortController();
+      const preflightTimer = setTimeout(() => preflightController.abort(), 3000);
       try {
-        const resolved = await resolveReachableServer();
-        if (resolved.ok) {
-          // Re-read config after mesh re-discovery committed the new IP.
-          config = await getConfig();
+        const preflight = await fetch(`http://${config.ip}:${config.port}/ping`, {
+          method: 'GET',
+          signal: preflightController.signal,
+        });
+        clearTimeout(preflightTimer);
+        if (!preflight.ok) throw new Error(`Preflight ${preflight.status}`);
+      } catch (innerErr) {
+        clearTimeout(preflightTimer);
+        throw innerErr;
+      }
+    } catch (preflightErr) {
+      if (isNetworkFailure(preflightErr)) {
+        try {
+          const resolved = await resolveReachableServer();
+          if (resolved.ok) {
+            // Re-read config after mesh re-discovery committed the new IP.
+            config = await getConfig();
+          }
+        } catch {
+          // If re-discovery itself fails, proceed with existing IP
         }
-      } catch {
-        // If re-discovery itself fails, proceed with the existing IP and let the
-        // actual upload surface a meaningful error to the user.
       }
     }
   }
@@ -1254,7 +1269,7 @@ export async function createDirectPostShare(targetDeviceIds, caption, files, onP
         encoding: FileSystem.EncodingType?.Base64 || 'base64',
       });
     } catch (_readErr) {
-      // Fallback for tricky SAF content:// URIs: copy to temp cache first
+      // Fallback for SAF content:// URIs: copy to temp cache first
       const tempCacheUri = `${FileSystem.cacheDirectory}direct_post_${Date.now()}_${i}_${(file.name || 'file').replace(/[^a-zA-Z0-9._-]/g, '_')}`;
       try {
         if (cleanUri.startsWith('content://')) {
@@ -1273,6 +1288,9 @@ export async function createDirectPostShare(targetDeviceIds, caption, files, onP
     }
     filesPayload.push({
       name: file.name || `file_${i + 1}`,
+      uri: cleanUri,
+      size: file.size || 0,
+      modifiedTime: file.modifiedTime || Date.now(),
       base64: base64Data,
     });
   }
@@ -1281,19 +1299,13 @@ export async function createDirectPostShare(targetDeviceIds, caption, files, onP
     onProgress('Creating feed post…');
   }
 
-  // Check if any target devices are P2P peers
-  let p2pTargets = [];
-  try {
-    const paired = await getPairedPeers();
-    p2pTargets = (paired || []).filter((p) => targetDeviceIds.includes(p.peerId));
-  } catch {}
-
   let p2pSuccessCount = 0;
   for (const peer of p2pTargets) {
     if (peer.ip && peer.port) {
       try {
         if (onProgress) onProgress(`Sending directly to ${peer.deviceName || peer.username}…`);
         await sendDirectShareToPeer(peer.ip, peer.port, {
+          peerId: peer.peerId,
           caption: caption || '',
           files: filesPayload,
         }, onProgress);
@@ -1303,8 +1315,6 @@ export async function createDirectPostShare(targetDeviceIds, caption, files, onP
       }
     }
   }
-
-  const serverTargets = targetDeviceIds.filter((id) => !p2pTargets.some((p) => p.peerId === id));
 
   // Only post to server if there are server targets OR no P2P targets were specified
   let serverResult = null;

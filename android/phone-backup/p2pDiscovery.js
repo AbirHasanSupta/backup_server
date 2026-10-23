@@ -15,7 +15,7 @@ const BATCH_SIZE = 25;
 let Network = null;
 try {
   Network = require('expo-network');
-} catch (e) {
+} catch (_e) {
   console.warn('[P2PDiscovery] Native module "ExpoNetwork" not available');
 }
 
@@ -91,6 +91,10 @@ export async function probePeer(ip, port, localDeviceId, pairedPeers = [], timeo
  */
 export function buildP2PSubnetWaves(deviceIp, pairedPeers = []) {
   const seen = new Set();
+  if (deviceIp) {
+    const selfParsed = parseServerAddress(deviceIp);
+    if (selfParsed.host) seen.add(selfParsed.host);
+  }
   const waves = {
     wave1: [], // Known paired peers + gateway
     wave2: [], // Primary local Wi-Fi subnet sweep

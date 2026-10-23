@@ -15,7 +15,6 @@ import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/them
 import { AppIcon } from '@/components/AppIcon';
 import { discoverPeers } from '../../p2pDiscovery';
 import { requestPairing, confirmPairing } from '../../p2pClient';
-import { getPairedPeers, savePairedPeer } from '../../p2pSettings';
 
 export type DiscoveredPeerItem = {
   peerId: string;

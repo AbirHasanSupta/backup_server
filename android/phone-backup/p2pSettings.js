@@ -5,7 +5,7 @@ import { getDeviceId, getUsername } from './settings';
 let Device = null;
 try {
   Device = require('expo-device');
-} catch (e) {
+} catch (_e) {
   // Graceful fallback for non-native environments
 }
 
@@ -137,8 +137,8 @@ export async function savePairedPeer(peer) {
     username: (peer.username || '').trim(),
     ip: (peer.ip || '').trim(),
     port: peer.port || DEFAULT_P2P_PORT,
-    authSecret: peer.authSecret || '',
-    pairedAt: peer.pairedAt || Date.now(),
+    authSecret: peer.authSecret || (existingIdx >= 0 ? peers[existingIdx].authSecret : '') || '',
+    pairedAt: peer.pairedAt || (existingIdx >= 0 ? peers[existingIdx].pairedAt : Date.now()),
     lastSeen: peer.lastSeen || Date.now(),
   };
 
@@ -169,7 +169,7 @@ export async function removePairedPeer(peerId) {
  */
 export async function updatePeerLastSeen(peerId, ip, port) {
   const peers = await getPairedPeers();
-  const existing = peers.find((p) => p.peerId === peerId);
+  const existing = peers.find((p) => (peerId && p.peerId === peerId) || (ip && p.ip === ip));
   if (existing) {
     existing.lastSeen = Date.now();
     if (ip) existing.ip = ip;
