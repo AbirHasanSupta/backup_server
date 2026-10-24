@@ -237,6 +237,8 @@ export async function sendDirectShareToPeer(peerIp, peerPort, payload, onProgres
           filesPayload.push({
             name: fileName,
             fileName: resBody.fileName || fileName,
+            uri: resBody.uri || file.uri || null,
+            thumbUri: resBody.thumbUri || file.thumbUri || null,
             size: resBody.size || file.size || 0,
             modified_time: file.modifiedTime || Date.now(),
           });

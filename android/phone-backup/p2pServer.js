@@ -304,7 +304,16 @@ export function initializeP2PServer() {
               (c) => c.id === comment.id || c.comment_id === comment.comment_id
             );
             if (!exists) {
-              targetPost.comments.push(comment);
+              const displayName = comment.display_name || comment.author_name || comment.username || comment.device_name || 'Nearby Peer';
+              const deviceName = comment.device_name || comment.author_device_name || 'Nearby Device';
+              targetPost.comments.push({
+                ...comment,
+                display_name: displayName,
+                device_name: deviceName,
+                author_name: displayName,
+                author_device_name: deviceName,
+                is_own: false,
+              });
             }
           } catch {}
         }

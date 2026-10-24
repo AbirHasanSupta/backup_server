@@ -672,6 +672,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
+import android.graphics.Bitmap;
+import android.media.MediaMetadataRetriever;
+import android.net.Uri;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -840,9 +843,39 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
   }
 
   @ReactMethod
+  public void getVideoThumbnail(String videoUri, Promise promise) {
+    try {
+      MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+      if (videoUri.startsWith("content://")) {
+        retriever.setDataSource(getReactApplicationContext(), Uri.parse(videoUri));
+      } else {
+        String cleanPath = videoUri.startsWith("file://") ? videoUri.substring(7) : videoUri;
+        retriever.setDataSource(cleanPath);
+      }
+      Bitmap bmp = retriever.getFrameAtTime(1000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+      if (bmp == null) bmp = retriever.getFrameAtTime();
+      retriever.release();
+      if (bmp != null) {
+        File thumbDir = new File(getReactApplicationContext().getFilesDir(), "p2p_thumbs");
+        if (!thumbDir.exists()) thumbDir.mkdirs();
+        File thumbFile = new File(thumbDir, "thumb_" + System.currentTimeMillis() + ".jpg");
+        FileOutputStream thumbFos = new FileOutputStream(thumbFile);
+        bmp.compress(Bitmap.CompressFormat.JPEG, 85, thumbFos);
+        thumbFos.flush();
+        thumbFos.close();
+        promise.resolve("file://" + thumbFile.getAbsolutePath());
+      } else {
+        promise.resolve(null);
+      }
+    } catch (Exception e) {
+      promise.resolve(null);
+    }
+  }
+
+  @ReactMethod
   public void updateFeedManifest(String feedManifestJson, Promise promise) {
     try {
-      File p2pDir = new File(getReactApplicationContext().getCacheDir(), "p2p_shared");
+      File p2pDir = new File(getReactApplicationContext().getFilesDir(), "p2p_shared");
       if (!p2pDir.exists()) p2pDir.mkdirs();
       File manifestFile = new File(p2pDir, "feed_manifest.json");
       FileOutputStream fos = new FileOutputStream(manifestFile);
@@ -1080,29 +1113,62 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
             }
           }
 
-          File p2pDir = new File(getReactApplicationContext().getCacheDir(), "p2p_shared");
+          File p2pDir = new File(getReactApplicationContext().getFilesDir(), "p2p_shared");
           if (!p2pDir.exists()) p2pDir.mkdirs();
 
           String safeName = shareId + "_" + System.currentTimeMillis() + "_" + new File(originalName).getName();
           File targetFile = new File(p2pDir, safeName);
           FileOutputStream fos = new FileOutputStream(targetFile);
 
-          byte[] buf = new byte[65536];
-          long bytesRemaining = contentLength;
-          while (bytesRemaining > 0) {
-            int toRead = (int) Math.min(buf.length, bytesRemaining);
-            int read = in.read(buf, 0, toRead);
-            if (read == -1) break;
-            fos.write(buf, 0, read);
-            bytesRemaining -= read;
+          if (contentLength > 0) {
+            byte[] buf = new byte[65536];
+            long bytesRemaining = contentLength;
+            while (bytesRemaining > 0) {
+              int toRead = (int) Math.min(buf.length, bytesRemaining);
+              int read = in.read(buf, 0, toRead);
+              if (read == -1) break;
+              fos.write(buf, 0, read);
+              bytesRemaining -= read;
+            }
+          } else {
+            byte[] buf = new byte[65536];
+            int read;
+            while ((read = in.read(buf)) != -1) {
+              fos.write(buf, 0, read);
+            }
           }
           fos.flush();
           fos.close();
+
+          String thumbUri = "";
+          String ext = safeName.toLowerCase();
+          if (ext.endsWith(".mp4") || ext.endsWith(".mov") || ext.endsWith(".mkv") || ext.endsWith(".webm") || ext.endsWith(".3gp") || ext.endsWith(".m4v")) {
+            try {
+              MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+              retriever.setDataSource(targetFile.getAbsolutePath());
+              Bitmap bmp = retriever.getFrameAtTime(1000000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+              if (bmp == null) bmp = retriever.getFrameAtTime();
+              retriever.release();
+              if (bmp != null) {
+                File thumbFile = new File(p2pDir, safeName + "_thumb.jpg");
+                FileOutputStream thumbFos = new FileOutputStream(thumbFile);
+                bmp.compress(Bitmap.CompressFormat.JPEG, 85, thumbFos);
+                thumbFos.flush();
+                thumbFos.close();
+                thumbUri = "file://" + thumbFile.getAbsolutePath();
+              }
+            } catch (Exception ignored) {}
+          } else if (ext.endsWith(".jpg") || ext.endsWith(".jpeg") || ext.endsWith(".png") || ext.endsWith(".webp")) {
+            thumbUri = "file://" + targetFile.getAbsolutePath();
+          }
 
           JSONObject resp = new JSONObject();
           resp.put("ok", true);
           resp.put("fileName", safeName);
           resp.put("uri", "file://" + targetFile.getAbsolutePath());
+          if (!thumbUri.isEmpty()) {
+            resp.put("thumbUri", thumbUri);
+          }
           resp.put("size", targetFile.length());
           writeJsonResponse(out, 200, resp.toString());
         } else if ("POST".equals(method) && path.startsWith("/p2p/share")) {
@@ -1118,7 +1184,7 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
           String postKind = req.optString("post_kind", "direct_post");
           long createdAt = req.optLong("created_at", System.currentTimeMillis());
 
-          File p2pDir = new File(getReactApplicationContext().getCacheDir(), "p2p_shared");
+          File p2pDir = new File(getReactApplicationContext().getFilesDir(), "p2p_shared");
           if (!p2pDir.exists()) p2pDir.mkdirs();
 
           JSONArray filesArr = req.optJSONArray("files");
@@ -1134,11 +1200,25 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
               String preUploadedName = fObj.optString("fileName", "");
               if (!preUploadedName.isEmpty()) {
                 File targetFile = new File(p2pDir, preUploadedName);
+                if (!targetFile.exists()) {
+                  targetFile = new File(getReactApplicationContext().getCacheDir(), "p2p_shared/" + preUploadedName);
+                }
                 if (targetFile.exists()) {
                   JSONObject savedObj = new JSONObject();
                   savedObj.put("name", originalName);
                   savedObj.put("fileName", preUploadedName);
                   savedObj.put("uri", "file://" + targetFile.getAbsolutePath());
+                  String thumbUri = fObj.optString("thumbUri", "");
+                  if (thumbUri.isEmpty()) {
+                    File thumbFile = new File(targetFile.getParentFile(), targetFile.getName() + "_thumb.jpg");
+                    if (thumbFile.exists()) {
+                      thumbUri = "file://" + thumbFile.getAbsolutePath();
+                    }
+                  }
+                  if (!thumbUri.isEmpty()) {
+                    savedObj.put("thumbUri", thumbUri);
+                    savedObj.put("thumb_uri", thumbUri);
+                  }
                   savedObj.put("size", targetFile.length());
                   savedFilesArr.put(savedObj);
                   continue;
@@ -1220,8 +1300,11 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
         } else if ("GET".equals(method) && path.startsWith("/p2p/files/")) {
           String rawFilename = path.substring("/p2p/files/".length());
           String safeFilename = new File(rawFilename).getName();
-          File p2pDir = new File(getReactApplicationContext().getCacheDir(), "p2p_shared");
+          File p2pDir = new File(getReactApplicationContext().getFilesDir(), "p2p_shared");
           File targetFile = new File(p2pDir, safeFilename);
+          if (!targetFile.exists()) {
+            targetFile = new File(getReactApplicationContext().getCacheDir(), "p2p_shared/" + safeFilename);
+          }
 
           if (targetFile.exists() && targetFile.isFile()) {
             writeFileResponse(out, targetFile, rangeHeader);
@@ -1229,8 +1312,11 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
             writeNotFound(out);
           }
         } else if ("GET".equals(method) && path.startsWith("/p2p/feed")) {
-          File p2pDir = new File(getReactApplicationContext().getCacheDir(), "p2p_shared");
+          File p2pDir = new File(getReactApplicationContext().getFilesDir(), "p2p_shared");
           File manifestFile = new File(p2pDir, "feed_manifest.json");
+          if (!manifestFile.exists()) {
+            manifestFile = new File(getReactApplicationContext().getCacheDir(), "p2p_shared/feed_manifest.json");
+          }
           if (manifestFile.exists() && manifestFile.isFile()) {
             try {
               FileInputStream fis = new FileInputStream(manifestFile);

@@ -32,7 +32,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { addSharedPostTapListener } from '../../notificationService';
-import { getPairedPeers } from '../../p2pSettings';
+import { getPairedPeers, getLocalP2PFeed, saveP2PFeedItem } from '../../p2pSettings';
 import { setUIPriorityMode, getCurrentSyncState } from '../../backgroundTask';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
@@ -158,7 +158,7 @@ type RemoteFile = {
   // Feed-only fields (device-to-device shares)
   kind?: 'share' | 'shared';
   is_device_share?: boolean;
-  share_id?: number;
+  share_id?: number | string;
   source_id?: string;
   caption?: string | null;
   shared_by?: string;
@@ -171,6 +171,11 @@ type RemoteFile = {
   is_own_post?: boolean;
   post_kind?: string | null;
   post_title?: string | null;
+  uri?: string | null;
+  thumb_uri?: string | null;
+  is_p2p?: boolean;
+  targets?: { target_device_id?: string; device_id?: string; device_name?: string; device_model?: string }[];
+  target_device_ids?: string[];
 };
 
 type ServerConfig = { ip: string; port: string; key: string; deviceId: string } | null;
@@ -243,7 +248,7 @@ function isMediaExtension(ext: string): boolean {
 }
 
 /** Identity check for two RemoteFile-shaped records: prefer share_id when both have one, else path. */
-function isSameRemoteFile(a: { share_id?: number | null; path: string } | null | undefined, b: { share_id?: number | null; path: string } | null | undefined): boolean {
+function isSameRemoteFile(a: { share_id?: number | string | null; path: string } | null | undefined, b: { share_id?: number | string | null; path: string } | null | undefined): boolean {
   if (!a || !b) return false;
   return a.share_id != null && b.share_id != null ? a.share_id === b.share_id : a.path === b.path;
 }
@@ -519,6 +524,9 @@ function mapFeedItem(f: any): RemoteFile {
     caption: it.caption ?? f.caption,
     is_own_post: it.is_own_post ?? f.is_own_post,
     source_id: it.source_id ?? f.source_id,
+    uri: it.uri || f.uri || null,
+    thumb_uri: it.thumb_uri || it.thumbUri || it.uri || f.thumb_uri || f.thumbUri || f.uri || null,
+    is_p2p: it.is_p2p ?? f.is_p2p,
   }));
   const firstItem = items[0] || {};
   return {
@@ -545,6 +553,11 @@ function mapFeedItem(f: any): RemoteFile {
     is_own_post: f.is_own_post,
     post_kind: f.post_kind,
     post_title: f.post_title,
+    uri: firstItem.uri || f.uri || null,
+    thumb_uri: firstItem.thumb_uri || f.thumb_uri || f.thumbUri || firstItem.uri || f.uri || null,
+    is_p2p: f.is_p2p ?? firstItem.is_p2p,
+    targets: f.targets,
+    target_device_ids: f.target_device_ids,
   };
 }
 
@@ -794,15 +807,18 @@ function SharedFeedCard({
             const category = getFileCategory(subItem.path);
             const isVideo = subItem.is_video ?? category === 'video';
             const effectiveSourceId = subItem.source_id ?? item.source_id ?? sourceId;
-            const thumbUrl = (subItem as any).uri
-              ? (subItem as any).uri
-              : !serverConfig
-                ? ''
-                : subItem.share_id != null
-                  ? buildShareThumbnailUrl(serverConfig, subItem.share_id)
-                  : isVideo
-                    ? buildThumbnailUrl(serverConfig, subItem.path, 'shared', effectiveSourceId)
-                    : buildPreviewUrl(serverConfig, subItem.path, 'shared', effectiveSourceId);
+            const localThumb = subItem.thumb_uri || (subItem as any).thumbUri || (isVideo ? null : (subItem as any).uri);
+            const thumbUrl = localThumb
+              ? localThumb
+              : (subItem as any).uri && !isVideo
+                ? (subItem as any).uri
+                : !serverConfig
+                  ? ((subItem as any).uri || '')
+                  : subItem.share_id != null
+                    ? buildShareThumbnailUrl(serverConfig, subItem.share_id)
+                    : isVideo
+                      ? buildThumbnailUrl(serverConfig, subItem.path, 'shared', effectiveSourceId)
+                      : buildPreviewUrl(serverConfig, subItem.path, 'shared', effectiveSourceId);
 
             return (
               <TouchableOpacity
@@ -1069,7 +1085,7 @@ function CommentsModal({
                   <View style={modalSheetStyles.commentBody}>
                     <View style={modalSheetStyles.commentMeta}>
                       <Text style={[modalSheetStyles.commentAuthor, { color: colors.text }]} numberOfLines={1}>
-                        {c.display_name || c.device_name || 'Unknown device'}
+                        {c.display_name || c.device_name || (c as any).author_name || (c as any).author_device_name || (c.is_own ? 'You' : 'Nearby Peer')}
                       </Text>
                       <Text style={[modalSheetStyles.commentTime, { color: colors.textMuted }]}>
                         {formatTimeAgo(c.created_at)}
@@ -1131,7 +1147,7 @@ function ManageShareModal({
   colors: AppColors;
   onClose: () => void;
   onDeleted: () => void;
-  onUpdated?: (updated: { caption?: string; removedShareId?: number }) => void;
+  onUpdated?: (updated: { caption?: string; removedShareId?: number | string }) => void;
 }) {
   const insets = useSafeAreaInsets();
   const { keyboardHeight } = useModalKeyboardHeight();
@@ -1145,7 +1161,7 @@ function ManageShareModal({
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
-  const [removingFileId, setRemovingFileId] = useState<number | null>(null);
+  const [removingFileId, setRemovingFileId] = useState<number | string | null>(null);
   const [files, setFiles] = useState<RemoteFile[]>([]);
 
   useEffect(() => {
@@ -1234,7 +1250,24 @@ function ManageShareModal({
             const isLastFile = files.length <= 1;
             setRemovingFileId(file.share_id!);
             try {
-              await deleteShare(file.share_id!);
+              const isP2P = (typeof file.share_id === 'string' && file.share_id.startsWith('p2p_')) || (typeof groupId === 'string' && groupId.startsWith('p2p_'));
+              if (isP2P) {
+                if (isLastFile) {
+                  await deleteShareGroup(groupId || String(file.share_id));
+                } else {
+                  const feed = await getLocalP2PFeed();
+                  const targetPost = (feed || []).find((p: any) => String(p.id) === String(groupId) || String(p.id) === String(item?.group_id));
+                  if (targetPost && Array.isArray(targetPost.files)) {
+                    targetPost.files = targetPost.files.filter((f: any, idx: number) => {
+                      const fId = `${targetPost.id}_${idx}`;
+                      return fId !== String(file.share_id) && f.name !== file.path;
+                    });
+                    await saveP2PFeedItem(targetPost);
+                  }
+                }
+              } else {
+                await deleteShare(file.share_id!);
+              }
               hapticSuccess();
               if (isLastFile) {
                 onClose();
@@ -1253,7 +1286,7 @@ function ManageShareModal({
         },
       ]
     );
-  }, [files.length, onClose, onDeleted, onUpdated]);
+  }, [files.length, onClose, onDeleted, onUpdated, groupId, item?.group_id]);
 
   const handleDeletePost = useCallback(() => {
     if (deleting) return;
@@ -3213,11 +3246,13 @@ function NativeVideoPreviewPlayer({
     };
   }, [onSeekingChange]);
 
+  const isLocal = Boolean(previewUri && (previewUri.startsWith('file://') || previewUri.startsWith('content://')));
+
   const source = useMemo<VideoSource>(() => ({
     uri: previewUri,
-    useCaching: true,
-    contentType: 'progressive',
-  }), [previewUri]);
+    useCaching: !isLocal,
+    contentType: isLocal ? undefined : 'progressive',
+  }), [previewUri, isLocal]);
 
   const player = videoModule.useVideoPlayer(source, p => {
     p.loop = true;
@@ -3276,10 +3311,11 @@ function NativeVideoPreviewPlayer({
       ) {
         previewFallbackAttemptedRef.current = true;
         isUpgradingRef.current = true;
+        const isOrigLocal = Boolean(originalUri && (originalUri.startsWith('file://') || originalUri.startsWith('content://')));
         void player.replaceAsync({
           uri: originalUri,
-          useCaching: true,
-          contentType: 'progressive',
+          useCaching: !isOrigLocal,
+          contentType: isOrigLocal ? undefined : 'progressive',
         }).catch(() => {
           initialLoadDoneRef.current = true;
           setShowBuffering(false);
@@ -4697,12 +4733,14 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
     const p2pFeedSub = DeviceEventEmitter.addListener('p2p-feed-updated', () => {
       if (isFeedMode && restoreMountedRef.current) {
+        fetchingRef.current = false;
         void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
       }
     });
 
     const p2pShareSub = DeviceEventEmitter.addListener('p2p-share-received', () => {
       if (isFeedMode && restoreMountedRef.current) {
+        fetchingRef.current = false;
         void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
       }
     });
@@ -4898,6 +4936,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       hapticSuccess();
       setDirectPostFiles([]);
 
+      fetchingRef.current = false;
       void handleFetch({ quiet: false, ignoreOffline: true, preserveSelection: true });
       Alert.alert(
         'Post Published!',
@@ -5450,7 +5489,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           if (isMedia && canSaveToGallery) {
             const tmpUri = FileSystem.cacheDirectory + 'restore_tmp_' + getCurrentTimestamp() + '_' + displayName;
             if (fileInfo?.share_id != null) {
-              await downloadShareFile(fileInfo.share_id, tmpUri, onFileProgress);
+              await downloadShareFile(fileInfo.share_id as any, tmpUri, onFileProgress);
             } else if (sourceMode === 'shared' && selectedSourceId) {
               await downloadSharedFile(selectedSourceId, path, tmpUri, onFileProgress);
             } else {
@@ -5493,7 +5532,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           }
 
           if (fileInfo?.share_id != null) {
-            await downloadShareFile(fileInfo.share_id, destUri, onFileProgress);
+            await downloadShareFile(fileInfo.share_id as any, destUri, onFileProgress);
           } else if (sourceMode === 'shared' && selectedSourceId) {
             await downloadSharedFile(selectedSourceId, path, destUri, onFileProgress);
           } else {
@@ -5988,18 +6027,18 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         colors={colors}
         onClose={() => setManageGroupItem(null)}
         onDeleted={() => {
-          if (manageGroupItem?.group_id) {
-            setFiles(prev => prev.filter(f => f.group_id !== manageGroupItem.group_id));
-          } else if (manageGroupItem?.share_id != null) {
-            setFiles(prev => prev.filter(f => f.share_id !== manageGroupItem.share_id));
+          const targetId = manageGroupItem?.group_id || (manageGroupItem as any)?.id || manageGroupItem?.share_id;
+          if (targetId != null) {
+            setFiles(prev => prev.filter(f => f.group_id !== targetId && (f as any).id !== targetId && f.share_id !== targetId));
           }
           setManageGroupItem(null);
         }}
         onUpdated={({ caption, removedShareId }) => {
           if (!manageGroupItem) return;
           const updateItem = (f: RemoteFile): RemoteFile | null => {
-            const matches = manageGroupItem.group_id
-              ? f.group_id === manageGroupItem.group_id
+            const targetId = manageGroupItem.group_id || (manageGroupItem as any).id;
+            const matches = targetId
+              ? (f.group_id === targetId || (f as any).id === targetId)
               : f.share_id != null && f.share_id === manageGroupItem.share_id;
             if (!matches) return f;
             const updated = { ...f };

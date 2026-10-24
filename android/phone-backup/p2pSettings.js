@@ -218,8 +218,11 @@ export async function saveP2PFeedItem(feedItem) {
  */
 export async function removeP2PFeedItem(feedItemId) {
   const feed = await getLocalP2PFeed();
-  const filtered = feed.filter((item) => item.id !== feedItemId);
+  const idStr = String(feedItemId);
+  const filtered = feed.filter((item) => item.id !== idStr && String(item.group_id) !== idStr);
   await AsyncStorage.setItem(P2P_KEYS.P2P_LOCAL_FEED, JSON.stringify(filtered));
   DeviceEventEmitter.emit('p2p-feed-updated', filtered);
   return filtered;
 }
+
+export const deleteP2PFeedItem = removeP2PFeedItem;
