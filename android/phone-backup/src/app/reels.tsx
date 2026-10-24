@@ -131,7 +131,7 @@ function matchesLibrarySource(r: ReelItem, target: 'reel_backup' | 'reel_shared'
 }
 
 type Comment = {
-  id: number;
+  id: number | string;
   text: string;
   source_id: string;
   display_name?: string;
@@ -1073,7 +1073,7 @@ function CommentsSheet({
   onCommentDeleted,
 }: {
   visible: boolean;
-  mediaId?: number | null;
+  mediaId?: number | string | null;
   colors: AppColors;
   onClose: () => void;
   onCommentAdded: (count: number) => void;
@@ -1113,7 +1113,7 @@ function CommentsSheet({
     finally { setSubmitting(false); }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (id: number | string) => {
     try {
       await deleteComment(id);
       const nextComments = comments.filter(c => c.id !== id);
@@ -1513,9 +1513,9 @@ export default function ReelsScreen() {
     const currentDeviceId = cfg?.deviceId || '';
     const isSharedSection = reelSectionRef.current === 'shared' || shareTarget.library_source === 'reel_shared';
     const sourceType = isSharedSection ? 'shared' : 'phone';
-    let defaultSourceKey = currentDeviceId || shareTarget.shared_by_device_id;
+    let defaultSourceKey = currentDeviceId || shareTarget.shared_by_device_id || 'peer_device';
     if (isSharedSection) {
-      defaultSourceKey = (shareTarget as any).source_key || shareTarget.reel_id.split(':')[2] || shareTarget.shared_by_device_id;
+      defaultSourceKey = (shareTarget as any).source_key || shareTarget.reel_id.split(':')[2] || shareTarget.shared_by_device_id || 'peer_device';
     }
     if (!defaultSourceKey) {
       hapticError();
@@ -1980,16 +1980,17 @@ export default function ReelsScreen() {
       persistHyperPulseState(engineStateRef.current, reelEngineScope(reelSectionRef.current)).catch(() => {});
     }
     try {
-      const res = await reactToMedia(item.media_id, emoji, 'reel');
+      const targetMediaId = item.media_id ?? item.share_id ?? item.reel_id;
+      const res = await reactToMedia(targetMediaId, emoji, 'reel');
       const nextCounts = res.counts ?? item.reaction_counts;
       const nextUserReactions = res.user_reactions ?? item.user_reactions;
       setReels(prev => prev.map(r =>
-        r.reel_id === item.reel_id || (item.media_id != null && r.media_id === item.media_id)
+        r.reel_id === item.reel_id || (item.media_id != null && r.media_id === item.media_id) || (item.share_id != null && r.share_id === item.share_id)
           ? { ...r, reaction_counts: nextCounts, user_reactions: nextUserReactions }
           : r
       ));
       DeviceEventEmitter.emit('reel-reaction-changed', {
-        mediaId: item.media_id,
+        mediaId: targetMediaId,
         reelId: item.reel_id,
         counts: nextCounts,
         userReactions: nextUserReactions,
@@ -2116,7 +2117,7 @@ export default function ReelsScreen() {
     }
     const nextCount = (repostTarget.repost_count || 0) + 1;
     try {
-      await repostReel(repostTarget.share_id, targetDeviceIds, caption);
+      await repostReel(repostTarget.share_id ?? (repostTarget as any)?.reel_id, targetDeviceIds, caption);
       setReels(prev => prev.map(r =>
         r.reel_id === repostTarget.reel_id
           ? {
@@ -2418,7 +2419,7 @@ export default function ReelsScreen() {
 
       <CommentsSheet
         visible={commentsTarget != null}
-        mediaId={commentsTarget?.media_id}
+        mediaId={commentsTarget?.media_id ?? (commentsTarget as any)?.share_id ?? commentsTarget?.reel_id}
         colors={colors}
         onClose={() => setCommentsTarget(null)}
         onCommentAdded={(count) => commentsTarget && handleCommentAdded(commentsTarget.reel_id, count)}

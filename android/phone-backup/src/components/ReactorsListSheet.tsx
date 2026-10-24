@@ -19,8 +19,8 @@ import { formatRelativeOrLocal } from '@/utils/dateFormat';
 const { height: SCREEN_H } = Dimensions.get('window');
 
 type Reactor = {
-  id: number;
-  media_id: number;
+  id: number | string;
+  media_id: number | string;
   source_id: string;
   emoji: string;
   created_at: number;
@@ -40,7 +40,7 @@ export function ReactorsListSheet({
   scope = 'post',
 }: {
   visible: boolean;
-  mediaId?: number | null;
+  mediaId?: number | string | null;
   colors: AppColors;
   onClose: () => void;
   scope?: string;

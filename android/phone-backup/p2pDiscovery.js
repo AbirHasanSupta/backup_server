@@ -7,6 +7,7 @@ import {
   updatePeerLastSeen,
 } from './p2pSettings';
 import { getDeviceIp } from './serverDiscovery';
+import { syncFeedWithPeer } from './p2pClient';
 
 const PROBE_TIMEOUT_MS = 1200;
 const SWEEP_TIMEOUT_MS = 800;
@@ -73,6 +74,7 @@ export async function probePeer(ip, port, localDeviceId, pairedPeers = [], timeo
   const isPaired = pairedPeers.some((p) => p.peerId === peerId);
   if (isPaired) {
     updatePeerLastSeen(peerId, host, targetPort).catch(() => {});
+    syncFeedWithPeer(host, targetPort).catch(() => {});
   }
 
   return {

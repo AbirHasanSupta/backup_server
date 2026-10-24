@@ -8,7 +8,8 @@ import {
   savePairedPeer,
   getLocalP2PFeed,
 } from './p2pSettings';
-import { showNewSharePostNotification } from './notificationService';
+import { showNewSharePostNotification, showDevicePairedNotification } from './notificationService';
+import { notifyPairAccepted } from './p2pClient';
 
 const P2PServerModule = NativeModules.PhoneBackupP2PServer;
 
@@ -166,9 +167,21 @@ export function initializeP2PServer() {
     }
   });
 
+  let _activePairingPin = null;
+
   // 2. Listen for incoming pairing requests
   DeviceEventEmitter.addListener('p2p_pair_request', (data) => {
     DeviceEventEmitter.emit('p2p-pair-requested', data);
+
+    // Suppress duplicate popup for the same PIN / peer if already showing
+    const activeKey = data.pin || data.deviceId;
+    if (_activePairingPin && _activePairingPin === activeKey) {
+      return;
+    }
+    _activePairingPin = activeKey;
+    setTimeout(() => {
+      if (_activePairingPin === activeKey) _activePairingPin = null;
+    }, 60_000);
 
     const displayName = data.username ? `${data.username} (${data.deviceName})` : data.deviceName || 'Nearby Device';
     Alert.alert(
@@ -178,12 +191,16 @@ export function initializeP2PServer() {
         {
           text: 'Reject',
           style: 'cancel',
+          onPress: () => {
+            _activePairingPin = null;
+          },
         },
         {
           text: 'Accept & Pair',
           onPress: async () => {
+            _activePairingPin = null;
             try {
-              await savePairedPeer({
+              const peerToSave = {
                 peerId: data.deviceId,
                 deviceName: data.deviceName || 'Nearby Peer',
                 username: data.username || '',
@@ -191,20 +208,127 @@ export function initializeP2PServer() {
                 port: data.port || 8088,
                 pairedAt: Date.now(),
                 lastSeen: Date.now(),
-              });
-              showNewSharePostNotification({
-                id: 'p2p_paired_' + Date.now(),
-                shared_by_name: displayName,
-                caption: 'Device successfully paired for direct Wi-Fi transfers!',
-                files_count: 0,
-              }).catch(() => {});
+              };
+              await savePairedPeer(peerToSave);
+
+              // Bidirectional mutual pairing: notify requesting peer so they automatically pair too
+              const localIdentity = await getLocalPeerIdentity();
+              if (data.ip) {
+                notifyPairAccepted(data.ip, data.port || 8088, localIdentity, data.pin).catch(() => {});
+              }
+
+              showDevicePairedNotification(displayName).catch(() => {});
+              DeviceEventEmitter.emit('p2p-peer-paired', peerToSave);
+              DeviceEventEmitter.emit('p2p-peers-updated');
             } catch (err) {
               console.warn('[P2PServer] Failed to save paired peer:', err);
             }
           },
         },
-      ]
+      ],
+      {
+        cancelable: true,
+        onDismiss: () => {
+          _activePairingPin = null;
+        },
+      }
     );
+  });
+
+  // 3. Listen for pairing accepted callbacks from peers (mutual pairing)
+  DeviceEventEmitter.addListener('p2p_pair_accepted', async (data) => {
+    try {
+      const displayName = data.username ? `${data.username} (${data.deviceName})` : data.deviceName || 'Nearby Device';
+      const peerToSave = {
+        peerId: data.deviceId,
+        deviceName: data.deviceName || 'Nearby Peer',
+        username: data.username || '',
+        ip: data.ip || '',
+        port: data.port || 8088,
+        pairedAt: Date.now(),
+        lastSeen: Date.now(),
+      };
+      await savePairedPeer(peerToSave);
+      showDevicePairedNotification(displayName).catch(() => {});
+      DeviceEventEmitter.emit('p2p-peer-paired', peerToSave);
+      DeviceEventEmitter.emit('p2p-peers-updated');
+    } catch (err) {
+      console.warn('[P2PServer] Failed to save accepted peer:', err);
+    }
+  });
+
+  // 4. Listen for incoming direct reactions from peers
+  DeviceEventEmitter.addListener('p2p_incoming_reaction', async (data) => {
+    try {
+      const feed = await getLocalP2PFeed();
+      const targetPost = feed.find((p) => p.id === data.shareId);
+      if (targetPost) {
+        const counts = { ...(targetPost.reaction_counts || {}) };
+        const emoji = data.emoji || '❤️';
+        if (data.action === 'remove') {
+          counts[emoji] = Math.max(0, (counts[emoji] || 1) - 1);
+        } else {
+          counts[emoji] = (counts[emoji] || 0) + 1;
+        }
+        targetPost.reaction_counts = counts;
+        await saveP2PFeedItem(targetPost);
+        DeviceEventEmitter.emit('reel-reaction-changed', {
+          mediaId: targetPost.id,
+          reelId: targetPost.id,
+          counts,
+          userReactions: targetPost.user_reactions || [],
+        });
+        DeviceEventEmitter.emit('p2p-feed-updated', feed);
+      }
+    } catch (err) {
+      console.warn('[P2PServer] Error handling incoming reaction:', err);
+    }
+  });
+
+  // 5. Listen for incoming direct comments from peers
+  DeviceEventEmitter.addListener('p2p_incoming_comment', async (data) => {
+    try {
+      const feed = await getLocalP2PFeed();
+      const targetPost = feed.find((p) => p.id === data.shareId);
+      if (targetPost) {
+        if (!Array.isArray(targetPost.comments)) targetPost.comments = [];
+
+        if (data.action === 'delete') {
+          targetPost.comments = targetPost.comments.filter(
+            (c) => c.id !== data.commentId && c.comment_id !== data.commentId
+          );
+        } else if (data.commentJson) {
+          try {
+            const comment = JSON.parse(data.commentJson);
+            const exists = targetPost.comments.some(
+              (c) => c.id === comment.id || c.comment_id === comment.comment_id
+            );
+            if (!exists) {
+              targetPost.comments.push(comment);
+            }
+          } catch {}
+        }
+        targetPost.comment_count = targetPost.comments.length;
+        await saveP2PFeedItem(targetPost);
+        DeviceEventEmitter.emit('feed_updated', targetPost);
+        DeviceEventEmitter.emit('p2p-feed-updated', feed);
+
+        if (data.action !== 'delete' && data.commentJson) {
+          try {
+            const comment = JSON.parse(data.commentJson);
+            const author = comment.author_name || 'Nearby Peer';
+            showNewSharePostNotification({
+              id: 'comment_' + Date.now(),
+              shared_by: author,
+              caption: comment.text ? `💬 "${comment.text}"` : 'Commented on your post',
+              files_count: 0,
+            }).catch(() => {});
+          } catch {}
+        }
+      }
+    } catch (err) {
+      console.warn('[P2PServer] Error handling incoming comment:', err);
+    }
   });
 
   // Automatically start daemon and sync feed manifest if P2P mode is enabled

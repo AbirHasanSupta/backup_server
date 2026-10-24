@@ -117,7 +117,7 @@ const SEGMENTS: { id: LibrarySegment; label: string; androidIcon: string; iosIco
 ];
 
 type Comment = {
-  id: number;
+  id: number | string;
   text: string;
   source_id: string;
   display_name?: string;
@@ -871,7 +871,7 @@ function CommentsSheet({
   onCommentDeleted,
 }: {
   visible: boolean;
-  mediaId?: number | null;
+  mediaId?: number | string | null;
   colors: AppColors;
   onClose: () => void;
   onCommentAdded: (count: number) => void;
@@ -911,7 +911,7 @@ function CommentsSheet({
     finally { setSubmitting(false); }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (id: number | string) => {
     try {
       await deleteComment(id);
       const nextComments = comments.filter(c => c.id !== id);
@@ -1529,9 +1529,10 @@ export default function SavedReelsScreen() {
   }, [savedReels, likedReels, repostedReels]);
 
   const handleReact = useCallback(async (item: SavedReelItem, emoji: string) => {
-    if (item.media_id == null) return;
+    const targetMediaId = item.media_id ?? item.share_id ?? item.reel_id;
+    if (targetMediaId == null) return;
     try {
-      const res = await reactToMedia(item.media_id, emoji, 'reel');
+      const res = await reactToMedia(targetMediaId, emoji, 'reel');
       const isNowReacted = (res.user_reactions?.length ?? 0) > 0;
       const nextCounts = res.counts ?? item.reaction_counts;
       const nextUserReactions = res.user_reactions ?? item.user_reactions;
@@ -1631,7 +1632,7 @@ export default function SavedReelsScreen() {
     if (!repostTarget) return;
     const nextCount = (repostTarget.repost_count || 0) + 1;
     try {
-      await repostReel(repostTarget.share_id, targetDeviceIds, caption);
+      await repostReel(repostTarget.share_id ?? (repostTarget as any)?.reel_id, targetDeviceIds, caption);
       const updater = (prev: SavedReelItem[]) => prev.map(r =>
         r.reel_id === repostTarget.reel_id || r.share_id === repostTarget.share_id
           ? {
@@ -1982,7 +1983,7 @@ export default function SavedReelsScreen() {
       {/* Comments Sheet */}
       <CommentsSheet
         visible={commentsTarget != null}
-        mediaId={commentsTarget?.media_id}
+        mediaId={commentsTarget?.media_id ?? (commentsTarget as any)?.share_id ?? commentsTarget?.reel_id}
         colors={colors}
         onClose={() => setCommentsTarget(null)}
         onCommentAdded={(count) => commentsTarget && handleCommentAdded(commentsTarget.reel_id, count)}

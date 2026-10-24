@@ -1,3 +1,5 @@
+import { DeviceEventEmitter } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import { formatHostForUrl, parseServerAddress } from './settings';
 import {
@@ -5,6 +7,7 @@ import {
   getP2PDeviceSecret,
   savePairedPeer,
   updatePeerLastSeen,
+  getLocalP2PFeed,
 } from './p2pSettings';
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -140,6 +143,55 @@ export async function confirmPairing(ip, port, peerId, pin) {
 }
 
 /**
+ * Notifies the requesting peer that their pairing request was accepted.
+ * This establishes mutual/bidirectional pairing automatically on both devices.
+ */
+export async function notifyPairAccepted(peerIp, peerPort, localIdentity, pin) {
+  try {
+    const baseUrl = buildBaseUrl(peerIp, peerPort);
+    const response = await postJson(`${baseUrl}/p2p/pair`, {
+      action: 'accepted',
+      device_id: localIdentity.deviceId,
+      device_name: localIdentity.deviceName,
+      device_model: localIdentity.deviceModel,
+      username: localIdentity.username,
+      port: localIdentity.port,
+      pin,
+    }, 6000);
+    return response;
+  } catch (err) {
+    console.warn('[P2PClient] notifyPairAccepted error:', err?.message);
+    return null;
+  }
+}
+
+/**
+ * Sends a reaction directly to a peer device over Wi-Fi.
+ */
+export async function sendDirectReaction(peerIp, peerPort, payload) {
+  try {
+    const baseUrl = buildBaseUrl(peerIp, peerPort);
+    return await postJson(`${baseUrl}/p2p/react`, payload, 5000);
+  } catch (err) {
+    console.warn('[P2PClient] sendDirectReaction failed:', err?.message);
+    return null;
+  }
+}
+
+/**
+ * Sends a comment directly to a peer device over Wi-Fi.
+ */
+export async function sendDirectComment(peerIp, peerPort, payload) {
+  try {
+    const baseUrl = buildBaseUrl(peerIp, peerPort);
+    return await postJson(`${baseUrl}/p2p/comment`, payload, 5000);
+  } catch (err) {
+    console.warn('[P2PClient] sendDirectComment failed:', err?.message);
+    return null;
+  }
+}
+
+/**
  * Sends a Direct Post or Share directly to another phone without using the central server.
  *
  * @param {string} peerIp IP of the receiving phone
@@ -254,4 +306,37 @@ export async function downloadPeerMediaFile(peerIp, peerPort, filename, destUri)
 
   const downloadResult = await FileSystem.downloadAsync(downloadUrl, destUri);
   return downloadResult;
+}
+
+/**
+ * Synchronizes the direct P2P feed with a connected peer.
+ * Pulls any posts shared by the peer that are missing locally.
+ */
+export async function syncFeedWithPeer(peerIp, peerPort) {
+  try {
+    const data = await fetchPeerFeed(peerIp, peerPort);
+    if (data?.items && Array.isArray(data.items)) {
+      let updated = false;
+      const localFeed = await getLocalP2PFeed();
+      const localIds = new Set(localFeed.map((item) => item.id));
+
+      for (const item of data.items) {
+        if (!item?.id) continue;
+        if (!localIds.has(item.id)) {
+          localFeed.unshift(item);
+          localIds.add(item.id);
+          updated = true;
+        }
+      }
+
+      if (updated) {
+        const trimmed = localFeed.slice(0, 200);
+        await AsyncStorage.setItem('p2p_local_feed_v1', JSON.stringify(trimmed));
+        DeviceEventEmitter.emit('p2p-feed-updated', trimmed);
+        DeviceEventEmitter.emit('feed_updated', null);
+      }
+    }
+  } catch (err) {
+    // Non-blocking sync
+  }
 }

@@ -25,6 +25,7 @@ import {
   runSync,
 } from '../../backgroundTask';
 import { checkDeviceConnection } from '../../uploader';
+import { getPairedPeers } from '../../p2pSettings';
 import {
   getServerIp,
   getServerName,
@@ -201,6 +202,24 @@ export default function HomeScreen() {
 
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
   const [serverLabel, setServerLabel] = useState('No server');
+  const [pairedPeers, setPairedPeersState] = useState<any[]>([]);
+
+  useEffect(() => {
+    const sub1 = DeviceEventEmitter.addListener('p2p-peers-updated', (updated?: any[]) => {
+      if (Array.isArray(updated)) {
+        setPairedPeersState(updated);
+      } else {
+        getPairedPeers().then((peers) => setPairedPeersState(peers || [])).catch(() => {});
+      }
+    });
+    const sub2 = DeviceEventEmitter.addListener('p2p-peer-paired', () => {
+      getPairedPeers().then((peers) => setPairedPeersState(peers || [])).catch(() => {});
+    });
+    return () => {
+      sub1.remove();
+      sub2.remove();
+    };
+  }, []);
 
   const {
     onScroll,
@@ -221,13 +240,14 @@ export default function HomeScreen() {
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const loadAll = useCallback(async () => {
-    const [lt, ts, si, paused, ip, name] = await Promise.all([
+    const [lt, ts, si, paused, ip, name, peers] = await Promise.all([
       getLastSyncTime(),
       getTotalSynced(),
       getSyncInterval(),
       getSyncPaused(),
       getServerIp(),
       getServerName(),
+      getPairedPeers().catch(() => []),
     ]);
 
     setLastSyncTimeState(lt);
@@ -235,6 +255,7 @@ export default function HomeScreen() {
     setSyncIntervalState(si);
     setSyncPausedState(paused);
     setServerLabel(name || ip || 'No server');
+    setPairedPeersState(Array.isArray(peers) ? peers : []);
 
     if (!ip) {
       setServerStatus('unknown');
@@ -655,9 +676,21 @@ export default function HomeScreen() {
 
   const intervalLabel = formatSyncIntervalLabel(syncInterval);
 
-  const serverColor = statusColors[serverStatus];
+  const isP2PDeviceAvailable = serverStatus !== 'connected' && pairedPeers.length > 0;
 
-  const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown' || serverStatus === 'removed';
+  const serverColor = isP2PDeviceAvailable ? '#10B981' : statusColors[serverStatus];
+
+  let displayStatusLabel = statusLabels[serverStatus];
+  if (isP2PDeviceAvailable) {
+    if (pairedPeers.length === 1) {
+      const p = pairedPeers[0];
+      displayStatusLabel = `P2P Active • ${p.deviceName || p.username || '1 Peer'}`;
+    } else {
+      displayStatusLabel = `P2P Active • ${pairedPeers.length} Peers`;
+    }
+  }
+
+  const isOffline = (serverStatus === 'disconnected' || serverStatus === 'unknown' || serverStatus === 'removed') && !isP2PDeviceAvailable;
 
   return (
     <View style={styles.screen}>
@@ -687,7 +720,7 @@ export default function HomeScreen() {
         <AnimatedPressable style={[styles.serverPill, { borderColor: serverColor }]} onPress={loadAll}>
           <View style={[styles.statusDot, { backgroundColor: serverColor }]} />
           <Text style={[styles.serverPillText, { color: serverColor }]} numberOfLines={1}>
-            {statusLabels[serverStatus]}
+            {displayStatusLabel}
           </Text>
         </AnimatedPressable>
       </Animated.View>

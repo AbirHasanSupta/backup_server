@@ -931,8 +931,8 @@ function SharedFeedCard({
 // ─────────────────────────────────────────────────────────────────────────────
 
 type CommentItem = {
-  id: number;
-  media_id: number;
+  id: number | string;
+  media_id: number | string;
   source_id: string;
   device_name?: string | null;
   username?: string | null;
@@ -956,7 +956,7 @@ function CommentsModal({
   serverConfig?: ServerConfig;
   colors: AppColors;
   onClose: () => void;
-  onCountChange: (mediaId: number, delta: number) => void;
+  onCountChange: (mediaId: number | string, delta: number) => void;
 }) {
   const insets = useSafeAreaInsets();
   const { keyboardHeight } = useModalKeyboardHeight();
@@ -964,7 +964,7 @@ function CommentsModal({
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const mediaId = item?.media_id;
+  const mediaId = item?.media_id ?? (item as any)?.group_id ?? (item as any)?.share_id;
   const isPostCreator = Boolean(
     item?.is_own_post ||
     (serverConfig?.deviceId && item?.shared_by_device_id === serverConfig.deviceId)
@@ -4406,17 +4406,20 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   // Reaction handler
   const handleToggleReaction = useCallback(async (file: RemoteFile, emoji: string) => {
-    if (!file.media_id) return;
+    const targetId = file.media_id ?? file.group_id ?? file.share_id ?? (file as any).id;
+    if (!targetId) return;
     hapticSelection();
 
     const currentReactions = file.user_reactions || [];
     const currentCounts = { ...(file.reaction_counts || {}) };
     const hasReacted = currentReactions.includes(emoji);
-    // Prefer media_id identity so a reaction updates the right card even when
-    // the unified feed carries two items with the same relative path from
-    // different sources; fall back to path for library rows.
-    const sameMedia = (f: RemoteFile) =>
-      file.media_id != null && f.media_id != null ? f.media_id === file.media_id : f.path === file.path;
+
+    const sameMedia = (f: RemoteFile) => {
+      if (file.media_id != null && f.media_id != null) return f.media_id === file.media_id;
+      if (file.group_id != null && f.group_id != null) return f.group_id === file.group_id;
+      if (file.share_id != null && f.share_id != null) return f.share_id === file.share_id;
+      return f.path === file.path;
+    };
 
     const updatedReactions = hasReacted
       ? currentReactions.filter(e => e !== emoji)
@@ -4437,7 +4440,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     setFiles(updateList);
 
     try {
-      const res = await reactToMedia(file.media_id, emoji);
+      const res = await reactToMedia(targetId, emoji);
       if (res?.counts && res?.user_reactions) {
         const syncServer = (list: RemoteFile[]) =>
           list.map(f =>
@@ -4461,13 +4464,14 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   // Keep a feed card's comment count in sync after add/delete inside the
   // CommentsModal, without refetching the whole feed (snapshot ordering holds).
-  const handleCommentCountChange = useCallback((mediaId: number, delta: number) => {
+  const handleCommentCountChange = useCallback((mediaId: number | string, delta: number) => {
     setFiles(list =>
-      list.map(f =>
-        f.media_id === mediaId
+      list.map(f => {
+        const matches = f.media_id === mediaId || f.group_id === mediaId || f.share_id === mediaId;
+        return matches
           ? { ...f, comment_count: Math.max(0, (f.comment_count || 0) + delta) }
-          : f
-      )
+          : f;
+      })
     );
   }, []);
 
@@ -4931,7 +4935,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   }, [serverConfig]);
 
   useEffect(() => {
-    if (isOffline || isDownloading) return;
+    if (isDownloading) return;
+    if (isOffline && !isFeedMode) return;
     // Feed sources from /api/feed (no shared source needed); shared mode requires selectedSourceId.
     if (!isFeedMode && sourceMode === 'shared' && !selectedSourceId) return;
     queueMicrotask(() => {
@@ -4940,7 +4945,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]);
 
   useFocusEffect(useCallback(() => {
-    if (isOffline || isDownloading) return;
+    if (isDownloading) return;
+    if (isOffline && !isFeedMode) return;
     if (!isFeedMode && sourceMode === 'shared' && !selectedSourceId) return;
 
     // If a notification tap flagged a forced refresh, bypass any in-flight guard
@@ -5347,7 +5353,11 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   // Download files
   const handleDownloadFiles = useCallback(async (pathSet: Set<string>) => {
     if (pathSet.size === 0 || downloadActiveRef.current) return;
-    if (serverStatus === 'disconnected' || serverStatus === 'unknown') {
+    const hasOnlyLocalFiles = Array.from(pathSet).every(path => {
+      const f = previewableFiles.find(x => x.path === path) || files.find(x => x.path === path);
+      return Boolean((f as any)?.uri);
+    });
+    if (!hasOnlyLocalFiles && (serverStatus === 'disconnected' || serverStatus === 'unknown')) {
       Alert.alert('Offline', 'Connect to a server before downloading files.');
       return;
     }
@@ -5394,6 +5404,25 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         publishProgress(completed, displayName, 0, knownSize);
 
         try {
+          // If file has a local uri already (from P2P received post/reel)
+          const localUri = (fileInfo as any)?.uri;
+          if (localUri) {
+            if (canSaveToGallery) {
+              await MediaLibrary.saveToLibraryAsync(localUri);
+              saved++;
+            } else if (FileSystem.documentDirectory) {
+              const localPath = sanitizeRelativePath(path);
+              const destUri = FileSystem.documentDirectory + localPath;
+              const folderUri = destUri.substring(0, destUri.lastIndexOf('/'));
+              const folderInfo = await FileSystem.getInfoAsync(folderUri);
+              if (!folderInfo.exists) await FileSystem.makeDirectoryAsync(folderUri, { intermediates: true });
+              await FileSystem.copyAsync({ from: localUri, to: destUri });
+              saved++;
+            }
+            completed++;
+            publishProgress(completed, displayName, 0, 0);
+            continue;
+          }
           if (!FileSystem.cacheDirectory) {
             failed++;
             completed++;
@@ -5905,17 +5934,24 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       </View>
 
       {/* Download FAB */}
-      {selectedPaths.size > 0 && !isDownloading && (
-        <AnimatedPressable
-          style={[styles.fab, { bottom: BottomTabInset + Spacing.four }, isOffline && styles.disabledBtn]}
-          onPress={handleDownload}
-          disabled={isOffline}
-          scaleDown={0.94}
-        >
-          <AppIcon androidName="download" iosName="arrow.down.circle" color={colors.white} size={22} />
-          <Text style={styles.fabText}>Download {selectedPaths.size} {selectedPaths.size === 1 ? 'File' : 'Files'}</Text>
-        </AnimatedPressable>
-      )}
+      {selectedPaths.size > 0 && !isDownloading && (() => {
+        const hasOnlyLocalFiles = Array.from(selectedPaths).every(p => {
+          const f = previewableFiles.find(x => x.path === p) || files.find(x => x.path === p);
+          return Boolean((f as any)?.uri);
+        });
+        const isDisabled = isOffline && !hasOnlyLocalFiles;
+        return (
+          <AnimatedPressable
+            style={[styles.fab, { bottom: BottomTabInset + Spacing.four }, isDisabled && styles.disabledBtn]}
+            onPress={handleDownload}
+            disabled={isDisabled}
+            scaleDown={0.94}
+          >
+            <AppIcon androidName="download" iosName="arrow.down.circle" color={colors.white} size={22} />
+            <Text style={styles.fabText}>Download {selectedPaths.size} {selectedPaths.size === 1 ? 'File' : 'Files'}</Text>
+          </AnimatedPressable>
+        );
+      })()}
 
       {/* Preview Modal */}
       <VideoPreviewPreloader uri={warmPreviewUrl} />
@@ -6015,7 +6051,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       {/* Reactors list on a feed item */}
       <ReactorsListSheet
         visible={reactorsItem !== null}
-        mediaId={reactorsItem?.media_id}
+        mediaId={reactorsItem?.media_id ?? (reactorsItem as any)?.group_id ?? (reactorsItem as any)?.share_id}
         colors={colors}
         onClose={() => setReactorsItem(null)}
       />

@@ -1042,15 +1042,25 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
           eventParams.putString("pin", pin);
           eventParams.putString("ip", remoteIp);
           eventParams.putInt("port", peerPort);
-          emitEvent("p2p_pair_request", eventParams);
-
-          JSONObject resp = new JSONObject();
-          resp.put("status", "pending");
-          resp.put("peer_device_id", deviceId);
-          resp.put("peer_device_name", deviceName);
-          resp.put("peer_username", username);
-          resp.put("pin", pin);
-          writeJsonResponse(out, 200, resp.toString());
+          if ("accepted".equals(action) || "confirm".equals(action)) {
+            emitEvent("p2p_pair_accepted", eventParams);
+            JSONObject resp = new JSONObject();
+            resp.put("status", "accepted");
+            resp.put("peer_device_id", deviceId);
+            resp.put("peer_device_name", deviceName);
+            resp.put("peer_username", username);
+            resp.put("pin", pin);
+            writeJsonResponse(out, 200, resp.toString());
+          } else {
+            emitEvent("p2p_pair_request", eventParams);
+            JSONObject resp = new JSONObject();
+            resp.put("status", "pending");
+            resp.put("peer_device_id", deviceId);
+            resp.put("peer_device_name", deviceName);
+            resp.put("peer_username", username);
+            resp.put("pin", pin);
+            writeJsonResponse(out, 200, resp.toString());
+          }
         } else if ("POST".equals(method) && path.startsWith("/p2p/upload")) {
           String query = "";
           int qIdx = path.indexOf("?");
@@ -1235,6 +1245,52 @@ public class BackupP2PServerModule extends ReactContextBaseJavaModule {
           } else {
             writeJsonResponse(out, 200, "{\\"items\\":[],\\"status\\":\\"ok\\"}");
           }
+        } else if ("POST".equals(method) && path.startsWith("/p2p/react")) {
+          byte[] bodyBytes = readExactBytes(in, contentLength);
+          String bodyStr = new String(bodyBytes, StandardCharsets.UTF_8);
+          JSONObject req = new JSONObject(bodyStr);
+
+          String shareId = req.optString("share_id", "");
+          String emoji = req.optString("emoji", "");
+          String reactAction = req.optString("action", "add");
+          String reactorDeviceId = req.optString("reactor_device_id", "");
+          String reactorName = req.optString("reactor_name", "Nearby Peer");
+
+          WritableMap eventParams = Arguments.createMap();
+          eventParams.putString("shareId", shareId);
+          eventParams.putString("emoji", emoji);
+          eventParams.putString("action", reactAction);
+          eventParams.putString("reactorDeviceId", reactorDeviceId);
+          eventParams.putString("reactorName", reactorName);
+          emitEvent("p2p_incoming_reaction", eventParams);
+
+          JSONObject resp = new JSONObject();
+          resp.put("ok", true);
+          resp.put("status", "success");
+          writeJsonResponse(out, 200, resp.toString());
+        } else if ("POST".equals(method) && path.startsWith("/p2p/comment")) {
+          byte[] bodyBytes = readExactBytes(in, contentLength);
+          String bodyStr = new String(bodyBytes, StandardCharsets.UTF_8);
+          JSONObject req = new JSONObject(bodyStr);
+
+          String shareId = req.optString("share_id", "");
+          String commentId = req.optString("comment_id", "");
+          String commentAction = req.optString("action", "add");
+          JSONObject commentObj = req.optJSONObject("comment");
+
+          WritableMap eventParams = Arguments.createMap();
+          eventParams.putString("shareId", shareId);
+          eventParams.putString("commentId", commentId);
+          eventParams.putString("action", commentAction);
+          if (commentObj != null) {
+            eventParams.putString("commentJson", commentObj.toString());
+          }
+          emitEvent("p2p_incoming_comment", eventParams);
+
+          JSONObject resp = new JSONObject();
+          resp.put("ok", true);
+          resp.put("status", "success");
+          writeJsonResponse(out, 200, resp.toString());
         } else {
           writeNotFound(out);
         }

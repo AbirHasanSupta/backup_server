@@ -67,7 +67,9 @@ export function ShareModal({
       .then((res) => {
         if (!active) return;
         const list = Array.isArray(res?.devices) ? res.devices : [];
-        setDevices(list.filter((d) => d.device_id !== 'desktop-server' && !excludedSet.has(d.device_id)));
+        const filtered = list.filter((d) => d.device_id !== 'desktop-server' && !excludedSet.has(d.device_id));
+        setDevices(filtered);
+        setSelected(new Set(filtered.map((d) => d.device_id)));
       })
       .catch(() => { if (active) setDevices([]); })
       .finally(() => { if (active) setLoading(false); });

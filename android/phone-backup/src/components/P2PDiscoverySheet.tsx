@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
+  DeviceEventEmitter,
   View,
   Text,
   StyleSheet,
@@ -14,7 +15,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { discoverPeers } from '../../p2pDiscovery';
-import { requestPairing, confirmPairing } from '../../p2pClient';
+import { requestPairing } from '../../p2pClient';
+import { getPairedPeers } from '../../p2pSettings';
 
 export type DiscoveredPeerItem = {
   peerId: string;
@@ -86,6 +88,32 @@ export function P2PDiscoverySheet({
     };
   }, [visible, startScan]);
 
+  useEffect(() => {
+    const sub1 = DeviceEventEmitter.addListener('p2p-peers-updated', async (updatedList?: any[]) => {
+      let list = updatedList;
+      if (!Array.isArray(list)) {
+        list = await getPairedPeers().catch(() => []);
+      }
+      const pairedIds = new Set((list || []).map((p: any) => p.peerId));
+      setPeers((prev) =>
+        prev.map((p) => (pairedIds.has(p.peerId) ? { ...p, isPaired: true } : p))
+      );
+    });
+    const sub2 = DeviceEventEmitter.addListener('p2p-peer-paired', (data: any) => {
+      setPairingPeerId(null);
+      const targetId = data?.peerId || data?.deviceId;
+      if (targetId) {
+        setPeers((prev) =>
+          prev.map((p) => (p.peerId === targetId ? { ...p, isPaired: true } : p))
+        );
+      }
+    });
+    return () => {
+      sub1.remove();
+      sub2.remove();
+    };
+  }, []);
+
   const handlePair = async (peer: DiscoveredPeerItem) => {
     setPairingPeerId(peer.peerId);
     try {
@@ -93,34 +121,12 @@ export function P2PDiscoverySheet({
       const pin = req.pin;
 
       Alert.alert(
-        'Confirm Pairing',
-        `Pair with "${peer.deviceName || peer.username}"?\n\nVerification PIN: ${pin}`,
+        'Pairing Request Sent',
+        `Verification PIN: ${pin}\n\nPlease tap "Accept & Pair" on "${peer.deviceName || peer.username}" to establish mutual connection.`,
         [
           {
-            text: 'Cancel',
-            style: 'cancel',
+            text: 'Dismiss',
             onPress: () => setPairingPeerId(null),
-          },
-          {
-            text: 'Pair Now',
-            onPress: async () => {
-              try {
-                const conf = await confirmPairing(peer.ip, peer.port, peer.peerId, pin);
-                if (conf?.status === 'accepted') {
-                  Alert.alert('Paired!', `Successfully paired with ${peer.deviceName || peer.username}.`);
-                  // Refresh paired status
-                  setPeers((prev) =>
-                    prev.map((p) => (p.peerId === peer.peerId ? { ...p, isPaired: true } : p))
-                  );
-                } else {
-                  Alert.alert('Pairing Pending', 'Waiting for confirmation on the other device.');
-                }
-              } catch (err: any) {
-                Alert.alert('Pairing Error', err?.message || 'Could not complete pairing.');
-              } finally {
-                setPairingPeerId(null);
-              }
-            },
           },
         ]
       );
