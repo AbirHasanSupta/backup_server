@@ -314,12 +314,18 @@ export function buildShareDownloadUrl(config, shareId) {
 }
 
 export function buildSharePreviewUrl(config, shareId) {
+  if (typeof shareId === 'string' && (shareId.startsWith('file:') || shareId.startsWith('content:') || shareId.startsWith('http:') || shareId.startsWith('https:'))) {
+    return shareId;
+  }
   if (!config || !config.ip || !config.port) return '';
   const host = formatHostForUrl(config.ip);
   return `http://${host}:${config.port}/share/${encodeURIComponent(shareId)}/preview?device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
 }
 
 export function buildShareThumbnailUrl(config, shareId) {
+  if (typeof shareId === 'string' && (shareId.startsWith('file:') || shareId.startsWith('content:') || shareId.startsWith('http:') || shareId.startsWith('https:'))) {
+    return shareId;
+  }
   if (!config || !config.ip || !config.port) return '';
   const host = formatHostForUrl(config.ip);
   return `http://${host}:${config.port}/share/${encodeURIComponent(shareId)}/thumbnail?device_id=${encodeURIComponent(config.deviceId)}&token=${encodeURIComponent(config.key)}`;
@@ -502,31 +508,53 @@ export async function searchSharedFiles(sourceId, query) {
 }
 
 export async function browseFiles(prefix = '') {
-  const res = await fetchJsonWithMeshRetry(async () => {
-    const { ip, port, key, deviceId } = await getConfig();
-    return {
-      url: `http://${ip}:${port}/files/browse?device_id=${encodeURIComponent(deviceId)}&prefix=${encodeURIComponent(prefix)}`,
-      options: { headers: { Authorization: `Bearer ${key}` } },
-    };
-  });
-  if (res && (Array.isArray(res.folders) || Array.isArray(res.files))) {
-    _uiMemoryCache.browse[prefix] = res;
+  const isServer = await isServerMode();
+  if (!isServer) {
+    return { folders: [], files: [] };
   }
-  return res;
+  try {
+    const res = await fetchJsonWithMeshRetry(async () => {
+      const { ip, port, key, deviceId } = await getConfig();
+      return {
+        url: `http://${ip}:${port}/files/browse?device_id=${encodeURIComponent(deviceId)}&prefix=${encodeURIComponent(prefix)}`,
+        options: { headers: { Authorization: `Bearer ${key}` } },
+      };
+    });
+    if (res && (Array.isArray(res.folders) || Array.isArray(res.files))) {
+      _uiMemoryCache.browse[prefix] = res;
+    }
+    return res;
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+    }
+    throw err;
+  }
 }
 
 export async function browseSharedFiles(sourceId, prefix = '') {
-  const res = await fetchJsonWithMeshRetry(async () => {
-    const { ip, port, key, deviceId } = await getConfig();
-    return {
-      url: `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/browse?device_id=${encodeURIComponent(deviceId)}&prefix=${encodeURIComponent(prefix)}`,
-      options: { headers: { Authorization: `Bearer ${key}` } },
-    };
-  });
-  if (res && (Array.isArray(res.folders) || Array.isArray(res.files))) {
-    _uiMemoryCache.browseShared[`${sourceId}:${prefix}`] = res;
+  const isServer = await isServerMode();
+  if (!isServer) {
+    return { folders: [], files: [] };
   }
-  return res;
+  try {
+    const res = await fetchJsonWithMeshRetry(async () => {
+      const { ip, port, key, deviceId } = await getConfig();
+      return {
+        url: `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/browse?device_id=${encodeURIComponent(deviceId)}&prefix=${encodeURIComponent(prefix)}`,
+        options: { headers: { Authorization: `Bearer ${key}` } },
+      };
+    });
+    if (res && (Array.isArray(res.folders) || Array.isArray(res.files))) {
+      _uiMemoryCache.browseShared[`${sourceId}:${prefix}`] = res;
+    }
+    return res;
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+    }
+    throw err;
+  }
 }
 
 
@@ -618,6 +646,22 @@ export async function downloadSharedFile(sourceId, relativePath, destUri, onProg
  * @returns {Promise<FileSystem.FileSystemDownloadResult>}
  */
 export async function downloadShareFile(shareId, destUri, onProgress) {
+  const isP2P = typeof shareId === 'string' && shareId.startsWith('p2p_');
+  if (isP2P) {
+    try {
+      const feed = await getLocalP2PFeed();
+      const targetPost = (feed || []).find(p => String(p.id) === String(shareId) || (p.files || []).some(f => String(f.id) === String(shareId)));
+      const file = (targetPost?.files || []).find(f => f.uri) || (targetPost?.uri ? targetPost : null);
+      if (file?.uri) {
+        await FileSystem.copyAsync({ from: file.uri, to: destUri });
+        onProgress?.(1, 1);
+        return { uri: destUri, status: 200, headers: {}, mimeType: null };
+      }
+    } catch (err) {
+      console.warn('[Downloader] P2P downloadShareFile copy failed:', err?.message);
+    }
+  }
+
   return withDownloadMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     const url =
@@ -1350,119 +1394,128 @@ export async function createDeviceShare(targetDeviceIds, caption, items, options
  * @param {string[]} imageUris local file URIs (score card first, then each question)
  */
 export async function createQuizShare(targetDeviceIds, caption, score, total, quizData, imageUris) {
-  const imagesBase64 = await Promise.all(
-    imageUris.map(async (uri) => {
-      const cleanUri = uri.startsWith('file://') ? uri : `file://${uri}`;
-      return await FileSystem.readAsStringAsync(cleanUri, {
-        encoding: FileSystem.EncodingType?.Base64 || 'base64',
-      });
-    })
-  );
+  const isServer = await isServerMode();
 
-  // Check for P2P targets
+  if (isServer) {
+    const imagesBase64 = await Promise.all(
+      imageUris.map(async (uri) => {
+        const cleanUri = uri.startsWith('file://') ? uri : `file://${uri}`;
+        return await FileSystem.readAsStringAsync(cleanUri, {
+          encoding: FileSystem.EncodingType?.Base64 || 'base64',
+        });
+      })
+    );
+
+    try {
+      const { ip, port, key, deviceId } = await getConfig();
+      const result = await fetchJsonWithTimeout(
+        `http://${ip}:${port}/api/share/quiz/create`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${key}`,
+          },
+          body: JSON.stringify({
+            shared_by_device_id: deviceId,
+            target_device_ids: targetDeviceIds,
+            caption: caption || '',
+            score,
+            total,
+            quiz_data: quizData,
+            images_base64: imagesBase64,
+          }),
+        },
+        15000
+      );
+      invalidateFeedCache();
+      return result || { ok: true };
+    } catch (err) {
+      if (isNetworkFailure(err)) {
+        await setServerAvailable(false);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // P2P MODE ONLY
+  // ═══════════════════════════════════════════════════════════════════════
   let p2pTargets = [];
   try {
     const paired = await getPairedPeers();
     p2pTargets = (paired || []).filter((p) => targetDeviceIds.includes(p.peerId));
   } catch {}
-  const serverTargets = targetDeviceIds.filter((id) => !p2pTargets.some((p) => p.peerId === id));
 
+  if (p2pTargets.length === 0) {
+    throw new Error('No paired P2P devices selected.');
+  }
+
+  const filesPayload = [];
+  for (let i = 0; i < imageUris.length; i++) {
+    filesPayload.push({
+      name: i === 0 ? 'scorecard.jpg' : `question_${i}.jpg`,
+      uri: imageUris[i],
+      size: 0,
+      modifiedTime: Date.now(),
+    });
+  }
+
+  const shareId = `p2p_quiz_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const postTitle = `Guess the Year · ${score}/${total} points`;
   let p2pSuccessCount = 0;
-  if (p2pTargets.length > 0) {
-    const filesPayload = [];
-    for (let i = 0; i < imageUris.length; i++) {
-      filesPayload.push({
-        name: i === 0 ? 'scorecard.jpg' : `question_${i}.jpg`,
-        uri: imageUris[i],
-        base64: imagesBase64[i],
-        size: 0,
-        modifiedTime: Date.now(),
-      });
-    }
 
-    const shareId = `p2p_quiz_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    const postTitle = `Guess the Year · ${score}/${total} points`;
-
-    for (const peer of p2pTargets) {
-      if (peer.ip && peer.port) {
-        try {
-          await sendDirectShareToPeer(peer.ip, peer.port, {
-            shareId,
-            caption: caption || '',
-            postKind: 'quiz',
-            files: filesPayload,
-          });
-          p2pSuccessCount++;
-        } catch (err) {
-          console.warn(`[Downloader] createQuizShare P2P send to ${peer.peerId} failed:`, err?.message);
-        }
+  for (const peer of p2pTargets) {
+    if (peer.ip && peer.port) {
+      try {
+        await sendDirectShareToPeer(peer.ip, peer.port, {
+          shareId,
+          caption: caption || '',
+          postKind: 'quiz',
+          files: filesPayload,
+        });
+        p2pSuccessCount++;
+      } catch (err) {
+        console.warn(`[Downloader] createQuizShare P2P send to ${peer.peerId} failed:`, err?.message);
       }
     }
-
-    // Save to sender's own local feed so quiz appears in their feed too
-    try {
-      const localIdentity = await getLocalPeerIdentity();
-      await saveP2PFeedItem({
-        id: shareId,
-        shared_by_device_id: localIdentity.deviceId,
-        shared_by_device_name: localIdentity.deviceName,
-        shared_by_username: localIdentity.username,
-        caption: caption || '',
-        post_kind: 'quiz',
-        post_title: postTitle,
-        quiz_data: quizData,
-        created_at: Date.now(),
-        files: filesPayload.map((f) => ({
-          ...f,
-          thumbUri: f.thumbUri || f.thumb_uri || f.uri,
-          thumb_uri: f.thumb_uri || f.thumbUri || f.uri,
-        })),
-        target_device_ids: targetDeviceIds,
-        targets: p2pTargets.map((p) => ({
-          device_id: p.peerId,
-          target_device_id: p.peerId,
-          device_name: p.deviceName || p.username || 'Peer Device',
-        })),
-        is_p2p: true,
-        is_own_post: true,
-        reaction_counts: {},
-        user_reactions: [],
-      });
-    } catch {}
   }
 
-  let result = null;
-  if (serverTargets.length > 0 || p2pTargets.length === 0) {
-    try {
-      result = await fetchJsonWithMeshRetry(async () => {
-        const { ip, port, key, deviceId } = await getConfig();
-        return {
-          url: `http://${ip}:${port}/api/share/quiz/create`,
-          options: {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${key}`,
-            },
-            body: JSON.stringify({
-              shared_by_device_id: deviceId,
-              target_device_ids: serverTargets.length > 0 ? serverTargets : targetDeviceIds,
-              caption: caption || '',
-              score,
-              total,
-              quiz_data: quizData,
-              images_base64: imagesBase64,
-            }),
-          },
-        };
-      }, 30000);
-    } catch (err) {
-      if (p2pSuccessCount === 0) throw err;
-    }
-  }
+  const localIdentity = await getLocalPeerIdentity();
+  const ownPost = {
+    id: shareId,
+    shared_by_device_id: localIdentity.deviceId,
+    shared_by_device_name: localIdentity.deviceName,
+    shared_by_username: localIdentity.username,
+    caption: caption || '',
+    post_kind: 'quiz',
+    post_title: postTitle,
+    quiz_data: quizData,
+    created_at: Date.now(),
+    files: filesPayload.map((f) => ({
+      ...f,
+      thumbUri: f.thumbUri || f.uri,
+      thumb_uri: f.thumb_uri || f.uri,
+    })),
+    target_device_ids: targetDeviceIds,
+    targets: p2pTargets.map((p) => ({
+      device_id: p.peerId,
+      target_device_id: p.peerId,
+      device_name: p.deviceName || p.username || 'Peer Device',
+    })),
+    is_p2p: true,
+    is_own_post: true,
+    reaction_counts: {},
+    user_reactions: [],
+  };
 
+  await saveP2PFeedItem(ownPost);
   invalidateFeedCache();
-  return result || { ok: true, p2p_sent: p2pSuccessCount };
+  DeviceEventEmitter.emit('p2p-feed-updated');
+  DeviceEventEmitter.emit('feed_updated', ownPost);
+
+  return { ok: true, p2p_sent: p2pSuccessCount, post: ownPost };
 }
 
 export const DIRECT_POST_MAX_FILES = 300;
@@ -1736,13 +1789,20 @@ async function getLocalP2PReels() {
         const isVideo = /\.(mp4|mov|avi|mkv|webm|3gp|m4v)$/i.test(f.name || f.fileName || '');
         if (isVideo) {
           p2pReels.push({
+            reel_id: String(post.id ? `p2p_${post.id}` : `p2p_${f.id || Math.random().toString(36).slice(2)}`),
             share_id: post.id,
             media_id: post.id,
-            path: f.name || f.fileName,
+            path: f.name || f.fileName || 'video.mp4',
             uri: f.uri,
             thumb_uri: f.thumb_uri || f.thumbUri || f.uri,
             caption: post.caption || '',
             shared_by: post.shared_by_username || post.shared_by_device_name || 'Nearby Peer',
+            shared_by_device_id: post.shared_by_device_id || '',
+            created_at: post.created_at || Date.now(),
+            reaction_counts: post.reaction_counts || {},
+            user_reactions: post.user_reactions || [],
+            comment_count: post.comment_count || (post.comments?.length || 0),
+            is_own_post: Boolean(post.is_own_post),
             is_p2p: true,
           });
         }
@@ -1891,64 +1951,103 @@ export async function sendReelTelemetry(events) {
  * @returns {Promise<{ok: boolean, share_id: number, group_id: string}>}
  */
 export async function repostReel(shareId, targetDeviceIds, caption = '') {
+  const isServer = await isServerMode();
+
+  if (isServer) {
+    try {
+      const { ip, port, key, deviceId } = await getConfig();
+      if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
+      const result = await fetchJsonWithTimeout(
+        `http://${ip}:${port}/api/reels/repost`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+          body: JSON.stringify({
+            device_id: deviceId,
+            share_id: shareId,
+            target_device_ids: targetDeviceIds,
+            caption: caption || null,
+          }),
+        },
+        8000
+      );
+      invalidateFeedCache();
+      return result;
+    } catch (err) {
+      if (isNetworkFailure(err)) {
+        await setServerAvailable(false);
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // P2P MODE ONLY
+  // ═══════════════════════════════════════════════════════════════════════
   let p2pTargets = [];
   try {
     const paired = await getPairedPeers();
     p2pTargets = (paired || []).filter((p) => targetDeviceIds.includes(p.peerId));
   } catch {}
-  const serverTargets = targetDeviceIds.filter((id) => !p2pTargets.some((p) => p.peerId === id));
 
-  let p2pSuccessCount = 0;
-  if (p2pTargets.length > 0) {
-    const feed = await getLocalP2PFeed();
-    const idStr = String(shareId);
-    const post = feed.find((p) => p.id === idStr || String(p.group_id) === idStr);
-    const videoFile = (post?.files || []).find((f) => /\.(mp4|mov|avi|mkv|webm|3gp|m4v)$/i.test(f.name || f.fileName || ''));
-
-    if (videoFile) {
-      const repostShareId = `p2p_repost_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      for (const peer of p2pTargets) {
-        if (peer.ip && peer.port) {
-          try {
-            await sendDirectShareToPeer(peer.ip, peer.port, {
-              shareId: repostShareId,
-              caption: caption || post?.caption || '',
-              files: [videoFile],
-            });
-            p2pSuccessCount++;
-          } catch {}
-        }
-      }
-    }
+  if (p2pTargets.length === 0) {
+    throw new Error('No paired P2P devices selected.');
   }
 
-  let result = null;
-  if (serverTargets.length > 0 || p2pTargets.length === 0) {
-    try {
-      result = await fetchJsonWithMeshRetry(async () => {
-        const { ip, port, key, deviceId } = await getConfig();
-        if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
-        return {
-          url: `http://${ip}:${port}/api/reels/repost`,
-          options: {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-            body: JSON.stringify({
-              device_id: deviceId,
-              share_id: shareId,
-              target_device_ids: serverTargets.length > 0 ? serverTargets : targetDeviceIds,
-              caption: caption || null,
-            }),
-          },
-        };
-      });
-    } catch (err) {
-      if (p2pSuccessCount === 0) throw err;
+  const feed = await getLocalP2PFeed();
+  const idStr = String(shareId);
+  const post = feed.find((p) => p.id === idStr || String(p.group_id) === idStr);
+  const videoFile = (post?.files || []).find((f) => /\.(mp4|mov|avi|mkv|webm|3gp|m4v)$/i.test(f.name || f.fileName || ''));
+
+  let p2pSuccessCount = 0;
+  if (videoFile) {
+    const repostShareId = `p2p_repost_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    for (const peer of p2pTargets) {
+      if (peer.ip && peer.port) {
+        try {
+          await sendDirectShareToPeer(peer.ip, peer.port, {
+            shareId: repostShareId,
+            caption: caption || post?.caption || '',
+            files: [videoFile],
+          });
+          p2pSuccessCount++;
+        } catch {}
+      }
     }
+
+    const localIdentity = await getLocalPeerIdentity();
+    const ownPost = {
+      id: repostShareId,
+      shared_by_device_id: localIdentity.deviceId,
+      shared_by_device_name: localIdentity.deviceName,
+      shared_by_username: localIdentity.username,
+      caption: caption || post?.caption || '',
+      post_kind: 'direct_post',
+      created_at: Date.now(),
+      files: [{
+        ...videoFile,
+        thumbUri: videoFile.thumbUri || videoFile.thumb_uri || videoFile.uri,
+        thumb_uri: videoFile.thumb_uri || videoFile.thumbUri || videoFile.uri,
+      }],
+      target_device_ids: targetDeviceIds,
+      targets: p2pTargets.map((p) => ({
+        device_id: p.peerId,
+        target_device_id: p.peerId,
+        device_name: p.deviceName || p.username || 'Peer Device',
+      })),
+      is_p2p: true,
+      is_own_post: true,
+      reaction_counts: {},
+      user_reactions: [],
+    };
+    await saveP2PFeedItem(ownPost);
+    DeviceEventEmitter.emit('p2p-feed-updated');
+    DeviceEventEmitter.emit('feed_updated', ownPost);
   }
 
   invalidateFeedCache();
-  return result || { ok: true, share_id: shareId, p2p_sent: p2pSuccessCount };
+  return { ok: true, share_id: shareId, p2p_sent: p2pSuccessCount };
 }
 
 /**
@@ -1957,12 +2056,24 @@ export async function repostReel(shareId, targetDeviceIds, caption = '') {
  * @returns {Promise<{ok: boolean, share_id: number}>}
  */
 export async function cancelRepostReel(shareId) {
-  return fetchJsonWithMeshRetry(async () => {
+  const isServer = await isServerMode();
+  const isP2P = typeof shareId === 'string' && shareId.startsWith('p2p_');
+  if (!isServer || isP2P) {
+    try {
+      await deleteP2PFeedItem(shareId);
+      DeviceEventEmitter.emit('reel-repost-changed', { shareId, isReposted: false });
+      DeviceEventEmitter.emit('p2p-feed-updated');
+      DeviceEventEmitter.emit('feed_updated');
+    } catch {}
+    return { ok: true, share_id: shareId };
+  }
+
+  try {
     const { ip, port, key, deviceId } = await getConfig();
-    if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
-    return {
-      url: `http://${ip}:${port}/api/reels/repost/cancel`,
-      options: {
+    if (!ip || !port) return { ok: false, error: 'No server config' };
+    const res = await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/reels/repost/cancel`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: JSON.stringify({
@@ -1970,8 +2081,16 @@ export async function cancelRepostReel(shareId) {
           share_id: shareId,
         }),
       },
-    };
-  });
+      3000
+    );
+    return res;
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      return { ok: true, share_id: shareId };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -1982,12 +2101,32 @@ export async function cancelRepostReel(shareId) {
  * @returns {Promise<{ok: boolean, saved: boolean, reel_id: string}>}
  */
 export async function toggleSaveReel(reelId, shareId, mediaId = null) {
-  return fetchJsonWithMeshRetry(async () => {
+  const isServer = await isServerMode();
+  const isP2P = (typeof shareId === 'string' && shareId.startsWith('p2p_')) || (typeof reelId === 'string' && reelId.startsWith('p2p_'));
+  if (!isServer || isP2P) {
+    try {
+      const feed = await getLocalP2PFeed();
+      const targetPost = (feed || []).find((p) => String(p.id) === String(shareId) || String(p.id) === String(reelId) || (p.files || []).some(f => String(f.id) === String(shareId)));
+      if (targetPost) {
+        targetPost.is_saved = !targetPost.is_saved;
+        await saveP2PFeedItem(targetPost);
+        DeviceEventEmitter.emit('reel-save-changed', {
+          reelId: String(reelId),
+          shareId,
+          isSaved: Boolean(targetPost.is_saved),
+        });
+        return { ok: true, saved: Boolean(targetPost.is_saved), reel_id: String(reelId) };
+      }
+    } catch {}
+    return { ok: true, saved: true, reel_id: String(reelId) };
+  }
+
+  try {
     const { ip, port, key, deviceId } = await getConfig();
     if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
-    return {
-      url: `http://${ip}:${port}/api/reels/save`,
-      options: {
+    return await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/reels/save`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: JSON.stringify({
@@ -1997,8 +2136,15 @@ export async function toggleSaveReel(reelId, shareId, mediaId = null) {
           media_id: mediaId,
         }),
       },
-    };
-  });
+      3000
+    );
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      return { ok: true, saved: true, reel_id: String(reelId) };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -2008,14 +2154,34 @@ export async function toggleSaveReel(reelId, shareId, mediaId = null) {
  * @returns {Promise<{reels: Array<any>, has_more: boolean, total: number}>}
  */
 export async function getSavedReels(offset = 0, limit = 50) {
-  return fetchJsonWithMeshRetry(async () => {
+  const isServer = await isServerMode();
+  if (!isServer) {
+    try {
+      const p2pReels = await getLocalP2PReels();
+      const saved = p2pReels.filter(r => r.is_saved);
+      return { reels: saved, has_more: false, total: saved.length };
+    } catch {
+      return { reels: [], has_more: false, total: 0 };
+    }
+  }
+
+  try {
     const { ip, port, key, deviceId } = await getConfig();
-    if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
-    return {
-      url: `http://${ip}:${port}/api/reels/saved?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
-      options: { headers: { Authorization: `Bearer ${key}` } },
-    };
-  });
+    if (!ip || !port) return { reels: [], has_more: false, total: 0 };
+    return await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/reels/saved?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
+      { headers: { Authorization: `Bearer ${key}` } },
+      3500
+    );
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      const p2pReels = await getLocalP2PReels();
+      const saved = p2pReels.filter(r => r.is_saved);
+      return { reels: saved, has_more: false, total: saved.length };
+    }
+    return { reels: [], has_more: false, total: 0 };
+  }
 }
 
 /**
@@ -2025,14 +2191,34 @@ export async function getSavedReels(offset = 0, limit = 50) {
  * @returns {Promise<{reels: Array<any>, has_more: boolean, total: number}>}
  */
 export async function getLikedReels(offset = 0, limit = 50) {
-  return fetchJsonWithMeshRetry(async () => {
+  const isServer = await isServerMode();
+  if (!isServer) {
+    try {
+      const p2pReels = await getLocalP2PReels();
+      const liked = p2pReels.filter(r => Array.isArray(r.user_reactions) && r.user_reactions.length > 0);
+      return { reels: liked, has_more: false, total: liked.length };
+    } catch {
+      return { reels: [], has_more: false, total: 0 };
+    }
+  }
+
+  try {
     const { ip, port, key, deviceId } = await getConfig();
-    if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
-    return {
-      url: `http://${ip}:${port}/api/reels/liked?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
-      options: { headers: { Authorization: `Bearer ${key}` } },
-    };
-  });
+    if (!ip || !port) return { reels: [], has_more: false, total: 0 };
+    return await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/reels/liked?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
+      { headers: { Authorization: `Bearer ${key}` } },
+      3500
+    );
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      const p2pReels = await getLocalP2PReels();
+      const liked = p2pReels.filter(r => Array.isArray(r.user_reactions) && r.user_reactions.length > 0);
+      return { reels: liked, has_more: false, total: liked.length };
+    }
+    return { reels: [], has_more: false, total: 0 };
+  }
 }
 
 /**
@@ -2042,14 +2228,34 @@ export async function getLikedReels(offset = 0, limit = 50) {
  * @returns {Promise<{reels: Array<any>, has_more: boolean, total: number}>}
  */
 export async function getRepostedReels(offset = 0, limit = 50) {
-  return fetchJsonWithMeshRetry(async () => {
+  const isServer = await isServerMode();
+  if (!isServer) {
+    try {
+      const p2pReels = await getLocalP2PReels();
+      const reposted = p2pReels.filter(r => r.is_repost || r.is_own_post);
+      return { reels: reposted, has_more: false, total: reposted.length };
+    } catch {
+      return { reels: [], has_more: false, total: 0 };
+    }
+  }
+
+  try {
     const { ip, port, key, deviceId } = await getConfig();
-    if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
-    return {
-      url: `http://${ip}:${port}/api/reels/reposted?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
-      options: { headers: { Authorization: `Bearer ${key}` } },
-    };
-  });
+    if (!ip || !port) return { reels: [], has_more: false, total: 0 };
+    return await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/reels/reposted?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
+      { headers: { Authorization: `Bearer ${key}` } },
+      3500
+    );
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      const p2pReels = await getLocalP2PReels();
+      const reposted = p2pReels.filter(r => r.is_repost || r.is_own_post);
+      return { reels: reposted, has_more: false, total: reposted.length };
+    }
+    return { reels: [], has_more: false, total: 0 };
+  }
 }
 
 /**
@@ -2057,13 +2263,23 @@ export async function getRepostedReels(offset = 0, limit = 50) {
  * @returns {Promise<{posts: Array<{group_id: string, shared_by: string, caption?: string, post_title?: string, item_count: number, created_at: number}>}>}
  */
 export async function getPendingShareNotifications() {
-  return fetchJsonWithMeshRetry(async () => {
+  const isServer = await isServerMode();
+  if (!isServer) return { posts: [] };
+
+  try {
     const { ip, port, key, deviceId } = await getConfig();
-    return {
-      url: `http://${ip}:${port}/api/notifications/pending?device_id=${encodeURIComponent(deviceId)}`,
-      options: { headers: { Authorization: `Bearer ${key}` } },
-    };
-  });
+    if (!ip || !port) return { posts: [] };
+    return await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/notifications/pending?device_id=${encodeURIComponent(deviceId)}`,
+      { headers: { Authorization: `Bearer ${key}` } },
+      3000
+    );
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+    }
+    return { posts: [] };
+  }
 }
 
 /**
@@ -2071,17 +2287,27 @@ export async function getPendingShareNotifications() {
  * @param {string[]} groupIds
  */
 export async function markShareNotificationsSeen(groupIds) {
-  return fetchJsonWithMeshRetry(async () => {
+  const isServer = await isServerMode();
+  if (!isServer) return { ok: true };
+
+  try {
     const { ip, port, key, deviceId } = await getConfig();
-    return {
-      url: `http://${ip}:${port}/api/notifications/seen`,
-      options: {
+    if (!ip || !port) return { ok: true };
+    return await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/notifications/seen`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: JSON.stringify({ device_id: deviceId, group_ids: groupIds }),
       },
-    };
-  });
+      3000
+    );
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+    }
+    return { ok: true };
+  }
 }
 
 /**
@@ -2090,8 +2316,9 @@ export async function markShareNotificationsSeen(groupIds) {
  * @returns {Promise<{targets: {target_device_id: string, device_name: string, device_model: string}[]}>}
  */
 export async function getShareGroupTargets(groupId) {
+  const isServer = await isServerMode();
   const isP2P = typeof groupId === 'string' && groupId.startsWith('p2p_');
-  if (isP2P) {
+  if (!isServer || isP2P) {
     try {
       const feed = await getLocalP2PFeed();
       const post = (feed || []).find((p) => String(p.id) === String(groupId) || String(p.group_id) === String(groupId));
@@ -2154,37 +2381,46 @@ export async function getShareGroupTargets(groupId) {
  * @returns {Promise<{devices: {device_id: string, device_name: string, display_name: string}[]}>}
  */
 export async function getAllDevices() {
-  let serverDevices = [];
-  try {
-    const res = await fetchJsonWithMeshRetry(async () => {
-      const { ip, port, key, deviceId } = await getConfig();
+  const isServer = await isServerMode();
+  if (!isServer) {
+    try {
+      const peers = await getPairedPeers();
       return {
-        url: `http://${ip}:${port}/api/devices?device_id=${encodeURIComponent(deviceId)}`,
-        options: { headers: { Authorization: `Bearer ${key}` } },
+        devices: (peers || []).map((p) => ({
+          device_id: p.peerId,
+          device_name: p.deviceName || p.username || 'Peer Device',
+          display_name: p.deviceName || p.username || 'Peer Device',
+        })),
       };
-    }, 3000);
-    serverDevices = res?.devices || [];
-  } catch {}
-
-  let pairedDevices = [];
-  try {
-    const peers = await getPairedPeers();
-    pairedDevices = (peers || []).map((p) => ({
-      device_id: p.peerId,
-      device_name: p.deviceName || p.username || 'Peer Device',
-      display_name: p.deviceName || p.username || 'Peer Device',
-    }));
-  } catch {}
-
-  const seen = new Set();
-  const merged = [];
-  for (const d of [...serverDevices, ...pairedDevices]) {
-    if (d.device_id && !seen.has(d.device_id)) {
-      seen.add(d.device_id);
-      merged.push(d);
+    } catch {
+      return { devices: [] };
     }
   }
-  return { devices: merged };
+
+  let serverDevices = [];
+  try {
+    const { ip, port, key, deviceId } = await getConfig();
+    const res = await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/devices?device_id=${encodeURIComponent(deviceId)}`,
+      { headers: { Authorization: `Bearer ${key}` } },
+      3000
+    );
+    serverDevices = res?.devices || [];
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      const peers = await getPairedPeers().catch(() => []);
+      return {
+        devices: (peers || []).map((p) => ({
+          device_id: p.peerId,
+          device_name: p.deviceName || p.username || 'Peer Device',
+          display_name: p.deviceName || p.username || 'Peer Device',
+        })),
+      };
+    }
+  }
+
+  return { devices: serverDevices };
 }
 
 /**
@@ -2193,8 +2429,9 @@ export async function getAllDevices() {
  * @param {string} targetDeviceId
  */
 export async function addShareGroupTarget(groupId, targetDeviceId) {
+  const isServer = await isServerMode();
   const isP2P = typeof groupId === 'string' && groupId.startsWith('p2p_');
-  if (isP2P) {
+  if (!isServer || isP2P) {
     try {
       const feed = await getLocalP2PFeed();
       const post = (feed || []).find((p) => String(p.id) === String(groupId) || String(p.group_id) === String(groupId));
@@ -2213,17 +2450,24 @@ export async function addShareGroupTarget(groupId, targetDeviceId) {
     return { ok: true };
   }
 
-  return fetchJsonWithMeshRetry(async () => {
+  try {
     const { ip, port, key, deviceId } = await getConfig();
-    return {
-      url: `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/add_target?device_id=${encodeURIComponent(deviceId)}`,
-      options: {
+    return await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/add_target?device_id=${encodeURIComponent(deviceId)}`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: JSON.stringify({ device_id: targetDeviceId }),
       },
-    };
-  });
+      3000
+    );
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      return { ok: true };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -2232,8 +2476,9 @@ export async function addShareGroupTarget(groupId, targetDeviceId) {
  * @param {string|null} caption
  */
 export async function editShareGroupCaption(groupId, caption) {
+  const isServer = await isServerMode();
   const isP2P = typeof groupId === 'string' && groupId.startsWith('p2p_');
-  if (isP2P) {
+  if (!isServer || isP2P) {
     try {
       const feed = await getLocalP2PFeed();
       const post = (feed || []).find((p) => String(p.id) === String(groupId) || String(p.group_id) === String(groupId));
@@ -2246,19 +2491,26 @@ export async function editShareGroupCaption(groupId, caption) {
     return { ok: true };
   }
 
-  const result = await fetchJsonWithMeshRetry(async () => {
+  try {
     const { ip, port, key, deviceId } = await getConfig();
-    return {
-      url: `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/edit_caption?device_id=${encodeURIComponent(deviceId)}`,
-      options: {
+    const result = await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/edit_caption?device_id=${encodeURIComponent(deviceId)}`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: JSON.stringify({ caption: caption ?? null }),
       },
-    };
-  });
-  invalidateFeedCache();
-  return result;
+      3000
+    );
+    invalidateFeedCache();
+    return result;
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      return { ok: true };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -2342,8 +2594,9 @@ export async function deleteShare(shareId) {
  * @param {string} targetDeviceId - The device_id to remove access for
  */
 export async function removeShareTarget(groupId, targetDeviceId) {
+  const isServer = await isServerMode();
   const isP2P = typeof groupId === 'string' && groupId.startsWith('p2p_');
-  if (isP2P) {
+  if (!isServer || isP2P) {
     try {
       const feed = await getLocalP2PFeed();
       const post = (feed || []).find((p) => String(p.id) === String(groupId) || String(p.group_id) === String(groupId));
@@ -2361,19 +2614,26 @@ export async function removeShareTarget(groupId, targetDeviceId) {
     return { ok: true };
   }
 
-  const result = await fetchJsonWithMeshRetry(async () => {
+  try {
     const { ip, port, key, deviceId } = await getConfig();
-    return {
-      url: `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/remove_target?device_id=${encodeURIComponent(deviceId)}`,
-      options: {
+    const result = await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/share/group/${encodeURIComponent(groupId)}/remove_target?device_id=${encodeURIComponent(deviceId)}`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: JSON.stringify({ device_id: targetDeviceId }),
       },
-    };
-  });
-  invalidateFeedCache();
-  return result;
+      3000
+    );
+    invalidateFeedCache();
+    return result;
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      return { ok: true };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -2382,22 +2642,33 @@ export async function removeShareTarget(groupId, targetDeviceId) {
  * @param {string} targetDeviceId
  */
 export async function removeShareTargetByShareId(shareId, targetDeviceId) {
-  const result = await fetchJsonWithMeshRetry(async () => {
+  const isServer = await isServerMode();
+  const isP2P = typeof shareId === 'string' && shareId.startsWith('p2p_');
+  if (!isServer || isP2P) {
+    return { ok: true };
+  }
+
+  try {
     const { ip, port, key, deviceId } = await getConfig();
-    return {
-      url: `http://${ip}:${port}/api/share/${encodeURIComponent(shareId)}/remove_target?device_id=${encodeURIComponent(deviceId)}`,
-      options: {
+    const result = await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/share/${encodeURIComponent(shareId)}/remove_target?device_id=${encodeURIComponent(deviceId)}`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: JSON.stringify({ device_id: targetDeviceId }),
       },
-    };
-  });
-  invalidateFeedCache();
-  return result;
+      3000
+    );
+    invalidateFeedCache();
+    return result;
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      return { ok: true };
+    }
+    throw err;
+  }
 }
-
-
 
 /**
  * Fetch comments for a media item.
@@ -2630,6 +2901,20 @@ export async function saveReelToDevice(shareId, relativePath, onProgress) {
   const { status } = await MediaLibrary.requestPermissionsAsync();
   if (status !== 'granted') {
     throw new Error('Media permission denied. Enable photo/video access in device settings.');
+  }
+
+  const isServer = await isServerMode();
+  const isP2P = typeof shareId === 'string' && shareId.startsWith('p2p_');
+  if (!isServer || isP2P) {
+    try {
+      const feed = await getLocalP2PFeed();
+      const targetPost = (feed || []).find(p => String(p.id) === String(shareId) || (p.files || []).some(f => String(f.id) === String(shareId)));
+      const file = (targetPost?.files || []).find(f => f.uri) || (targetPost?.uri ? targetPost : null);
+      if (file?.uri) {
+        await MediaLibrary.saveToLibraryAsync(file.uri);
+        return true;
+      }
+    } catch {}
   }
 
   const ext = (relativePath || '').split('.').pop()?.toLowerCase() || 'mp4';

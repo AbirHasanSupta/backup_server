@@ -562,7 +562,7 @@ function ReelCardBase({
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
   const videoUrl = item.uri ? item.uri : serverConfig ? buildSharePreviewUrl(serverConfig, item.share_id) : '';
-  const thumbUrl = item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
+  const thumbUrl = item.thumb_uri ? item.thumb_uri : item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
   const totalReactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
   const myReaction = item.user_reactions?.[0];
   const isLiked = !!myReaction;
@@ -1969,7 +1969,7 @@ export default function ReelsScreen() {
       feedSub.remove();
       modeSub.remove();
     };
-  }, []);
+  }, [loadReels]);
 
   const handleReact = useCallback(async (item: ReelItem, emoji: string) => {
     if (item.media_id == null) return;

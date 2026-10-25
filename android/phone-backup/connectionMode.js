@@ -1,7 +1,7 @@
 import { DeviceEventEmitter } from 'react-native';
 import { getServerIp, getServerPort, formatHostForUrl } from './settings';
 import { setP2PEnabled } from './p2pSettings';
-import { startP2PServer, stopP2PServer } from './p2pServer';
+import { startP2PServer, stopP2PServer, reconcileP2PMediaWithServer } from './p2pServer';
 
 // In-memory reachability cache
 let _serverAvailable = null; // null = unknown, true = reachable, false = offline
@@ -122,6 +122,10 @@ export async function setServerAvailable(available, options = {}) {
       // Server available: disable P2P daemon and mode
       await setP2PEnabled(false);
       await stopP2PServer().catch(() => {});
+      if (prevAvailable === false) {
+        // Reconcile any P2P media captured while in offline P2P mode
+        reconcileP2PMediaWithServer().catch(() => {});
+      }
     } else {
       // Server offline: enable P2P daemon and mode
       await setP2PEnabled(true);

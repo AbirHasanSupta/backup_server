@@ -52,6 +52,7 @@ export type ReelItem = {
   is_unseen?: boolean;
   group_id?: string | null;
   uri?: string | null;
+  thumb_uri?: string | null;
   is_p2p?: boolean;
   /** Present only for private backup/shared-folder catalogue reels. */
   library_source?: 'reel_backup' | 'reel_shared';

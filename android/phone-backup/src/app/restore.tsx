@@ -87,9 +87,8 @@ import {
   buildShareDownloadUrl,
   downloadShareFile,
 } from '../../downloader';
-import { checkDeviceConnection } from '../../uploader';
-import { getServerIp, resolveReachableServer } from '../../settings';
-import { checkServerReachable, setServerAvailable, isServerMode } from '../../connectionMode';
+import { getServerIp } from '../../settings';
+import { checkServerReachable, setServerAvailable } from '../../connectionMode';
 import { prunePreviewCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticSelection, hapticLongPress, hapticSuccess, hapticError, hapticLight } from '@/utils/haptics';

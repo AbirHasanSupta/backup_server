@@ -105,6 +105,7 @@ export type SavedReelItem = {
   is_saved?: boolean;
   group_id?: string | null;
   uri?: string | null;
+  thumb_uri?: string | null;
   is_p2p?: boolean;
 };
 
@@ -432,7 +433,7 @@ function SavedReelCardBase({
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
   const videoUrl = item.uri ? item.uri : serverConfig ? buildSharePreviewUrl(serverConfig, item.share_id) : '';
-  const thumbUrl = item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
+  const thumbUrl = item.thumb_uri ? item.thumb_uri : item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
   const totalReactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
   const myReaction = item.user_reactions?.[0];
   const isLiked = !!myReaction;
@@ -1400,13 +1401,22 @@ export default function SavedReelsScreen() {
       setRepostedReels(updater);
     });
 
+    const modeSub = DeviceEventEmitter.addListener('app_mode_changed', () => {
+      void loadData();
+    });
+    const p2pFeedSub = DeviceEventEmitter.addListener('p2p-feed-updated', () => {
+      void loadData();
+    });
+
     return () => {
       saveSub.remove();
       reactionSub.remove();
       repostSub.remove();
       commentSub.remove();
+      modeSub.remove();
+      p2pFeedSub.remove();
     };
-  }, []);
+  }, [loadData]);
 
   const handleToggleMute = useCallback(() => {
     setMuted(prev => {
@@ -1694,7 +1704,7 @@ export default function SavedReelsScreen() {
   }, []);
 
   const renderGridItem = useCallback(({ item, index }: { item: SavedReelItem; index: number }) => {
-    const thumbUrl = item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
+    const thumbUrl = item.thumb_uri ? item.thumb_uri : item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
     const authorName = item.is_repost
       ? (item.original_author?.display_name || item.shared_by)
       : item.shared_by;

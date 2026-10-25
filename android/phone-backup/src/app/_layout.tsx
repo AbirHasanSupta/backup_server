@@ -29,7 +29,6 @@ import {
   setLastFlashbackNotifiedAt,
   getLastRecapNotifiedMonth,
   setLastRecapNotifiedMonth,
-  resolveReachableServer,
 } from '../../settings';
 import { getTodaysMemories, getRandomFlashback, generateRewindReel, getRewindReelStatus } from '../../downloader';
 import { connectWebSocket, disconnectWebSocket } from '../../websocketClient';
