@@ -1067,6 +1067,7 @@ function formatTimeAgo(ts: number): string {
 function CommentsSheet({
   visible,
   mediaId,
+  isOwnReel,
   colors,
   onClose,
   onCommentAdded,
@@ -1074,6 +1075,8 @@ function CommentsSheet({
 }: {
   visible: boolean;
   mediaId?: number | string | null;
+  /** True when the current user is the creator of the reel — lets them delete any comment. */
+  isOwnReel?: boolean;
   colors: AppColors;
   onClose: () => void;
   onCommentAdded: (count: number) => void;
@@ -1169,7 +1172,7 @@ function CommentsSheet({
                     <Text style={[cs.cText, { color: colors.text }]}>{c.text}</Text>
                     <Text style={[cs.cTime, { color: colors.textMuted }]}>{formatTimeAgo(c.created_at)}</Text>
                   </View>
-                  {c.is_own && (
+                  {(c.is_own || isOwnReel) && (
                     <TouchableOpacity onPress={() => handleDelete(c.id)} hitSlop={10}>
                       <AppIcon androidName="delete" iosName="trash" color={colors.error} size={16} />
                     </TouchableOpacity>
@@ -2433,6 +2436,7 @@ export default function ReelsScreen() {
       <CommentsSheet
         visible={commentsTarget != null}
         mediaId={commentsTarget?.media_id ?? (commentsTarget as any)?.share_id ?? commentsTarget?.reel_id}
+        isOwnReel={commentsTarget?.is_own_post === true}
         colors={colors}
         onClose={() => setCommentsTarget(null)}
         onCommentAdded={(count) => commentsTarget && handleCommentAdded(commentsTarget.reel_id, count)}

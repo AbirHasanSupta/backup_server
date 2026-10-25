@@ -1200,7 +1200,7 @@ function ManageShareModal({
       });
 
     return () => { active = false; };
-  }, [visible, item, groupId]);
+  }, [visible, item, groupId, isP2PPost, p2pPostId]);
 
   const handleSaveCaption = useCallback(async () => {
     // For P2P posts use p2pPostId (group_id or share_id); for server posts require groupId.

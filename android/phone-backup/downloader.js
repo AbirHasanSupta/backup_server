@@ -1095,6 +1095,9 @@ async function handleLocalP2PReaction(mediaId, emoji) {
     userReactions: updatedReactions,
   });
 
+  // Also notify the feed tab so reaction counts update reactively
+  DeviceEventEmitter.emit('feed_updated', { mediaId, source: 'p2p_reaction' });
+
   return {
     status: hasReacted ? 'removed' : 'added',
     media_id: mediaId,
@@ -1789,7 +1792,8 @@ async function getLocalP2PReels() {
         const isVideo = /\.(mp4|mov|avi|mkv|webm|3gp|m4v)$/i.test(f.name || f.fileName || '');
         if (isVideo) {
           p2pReels.push({
-            reel_id: String(post.id ? `p2p_${post.id}` : `p2p_${f.id || Math.random().toString(36).slice(2)}`),
+            // Use post.id directly (already has p2p_ prefix) to avoid double-prefixing (p2p_p2p_...)
+            reel_id: String(post.id ? post.id : `p2p_${f.id || Math.random().toString(36).slice(2)}`),
             share_id: post.id,
             media_id: post.id,
             path: f.name || f.fileName || 'video.mp4',
@@ -2524,6 +2528,8 @@ export async function deleteShareGroup(groupId) {
   if (!isServer || isP2P) {
     await deleteP2PFeedItem(groupId);
     invalidateFeedCache();
+    DeviceEventEmitter.emit('p2p-feed-updated', { source: 'delete_group', groupId });
+    DeviceEventEmitter.emit('feed_updated', { source: 'p2p_delete_group', groupId });
     return { ok: true };
   }
 
@@ -2544,6 +2550,8 @@ export async function deleteShareGroup(groupId) {
       await setServerAvailable(false);
       await deleteP2PFeedItem(groupId);
       invalidateFeedCache();
+      DeviceEventEmitter.emit('p2p-feed-updated', { source: 'delete_group', groupId });
+      DeviceEventEmitter.emit('feed_updated', { source: 'p2p_delete_group', groupId });
       return { ok: true };
     }
     throw err;
@@ -2561,6 +2569,8 @@ export async function deleteShare(shareId) {
   if (!isServer || isP2P) {
     await deleteP2PFeedItem(shareId);
     invalidateFeedCache();
+    DeviceEventEmitter.emit('p2p-feed-updated', { source: 'delete_share', shareId });
+    DeviceEventEmitter.emit('feed_updated', { source: 'p2p_delete_share', shareId });
     return { ok: true };
   }
 
@@ -2581,6 +2591,8 @@ export async function deleteShare(shareId) {
       await setServerAvailable(false);
       await deleteP2PFeedItem(shareId);
       invalidateFeedCache();
+      DeviceEventEmitter.emit('p2p-feed-updated', { source: 'delete_share', shareId });
+      DeviceEventEmitter.emit('feed_updated', { source: 'p2p_delete_share', shareId });
       return { ok: true };
     }
     throw err;
@@ -2645,6 +2657,13 @@ export async function removeShareTargetByShareId(shareId, targetDeviceId) {
   const isServer = await isServerMode();
   const isP2P = typeof shareId === 'string' && shareId.startsWith('p2p_');
   if (!isServer || isP2P) {
+    // In P2P mode, "hide" means remove the item from the local feed entirely
+    try {
+      await deleteP2PFeedItem(shareId);
+      invalidateFeedCache();
+      DeviceEventEmitter.emit('p2p-feed-updated', { source: 'hide_share', shareId });
+      DeviceEventEmitter.emit('feed_updated', { source: 'p2p_hide_share', shareId });
+    } catch {}
     return { ok: true };
   }
 
@@ -2737,9 +2756,10 @@ async function handleLocalP2PAddComment(mediaId, text) {
   const targetPost = feed.find((p) => p.id === idStr || String(p.group_id) === idStr);
   const displayName = localIdentity.username || localIdentity.deviceName || 'You';
 
+  const commentId = `p2p_c_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
   const newComment = {
-    id: `p2p_c_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-    comment_id: `p2p_c_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    id: commentId,
+    comment_id: commentId,
     media_id: mediaId,
     source_id: localIdentity.deviceId,
     display_name: displayName,
@@ -2756,6 +2776,12 @@ async function handleLocalP2PAddComment(mediaId, text) {
     targetPost.comments.push(newComment);
     targetPost.comment_count = targetPost.comments.length;
     await saveP2PFeedItem(targetPost);
+    // Notify reel cards so their comment count badge updates immediately
+    DeviceEventEmitter.emit('reel-comment-changed', {
+      reelId: String(targetPost.id),
+      mediaId,
+      delta: 1,
+    });
   }
 
   for (const peer of peers || []) {
@@ -2817,6 +2843,12 @@ async function handleLocalP2PDeleteComment(commentId) {
         post.comments.splice(idx, 1);
         post.comment_count = post.comments.length;
         await saveP2PFeedItem(post);
+        // Notify reel cards so their comment count badge updates immediately
+        DeviceEventEmitter.emit('reel-comment-changed', {
+          reelId: String(post.id),
+          mediaId: post.id,
+          delta: -1,
+        });
         for (const peer of peers || []) {
           if (peer.ip && peer.port) {
             sendDirectComment(peer.ip, peer.port, {
@@ -2877,18 +2909,37 @@ export async function getLibraryReels(source, offset = 0, limit = 30, seed = 0) 
   if (source !== 'backups' && source !== 'shared') {
     throw new Error('Invalid reel library source.');
   }
-  const res = await fetchJsonWithMeshRetry(async () => {
-    const { ip, port, key, deviceId } = await getConfig();
-    if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
-    return {
-      url: `http://${ip}:${port}/api/reels/shared-backups?device_id=${encodeURIComponent(deviceId)}&source=${source}&offset=${offset}&limit=${limit}&seed=${seed}`,
-      options: { headers: { Authorization: `Bearer ${key}` } },
-    };
-  });
-  if (offset === 0 && res && Array.isArray(res.reels)) {
-    _uiMemoryCache.reelsFeed[source] = res;
+
+  // In P2P mode the desktop server is not available; return empty gracefully
+  const isServer = await isServerMode();
+  if (!isServer) {
+    const cached = _uiMemoryCache.reelsFeed[source];
+    if (cached) return cached;
+    return { reels: [], has_more: false, total: 0 };
   }
-  return res;
+
+  try {
+    const res = await fetchJsonWithMeshRetry(async () => {
+      const { ip, port, key, deviceId } = await getConfig();
+      if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
+      return {
+        url: `http://${ip}:${port}/api/reels/shared-backups?device_id=${encodeURIComponent(deviceId)}&source=${source}&offset=${offset}&limit=${limit}&seed=${seed}`,
+        options: { headers: { Authorization: `Bearer ${key}` } },
+      };
+    });
+    if (offset === 0 && res && Array.isArray(res.reels)) {
+      _uiMemoryCache.reelsFeed[source] = res;
+    }
+    return res;
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      const cached = _uiMemoryCache.reelsFeed[source];
+      if (cached) return cached;
+      return { reels: [], has_more: false, total: 0 };
+    }
+    throw err;
+  }
 }
 
 /**

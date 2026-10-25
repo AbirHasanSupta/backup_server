@@ -278,6 +278,8 @@ export function initializeP2PServer() {
           counts,
           userReactions: targetPost.user_reactions || [],
         });
+        // Notify the feed tab so reaction count badges update reactively
+        DeviceEventEmitter.emit('feed_updated', { mediaId: targetPost.id, source: 'p2p_peer_reaction' });
         DeviceEventEmitter.emit('p2p-feed-updated', feed);
       }
     } catch (err) {
@@ -319,6 +321,12 @@ export function initializeP2PServer() {
         }
         targetPost.comment_count = targetPost.comments.length;
         await saveP2PFeedItem(targetPost);
+        // Notify reel comment-count badge and general feed tab
+        DeviceEventEmitter.emit('reel-comment-changed', {
+          reelId: String(targetPost.id),
+          mediaId: targetPost.id,
+          count: targetPost.comment_count,
+        });
         DeviceEventEmitter.emit('feed_updated', targetPost);
         DeviceEventEmitter.emit('p2p-feed-updated', feed);
 
