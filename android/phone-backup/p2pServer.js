@@ -339,13 +339,6 @@ export function initializeP2PServer() {
       console.warn('[P2PServer] Error handling incoming comment:', err);
     }
   });
-
-  // Automatically start daemon and sync feed manifest if P2P mode is enabled
-  isP2PEnabled().then((enabled) => {
-    if (enabled) {
-      startP2PServer().then(() => syncFeedManifest()).catch(() => {});
-    }
-  });
 }
 
 /**

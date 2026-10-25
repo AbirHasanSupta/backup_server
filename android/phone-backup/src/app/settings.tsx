@@ -54,6 +54,7 @@ import { registerBackgroundTask, runSync, getCurrentSyncState } from '../../back
 import { connectToServer } from '../../connectToServer';
 import { checkDeviceConnection } from '../../uploader';
 import { updateUsernameOnServer } from '../../downloader';
+import { setServerAvailable } from '../../connectionMode';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { ServerDiscoverySheet } from '@/components/ServerDiscoverySheet';
 import { P2PDiscoverySheet } from '@/components/P2PDiscoverySheet';
@@ -134,7 +135,7 @@ export default function SettingsScreen() {
 
   const checkServer = useCallback(async () => {
     const ip = await getServerIp();
-    if (!ip) { setServerStatus('unknown'); return; }
+    if (!ip) { setServerStatus('unknown'); void setServerAvailable(false); return; }
 
     const snapshot = await getCurrentSyncState().catch(() => null);
     if (snapshot?.active) {
@@ -148,10 +149,10 @@ export default function SettingsScreen() {
     try {
       const result = await checkDeviceConnection({ signal: controller.signal });
       clearTimeout(timeout);
-      setServerStatus(result.connected ? 'connected' : 'disconnected');
+      setServerStatus(result.connected ? 'connected' : 'disconnected'); void setServerAvailable(result.connected);
     } catch {
       clearTimeout(timeout);
-      setServerStatus('disconnected');
+      setServerStatus('disconnected'); void setServerAvailable(false);
     }
   }, []);
 
