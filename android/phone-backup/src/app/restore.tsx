@@ -32,7 +32,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { addSharedPostTapListener } from '../../notificationService';
-import { getPairedPeers, getLocalP2PFeed, saveP2PFeedItem } from '../../p2pSettings';
+import { getPairedPeers, getLocalP2PFeed, saveP2PFeedItem, deleteP2PFeedItem } from '../../p2pSettings';
 import { setUIPriorityMode, getCurrentSyncState } from '../../backgroundTask';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
@@ -1154,6 +1154,13 @@ function ManageShareModal({
   const { keyboardHeight } = useModalKeyboardHeight();
   const groupId = item?.group_id || null;
   const initialCaption = item?.group_caption || item?.caption || '';
+  // Determine whether this post lives in the local P2P feed (no server round-trip needed).
+  const isP2PPost =
+    item?.is_p2p === true ||
+    (typeof groupId === 'string' && groupId.startsWith('p2p_')) ||
+    (item?.share_id != null && String(item.share_id).startsWith('p2p_'));
+  // Stable identifier for P2P operations — prefer group_id, fall back to share_id.
+  const p2pPostId = groupId || (item?.share_id != null ? String(item.share_id) : null);
 
   const [caption, setCaption] = useState(initialCaption);
   const [savingCaption, setSavingCaption] = useState(false);
@@ -1176,9 +1183,12 @@ function ManageShareModal({
     setCaption(item.group_caption || item.caption || '');
     setFiles(item.group_items && item.group_items.length > 0 ? item.group_items : [item]);
 
+    // Use p2pPostId (group_id or share_id) for P2P target lookup so it works
+    // even when groupId and share_id differ in prefix format.
+    const targetsQueryId = isP2PPost ? p2pPostId : groupId;
     Promise.all([
       getAllDevices().catch(() => ({ devices: [] })),
-      groupId ? getShareGroupTargets(groupId).catch(() => ({ targets: [] })) : Promise.resolve({ targets: [] }),
+      targetsQueryId ? getShareGroupTargets(targetsQueryId).catch(() => ({ targets: [] })) : Promise.resolve({ targets: [] }),
     ])
       .then(([devRes, tgtRes]) => {
         if (!active) return;
@@ -1193,10 +1203,12 @@ function ManageShareModal({
   }, [visible, item, groupId]);
 
   const handleSaveCaption = useCallback(async () => {
-    if (!groupId) return;
+    // For P2P posts use p2pPostId (group_id or share_id); for server posts require groupId.
+    const targetId = isP2PPost ? p2pPostId : groupId;
+    if (!targetId) return;
     setSavingCaption(true);
     try {
-      await editShareGroupCaption(groupId, caption.trim() || null);
+      await editShareGroupCaption(targetId, caption.trim() || null);
       hapticSuccess();
       onUpdated?.({ caption: caption.trim() });
       Alert.alert('Saved', 'Post caption updated successfully.');
@@ -1206,18 +1218,20 @@ function ManageShareModal({
     } finally {
       setSavingCaption(false);
     }
-  }, [groupId, caption, onUpdated]);
+  }, [isP2PPost, p2pPostId, groupId, caption, onUpdated]);
 
   const handleToggleRecipient = useCallback(async (dev: { device_id: string; device_name: string; display_name?: string }) => {
-    if (!groupId) return;
+    // For P2P posts use p2pPostId; for server posts require groupId.
+    const targetId = isP2PPost ? p2pPostId : groupId;
+    if (!targetId) return;
     const isCurrent = targets.some((t) => t.target_device_id === dev.device_id);
     setTogglingId(dev.device_id);
     try {
       if (isCurrent) {
-        await removeShareTarget(groupId, dev.device_id);
+        await removeShareTarget(targetId, dev.device_id);
         setTargets((prev) => prev.filter((t) => t.target_device_id !== dev.device_id));
       } else {
-        await addShareGroupTarget(groupId, dev.device_id);
+        await addShareGroupTarget(targetId, dev.device_id);
         setTargets((prev) => [
           ...prev,
           {
@@ -1234,7 +1248,7 @@ function ManageShareModal({
     } finally {
       setTogglingId(null);
     }
-  }, [groupId, targets]);
+  }, [isP2PPost, p2pPostId, groupId, targets]);
 
   const handleRemoveFile = useCallback((file: RemoteFile) => {
     if (file.share_id == null) return;
@@ -1251,13 +1265,14 @@ function ManageShareModal({
             const isLastFile = files.length <= 1;
             setRemovingFileId(file.share_id!);
             try {
-              const isP2P = (typeof file.share_id === 'string' && file.share_id.startsWith('p2p_')) || (typeof groupId === 'string' && groupId.startsWith('p2p_'));
+              const isP2P = isP2PPost || (typeof file.share_id === 'string' && file.share_id.startsWith('p2p_')) || (typeof groupId === 'string' && groupId.startsWith('p2p_'));
               if (isP2P) {
+                const p2pId = p2pPostId || (typeof groupId === 'string' ? groupId : null) || String(file.share_id);
                 if (isLastFile) {
-                  await deleteShareGroup(groupId || String(file.share_id));
+                  await deleteShareGroup(p2pId);
                 } else {
                   const feed = await getLocalP2PFeed();
-                  const targetPost = (feed || []).find((p: any) => String(p.id) === String(groupId) || String(p.id) === String(item?.group_id));
+                  const targetPost = (feed || []).find((p: any) => String(p.id) === String(p2pId) || String(p.id) === String(item?.group_id));
                   if (targetPost && Array.isArray(targetPost.files)) {
                     targetPost.files = targetPost.files.filter((f: any, idx: number) => {
                       const fId = `${targetPost.id}_${idx}`;
@@ -1287,7 +1302,7 @@ function ManageShareModal({
         },
       ]
     );
-  }, [files.length, onClose, onDeleted, onUpdated, groupId, item?.group_id]);
+  }, [files.length, onClose, onDeleted, onUpdated, isP2PPost, p2pPostId, groupId, item?.group_id]);
 
   const handleDeletePost = useCallback(() => {
     if (deleting) return;
@@ -1302,9 +1317,11 @@ function ManageShareModal({
           onPress: async () => {
             setDeleting(true);
             try {
-              if (groupId) {
-                await deleteShareGroup(groupId);
-              } else if (item?.share_id != null) {
+              // For P2P posts use p2pPostId (group_id or share_id); server posts use groupId.
+              const deleteId = isP2PPost ? p2pPostId : groupId;
+              if (deleteId) {
+                await deleteShareGroup(deleteId);
+              } else if (!isP2PPost && item?.share_id != null) {
                 await deleteShare(item.share_id);
               }
               hapticSuccess();
@@ -1320,7 +1337,7 @@ function ManageShareModal({
         },
       ]
     );
-  }, [groupId, item, deleting, onClose, onDeleted]);
+  }, [isP2PPost, p2pPostId, groupId, item, deleting, onClose, onDeleted]);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -4959,7 +4976,19 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           style: 'destructive',
           onPress: async () => {
             try {
-              if (file.group_id && serverConfig?.deviceId) {
+              const isP2PItem =
+                file.is_p2p ||
+                (typeof file.group_id === 'string' && file.group_id.startsWith('p2p_')) ||
+                (file.share_id != null && String(file.share_id).startsWith('p2p_'));
+
+              if (isP2PItem) {
+                // P2P received posts: remove entirely from local feed storage so
+                // it doesn't reappear after the next p2p-feed-updated refresh.
+                const localId = file.group_id || String(file.share_id ?? '');
+                if (localId) {
+                  await deleteP2PFeedItem(localId);
+                }
+              } else if (file.group_id && serverConfig?.deviceId) {
                 await removeShareTarget(file.group_id, serverConfig.deviceId);
               } else if (file.share_id != null && serverConfig?.deviceId) {
                 await removeShareTarget(String(file.share_id), serverConfig.deviceId);
