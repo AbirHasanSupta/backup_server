@@ -9,9 +9,9 @@ import {
 import { getDeviceIp } from './serverDiscovery';
 import { syncFeedWithPeer } from './p2pClient';
 
-const PROBE_TIMEOUT_MS = 1200;
-const SWEEP_TIMEOUT_MS = 800;
-const BATCH_SIZE = 25;
+const PROBE_TIMEOUT_MS = 1000;
+const SWEEP_TIMEOUT_MS = 600;
+const BATCH_SIZE = 40;
 
 let Network = null;
 try {

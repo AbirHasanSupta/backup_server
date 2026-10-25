@@ -1950,11 +1950,24 @@ export default function ReelsScreen() {
       }));
     });
 
+    const p2pFeedSub = DeviceEventEmitter.addListener('p2p-feed-updated', () => {
+      void loadReels(true, { skipFullScreenLoading: true });
+    });
+    const feedSub = DeviceEventEmitter.addListener('feed_updated', () => {
+      void loadReels(true, { skipFullScreenLoading: true });
+    });
+    const modeSub = DeviceEventEmitter.addListener('app_mode_changed', () => {
+      void loadReels(true, { skipFullScreenLoading: true });
+    });
+
     return () => {
       saveSub.remove();
       reactionSub.remove();
       repostSub.remove();
       commentSub.remove();
+      p2pFeedSub.remove();
+      feedSub.remove();
+      modeSub.remove();
     };
   }, []);
 

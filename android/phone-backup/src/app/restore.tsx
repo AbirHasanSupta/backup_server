@@ -89,6 +89,7 @@ import {
 } from '../../downloader';
 import { checkDeviceConnection } from '../../uploader';
 import { getServerIp, resolveReachableServer } from '../../settings';
+import { checkServerReachable, setServerAvailable, isServerMode } from '../../connectionMode';
 import { prunePreviewCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticSelection, hapticLongPress, hapticSuccess, hapticError, hapticLight } from '@/utils/haptics';
@@ -165,6 +166,7 @@ type RemoteFile = {
   shared_by_device_id?: string;
   comment_count?: number;
   created_at?: number;
+  id?: string | number;
   group_id?: string;
   group_caption?: string | null;
   group_items?: RemoteFile[];
@@ -4201,7 +4203,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
   }, []);
 
-  // Server connection check
+  // Server connection check: fast probe (≤1500ms) with mutual exclusivity (server vs p2p)
   const checkServer = useCallback(async (alive?: () => boolean) => {
     const stillAlive = alive ?? (() => true);
     const ip = await getServerIp();
@@ -4209,7 +4211,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     if (!ip) {
       sharedSourcesGen.current += 1;
       setIsLoadingSources(false);
-      setServerStatus('unknown');
+      setServerStatus('disconnected');
+      await setServerAvailable(false);
       return;
     }
 
@@ -4217,6 +4220,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     if (!stillAlive()) return;
     if (snapshot?.active) {
       setServerStatus('connected');
+      await setServerAvailable(true);
       loadServerConfig();
       if (sourceModeRef.current === 'shared') {
         void loadSharedSources();
@@ -4224,65 +4228,19 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       return;
     }
 
-    // Keep showing connected while re-probing to avoid offline UI flash.
-    setServerStatus(prev => (prev === 'connected' ? prev : 'checking'));
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
-    try {
-      const result = await checkDeviceConnection({ signal: controller.signal });
-      if (!stillAlive()) return;
-      if (result.connected) {
-        setServerStatus('connected');
-        loadServerConfig();
-        if (sourceModeRef.current === 'shared') {
-          void loadSharedSources();
-        }
-        return;
-      }
+    const reachable = await checkServerReachable({ timeoutMs: 1500 });
+    if (!stillAlive()) return;
 
-      // Attempt mesh failover re-discovery before marking offline
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false, reconnected: false }));
-      if (!stillAlive()) return;
-      if (resolved.ok && resolved.reconnected) {
-        try {
-          const retry = await checkDeviceConnection();
-          if (!stillAlive()) return;
-          if (retry.connected) {
-            setServerStatus('connected');
-            loadServerConfig();
-            if (sourceModeRef.current === 'shared') {
-              void loadSharedSources();
-            }
-            return;
-          }
-        } catch {}
+    if (reachable) {
+      setServerStatus('connected');
+      loadServerConfig();
+      if (sourceModeRef.current === 'shared') {
+        void loadSharedSources();
       }
+    } else {
       sharedSourcesGen.current += 1;
       setIsLoadingSources(false);
       setServerStatus('disconnected');
-    } catch {
-      if (!stillAlive()) return;
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false, reconnected: false }));
-      if (!stillAlive()) return;
-      if (resolved.ok && resolved.reconnected) {
-        try {
-          const retry = await checkDeviceConnection();
-          if (!stillAlive()) return;
-          if (retry.connected) {
-            setServerStatus('connected');
-            loadServerConfig();
-            if (sourceModeRef.current === 'shared') {
-              void loadSharedSources();
-            }
-            return;
-          }
-        } catch {}
-      }
-      sharedSourcesGen.current += 1;
-      setIsLoadingSources(false);
-      setServerStatus('disconnected');
-    } finally {
-      clearTimeout(timeout);
     }
   }, [loadServerConfig, loadSharedSources]);
 
@@ -4723,10 +4681,24 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
   }, [isOffline, isDownloading, sourceMode, selectedSourceId, isFeedMode, sortField, sortDir, loadServerConfig]);
 
-  // Real-time WebSocket push listener: refresh feed and update social metrics live
+  // Real-time listener: refresh feed and update social metrics live
   useEffect(() => {
-    const feedSub = DeviceEventEmitter.addListener('feed_updated', () => {
+    const feedSub = DeviceEventEmitter.addListener('feed_updated', (newPost?: any) => {
       if (isFeedMode && restoreMountedRef.current) {
+        if (newPost && (newPost.id || newPost.group_id)) {
+          setFiles((prev) => {
+            const mapped = mapFeedItem(newPost);
+            const targetId = mapped.group_id || mapped.id;
+            const existingIdx = prev.findIndex((f) => (f.group_id || f.id) === targetId);
+            if (existingIdx >= 0) {
+              const updated = [...prev];
+              updated[existingIdx] = { ...updated[existingIdx], ...mapped };
+              return updated;
+            }
+            return [mapped, ...prev];
+          });
+        }
+        fetchingRef.current = false;
         void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
       }
     });
@@ -4738,8 +4710,29 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       }
     });
 
-    const p2pShareSub = DeviceEventEmitter.addListener('p2p-share-received', () => {
+    const p2pShareSub = DeviceEventEmitter.addListener('p2p-share-received', (newPost?: any) => {
       if (isFeedMode && restoreMountedRef.current) {
+        if (newPost && (newPost.id || newPost.group_id)) {
+          setFiles((prev) => {
+            const mapped = mapFeedItem(newPost);
+            const targetId = mapped.group_id || mapped.id;
+            const existingIdx = prev.findIndex((f) => (f.group_id || f.id) === targetId);
+            if (existingIdx >= 0) {
+              const updated = [...prev];
+              updated[existingIdx] = { ...updated[existingIdx], ...mapped };
+              return updated;
+            }
+            return [mapped, ...prev];
+          });
+        }
+        fetchingRef.current = false;
+        void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
+      }
+    });
+
+    const modeSub = DeviceEventEmitter.addListener('app_mode_changed', ({ mode }: { mode: string }) => {
+      if (isFeedMode && restoreMountedRef.current) {
+        setServerStatus(mode === 'server' ? 'connected' : 'disconnected');
         fetchingRef.current = false;
         void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
       }
@@ -4765,6 +4758,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       feedSub.remove();
       p2pFeedSub.remove();
       p2pShareSub.remove();
+      modeSub.remove();
       socialSub.remove();
     };
   }, [isFeedMode, handleFetch]);
@@ -4932,9 +4926,18 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         onProgress(`Uploading ${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'}…`);
       }
 
-      await createDirectPostShare(targetIds, caption, selectedFiles, onProgress);
+      const shareRes = await createDirectPostShare(targetIds, caption, selectedFiles, onProgress);
       hapticSuccess();
       setDirectPostFiles([]);
+
+      if (shareRes?.post) {
+        setFiles((prev) => {
+          const mapped = mapFeedItem(shareRes.post);
+          const targetId = mapped.group_id || mapped.id;
+          if (prev.some((f) => (f.group_id || f.id) === targetId)) return prev;
+          return [mapped, ...prev];
+        });
+      }
 
       fetchingRef.current = false;
       void handleFetch({ quiet: false, ignoreOffline: true, preserveSelection: true });

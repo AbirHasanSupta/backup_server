@@ -26,6 +26,7 @@ import {
 } from '../../backgroundTask';
 import { checkDeviceConnection } from '../../uploader';
 import { getPairedPeers } from '../../p2pSettings';
+import { setServerAvailable } from '../../connectionMode';
 import {
   getServerIp,
   getServerName,
@@ -285,6 +286,7 @@ export default function HomeScreen() {
 
     if (syncingRef.current) {
       setServerStatus('connected');
+      void setServerAvailable(true);
       failureCountRef.current = 0;
       return;
     }
@@ -296,6 +298,7 @@ export default function HomeScreen() {
       const result = await checkDeviceConnection({ signal: controller.signal });
       clearTimeout(timeout);
       setServerStatus(result.connected ? 'connected' : 'removed');
+      void setServerAvailable(result.connected);
       if (result.connected) {
         failureCountRef.current = 0;
       } else {
@@ -305,6 +308,7 @@ export default function HomeScreen() {
       clearTimeout(timeout);
       failureCountRef.current += 1;
       setServerStatus('disconnected');
+      void setServerAvailable(false);
     }
   }, []);
 

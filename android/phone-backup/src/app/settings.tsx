@@ -787,7 +787,7 @@ export default function SettingsScreen() {
                 <Text style={styles.toggleLabel}>Local Wi-Fi P2P</Text>
                 <Text style={styles.toggleSub}>
                   {p2pEnabled
-                    ? `Active on port ${p2pStatus?.port || 8088}. Connect phone-to-phone without desktop server.`
+                    ? `Active on port ${p2pStatus?.port || 8088}. Connect phone-to-phone (desktop server is unavailable).`
                     : 'Disabled. Devices communicate through desktop server only.'}
                 </Text>
               </View>

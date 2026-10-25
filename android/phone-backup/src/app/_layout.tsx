@@ -34,6 +34,7 @@ import {
 import { getTodaysMemories, getRandomFlashback, generateRewindReel, getRewindReelStatus } from '../../downloader';
 import { connectWebSocket, disconnectWebSocket } from '../../websocketClient';
 import { initializeP2PServer } from '../../p2pServer';
+import { initConnectionMode, checkServerReachable } from '../../connectionMode';
 import {
   getStreakData,
 
@@ -206,9 +207,9 @@ function RootLayoutContent() {
       await setupNotifications().catch(() => {});
       await registerBackgroundTask();
       syncWidgetServerConfig().catch(() => {});
-      resolveReachableServer().catch(() => {});
-      connectWebSocket().catch(() => {});
       initializeP2PServer();
+      initConnectionMode().catch(() => {});
+      connectWebSocket().catch(() => {});
       checkAndNotifyMemories().catch(() => {});
       checkAndNotifyFlashback().catch(() => {});
       checkAndNotifyStreakRisk().catch(() => {});
@@ -224,7 +225,7 @@ function RootLayoutContent() {
       if (Network?.addNetworkStateListener) {
         networkSub = Network.addNetworkStateListener((state: any) => {
           if (state?.isConnected) {
-            resolveReachableServer({ force: true }).catch(() => {});
+            checkServerReachable({ force: true, timeoutMs: 1500 }).catch(() => {});
             connectWebSocket().catch(() => {});
             checkAndNotifyNewShares().catch(() => {});
           }

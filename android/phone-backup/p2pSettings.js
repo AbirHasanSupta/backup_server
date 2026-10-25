@@ -181,14 +181,21 @@ export async function updatePeerLastSeen(peerId, ip, port) {
 
 // ─── Local P2P Feed & Storage ───────────────────────────────────────────────
 
+let _cachedLocalP2PFeed = null;
+
 /**
  * Get locally cached peer shares received over direct P2P.
+ * Uses high-speed memory cache backed by AsyncStorage.
  * @returns {Promise<Array<any>>}
  */
 export async function getLocalP2PFeed() {
+  if (_cachedLocalP2PFeed !== null) {
+    return _cachedLocalP2PFeed;
+  }
   const raw = await AsyncStorage.getItem(P2P_KEYS.P2P_LOCAL_FEED);
   const items = safeJsonParse(raw, []);
-  return Array.isArray(items) ? items : [];
+  _cachedLocalP2PFeed = Array.isArray(items) ? items : [];
+  return _cachedLocalP2PFeed;
 }
 
 /**
@@ -208,7 +215,8 @@ export async function saveP2PFeedItem(feedItem) {
 
   // Keep up to 200 recent P2P posts locally
   const trimmed = feed.slice(0, 200);
-  await AsyncStorage.setItem(P2P_KEYS.P2P_LOCAL_FEED, JSON.stringify(trimmed));
+  _cachedLocalP2PFeed = trimmed;
+  AsyncStorage.setItem(P2P_KEYS.P2P_LOCAL_FEED, JSON.stringify(trimmed)).catch(() => {});
   DeviceEventEmitter.emit('p2p-feed-updated', trimmed);
   return trimmed;
 }
@@ -220,7 +228,8 @@ export async function removeP2PFeedItem(feedItemId) {
   const feed = await getLocalP2PFeed();
   const idStr = String(feedItemId);
   const filtered = feed.filter((item) => item.id !== idStr && String(item.group_id) !== idStr);
-  await AsyncStorage.setItem(P2P_KEYS.P2P_LOCAL_FEED, JSON.stringify(filtered));
+  _cachedLocalP2PFeed = filtered;
+  AsyncStorage.setItem(P2P_KEYS.P2P_LOCAL_FEED, JSON.stringify(filtered)).catch(() => {});
   DeviceEventEmitter.emit('p2p-feed-updated', filtered);
   return filtered;
 }
