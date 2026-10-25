@@ -870,6 +870,7 @@ function CommentsSheet({
   onClose,
   onCommentAdded,
   onCommentDeleted,
+  isOwnReel,
 }: {
   visible: boolean;
   mediaId?: number | string | null;
@@ -877,6 +878,7 @@ function CommentsSheet({
   onClose: () => void;
   onCommentAdded: (count: number) => void;
   onCommentDeleted: (count: number) => void;
+  isOwnReel?: boolean;
 }) {
   const insets = useSafeAreaInsets();
   const { keyboardHeight } = useModalKeyboardHeight();
@@ -968,7 +970,7 @@ function CommentsSheet({
                     <Text style={[cs.cText, { color: colors.text }]}>{c.text}</Text>
                     <Text style={[cs.cTime, { color: colors.textMuted }]}>{formatTimeAgo(c.created_at)}</Text>
                   </View>
-                  {c.is_own && (
+                  {(c.is_own || isOwnReel) && (
                     <TouchableOpacity onPress={() => handleDelete(c.id)} hitSlop={10}>
                       <AppIcon androidName="delete" iosName="trash" color={colors.error} size={16} />
                     </TouchableOpacity>
@@ -1998,6 +2000,7 @@ export default function SavedReelsScreen() {
         onClose={() => setCommentsTarget(null)}
         onCommentAdded={(count) => commentsTarget && handleCommentAdded(commentsTarget.reel_id, count)}
         onCommentDeleted={(count) => commentsTarget && handleCommentDeleted(commentsTarget.reel_id, count)}
+        isOwnReel={commentsTarget?.is_own_post === true}
       />
 
       {/* Repost Modal */}
