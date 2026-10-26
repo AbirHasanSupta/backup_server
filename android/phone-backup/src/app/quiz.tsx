@@ -411,6 +411,7 @@ export default function QuizScreen() {
         visible={feedShareVisible}
         count={items.length + 1}
         colors={colors}
+        excludeDeviceIds={serverConfig?.deviceId ? [serverConfig.deviceId] : []}
         onClose={() => { if (!sharing) setFeedShareVisible(false); }}
         onSubmit={handleFeedShareSubmit}
       />

@@ -17,7 +17,13 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
-import { listShareTargetDevices, MAX_SHARE_POST_FILES } from '../../downloader';
+import {
+  listShareTargetDevices,
+  MAX_SHARE_POST_FILES,
+  DESKTOP_SHARE_DEVICE_ID,
+  resolveExcludedShareRecipientIds,
+  filterShareRecipientDevices,
+} from '../../downloader';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 const { height: SCREEN_H } = Dimensions.get('window');
@@ -62,12 +68,15 @@ export function ShareModal({
     setLoading(true);
     setSelected(new Set());
     setCaption('');
-    const excludedSet = new Set(excludeDeviceIds || []);
-    listShareTargetDevices()
-      .then((res) => {
+    Promise.all([
+      listShareTargetDevices(),
+      resolveExcludedShareRecipientIds(excludeDeviceIds),
+    ])
+      .then(([res, excluded]) => {
         if (!active) return;
         const list = Array.isArray(res?.devices) ? res.devices : [];
-        const filtered = list.filter((d) => d.device_id !== 'desktop-server' && !excludedSet.has(d.device_id));
+        excluded.add(DESKTOP_SHARE_DEVICE_ID);
+        const filtered = filterShareRecipientDevices(list, excluded);
         setDevices(filtered);
         setSelected(new Set(filtered.map((d) => d.device_id)));
       })
@@ -102,13 +111,17 @@ export function ShareModal({
       );
       return;
     }
+    const targetIds = Array.from(selected).filter(
+      (id) => id !== DESKTOP_SHARE_DEVICE_ID && devices.some((d) => d.device_id === id),
+    );
+    if (targetIds.length === 0) return;
     setSending(true);
     try {
-      await onSubmit(Array.from(selected), caption.trim());
+      await onSubmit(targetIds, caption.trim());
     } finally {
       setSending(false);
     }
-  }, [count, selected, sending, caption, onSubmit]);
+  }, [count, selected, sending, caption, onSubmit, devices]);
 
   // On Android, Modal windows are not subject to windowSoftInputMode="adjustResize",
   // so we manually shift the sheet up by the keyboard height.

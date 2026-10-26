@@ -1737,6 +1737,7 @@ export default function MemoriesScreen() {
         visible={shareVisible}
         count={shareItems.length > 0 ? shareItems.length : 1}
         colors={colors}
+        excludeDeviceIds={serverConfig?.deviceId ? [serverConfig.deviceId] : []}
         onClose={() => { setShareVisible(false); setShareItem(null); setShareItems([]); setShareKind(null); setShareTitle(null); }}
         onSubmit={handleShareSubmit}
       />

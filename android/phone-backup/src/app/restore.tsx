@@ -79,6 +79,9 @@ import {
   removeShareTarget,
   getShareGroupTargets,
   getAllDevices,
+  DESKTOP_SHARE_DEVICE_ID,
+  resolveExcludedShareRecipientIds,
+  filterShareRecipientDevices,
   addShareGroupTarget,
   editShareGroupCaption,
   deleteShare,
@@ -1189,18 +1192,20 @@ function ManageShareModal({
     Promise.all([
       getAllDevices().catch(() => ({ devices: [] })),
       targetsQueryId ? getShareGroupTargets(targetsQueryId).catch(() => ({ targets: [] })) : Promise.resolve({ targets: [] }),
+      resolveExcludedShareRecipientIds(serverConfig?.deviceId ? [serverConfig.deviceId] : []),
     ])
-      .then(([devRes, tgtRes]) => {
+      .then(([devRes, tgtRes, excluded]) => {
         if (!active) return;
-        setAllDevices(Array.isArray(devRes?.devices) ? devRes.devices : []);
-        setTargets(Array.isArray(tgtRes?.targets) ? tgtRes.targets : []);
+        excluded.add(DESKTOP_SHARE_DEVICE_ID);
+        setAllDevices(filterShareRecipientDevices(Array.isArray(devRes?.devices) ? devRes.devices : [], excluded));
+        setTargets(filterShareRecipientDevices(Array.isArray(tgtRes?.targets) ? tgtRes.targets : [], excluded));
       })
       .finally(() => {
         if (active) setLoading(false);
       });
 
     return () => { active = false; };
-  }, [visible, item, groupId, isP2PPost, p2pPostId]);
+  }, [visible, item, groupId, isP2PPost, p2pPostId, serverConfig?.deviceId]);
 
   const handleSaveCaption = useCallback(async () => {
     // For P2P posts use p2pPostId (group_id or share_id); for server posts require groupId.
@@ -1224,6 +1229,9 @@ function ManageShareModal({
     // For P2P posts use p2pPostId; for server posts require groupId.
     const targetId = isP2PPost ? p2pPostId : groupId;
     if (!targetId) return;
+    if (dev.device_id === DESKTOP_SHARE_DEVICE_ID || (serverConfig?.deviceId && dev.device_id === serverConfig.deviceId)) {
+      return;
+    }
     const isCurrent = targets.some((t) => t.target_device_id === dev.device_id);
     setTogglingId(dev.device_id);
     try {
@@ -1248,7 +1256,7 @@ function ManageShareModal({
     } finally {
       setTogglingId(null);
     }
-  }, [isP2PPost, p2pPostId, groupId, targets]);
+  }, [isP2PPost, p2pPostId, groupId, targets, serverConfig]);
 
   const handleRemoveFile = useCallback((file: RemoteFile) => {
     if (file.share_id == null) return;
@@ -6046,6 +6054,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         visible={shareModalVisible}
         count={singleShareFile ? 1 : selectedPaths.size}
         colors={colors}
+        excludeDeviceIds={serverConfig?.deviceId ? [serverConfig.deviceId] : []}
         onClose={() => { setShareModalVisible(false); setSingleShareFile(null); }}
         onSubmit={handleShareSubmit}
       />

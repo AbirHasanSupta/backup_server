@@ -197,7 +197,10 @@ def is_media_or_post_creator(media_id: int, device_id: str) -> bool:
 
 def get_share_target_devices(device_id: str) -> List[Dict[str, Any]]:
     if is_postgres():
-        return execute_read_query("SELECT device_id, device_name, device_model, username, status FROM devices WHERE device_id != ? AND status = 'accepted' ORDER BY last_seen DESC", (device_id,))
+        return execute_read_query(
+            "SELECT device_id, device_name, device_model, username, status FROM devices WHERE device_id != ? AND device_id != 'desktop-server' AND status = 'accepted' ORDER BY last_seen DESC",
+            (device_id,),
+        )
     return db_get_share_target_devices(device_id)
 
 

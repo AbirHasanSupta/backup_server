@@ -1279,6 +1279,7 @@ export default function PlacesScreen() {
         visible={feedShareVisible}
         count={1}
         colors={colors}
+        excludeDeviceIds={serverConfig?.deviceId ? [serverConfig.deviceId] : []}
         onClose={() => setFeedShareVisible(false)}
         onSubmit={handleFeedShareSubmit}
       />
@@ -1287,6 +1288,7 @@ export default function PlacesScreen() {
         visible={albumShareVisible}
         count={activeTrip ? tripItems.length : clusterItems.length}
         colors={colors}
+        excludeDeviceIds={serverConfig?.deviceId ? [serverConfig.deviceId] : []}
         onClose={() => setAlbumShareVisible(false)}
         onSubmit={handleAlbumShareSubmit}
       />

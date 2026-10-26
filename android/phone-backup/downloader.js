@@ -1222,9 +1222,56 @@ export async function updateUsernameOnServer(username) {
   });
 }
 
+/** Canonical id of the desktop/main server — never a share recipient. */
+export const DESKTOP_SHARE_DEVICE_ID = 'desktop-server';
+
+/**
+ * Local device ids plus the desktop server that must never appear in recipient lists.
+ * @param {string[] | Set<string> | null | undefined} extraExcludeIds
+ * @returns {Promise<Set<string>>}
+ */
+export async function resolveExcludedShareRecipientIds(extraExcludeIds = []) {
+  const excluded = new Set([DESKTOP_SHARE_DEVICE_ID]);
+  const extras = extraExcludeIds instanceof Set ? extraExcludeIds : extraExcludeIds || [];
+  for (const id of extras) {
+    if (id) excluded.add(id);
+  }
+  try {
+    const { deviceId } = await getConfig();
+    if (deviceId) excluded.add(deviceId);
+  } catch {}
+  try {
+    const ident = await getLocalPeerIdentity();
+    if (ident?.deviceId) excluded.add(ident.deviceId);
+  } catch {}
+  return excluded;
+}
+
+/**
+ * Drop the current device and desktop/main server from a recipient/device list.
+ * @template {{device_id?: string, target_device_id?: string}} T
+ * @param {T[]} devices
+ * @param {Set<string> | string[] | null | undefined} excludedIds
+ * @returns {T[]}
+ */
+export function filterShareRecipientDevices(devices, excludedIds) {
+  const excluded = new Set(excludedIds || []);
+  excluded.add(DESKTOP_SHARE_DEVICE_ID);
+  return (Array.isArray(devices) ? devices : []).filter((d) => {
+    const id = d && (d.device_id || d.target_device_id);
+    return Boolean(id) && !excluded.has(id);
+  });
+}
+
+async function withShareRecipientFilter(devices, extraExcludeIds) {
+  const excluded = await resolveExcludedShareRecipientIds(extraExcludeIds);
+  return filterShareRecipientDevices(devices, excluded);
+}
+
 /**
  * List accepted devices this device can share to (safe fields only — never a token).
  * Mutual exclusivity: returns Server devices when in Server Mode, P2P peers when in P2P Mode.
+ * Always omits the current device and the desktop/main server.
  * @returns {Promise<{devices: {device_id: string, device_name: string, device_model: string}[]}>}
  */
 export async function listShareTargetDevices() {
@@ -1240,7 +1287,7 @@ export async function listShareTargetDevices() {
           3000
         );
         if (Array.isArray(res?.devices)) {
-          return { devices: res.devices };
+          return { devices: await withShareRecipientFilter(res.devices) };
         }
       }
     } catch (err) {
@@ -1266,7 +1313,7 @@ export async function listShareTargetDevices() {
     }));
   } catch {}
 
-  return { devices: p2pDevices };
+  return { devices: await withShareRecipientFilter(p2pDevices) };
 }
 
 /**
@@ -2381,50 +2428,12 @@ export async function getShareGroupTargets(groupId) {
 
 /**
  * Fetch all accepted devices (for recipient management in Manage Post).
- * Merges server devices with local P2P paired devices for offline/hybrid support.
+ * Same source as share-target lists so own device and the desktop/main server
+ * are never offered as recipients.
  * @returns {Promise<{devices: {device_id: string, device_name: string, display_name: string}[]}>}
  */
 export async function getAllDevices() {
-  const isServer = await isServerMode();
-  if (!isServer) {
-    try {
-      const peers = await getPairedPeers();
-      return {
-        devices: (peers || []).map((p) => ({
-          device_id: p.peerId,
-          device_name: p.deviceName || p.username || 'Peer Device',
-          display_name: p.deviceName || p.username || 'Peer Device',
-        })),
-      };
-    } catch {
-      return { devices: [] };
-    }
-  }
-
-  let serverDevices = [];
-  try {
-    const { ip, port, key, deviceId } = await getConfig();
-    const res = await fetchJsonWithTimeout(
-      `http://${ip}:${port}/api/devices?device_id=${encodeURIComponent(deviceId)}`,
-      { headers: { Authorization: `Bearer ${key}` } },
-      3000
-    );
-    serverDevices = res?.devices || [];
-  } catch (err) {
-    if (isNetworkFailure(err)) {
-      await setServerAvailable(false);
-      const peers = await getPairedPeers().catch(() => []);
-      return {
-        devices: (peers || []).map((p) => ({
-          device_id: p.peerId,
-          device_name: p.deviceName || p.username || 'Peer Device',
-          display_name: p.deviceName || p.username || 'Peer Device',
-        })),
-      };
-    }
-  }
-
-  return { devices: serverDevices };
+  return listShareTargetDevices();
 }
 
 /**

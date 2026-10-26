@@ -396,6 +396,7 @@ export default function RouletteScreen() {
         visible={feedShareVisible}
         count={1}
         colors={colors}
+        excludeDeviceIds={serverConfig?.deviceId ? [serverConfig.deviceId] : []}
         onClose={() => setFeedShareVisible(false)}
         onSubmit={handleFeedShareSubmit}
       />
