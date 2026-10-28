@@ -2451,8 +2451,11 @@ export function openModal(id) {
 }
 
 export function closeModal(id) {
-  el(id)?.classList.remove('flex');
-  el(id)?.classList.add('hidden');
+  const modal = el(id);
+  if (!modal) return;
+  if (id === 'media-modal') stopMediaModalPlayback();
+  modal.classList.remove('flex');
+  modal.classList.add('hidden');
 }
 
 window.openModal = openModal;
@@ -2460,23 +2463,65 @@ window.closeModal = closeModal;
 
 document.addEventListener('click', e => {
   if (e.target.classList.contains('modal-backdrop')) {
-    e.target.classList.remove('flex');
-    e.target.classList.add('hidden');
+    closeModal(e.target.id);
   }
 });
+
+let _activePreviewMedia = null;
+
+function stopMediaModalPlayback() {
+  const content = el('media-modal-content');
+  const mediaElements = new Set(content ? content.querySelectorAll('video, audio') : []);
+  if (_activePreviewMedia) mediaElements.add(_activePreviewMedia);
+  mediaElements.forEach(media => {
+    media.autoplay = false;
+    media.muted = true;
+    media.volume = 0;
+    media.pause();
+    try { media.currentTime = 0; } catch (_) {}
+    media.srcObject = null;
+    media.removeAttribute('src');
+    media.querySelectorAll('source').forEach(source => source.remove());
+    media.load();
+    media.remove();
+  });
+  content?.replaceChildren();
+  _activePreviewMedia = null;
+}
 
 function openMediaPreviewUrl(url, cat = 'photos') {
   openModal('media-modal');
   const cont = el('media-modal-content');
   if (!cont) return;
+  stopMediaModalPlayback();
 
   if (cat === 'videos' || (url && url.match(/\.(mp4|mov|mkv|webm)$/i))) {
-    cont.innerHTML = `<video src="${escHtml(url)}" controls autoplay class="max-h-[75vh] max-w-full rounded-xl shadow-2xl mx-auto"></video>`;
+    const video = document.createElement('video');
+    video.src = url;
+    video.controls = true;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.className = 'max-h-[75vh] max-w-full rounded-xl shadow-2xl mx-auto';
+    _activePreviewMedia = video;
+    cont.replaceChildren(video);
   } else {
     cont.innerHTML = `<img src="${escHtml(url)}" class="max-h-[75vh] max-w-full rounded-xl object-contain shadow-2xl mx-auto">`;
   }
 }
 window.openMediaPreviewUrl = openMediaPreviewUrl;
+
+const mediaModal = el('media-modal');
+if (mediaModal) {
+  new MutationObserver(() => {
+    if (mediaModal.classList.contains('hidden')) stopMediaModalPlayback();
+  }).observe(mediaModal, { attributes: true, attributeFilter: ['class'] });
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && mediaModal && !mediaModal.classList.contains('hidden')) {
+    closeModal('media-modal');
+  }
+});
 
 // ── 13. UI NOTIFICATIONS & PRIMITIVES ───────────────────────────────────────────
 
