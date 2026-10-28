@@ -7,7 +7,7 @@ import contextlib
 import os
 import time
 from pydantic import BaseModel
-from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import FileResponse, StreamingResponse
 
 from core.config import get_shared_dirs, load_config, save_config
@@ -92,6 +92,20 @@ class WarmPreviewsRequest(BaseModel):
 class AddGoogleDriveFolderRequest(BaseModel):
     link: str
     label: str | None = None
+
+
+@router.get("/api/shared/google-drive/api-key")
+@router.get("/shared/google-drive/api-key")
+async def get_shared_google_drive_api_key(
+    device_id: str,
+    response: Response,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    response.headers["Cache-Control"] = "no-store, private"
+    key = str(load_config().get("GOOGLE_DRIVE_API_KEY") or "").strip()
+    return {"api_key": key, "configured": bool(key)}
 
 
 def _find_shared_dir(source_id: str) -> dict | None:
@@ -662,7 +676,9 @@ async def add_shared_google_drive_folder(
         # A device-token request creates a source for that device only. Admin
         # API-key requests may intentionally publish it to every paired device.
         "device_ids": [device_id] if device_id else ["all"],
-        "available_in_reels": False,
+        # New shared Drive folders appear in the shared Reels shelf by default.
+        # Existing entries keep their stored setting until an admin changes it.
+        "available_in_reels": True,
     }
     dirs.append(entry)
     cfg["SHARED_DIRS"] = dirs

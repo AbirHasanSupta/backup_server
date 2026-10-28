@@ -62,7 +62,7 @@ import time
 import uuid
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, File, Header, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, File, Header, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel
 
 from config import APP_DATA_DIR, SHARED_DIRECT_POST_DIR, load_config, save_config
@@ -746,6 +746,18 @@ class GoogleDriveApiKeyRequest(BaseModel):
     api_key: str
 
 
+@router.get("/api/admin/google-drive/api-key")
+async def get_google_drive_api_key(
+    response: Response,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    _auth(authorization, token)
+    response.headers["Cache-Control"] = "no-store, private"
+    key = str(load_config().get("GOOGLE_DRIVE_API_KEY") or "").strip()
+    return {"api_key": key, "configured": bool(key)}
+
+
 @router.post("/api/admin/google-drive/api-key")
 async def save_google_drive_api_key(
     body: GoogleDriveApiKeyRequest,
@@ -839,7 +851,7 @@ async def add_admin_shared_folder(
             "type": "google_drive",
             "drive_folder_id": folder_id,
             "device_ids": body.device_ids if body.device_ids is not None else ["all"],
-            "available_in_reels": False,
+            "available_in_reels": bool(body.available_in_reels),
         }
         dirs.append(entry)
         cfg["SHARED_DIRS"] = dirs
@@ -924,7 +936,7 @@ async def update_admin_shared_folder(
     if body.device_ids is not None:
         entry["device_ids"] = body.device_ids
     if body.available_in_reels is not None:
-        entry["available_in_reels"] = False if entry.get("type") == "google_drive" else bool(body.available_in_reels)
+        entry["available_in_reels"] = bool(body.available_in_reels)
 
     dirs[idx] = entry
     cfg["SHARED_DIRS"] = dirs

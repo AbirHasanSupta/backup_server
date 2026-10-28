@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import threading
@@ -11,6 +12,7 @@ from pydantic import BaseModel, Field
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 
 from core.config import get_shared_dirs
+from core.google_drive import GoogleDriveError, all_files as drive_all_files, folder_id_from_link
 from core.path_utils import normalize_fs_path
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo, reels_repo, social_repo, file_repo
@@ -21,6 +23,125 @@ from storage.manager import get_storage
 router = APIRouter(tags=["Reels"])
 
 _REEL_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
+_DRIVE_REEL_CACHE_TTL = 60
+_drive_reel_cache: dict[str, tuple[list[dict], float]] = {}
+_drive_reel_cache_lock = threading.Lock()
+
+
+def _drive_reel_cache_key(source_key: str) -> str:
+    return f"google_drive:reel_candidates:{source_key}"
+
+
+def _get_cached_drive_videos(source_key: str, now: float) -> list[dict] | None:
+    with _drive_reel_cache_lock:
+        for key, (_, expires_at) in list(_drive_reel_cache.items()):
+            if expires_at <= now:
+                _drive_reel_cache.pop(key, None)
+        cached = _drive_reel_cache.get(source_key)
+        if cached and cached[1] > now:
+            return cached[0]
+
+    try:
+        from services.redis_service import get_redis_client
+
+        client = get_redis_client()
+        payload = client.get(_drive_reel_cache_key(source_key)) if client else None
+        if payload:
+            videos = json.loads(payload)
+            if isinstance(videos, list):
+                with _drive_reel_cache_lock:
+                    _drive_reel_cache[source_key] = (videos, now + _DRIVE_REEL_CACHE_TTL)
+                return videos
+    except Exception:
+        pass
+    return None
+
+
+def _store_cached_drive_videos(source_key: str, videos: list[dict], now: float) -> None:
+    with _drive_reel_cache_lock:
+        _drive_reel_cache[source_key] = (videos, now + _DRIVE_REEL_CACHE_TTL)
+    try:
+        from services.redis_service import get_redis_client
+
+        client = get_redis_client()
+        if client:
+            client.setex(_drive_reel_cache_key(source_key), _DRIVE_REEL_CACHE_TTL, json.dumps(videos))
+    except Exception:
+        pass
+
+
+def _drive_video_candidates(entry: dict) -> list[dict]:
+    """Read and briefly cache video files in a shared Google Drive tree."""
+    source_key = str(entry.get("id") or "")
+    now = time.monotonic()
+    cached = _get_cached_drive_videos(source_key, now)
+    if cached is not None:
+        return cached
+
+    try:
+        folder_id = str(entry.get("drive_folder_id") or folder_id_from_link(entry.get("path") or ""))
+        files = drive_all_files(folder_id)
+    except (GoogleDriveError, ValueError):
+        return []
+
+    videos = []
+    for item in files:
+        mime_type = str(item.get("mime_type") or "").lower()
+        extension = os.path.splitext(str(item.get("name") or item.get("path") or ""))[1].lower()
+        is_video = mime_type.startswith("video/") or (
+            mime_type in ("", "application/octet-stream", "binary/octet-stream")
+            and extension in _REEL_VIDEO_EXTS
+        )
+        if not is_video:
+            continue
+        videos.append({
+            "source_type": "reel_shared",
+            "source_key": source_key,
+            "path": item["path"],
+            "size": item.get("size", 0),
+            "modified_time": item.get("modified_time", 0),
+        })
+    _store_cached_drive_videos(source_key, videos, now)
+    return videos
+
+
+def _visible_drive_sources(entries: list[dict], device_id: str) -> list[dict]:
+    """Drive folders available to this device for offline browsing.
+
+    ``available_in_reels`` is intentionally ignored here: offline mode always
+    shows locally saved Drive folders, while the online Reels catalog applies
+    that setting separately.
+    """
+    visible = []
+    for entry in entries:
+        if entry.get("type") != "google_drive" and entry.get("kind") != "google_drive":
+            continue
+        tags = entry.get("device_ids", ["all"])
+        if tags and "all" not in tags and device_id not in tags:
+            continue
+        folder_id = str(entry.get("drive_folder_id") or "")
+        if not folder_id:
+            try:
+                folder_id = folder_id_from_link(entry.get("path") or "")
+            except GoogleDriveError:
+                continue
+        visible.append({
+            "id": entry.get("id"),
+            "label": entry.get("label") or "Shared folder",
+            "type": "google_drive",
+            "drive_folder_id": folder_id,
+            "drive_link": entry.get("path") or folder_id,
+        })
+    return visible
+
+
+def _online_shared_reel_entries(entries: list[dict], device_id: str) -> list[dict]:
+    return [
+        entry for entry in entries
+        if entry.get("id")
+        and (not entry.get("device_ids", ["all"]) or "all" in entry.get("device_ids", ["all"]) or device_id in entry.get("device_ids", ["all"]))
+        and entry.get("available_in_reels", entry.get("available_in_reel", True))
+    ]
 
 
 def _collect_shared_videos_from_dir(root: str) -> list[dict]:
@@ -225,20 +346,25 @@ async def get_shared_and_backups_reels(
     # slow and were repeated for every client page/scroll.  Read the durable
     # PostgreSQL index instead; its scanner handles filesystem changes off the
     # interactive request path.
-    shared_entries = [
-        entry for entry in get_shared_dirs()
-        if entry.get("id")
-        and (not entry.get("device_ids", ["all"]) or "all" in entry.get("device_ids", ["all"]) or device_id in entry.get("device_ids", ["all"]))
-        and entry.get("available_in_reels", entry.get("available_in_reel", True))
-    ]
+    all_shared_entries = get_shared_dirs()
+    visible_drive_sources = _visible_drive_sources(all_shared_entries, device_id)
+    shared_entries = _online_shared_reel_entries(all_shared_entries, device_id)
     shared_labels = {
         str(entry["id"]): entry.get("label") or "Shared folder"
         for entry in shared_entries
     }
+    drive_entries = [
+        entry for entry in shared_entries
+        if entry.get("type") == "google_drive" or entry.get("kind") == "google_drive"
+    ]
+    filesystem_shared_keys = [
+        str(entry["id"]) for entry in shared_entries
+        if str(entry["id"]) in shared_labels and entry not in drive_entries
+    ]
 
     async def _catalog_page(page_offset: int, page_limit: int) -> list[dict]:
         """Load only one catalog page; never materialize a whole library to scroll."""
-        async def _backups() -> list[dict]:
+        async def _backups(page_offset: int = page_offset, page_limit: int = page_limit) -> list[dict]:
             rows = await asyncio.to_thread(
                 file_repo.get_video_files_for_device, device_id, page_limit, page_offset
             )
@@ -248,14 +374,23 @@ async def get_shared_and_backups_reels(
                 "modified_time": row.get("modified_time", 0), "label": "My backup",
             } for row in rows]
 
-        async def _shared() -> list[dict]:
+        async def _shared(page_offset: int = page_offset, page_limit: int = page_limit) -> list[dict]:
+            fetch_to = page_offset + page_limit
             rows = await asyncio.to_thread(
                 reels_repo.get_indexed_shared_video_candidates,
-                list(shared_labels), page_limit, page_offset,
+                filesystem_shared_keys, fetch_to, 0,
             )
-            if not rows:
+            filesystem_candidates = [{
+                "source_type": "reel_shared", "source_key": row["source_key"],
+                "path": row["path"], "size": row.get("size", 0),
+                "modified_time": row.get("modified_time", 0),
+                "label": shared_labels.get(str(row["source_key"]), "Shared folder"),
+            } for row in rows]
+            if not filesystem_candidates:
                 disk_candidates = []
                 for entry in shared_entries:
+                    if entry in drive_entries:
+                        continue
                     sid = str(entry.get("id"))
                     root = os.path.abspath(normalize_fs_path(entry.get("path") or ""))
                     if not root or not os.path.isdir(root):
@@ -277,15 +412,22 @@ async def get_shared_and_backups_reels(
                         )
                     except Exception:
                         pass
-                    disk_candidates.sort(key=lambda r: (-int(r.get("modified_time") or 0), str(r.get("path"))))
-                    return disk_candidates[page_offset:page_offset + page_limit]
+                    filesystem_candidates = disk_candidates
 
-            return [{
-                "source_type": "reel_shared", "source_key": row["source_key"],
-                "path": row["path"], "size": row.get("size", 0),
-                "modified_time": row.get("modified_time", 0),
-                "label": shared_labels.get(str(row["source_key"]), "Shared folder"),
-            } for row in rows]
+            drive_lists = await asyncio.gather(*(
+                asyncio.to_thread(_drive_video_candidates, entry) for entry in drive_entries
+            ))
+            drive_candidates = [{
+                **candidate,
+                "label": shared_labels.get(str(candidate["source_key"]), "Shared folder"),
+            } for candidates in drive_lists for candidate in candidates]
+            candidates = [*filesystem_candidates, *drive_candidates]
+            candidates.sort(key=lambda row: (
+                -int(row.get("modified_time") or 0),
+                str(row.get("source_key") or ""),
+                str(row.get("path") or ""),
+            ))
+            return candidates[page_offset:page_offset + page_limit]
 
         if source == "backups":
             return await _backups()
@@ -296,25 +438,9 @@ async def get_shared_and_backups_reels(
         # only enough from each catalog to form that page, in parallel.
         fetch_to = page_offset + page_limit
         backup_rows, shared_rows = await asyncio.gather(
-            _backups() if page_offset == 0 else asyncio.to_thread(
-                file_repo.get_video_files_for_device, device_id, fetch_to, 0
-            ),
-            _shared() if page_offset == 0 else asyncio.to_thread(
-                reels_repo.get_indexed_shared_video_candidates, list(shared_labels), fetch_to, 0
-            ),
+            _backups(0, fetch_to),
+            _shared(0, fetch_to),
         )
-        if page_offset:
-            backup_rows = [{
-                "source_type": "reel_backup", "source_key": device_id,
-                "path": row["path"], "size": row.get("size", 0),
-                "modified_time": row.get("modified_time", 0), "label": "My backup",
-            } for row in backup_rows]
-            shared_rows = [{
-                "source_type": "reel_shared", "source_key": row["source_key"],
-                "path": row["path"], "size": row.get("size", 0),
-                "modified_time": row.get("modified_time", 0),
-                "label": shared_labels.get(str(row["source_key"]), "Shared folder"),
-            } for row in shared_rows]
         merged = [*backup_rows, *shared_rows]
         merged.sort(key=lambda row: (-int(row.get("modified_time") or 0), str(row["source_type"]), str(row["path"])))
         return merged[page_offset:page_offset + page_limit]
@@ -420,6 +546,9 @@ async def get_shared_and_backups_reels(
         "reels": reels,
         "has_more": has_more_candidates,
         "total": len(reels),
+        # These device-authorized folder links let the Android client keep its
+        # offline Drive shelf in sync without an additional list request.
+        "drive_sources": visible_drive_sources,
         # The client must advance past filtered watched rows as well as the
         # visible page, otherwise they are fetched again after every scroll.
         "next_offset": scan_offset,

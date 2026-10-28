@@ -12,7 +12,7 @@ import time
 import uuid
 from pydantic import BaseModel
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from core.config import APP_DATA_DIR, SHARED_DIRECT_POST_DIR, SHARED_QUIZ_DIR, SHARED_REWIND_DIR, get_shared_dirs
 from core.path_utils import normalize_fs_path
@@ -224,6 +224,49 @@ def _resolve_share_path(share: dict) -> str:
         return normalize_fs_path(relative_path)
 
     raise HTTPException(status_code=400, detail="Unknown share source type")
+
+
+def _library_drive_source(share: dict) -> dict | None:
+    if share.get("source_type") != "reel_shared" or not share.get("is_library_reel"):
+        return None
+    for entry in get_shared_dirs():
+        if entry.get("id") == share.get("source_key") and (
+            entry.get("type") == "google_drive" or entry.get("kind") == "google_drive"
+        ):
+            return entry
+    return None
+
+
+async def _library_drive_metadata(share: dict) -> tuple[str, dict] | None:
+    entry = _library_drive_source(share)
+    if not entry:
+        return None
+    try:
+        from core.google_drive import ensure_descendant, folder_id_from_link
+
+        root_id = str(entry.get("drive_folder_id") or folder_id_from_link(entry.get("path") or ""))
+        relative_path = str(share.get("relative_path") or "").replace("\\", "/").strip("/")
+        file_id = relative_path.split("/", 1)[0]
+        if not file_id:
+            raise HTTPException(status_code=404, detail="Google Drive file not found")
+        metadata = await asyncio.to_thread(ensure_descendant, root_id, file_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Google Drive file is not available") from exc
+    video_extensions = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
+    filename = relative_path.split("/", 1)[-1]
+    mime_type = str(metadata.get("mimeType") or "").lower()
+    is_video = (
+        mime_type.startswith("video/")
+        or (
+            mime_type in ("", "application/octet-stream", "binary/octet-stream")
+            and os.path.splitext(filename)[1].lower() in video_extensions
+        )
+    )
+    if not is_video:
+        raise HTTPException(status_code=404, detail="Google Drive video is not available")
+    return file_id, metadata
 
 
 @router.get("/feed")
@@ -779,6 +822,11 @@ async def download_share_item(
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     share = _authorize_share_access(share_id, device_id)
+    drive_file = await _library_drive_metadata(share)
+    if drive_file:
+        from api.v1.files import _drive_media_response
+        file_id, metadata = drive_file
+        return await asyncio.to_thread(_drive_media_response, file_id, request, metadata)
     path = _resolve_share_path(share)
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -796,6 +844,11 @@ async def preview_share_item(
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     share = _authorize_share_access(share_id, device_id)
+    drive_file = await _library_drive_metadata(share)
+    if drive_file:
+        from api.v1.files import _drive_media_response
+        file_id, metadata = drive_file
+        return await asyncio.to_thread(_drive_media_response, file_id, request, metadata)
     path = _resolve_share_path(share)
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")
@@ -818,6 +871,21 @@ async def thumbnail_share_item(
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     share = _authorize_share_access(share_id, device_id)
+    drive_file = await _library_drive_metadata(share)
+    if drive_file:
+        from api.v1.files import _fetch_drive_thumbnail
+        _, metadata = drive_file
+        thumbnail_url = metadata.get("thumbnailLink")
+        if not thumbnail_url:
+            raise HTTPException(status_code=404, detail="Thumbnail is not available")
+        try:
+            content, media_type = await asyncio.to_thread(_fetch_drive_thumbnail, thumbnail_url)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="Google Drive thumbnail is not available") from exc
+        return StreamingResponse(
+            iter([content]), media_type=media_type,
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
     path = _resolve_share_path(share)
     if not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="File not found")

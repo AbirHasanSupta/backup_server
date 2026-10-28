@@ -23,6 +23,7 @@ import { isServerMode, setServerAvailable } from './connectionMode';
 const P2PServerModule = NativeModules.PhoneBackupP2PServer;
 const DRIVE_SOURCES_KEY = 'google_drive_shared_folders_v1';
 const DRIVE_API_KEY_STORAGE_KEY = 'google_drive_api_key_v1';
+const DRIVE_API_KEY_SOURCE_STORAGE_KEY = 'google_drive_api_key_source_v1';
 const DRIVE_EXPORT_FORMATS = {
   'application/vnd.google-apps.document': ['application/pdf', '.pdf'],
   'application/vnd.google-apps.spreadsheet': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx'],
@@ -30,11 +31,64 @@ const DRIVE_EXPORT_FORMATS = {
   'application/vnd.google-apps.drawing': ['application/pdf', '.pdf'],
 };
 let DRIVE_API_KEY = Constants.expoConfig?.extra?.googleDriveApiKey || '';
+let DRIVE_API_KEY_SOURCE = DRIVE_API_KEY ? 'build' : 'none';
+let DRIVE_API_KEY_STORAGE_LOADED = false;
+let _localDriveReelCache = { key: '', reels: [], expiresAt: 0 };
 
 async function getDriveApiKey() {
-  if (DRIVE_API_KEY) return DRIVE_API_KEY;
-  DRIVE_API_KEY = (await AsyncStorage.getItem(DRIVE_API_KEY_STORAGE_KEY)) || '';
+  if (!DRIVE_API_KEY_STORAGE_LOADED) {
+    const [savedKey, savedSource] = await Promise.all([
+      AsyncStorage.getItem(DRIVE_API_KEY_STORAGE_KEY),
+      AsyncStorage.getItem(DRIVE_API_KEY_SOURCE_STORAGE_KEY),
+    ]);
+    if (String(savedKey || '').trim()) {
+      DRIVE_API_KEY = String(savedKey).trim();
+      DRIVE_API_KEY_SOURCE = savedSource === 'server' ? 'server' : 'user';
+    }
+    DRIVE_API_KEY_STORAGE_LOADED = true;
+  }
   return DRIVE_API_KEY;
+}
+
+export async function saveGoogleDriveApiKey(value, source = null) {
+  const key = String(value || '').trim();
+  if (!key) return '';
+  const keySource = source || (
+    DRIVE_API_KEY === key && DRIVE_API_KEY_SOURCE === 'server' ? 'server' : 'user'
+  );
+  DRIVE_API_KEY = key;
+  DRIVE_API_KEY_SOURCE = keySource;
+  DRIVE_API_KEY_STORAGE_LOADED = true;
+  _localDriveReelCache.expiresAt = 0;
+  await Promise.all([
+    AsyncStorage.setItem(DRIVE_API_KEY_STORAGE_KEY, key),
+    AsyncStorage.setItem(DRIVE_API_KEY_SOURCE_STORAGE_KEY, keySource),
+  ]);
+  return key;
+}
+
+export async function getGoogleDriveApiKey() {
+  const localKey = await getDriveApiKey();
+  // A key typed by the user is the phone's chosen offline key. If the only
+  // local value came from the build, prefer the current server .env value when
+  // online so the field reflects the effective server configuration.
+  if (DRIVE_API_KEY_SOURCE === 'user' || !(await isServerMode())) return localKey;
+  try {
+    const result = await fetchJsonWithMeshRetry(async () => {
+      const { ip, port, key, deviceId } = await getConfig();
+      if (!ip || !port) throw new Error('Server not set up. Add it in Settings.');
+      return {
+        url: `http://${ip}:${port}/shared/google-drive/api-key?device_id=${encodeURIComponent(deviceId)}`,
+        options: { headers: { Authorization: `Bearer ${key}` } },
+      };
+    });
+    const serverKey = String(result?.api_key || '').trim();
+    if (serverKey) return await saveGoogleDriveApiKey(serverKey, 'server');
+  } catch {
+    // The Drive-key field remains usable for a manually entered key when the
+    // server is disconnected or has no key configured.
+  }
+  return localKey;
 }
 
 function driveFolderId(link) {
@@ -95,7 +149,7 @@ async function listDriveChildren(folderId) {
   do {
     const page = await driveRequest('files', {
       q: `'${folderId}' in parents and trashed = false`,
-      fields: 'nextPageToken,files(id,name,mimeType,size,modifiedTime)',
+      fields: 'nextPageToken,files(id,name,mimeType,size,modifiedTime,webContentLink,thumbnailLink)',
       pageSize: '1000',
       supportsAllDrives: 'true',
       includeItemsFromAllDrives: 'true',
@@ -588,8 +642,7 @@ export async function listSharedSources() {
 export async function addGoogleDriveSource(link, label = '', apiKey = '') {
   const folderId = driveFolderId(link);
   if (apiKey.trim()) {
-    DRIVE_API_KEY = apiKey.trim();
-    await AsyncStorage.setItem(DRIVE_API_KEY_STORAGE_KEY, DRIVE_API_KEY);
+    await saveGoogleDriveApiKey(apiKey);
   }
   if (await isServerMode()) {
     try {
@@ -690,7 +743,16 @@ async function driveFilesForFolder(folderId) {
     for (const item of children) {
       const relativePath = parentPath ? `${parentPath}/${item.name}` : item.name;
       if (item.mimeType === 'application/vnd.google-apps.folder') queue.push({ id: item.id, parentPath: relativePath });
-      else result.push({ path: driveFilePath(item, parentPath), name: driveDisplayName(item.name, item.mimeType), drive_id: item.id, size: Number(item.size || 0), modified_time: driveTimestamp(item.modifiedTime) });
+      else result.push({
+        path: driveFilePath(item, parentPath),
+        name: driveDisplayName(item.name, item.mimeType),
+        drive_id: item.id,
+        mime_type: item.mimeType,
+        web_content_link: item.webContentLink || null,
+        thumbnail_link: item.thumbnailLink || null,
+        size: Number(item.size || 0),
+        modified_time: driveTimestamp(item.modifiedTime),
+      });
     }
   }
   return result;
@@ -835,6 +897,94 @@ export async function downloadFile(relativePath, destUri, onProgress) {
     );
     return downloadResumable.downloadAsync();
   });
+}
+
+function localDriveVideoUrl(file) {
+  if (file.web_content_link) return file.web_content_link;
+  const apiKey = DRIVE_API_KEY;
+  return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.drive_id)}?alt=media&supportsAllDrives=true&key=${encodeURIComponent(apiKey)}`;
+}
+
+function localDriveReelId(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) || 1;
+}
+
+async function getLocalDriveVideoReels() {
+  const sources = await getLocalDriveSources();
+  const cacheKey = sources.map(source => `${source.id}:${source.label || ''}`).sort().join('|');
+  if (_localDriveReelCache.key === cacheKey && _localDriveReelCache.expiresAt > Date.now()) {
+    return _localDriveReelCache.reels;
+  }
+  const folders = await Promise.all(sources.map(async source => {
+    try {
+      const files = await driveFilesForFolder(source.folderId);
+      return files
+        .filter(file => String(file.mime_type || '').toLowerCase().startsWith('video/') || /\.(mp4|mov|avi|mkv|webm|3gp|m4v|wmv)$/i.test(file.name || file.path))
+        .map(file => {
+          const identity = `${source.folderId}:${file.drive_id}`;
+          const uri = localDriveVideoUrl(file);
+          return {
+            reel_id: `local-drive:${identity}`,
+            share_id: localDriveReelId(identity),
+            path: file.path,
+            shared_by: source.label || 'Shared folder',
+            shared_by_device_id: `local:${source.id}`,
+            is_repost: false,
+            user_has_reposted: false,
+            original_author: { device_id: `local:${source.id}`, name: source.label || 'Shared folder', display_name: source.label || 'Shared folder' },
+            reposted_by: null,
+            caption: null,
+            created_at: file.modified_time || 0,
+            reaction_counts: {},
+            user_reactions: [],
+            comment_count: 0,
+            repost_count: 0,
+            view_count: 0,
+            duration: 0,
+            quality_score: 0,
+            tokens: [],
+            size: file.size || 0,
+            is_own_post: false,
+            is_saved: false,
+            is_unseen: false,
+            group_id: null,
+            uri,
+            thumb_uri: file.thumbnail_link || uri,
+            library_source: 'reel_shared',
+            source_type: 'shared',
+            source_key: source.id,
+            is_local_drive: true,
+          };
+        });
+    } catch (error) {
+      console.warn(`[SharedReels] Could not list local Drive folder ${source.id}:`, error?.message || error);
+      return [];
+    }
+  }));
+  const reels = folders.flat().sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  _localDriveReelCache = { key: cacheKey, reels, expiresAt: Date.now() + 30000 };
+  return reels;
+}
+
+async function getOfflineSharedReels(offset, limit, cachedResponse = null) {
+  const driveReels = await getLocalDriveVideoReels();
+  const cachedReels = Array.isArray(cachedResponse?.reels) ? cachedResponse.reels : [];
+  const drivePaths = new Set(driveReels.map(reel => reel.path));
+  const combined = [
+    ...driveReels,
+    ...cachedReels.filter(reel => !drivePaths.has(reel.path)),
+  ].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  return {
+    reels: combined.slice(offset, offset + limit),
+    has_more: offset + limit < combined.length || Boolean(cachedResponse?.has_more),
+    total: combined.length,
+    next_offset: Math.min(offset + limit, combined.length),
+  };
 }
 
 /**
@@ -3271,6 +3421,7 @@ export async function getLibraryReels(source, offset = 0, limit = 30, seed = 0) 
   const isServer = await isServerMode();
   if (!isServer) {
     const cached = _uiMemoryCache.reelsFeed[source];
+    if (source === 'shared') return getOfflineSharedReels(offset, limit, cached);
     if (cached) return cached;
     return { reels: [], has_more: false, total: 0 };
   }
@@ -3284,6 +3435,38 @@ export async function getLibraryReels(source, offset = 0, limit = 30, seed = 0) 
         options: { headers: { Authorization: `Bearer ${key}` } },
       };
     });
+    // Persist device-authorized Drive sources returned with the shelf so the
+    // next server-off session can use them without a second network request.
+    if (source === 'shared' && Array.isArray(res?.drive_sources) && res.drive_sources.length) {
+      const localSources = await getLocalDriveSources();
+      let changed = false;
+      for (const remote of res.drive_sources) {
+        if (!remote?.drive_folder_id || !remote?.drive_link) continue;
+        const existing = localSources.find(item => item.folderId === remote.drive_folder_id);
+        if (existing) {
+          if (remote.label && existing.label !== remote.label) {
+            existing.label = remote.label;
+            changed = true;
+          }
+          if (existing.link !== remote.drive_link) {
+            existing.link = remote.drive_link;
+            changed = true;
+          }
+        } else {
+          localSources.push({
+            id: `local_drive_${remote.drive_folder_id}`,
+            folderId: remote.drive_folder_id,
+            link: remote.drive_link,
+            label: remote.label || 'Shared folder',
+          });
+          changed = true;
+        }
+      }
+      if (changed) await AsyncStorage.setItem(DRIVE_SOURCES_KEY, JSON.stringify(localSources)).catch(() => {});
+    }
+    if (source === 'shared' && offset === 0) {
+      void getGoogleDriveApiKey().catch(() => {});
+    }
     if (offset === 0 && res && Array.isArray(res.reels)) {
       _uiMemoryCache.reelsFeed[source] = res;
     }
@@ -3292,6 +3475,7 @@ export async function getLibraryReels(source, offset = 0, limit = 30, seed = 0) 
     if (isNetworkFailure(err)) {
       await setServerAvailable(false);
       const cached = _uiMemoryCache.reelsFeed[source];
+      if (source === 'shared') return getOfflineSharedReels(offset, limit, cached);
       if (cached) return cached;
       return { reels: [], has_more: false, total: 0 };
     }
@@ -3305,7 +3489,13 @@ export async function getLibraryReels(source, offset = 0, limit = 30, seed = 0) 
  * @param {string} relativePath
  * @param {(progress: number) => void} [onProgress]
  */
-export async function saveReelToDevice(shareId, relativePath, onProgress) {
+/**
+ * @param {number|string} shareId
+ * @param {string} relativePath
+ * @param {(progress: number) => void} [onProgress]
+ * @param {string|null} [sourceUrl]
+ */
+export async function saveReelToDevice(shareId, relativePath, onProgress, sourceUrl = null) {
   const { status } = await MediaLibrary.requestPermissionsAsync();
   if (status !== 'granted') {
     throw new Error('Media permission denied. Enable photo/video access in device settings.');
@@ -3330,11 +3520,14 @@ export async function saveReelToDevice(shareId, relativePath, onProgress) {
   const tmpUri = `${FileSystem.cacheDirectory}${filename}`;
 
   try {
-    const result = await downloadShareFile(shareId, tmpUri, (written, total) => {
-      if (total > 0) {
-        onProgress?.(written / total);
-      }
-    });
+    const progress = (written, total) => {
+      if (total > 0) onProgress?.(written / total);
+    };
+    const result = sourceUrl
+      ? await FileSystem.createDownloadResumable(sourceUrl, tmpUri, {}, ({ totalBytesWritten, totalBytesExpectedToWrite }) => {
+        progress(totalBytesWritten, totalBytesExpectedToWrite);
+      }).downloadAsync()
+      : await downloadShareFile(shareId, tmpUri, progress);
     if (result && result.status >= 400) {
       throw new Error(`Download failed with server status ${result.status}`);
     }

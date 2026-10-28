@@ -335,7 +335,12 @@ def all_files(folder_id: str) -> list[dict]:
     pending = [(folder_id, "")]
     while pending:
         current_id, parent_path = pending.pop()
-        for item in list_children(current_id):
+        children = list_children(current_id)
+        # The Reels catalog uses this same traversal to verify playback and
+        # thumbnails. Remember every descendant against the shared root so
+        # those requests do not need to crawl the Drive tree again.
+        _remember_descendants(folder_id, children)
+        for item in children:
             name = display_name(item.get("name", "file"), item.get("mimeType"))
             rel = f"{parent_path}/{name}" if parent_path else name
             if item.get("mimeType") == FOLDER_MIME:

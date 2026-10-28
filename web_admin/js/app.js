@@ -1276,6 +1276,19 @@ function renderSharedFolders() {
   }).join('');
 }
 
+async function loadSharedDriveApiKey() {
+  const input = el('shared-drive-key-input');
+  const valueWhenRequested = input.value;
+  try {
+    const result = await api.get('/api/admin/google-drive/api-key');
+    const key = String(result.api_key || '');
+    input.dataset.savedValue = key;
+    if (input.value === valueWhenRequested) input.value = key;
+  } catch (_) {
+    input.dataset.savedValue = input.value;
+  }
+}
+
 window.openAddSharedFolderModal = async function() {
   openModal('shared-folder-modal');
   el('shared-modal-title').textContent = 'Add Shared Folder';
@@ -1288,6 +1301,8 @@ window.openAddSharedFolderModal = async function() {
 
   el('shared-label-input').value = '';
   el('shared-drive-key-input').value = '';
+  el('shared-drive-key-input').dataset.savedValue = '';
+  void loadSharedDriveApiKey();
   el('shared-all-devices-chk').checked = true;
   el('shared-reels-chk').checked = true;
   el('shared-reels-chk').disabled = false;
@@ -1312,8 +1327,9 @@ window.openAddSharedFolderModal = async function() {
 
     try {
       const isDriveSource = /drive\.google\.com/.test(path) || /\/folders\//.test(path);
-      if (isDriveSource && driveApiKey) {
+      if (isDriveSource && driveApiKey && driveApiKey !== el('shared-drive-key-input').dataset.savedValue) {
         await api.post('/api/admin/google-drive/api-key', { api_key: driveApiKey });
+        el('shared-drive-key-input').dataset.savedValue = driveApiKey;
       }
       await api.post('/api/admin/shared-folders/add', {
         path,
@@ -1353,11 +1369,13 @@ async function openManageSharedFolderAccess(folderId) {
 
   el('shared-label-input').value = f.label || '';
   el('shared-drive-key-input').value = '';
+  el('shared-drive-key-input').dataset.savedValue = '';
+  void loadSharedDriveApiKey();
   const currentTags = f.device_ids || ['all'];
   const isAll = !currentTags.length || currentTags.includes('all');
   el('shared-all-devices-chk').checked = isAll;
   el('shared-reels-chk').checked = f.available_in_reels !== false;
-  el('shared-reels-chk').disabled = f.type === 'google_drive';
+  el('shared-reels-chk').disabled = false;
 
   renderSharedFolderDevicesChecklist(currentTags);
 
@@ -1366,8 +1384,13 @@ async function openManageSharedFolderAccess(folderId) {
     const isAllNow = el('shared-all-devices-chk').checked;
     const deviceIds = isAllNow ? ['all'] : qsa('.shared-dev-chk:checked').map(c => c.value);
     const availableInReels = el('shared-reels-chk').checked;
+    const driveApiKey = el('shared-drive-key-input').value.trim();
 
     try {
+      if (driveApiKey && driveApiKey !== el('shared-drive-key-input').dataset.savedValue) {
+        await api.post('/api/admin/google-drive/api-key', { api_key: driveApiKey });
+        el('shared-drive-key-input').dataset.savedValue = driveApiKey;
+      }
       await api.post('/api/admin/shared-folders/update', {
         id: folderId,
         label,

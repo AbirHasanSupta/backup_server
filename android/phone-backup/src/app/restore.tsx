@@ -51,6 +51,8 @@ import {
   listSharedSources,
   getLocalDriveSharedSources,
   addGoogleDriveSource,
+  getGoogleDriveApiKey,
+  saveGoogleDriveApiKey,
   removeGoogleDriveSource,
   downloadSharedFile,
   getConfig,
@@ -2164,8 +2166,26 @@ function SourceSelector({
   const [showDriveModal, setShowDriveModal] = useState(false);
   const [driveLink, setDriveLink] = useState('');
   const [driveApiKey, setDriveApiKey] = useState('');
+  const driveApiKeyRef = useRef(driveApiKey);
   const [driveBusy, setDriveBusy] = useState(false);
   const selectedSource = sharedSources.find(s => s.id === selectedSourceId);
+
+  useEffect(() => {
+    driveApiKeyRef.current = driveApiKey;
+  }, [driveApiKey]);
+
+  useEffect(() => {
+    if (!showDriveModal) return;
+    let active = true;
+    const valueWhenRequested = driveApiKeyRef.current;
+    getGoogleDriveApiKey().then(key => {
+      if (active && key && driveApiKeyRef.current === valueWhenRequested) {
+        driveApiKeyRef.current = key;
+        setDriveApiKey(key);
+      }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [showDriveModal]);
 
   if (!showModeSwitch) return null;
 
@@ -2295,7 +2315,10 @@ function SourceSelector({
               )}
             </>
           )}
-          <Modal visible={showDriveModal} transparent animationType="fade" onRequestClose={() => setShowDriveModal(false)}>
+          <Modal visible={showDriveModal} transparent animationType="fade" onRequestClose={() => {
+            void saveGoogleDriveApiKey(driveApiKey).catch(() => {});
+            setShowDriveModal(false);
+          }}>
             <View style={srcStyles.driveModalBackdrop}>
               <View style={[srcStyles.driveModal, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
                 <Text style={[srcStyles.driveModalTitle, { color: colors.text }]}>Add Google Drive folder</Text>
@@ -2311,12 +2334,15 @@ function SourceSelector({
                 />
                 <TextInput
                   value={driveApiKey}
-                  onChangeText={setDriveApiKey}
+                  onChangeText={value => {
+                    driveApiKeyRef.current = value;
+                    setDriveApiKey(value);
+                  }}
+                  onEndEditing={() => { void saveGoogleDriveApiKey(driveApiKey).catch(() => {}); }}
                   placeholder="Google Drive API key (needed for offline/P2P)"
                   placeholderTextColor={colors.textMuted}
                   autoCapitalize="none"
                   autoCorrect={false}
-                  secureTextEntry
                   style={[srcStyles.driveInput, { color: colors.text, borderColor: colors.surfaceBorder, backgroundColor: colors.surfaceElevated }]}
                 />
                 <Text style={[srcStyles.driveModalHint, { color: colors.textMuted }]}>Optional when the connected server already has a key. Add one here for offline and P2P use; it is saved in the app.</Text>
@@ -2325,7 +2351,10 @@ function SourceSelector({
                   style={[srcStyles.driveHelpLink, { color: colors.primary }]}
                 >Need an API key? Open Google Cloud Console</Text>
                 <View style={srcStyles.driveModalActions}>
-                  <TouchableOpacity onPress={() => setShowDriveModal(false)} style={srcStyles.driveAction}>
+                  <TouchableOpacity onPress={() => {
+                    void saveGoogleDriveApiKey(driveApiKey).catch(() => {});
+                    setShowDriveModal(false);
+                  }} style={srcStyles.driveAction}>
                     <Text style={{ color: colors.textSecondary, fontWeight: '700' }}>Cancel</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -2336,7 +2365,6 @@ function SourceSelector({
                       try {
                         await onAddDriveFolder(driveLink.trim(), driveApiKey.trim());
                         setDriveLink('');
-                        setDriveApiKey('');
                         setShowDriveModal(false);
                       } catch (err: any) {
                         Alert.alert('Google Drive folder', sanitizeErrorMessage(err, 'Could not access this folder.'));
@@ -4448,7 +4476,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     // The picker merges the server sources with locally saved public Drive
     // sources, so it remains useful while offline and in P2P mode.
     void loadSharedSources();
-  }, [loadSharedSources, serverStatus]);
+  }, [loadSharedSources]);
 
   const handleSourceSelect = useCallback((source: SharedSource) => {
     setSelectedSourceId(source.id);

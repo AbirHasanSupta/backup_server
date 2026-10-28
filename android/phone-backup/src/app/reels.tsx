@@ -508,6 +508,7 @@ function ReelCardBase({
         tokens: item.tokens,
         group_id: item.group_id,
         timestamp: Date.now(),
+        is_local_drive: item.is_local_drive,
       });
     }
   }, [isActive, item]);
@@ -539,6 +540,7 @@ function ReelCardBase({
           tokens: item.tokens,
           group_id: item.group_id,
           timestamp: Date.now(),
+          is_local_drive: item.is_local_drive,
         });
       }
     };
@@ -584,7 +586,7 @@ function ReelCardBase({
     lastTapRef.current = now;
     if (isDouble) {
       if (singleTapTimerRef.current) { clearTimeout(singleTapTimerRef.current); singleTapTimerRef.current = null; }
-      if (!item.user_reactions?.includes('❤️')) onReact(item, '❤️');
+      if (!item.is_local_drive && !item.user_reactions?.includes('❤️')) onReact(item, '❤️');
       hapticSuccess();
       setShowHeart(true);
       heartScale.setValue(0);
@@ -840,7 +842,7 @@ function ReelCardBase({
         importantForAccessibility={show2x ? 'no-hide-descendants' : 'auto'}
       >
         {/* Like Button (Heart only) */}
-        <TouchableOpacity
+        {!item.is_local_drive && <TouchableOpacity
           style={s.actionBtn}
           onPress={toggleHeartLike}
           activeOpacity={0.75}
@@ -856,10 +858,10 @@ function ReelCardBase({
           <Text style={s.actionCount}>
             {totalReactions > 0 ? totalReactions : 'Like'}
           </Text>
-        </TouchableOpacity>
+        </TouchableOpacity>}
 
         {/* Comments Button */}
-        <TouchableOpacity
+        {!item.is_local_drive && <TouchableOpacity
           style={s.actionBtn}
           onPress={() => { hapticLight(); onOpenComments(item); }}
           activeOpacity={0.75}
@@ -875,10 +877,10 @@ function ReelCardBase({
           <Text style={s.actionCount}>
             {item.comment_count > 0 ? item.comment_count : 'Comment'}
           </Text>
-        </TouchableOpacity>
+        </TouchableOpacity>}
 
         {/* Share Button (Backup & Shared Folders) or Repost Button (Main Reels) */}
-        {isLibrary ? (
+        {!item.is_local_drive && (isLibrary ? (
           <TouchableOpacity
             style={s.actionBtn}
             onPress={() => { hapticLight(); onOpenShare?.(item); }}
@@ -913,10 +915,10 @@ function ReelCardBase({
               {(item.repost_count || 0) > 0 ? item.repost_count : 'Repost'}
             </Text>
           </TouchableOpacity>
-        )}
+        ))}
 
         {/* Save / Bookmark Button */}
-        <TouchableOpacity
+        {!item.is_local_drive && <TouchableOpacity
           style={s.actionBtn}
           onPress={() => { onToggleSave(item); }}
           activeOpacity={0.75}
@@ -932,7 +934,7 @@ function ReelCardBase({
           <Text style={s.actionCount}>
             {item.is_saved ? 'Saved' : 'Save'}
           </Text>
-        </TouchableOpacity>
+        </TouchableOpacity>}
 
         {/* Settings / Options Button (More) */}
         <TouchableOpacity
@@ -1269,7 +1271,7 @@ function ReelsSettingsModal({
     try {
       await saveReelToDevice(item.share_id, item.path, (p) => {
         setSaveProgress(p);
-      });
+      }, item.is_local_drive ? item.uri || undefined : undefined);
       setSaveSuccess(true);
       hapticSuccess();
       Alert.alert('Saved to device', 'This reel video has been saved to your photo gallery.');
@@ -1588,6 +1590,7 @@ export default function ReelsScreen() {
       engineStateRef.current,
       reelEngineScope(reelSectionRef.current),
     ).catch(() => {});
+    if (ev.is_local_drive) return;
     telemetryBatchRef.current.push(ev);
     if (telemetryBatchRef.current.length >= 5) {
       void flushTelemetry();

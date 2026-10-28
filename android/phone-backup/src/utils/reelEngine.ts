@@ -58,6 +58,8 @@ export type ReelItem = {
   library_source?: 'reel_backup' | 'reel_shared';
   source_type?: 'phone' | 'shared';
   source_key?: string;
+  /** Local Drive shelf reels have no server-side share/reaction identity. */
+  is_local_drive?: boolean;
 };
 
 export type PlaybackTelemetryEvent = {
@@ -78,6 +80,7 @@ export type PlaybackTelemetryEvent = {
   tokens?: string[];
   group_id?: string | null;
   timestamp: number;
+  is_local_drive?: boolean;
 };
 
 export type CreatorAffinity = {
