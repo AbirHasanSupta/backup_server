@@ -3721,6 +3721,30 @@ def get_device_shares_by_sharer(sharer_device_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_all_device_shares() -> list[dict]:
+    """Return every shared post item, newest first, with its author and group metadata."""
+    conn = get_read_conn()
+    rows = conn.execute(
+        """
+        SELECT ds.id AS share_id, ds.media_id, ds.source_type, ds.source_key,
+               ds.relative_path, ds.size, ds.modified_time, ds.caption,
+               ds.shared_by_device_id, ds.created_at, ds.share_group_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id,
+               d.device_name AS shared_by_name, d.username AS shared_by_username,
+               d.device_model AS shared_by_model,
+               COALESCE(dsg.caption, ds.caption) AS group_caption,
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title
+        FROM device_shares ds
+        LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        WHERE COALESCE(ds.is_library_reel, 0) = 0
+        ORDER BY ds.created_at DESC, ds.id ASC
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_all_share_targets_for_sharer(sharer_device_id: str) -> dict[str, list[dict]]:
     """Return all target devices for every group owned by sharer_device_id in one query.
 

@@ -189,6 +189,12 @@ html:not(.dark) .section-header { color: #64748b; }
   justify-content: center;
 }
 
+/* The filesystem picker can open from inside another modal (for example,
+   Add Shared Folder), so it must stack above the active form modal. */
+#fs-explorer-modal {
+  z-index: 70;
+}
+
 /* ── Tab Active Navigation ────────────────────────────────────────────────── */
 [data-tab].tab-active {
   color: #ffffff;

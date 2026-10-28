@@ -18,6 +18,7 @@ from database import (
     create_device_share as db_create_device_share,
     get_device_shares_for_target as db_get_device_shares_for_target,
     get_device_shares_by_sharer as db_get_device_shares_by_sharer,
+    get_all_device_shares as db_get_all_device_shares,
     get_device_share_by_id as db_get_device_share_by_id,
     get_share_targets_for_group as db_get_share_targets_for_group,
     delete_device_share_group as db_delete_device_share_group,
@@ -312,6 +313,29 @@ def get_device_shares_by_sharer(device_id: str) -> List[Dict[str, Any]]:
         """
         return execute_read_query(sql, (device_id,))
     return db_get_device_shares_by_sharer(device_id)
+
+
+def get_all_device_shares() -> List[Dict[str, Any]]:
+    """Return all user and desktop shared-post items for admin moderation."""
+    if is_postgres():
+        return execute_read_query(
+            """
+            SELECT ds.share_id, ds.media_id, ds.source_type, ds.source_key,
+                   ds.relative_path, ds.size, ds.modified_time, ds.caption,
+                   ds.shared_by_device_id, ds.created_at, ds.share_group_id,
+                   ds.original_shared_by_device_id, ds.repost_of_share_id,
+                   d.device_name AS shared_by_name, d.username AS shared_by_username,
+                   d.device_model AS shared_by_model,
+                   COALESCE(dsg.caption, ds.caption) AS group_caption,
+                   dsg.post_kind AS post_kind, dsg.post_title AS post_title
+            FROM device_shares ds
+            LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+            LEFT JOIN device_share_groups dsg ON dsg.group_id = ds.share_group_id
+            WHERE COALESCE(ds.is_library_reel, 0) = 0
+            ORDER BY ds.created_at DESC, ds.share_id ASC
+            """
+        )
+    return db_get_all_device_shares()
 
 
 def get_device_share_by_id(share_id: int) -> Dict[str, Any] | None:

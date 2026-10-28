@@ -46,6 +46,8 @@ Provides endpoints for the web admin dashboard:
       POST   /api/admin/posts/{group_id}/items/upload
       POST   /api/admin/posts/{group_id}/caption
       DELETE /api/admin/posts/{group_id}
+      GET    /api/admin/all-posts
+      DELETE /api/admin/all-posts/{group_id}
 
 All endpoints require API key auth (Bearer token).
 """
@@ -820,12 +822,17 @@ async def add_admin_shared_folder(
 ):
     _auth(authorization, token)
     raw_path = body.path.strip()
+    source_type = (body.source_type or "").strip().lower()
+    if source_type not in ("", "server", "google_drive"):
+        raise HTTPException(status_code=400, detail="Unsupported shared folder source type")
     drive_folder = False
     try:
         from core.google_drive import FOLDER_MIME, GoogleDriveError, folder_id_from_link, get_file, list_children
-        # Do not reinterpret ordinary relative directory names (for example,
-        # "holidayPhotos") as Drive IDs. Bare IDs require an explicit type.
-        drive_folder = body.source_type == "google_drive" or "/folders/" in raw_path or "drive.google.com" in raw_path
+        # Explicit server paths stay server paths. Retain URL inference only for
+        # older clients that do not send source_type.
+        drive_folder = source_type == "google_drive" or (
+            not source_type and ("/folders/" in raw_path or "drive.google.com" in raw_path)
+        )
         if drive_folder:
             folder_id = folder_id_from_link(raw_path)
             metadata = await asyncio.to_thread(get_file, folder_id)
@@ -1057,6 +1064,88 @@ async def list_admin_posts(
     }
 
 
+class BulkDeletePostsRequest(BaseModel):
+    group_ids: list[str]
+
+
+@router.post("/api/admin/posts/bulk-delete")
+async def bulk_delete_desktop_posts(
+    body: BulkDeletePostsRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    _auth(authorization, token)
+    deleted_ids = []
+    failed_ids = []
+    for group_id in dict.fromkeys(body.group_ids):
+        ok = await asyncio.to_thread(social_repo.delete_device_share_group, group_id, "desktop-server")
+        (deleted_ids if ok else failed_ids).append(group_id)
+    return {"ok": not failed_ids, "deleted_ids": deleted_ids, "failed_ids": failed_ids}
+
+
+@router.get("/api/admin/all-posts")
+async def list_all_admin_posts(
+    q: str = "",
+    device_filter: str | None = None,
+    offset: int = 0,
+    limit: int = 20,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    """Compact moderation list covering posts created by every device."""
+    _auth(authorization, token)
+    rows = await asyncio.to_thread(social_repo.get_all_device_shares)
+    groups: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for row in rows:
+        group_id = row.get("share_group_id") or str(row["share_id"])
+        if group_id not in groups:
+            groups[group_id] = []
+            order.append(group_id)
+        groups[group_id].append(row)
+
+    posts = []
+    author_devices = {}
+    query = q.strip().lower()
+    for group_id in order:
+        items = groups[group_id]
+        head = items[0]
+        device_id = head.get("shared_by_device_id") or "unknown"
+        device_name = device_repo.format_device_display_name(
+            username=head.get("shared_by_username"),
+            device_name=head.get("shared_by_name"),
+            device_model=head.get("shared_by_model"),
+            device_id=device_id,
+            fallback=device_id,
+        )
+        author = head.get("shared_by_username") or head.get("shared_by_name") or device_id
+        caption = head.get("group_caption") or head.get("caption") or ""
+        author_devices[device_id] = device_name
+        if query and query not in caption.lower() and query not in author.lower() and query not in device_name.lower():
+            continue
+        if device_filter and device_filter != "all" and device_filter != device_id:
+            continue
+        posts.append({
+            "group_id": group_id,
+            "caption": caption,
+            "created_at": head.get("created_at") or 0,
+            "shared_by": author,
+            "device_id": device_id,
+            "device_name": device_name,
+            "item_count": len(items),
+        })
+
+    return {
+        "posts": posts[offset:offset + limit],
+        "total": len(posts),
+        "has_more": offset + limit < len(posts),
+        "devices": [
+            {"device_id": device_id, "display_name": name}
+            for device_id, name in sorted(author_devices.items(), key=lambda item: item[1].lower())
+        ],
+    }
+
+
 @router.get("/api/admin/posts/{group_id}/targets")
 async def get_admin_post_targets(
     group_id: str,
@@ -1229,3 +1318,55 @@ async def delete_admin_post_group(
     if not ok:
         raise HTTPException(status_code=400, detail="Failed to delete post")
     return {"ok": True}
+
+
+@router.delete("/api/admin/all-posts/{group_id}")
+async def delete_any_admin_post(
+    group_id: str,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    _auth(authorization, token)
+    rows = await asyncio.to_thread(social_repo.get_all_device_shares)
+    matching = [r for r in rows if (r.get("share_group_id") or str(r.get("share_id"))) == group_id]
+    if not matching:
+        raise HTTPException(status_code=404, detail="Post not found")
+    owner = matching[0].get("shared_by_device_id")
+    actual_group_id = matching[0].get("share_group_id")
+    if actual_group_id:
+        ok = await asyncio.to_thread(social_repo.delete_device_share_group, actual_group_id, owner)
+    else:
+        ok = await asyncio.to_thread(social_repo.delete_device_share, matching[0]["share_id"], owner)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Post was already deleted")
+    return {"ok": True}
+
+
+@router.post("/api/admin/all-posts/bulk-delete")
+async def bulk_delete_any_admin_posts(
+    body: BulkDeletePostsRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    _auth(authorization, token)
+    rows = await asyncio.to_thread(social_repo.get_all_device_shares)
+    posts_by_id: dict[str, list[dict]] = {}
+    for row in rows:
+        group_id = row.get("share_group_id") or str(row.get("share_id"))
+        posts_by_id.setdefault(group_id, []).append(row)
+
+    deleted_ids = []
+    failed_ids = []
+    for group_id in dict.fromkeys(body.group_ids):
+        matching = posts_by_id.get(group_id, [])
+        if not matching:
+            failed_ids.append(group_id)
+            continue
+        owner = matching[0].get("shared_by_device_id")
+        actual_group_id = matching[0].get("share_group_id")
+        if actual_group_id:
+            ok = await asyncio.to_thread(social_repo.delete_device_share_group, actual_group_id, owner)
+        else:
+            ok = await asyncio.to_thread(social_repo.delete_device_share, matching[0]["share_id"], owner)
+        (deleted_ids if ok else failed_ids).append(group_id)
+    return {"ok": not failed_ids, "deleted_ids": deleted_ids, "failed_ids": failed_ids}

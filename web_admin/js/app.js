@@ -179,7 +179,7 @@ window.restartServer = async function() {
 
 // ── Tab Management ──────────────────────────────────────────────────────────────
 
-const TABS = ['dashboard', 'devices', 'post_to_devices', 'posts', 'shared_folders', 'settings', 'logs', 'history'];
+const TABS = ['dashboard', 'devices', 'post_to_devices', 'posts', 'all_posts', 'shared_folders', 'settings', 'logs', 'history'];
 let _currentTab = null;
 
 export function showTab(tabId) {
@@ -209,6 +209,7 @@ function loadTab(tabId) {
     case 'devices':         loadDevices();         break;
     case 'post_to_devices': loadPostForm();        break;
     case 'posts':           loadPosts();           break;
+    case 'all_posts':       loadAllPosts();        break;
     case 'shared_folders':  loadSharedFolders();   break;
     case 'settings':        loadSettings();        break;
     case 'logs':            loadLogs();            break;
@@ -269,6 +270,7 @@ async function loadDashboard() {
   await refreshDashboard();
   _dashInterval = setInterval(refreshDashboard, 15000);
 }
+window.loadDashboard = loadDashboard;
 
 async function refreshDashboard() {
   if (_currentTab !== 'dashboard') { clearInterval(_dashInterval); return; }
@@ -401,6 +403,7 @@ async function loadDevices() {
     if (con) con.innerHTML = errorBanner(e.message);
   }
 }
+window.loadDevices = loadDevices;
 
 function renderDevices(devices) {
   const q = (el('devices-search')?.value || '').trim().toLowerCase();
@@ -550,6 +553,15 @@ document.addEventListener('click', e => {
     case 'delete-post':
       confirmDeletePost(btn.dataset.groupId);
       break;
+    case 'delete-any-post':
+      confirmDeleteAnyPost(btn.dataset.groupId);
+      break;
+    case 'bulk-delete-posts':
+      confirmBulkDeleteDesktopPosts();
+      break;
+    case 'bulk-delete-any-posts':
+      confirmBulkDeleteAnyPosts();
+      break;
     case 'preview-media': {
       const url = btn.dataset.url;
       const cat = btn.dataset.cat || 'photos';
@@ -565,6 +577,30 @@ document.addEventListener('click', e => {
     case 'fs-select-folder':
       fsSelectFolder(btn.dataset.path);
       break;
+  }
+});
+
+document.addEventListener('change', e => {
+  const input = e.target.closest('[data-action]');
+  if (!input) return;
+  const action = input.dataset.action;
+
+  if (action === 'select-post-item') {
+    input.checked ? _selectedPostGroups.add(input.dataset.groupId) : _selectedPostGroups.delete(input.dataset.groupId);
+    renderPosts();
+  } else if (action === 'select-post-page') {
+    _postsData.forEach(post => input.checked
+      ? _selectedPostGroups.add(post.group_id)
+      : _selectedPostGroups.delete(post.group_id));
+    renderPosts();
+  } else if (action === 'select-any-post') {
+    input.checked ? _selectedAnyPostGroups.add(input.dataset.groupId) : _selectedAnyPostGroups.delete(input.dataset.groupId);
+    renderAllPosts();
+  } else if (action === 'select-all-posts-page') {
+    _allPostsData.forEach(post => input.checked
+      ? _selectedAnyPostGroups.add(post.group_id)
+      : _selectedAnyPostGroups.delete(post.group_id));
+    renderAllPosts();
   }
 });
 
@@ -906,14 +942,19 @@ let _postsPage = 0;
 const POSTS_PER_PAGE = 20;
 let _postsData = [];
 let _postsTotal = 0;
+const _selectedPostGroups = new Set();
 
 async function loadPosts() {
   const con = el('posts-content');
   if (con) con.innerHTML = loadingSpinner();
 
-  populatePostDeviceFilter();
-
   try {
+    if (!_devices.length) {
+      const deviceRes = await api.get('/api/admin/devices');
+      _devices = deviceRes.devices || [];
+    }
+    populatePostDeviceFilter();
+
     const q = (el('posts-search')?.value || '').trim();
     const devFilter = el('posts-device-filter')?.value || 'all';
 
@@ -931,6 +972,7 @@ async function loadPosts() {
     if (con) con.innerHTML = errorBanner(e.message);
   }
 }
+window.loadPosts = loadPosts;
 
 function populatePostDeviceFilter() {
   const sel = el('posts-device-filter');
@@ -946,6 +988,8 @@ function populatePostDeviceFilter() {
 function renderPosts() {
   const con = el('posts-content');
   if (!con) return;
+
+  updatePostSelectionUi();
 
   const totalPages = Math.max(1, Math.ceil(_postsTotal / POSTS_PER_PAGE));
   el('posts-page-lbl').textContent = `Page ${_postsPage + 1} of ${totalPages} (${_postsTotal} total)`;
@@ -973,6 +1017,7 @@ function renderPosts() {
     <div class="card space-y-3" data-group-id="${gid}">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
+          <label class="flex items-center gap-2 mb-2 text-[10px] text-zinc-500"><input type="checkbox" data-action="select-post-item" data-group-id="${gid}" class="rounded" ${_selectedPostGroups.has(p.group_id) ? 'checked' : ''}> Select post</label>
           <div class="font-bold text-sm text-zinc-100">${caption}</div>
           <div class="text-xs text-zinc-400 mt-0.5">
             <span>${items.length} file${items.length !== 1 ? 's' : ''}</span>
@@ -1030,6 +1075,191 @@ window.postsNextPage = function() {
   _postsPage++;
   loadPosts();
 };
+window.filterDesktopPosts = function() {
+  _postsPage = 0;
+  loadPosts();
+};
+
+function updatePostSelectionUi() {
+  const count = el('posts-selected-count');
+  const bulkButton = qsa('[data-action="bulk-delete-posts"]')[0];
+  const pageCheckbox = qsa('[data-action="select-post-page"]')[0];
+  const ids = _postsData.map(post => post.group_id);
+  const selectedOnPage = ids.filter(id => _selectedPostGroups.has(id)).length;
+  if (count) count.textContent = `${_selectedPostGroups.size} selected`;
+  if (bulkButton) bulkButton.disabled = _selectedPostGroups.size === 0;
+  if (pageCheckbox) {
+    pageCheckbox.checked = ids.length > 0 && selectedOnPage === ids.length;
+    pageCheckbox.indeterminate = selectedOnPage > 0 && selectedOnPage < ids.length;
+  }
+}
+
+// ── All Posts Moderation (every device author) ────────────────────────────────
+
+let _allPostsPage = 0;
+const ALL_POSTS_PER_PAGE = 20;
+let _allPostsData = [];
+let _allPostsTotal = 0;
+const _selectedAnyPostGroups = new Set();
+
+async function loadAllPosts() {
+  const con = el('all-posts-content');
+  if (con) con.innerHTML = loadingSpinner();
+
+  try {
+    const res = await api.get('/api/admin/all-posts', {
+      q: (el('all-posts-search')?.value || '').trim(),
+      device_filter: el('all-posts-device-filter')?.value || 'all',
+      offset: _allPostsPage * ALL_POSTS_PER_PAGE,
+      limit: ALL_POSTS_PER_PAGE,
+    });
+    _allPostsData = res.posts || [];
+    _allPostsTotal = res.total || 0;
+    populateAllPostsDeviceFilter(res.devices || []);
+    renderAllPosts();
+  } catch (e) {
+    if (con) con.innerHTML = errorBanner(e.message);
+  }
+}
+window.loadAllPosts = loadAllPosts;
+
+function populateAllPostsDeviceFilter(devices) {
+  const sel = el('all-posts-device-filter');
+  if (!sel) return;
+  const selected = sel.value || 'all';
+  const allOption = sel.firstElementChild;
+  sel.replaceChildren(allOption);
+  devices.forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d.device_id;
+    opt.textContent = d.display_name || d.device_id;
+    sel.appendChild(opt);
+  });
+  if ([...sel.options].some(opt => opt.value === selected)) sel.value = selected;
+}
+
+function renderAllPosts() {
+  const con = el('all-posts-content');
+  if (!con) return;
+  updateAllPostSelectionUi();
+  const totalPages = Math.max(1, Math.ceil(_allPostsTotal / ALL_POSTS_PER_PAGE));
+  el('all-posts-page-lbl').textContent = `Page ${_allPostsPage + 1} of ${totalPages} (${_allPostsTotal} total)`;
+  el('all-posts-prev-btn').disabled = _allPostsPage <= 0;
+  el('all-posts-next-btn').disabled = _allPostsPage >= totalPages - 1;
+
+  if (!_allPostsData.length) {
+    con.innerHTML = emptyState('No posts found', 'Posts shared by devices will appear here.');
+    return;
+  }
+
+  con.innerHTML = `
+    <div class="card overflow-x-auto p-0">
+      <table class="w-full min-w-[760px] text-left text-xs">
+        <thead class="bg-zinc-900 border-b border-zinc-800 text-zinc-400 font-semibold uppercase text-[10px] tracking-wider">
+          <tr><th class="p-3">Select</th><th class="p-3">Device</th><th class="p-3">Post Caption</th><th class="p-3">Post Time</th><th class="p-3">Total Files</th><th class="p-3">Post Author</th><th class="p-3 text-right">Operation</th></tr>
+        </thead>
+        <tbody class="divide-y divide-zinc-800/60">
+          ${_allPostsData.map(p => `
+            <tr class="hover:bg-zinc-800/30">
+              <td class="p-3"><input type="checkbox" data-action="select-any-post" data-group-id="${escHtml(p.group_id)}" class="rounded" ${_selectedAnyPostGroups.has(p.group_id) ? 'checked' : ''} aria-label="Select post"></td>
+              <td class="p-3 text-zinc-200">${escHtml(p.device_name || p.device_id || 'Unknown device')}</td>
+              <td class="p-3 text-zinc-200 max-w-sm"><div class="truncate" title="${escHtml(p.caption || '')}">${escHtml(p.caption || '(no caption)')}</div></td>
+              <td class="p-3 text-zinc-400 whitespace-nowrap" title="${escHtml(fmtRel(p.created_at))}">${escHtml(fmtTs(p.created_at))}</td>
+              <td class="p-3 text-zinc-300 font-mono">${Number(p.item_count || 0).toLocaleString()}</td>
+              <td class="p-3 text-zinc-300">${escHtml(p.shared_by || 'Unknown author')}</td>
+              <td class="p-3 text-right"><button data-action="delete-any-post" data-group-id="${escHtml(p.group_id)}" class="btn-danger text-xs py-1 px-2.5">Delete Post</button></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+window.allPostsPrevPage = function() {
+  if (_allPostsPage > 0) { _allPostsPage--; loadAllPosts(); }
+};
+window.allPostsNextPage = function() {
+  _allPostsPage++;
+  loadAllPosts();
+};
+
+function updateAllPostSelectionUi() {
+  const count = el('all-posts-selected-count');
+  const bulkButton = qsa('[data-action="bulk-delete-any-posts"]')[0];
+  const pageCheckbox = qsa('[data-action="select-all-posts-page"]')[0];
+  const ids = _allPostsData.map(post => post.group_id);
+  const selectedOnPage = ids.filter(id => _selectedAnyPostGroups.has(id)).length;
+  if (count) count.textContent = `${_selectedAnyPostGroups.size} selected`;
+  if (bulkButton) bulkButton.disabled = _selectedAnyPostGroups.size === 0;
+  if (pageCheckbox) {
+    pageCheckbox.checked = ids.length > 0 && selectedOnPage === ids.length;
+    pageCheckbox.indeterminate = selectedOnPage > 0 && selectedOnPage < ids.length;
+  }
+}
+
+function confirmDeleteAnyPost(groupId) {
+  openModal('confirm-modal');
+  el('confirm-modal-title').textContent = 'Delete Post';
+  el('confirm-modal-body').textContent = 'Delete this user post and remove it from all device feeds? This cannot be undone.';
+  el('confirm-ok-btn').className = 'btn-danger';
+  el('confirm-ok-btn').textContent = 'Delete Post';
+  el('confirm-ok-btn').onclick = async () => {
+    try {
+      await api.delete(`/api/admin/all-posts/${encodeURIComponent(groupId)}`);
+      closeModal('confirm-modal');
+      _selectedAnyPostGroups.delete(groupId);
+      if (_allPostsPage > 0 && _allPostsPage * ALL_POSTS_PER_PAGE >= _allPostsTotal - 1) _allPostsPage--;
+      loadAllPosts();
+      showToast('Post deleted.');
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+  };
+}
+
+function confirmBulkDeleteDesktopPosts() {
+  const groupIds = [..._selectedPostGroups];
+  if (!groupIds.length) return;
+  openModal('confirm-modal');
+  el('confirm-modal-title').textContent = 'Delete Selected Desktop Posts';
+  el('confirm-modal-body').textContent = `Delete ${groupIds.length} selected desktop post(s)? This cannot be undone.`;
+  el('confirm-ok-btn').className = 'btn-danger';
+  el('confirm-ok-btn').textContent = `Delete ${groupIds.length} Posts`;
+  el('confirm-ok-btn').onclick = async () => {
+    try {
+      const res = await api.post('/api/admin/posts/bulk-delete', { group_ids: groupIds });
+      (res.deleted_ids || []).forEach(id => _selectedPostGroups.delete(id));
+      closeModal('confirm-modal');
+      loadPosts();
+      showToast(`${(res.deleted_ids || []).length} post(s) deleted${res.failed_ids?.length ? `; ${res.failed_ids.length} failed` : ''}.`, res.failed_ids?.length ? 'warn' : 'success');
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+  };
+}
+
+function confirmBulkDeleteAnyPosts() {
+  const groupIds = [..._selectedAnyPostGroups];
+  if (!groupIds.length) return;
+  openModal('confirm-modal');
+  el('confirm-modal-title').textContent = 'Delete Selected Posts';
+  el('confirm-modal-body').textContent = `Delete ${groupIds.length} selected post(s) from all users and remove them from device feeds? This cannot be undone.`;
+  el('confirm-ok-btn').className = 'btn-danger';
+  el('confirm-ok-btn').textContent = `Delete ${groupIds.length} Posts`;
+  el('confirm-ok-btn').onclick = async () => {
+    try {
+      const res = await api.post('/api/admin/all-posts/bulk-delete', { group_ids: groupIds });
+      (res.deleted_ids || []).forEach(id => _selectedAnyPostGroups.delete(id));
+      closeModal('confirm-modal');
+      if (_allPostsPage > 0 && _allPostsPage * ALL_POSTS_PER_PAGE >= _allPostsTotal - (res.deleted_ids || []).length) {
+        _allPostsPage = Math.max(0, Math.ceil((_allPostsTotal - (res.deleted_ids || []).length) / ALL_POSTS_PER_PAGE) - 1);
+      }
+      loadAllPosts();
+      showToast(`${(res.deleted_ids || []).length} post(s) deleted${res.failed_ids?.length ? `; ${res.failed_ids.length} failed` : ''}.`, res.failed_ids?.length ? 'warn' : 'success');
+    } catch (e) {
+      showToast(e.message, 'error');
+    }
+  };
+}
 
 // Edit Caption — receives raw strings from _postsData lookup, not from HTML
 function openEditCaptionModal(groupId, currentCaption) {
@@ -1199,6 +1429,7 @@ function confirmDeletePost(groupId) {
     try {
       await api.delete(`/api/admin/posts/${groupId}`);
       closeModal('confirm-modal');
+      _selectedPostGroups.delete(groupId);
       loadPosts();
       showToast('Post deleted.');
     } catch (e) {
@@ -1223,6 +1454,7 @@ async function loadSharedFolders() {
     if (con) con.innerHTML = errorBanner(e.message);
   }
 }
+window.loadSharedFolders = loadSharedFolders;
 
 function renderSharedFolders() {
   const con = el('shared-content');
@@ -1289,15 +1521,22 @@ async function loadSharedDriveApiKey() {
   }
 }
 
+window.setSharedFolderSource = function(sourceType) {
+  el('shared-server-source')?.classList.toggle('hidden', sourceType !== 'server');
+  el('shared-google-source')?.classList.toggle('hidden', sourceType !== 'google_drive');
+};
+
 window.openAddSharedFolderModal = async function() {
   openModal('shared-folder-modal');
   el('shared-modal-title').textContent = 'Add Shared Folder';
+  el('shared-source-controls').classList.remove('hidden');
+  el('shared-source-type').value = 'server';
+  window.setSharedFolderSource('server');
   const pathInp = el('shared-path-input');
   pathInp.value = '';
   pathInp.readOnly = false;
   pathInp.classList.remove('opacity-75');
-  const browseBtn = pathInp.parentElement?.querySelector('button');
-  if (browseBtn) browseBtn.style.display = '';
+  el('shared-drive-link-input').value = '';
 
   el('shared-label-input').value = '';
   el('shared-drive-key-input').value = '';
@@ -1316,24 +1555,29 @@ window.openAddSharedFolderModal = async function() {
   renderSharedFolderDevicesChecklist(['all']);
 
   el('shared-save-btn').onclick = async () => {
-    const path = el('shared-path-input').value.trim();
+    const sourceType = el('shared-source-type').value;
+    const path = sourceType === 'google_drive'
+      ? el('shared-drive-link-input').value.trim()
+      : el('shared-path-input').value.trim();
     const label = el('shared-label-input').value.trim();
     const driveApiKey = el('shared-drive-key-input').value.trim();
     const isAll = el('shared-all-devices-chk').checked;
     const deviceIds = isAll ? ['all'] : qsa('.shared-dev-chk:checked').map(c => c.value);
     const availableInReels = el('shared-reels-chk').checked;
 
-    if (!path) { showToast('Enter a server folder path or Google Drive folder link.', 'warn'); return; }
+    if (!path) {
+      showToast(sourceType === 'google_drive' ? 'Enter a Google Drive folder link.' : 'Choose or enter a server folder path.', 'warn');
+      return;
+    }
 
     try {
-      const isDriveSource = /drive\.google\.com/.test(path) || /\/folders\//.test(path);
-      if (isDriveSource && driveApiKey && driveApiKey !== el('shared-drive-key-input').dataset.savedValue) {
+      if (sourceType === 'google_drive' && driveApiKey && driveApiKey !== el('shared-drive-key-input').dataset.savedValue) {
         await api.post('/api/admin/google-drive/api-key', { api_key: driveApiKey });
         el('shared-drive-key-input').dataset.savedValue = driveApiKey;
       }
       await api.post('/api/admin/shared-folders/add', {
         path,
-        ...(isDriveSource ? { source_type: 'google_drive' } : {}),
+        source_type: sourceType,
         label,
         device_ids: deviceIds,
         available_in_reels: availableInReels,
@@ -1360,17 +1604,13 @@ async function openManageSharedFolderAccess(folderId) {
 
   openModal('shared-folder-modal');
   el('shared-modal-title').textContent = `Manage Folder Access: ${f.label || f.path}`;
+  el('shared-source-controls').classList.add('hidden');
   const pathInp = el('shared-path-input');
   pathInp.value = f.path || '';
-  pathInp.readOnly = true;
-  pathInp.classList.add('opacity-75');
-  const browseBtn = pathInp.parentElement?.querySelector('button');
-  if (browseBtn) browseBtn.style.display = 'none';
 
   el('shared-label-input').value = f.label || '';
   el('shared-drive-key-input').value = '';
   el('shared-drive-key-input').dataset.savedValue = '';
-  void loadSharedDriveApiKey();
   const currentTags = f.device_ids || ['all'];
   const isAll = !currentTags.length || currentTags.includes('all');
   el('shared-all-devices-chk').checked = isAll;
@@ -1384,13 +1624,8 @@ async function openManageSharedFolderAccess(folderId) {
     const isAllNow = el('shared-all-devices-chk').checked;
     const deviceIds = isAllNow ? ['all'] : qsa('.shared-dev-chk:checked').map(c => c.value);
     const availableInReels = el('shared-reels-chk').checked;
-    const driveApiKey = el('shared-drive-key-input').value.trim();
 
     try {
-      if (driveApiKey && driveApiKey !== el('shared-drive-key-input').dataset.savedValue) {
-        await api.post('/api/admin/google-drive/api-key', { api_key: driveApiKey });
-        el('shared-drive-key-input').dataset.savedValue = driveApiKey;
-      }
       await api.post('/api/admin/shared-folders/update', {
         id: folderId,
         label,
@@ -1784,6 +2019,7 @@ async function loadHistory(resetPage = false) {
     if (con) con.innerHTML = errorBanner(e.message);
   }
 }
+window.loadHistory = loadHistory;
 
 async function populateHistDeviceFilter() {
   const sel = el('hist-device-filter');
@@ -2116,6 +2352,7 @@ function initWebSocketListeners() {
   window.addEventListener('ws:new_share', e => {
     showToast(`New share group created: ${e.detail.caption || 'Shared post'}`);
     if (_currentTab === 'posts') loadPosts();
+    if (_currentTab === 'all_posts') loadAllPosts();
   });
 }
 
@@ -2223,6 +2460,17 @@ async function boot() {
   el('posts-search')?.addEventListener('input', () => {
     clearTimeout(postTimer);
     postTimer = setTimeout(() => { _postsPage = 0; loadPosts(); }, 250);
+  });
+
+  let allPostsTimer;
+  el('all-posts-search')?.addEventListener('input', () => {
+    clearTimeout(allPostsTimer);
+    allPostsTimer = setTimeout(() => { _allPostsPage = 0; loadAllPosts(); }, 250);
+  });
+
+  el('all-posts-device-filter')?.addEventListener('change', () => {
+    _allPostsPage = 0;
+    loadAllPosts();
   });
 
   let devFilesTimer;

@@ -118,6 +118,11 @@
           Posts
         </button>
 
+        <button data-tab="all_posts" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
+          <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 6h16M4 12h16M4 18h16"/></svg>
+          All Posts
+        </button>
+
         <button data-tab="shared_folders" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
           <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
           Shared Folders
@@ -371,9 +376,15 @@
             <input id="posts-search" class="input pl-9" placeholder="Search posts by caption, author, recipient…">
             <svg class="w-4 h-4 text-zinc-500 absolute left-3 top-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
           </div>
-          <select id="posts-device-filter" onchange="loadPosts()" class="input">
+          <select id="posts-device-filter" onchange="filterDesktopPosts()" class="input">
             <option value="all">All Target Devices</option>
           </select>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <label class="flex items-center gap-2 text-xs text-zinc-400"><input type="checkbox" data-action="select-post-page" class="rounded"> Select page</label>
+          <span id="posts-selected-count" class="text-xs text-zinc-400">0 selected</span>
+          <button data-action="bulk-delete-posts" class="btn-danger text-xs" disabled>Delete Selected</button>
         </div>
 
         <!-- Posts Content List -->
@@ -384,6 +395,38 @@
           <button id="posts-prev-btn" onclick="postsPrevPage()" class="btn-secondary text-xs">← Previous</button>
           <span id="posts-page-lbl" class="text-xs text-zinc-400 font-mono">Page 1</span>
           <button id="posts-next-btn" onclick="postsNextPage()" class="btn-secondary text-xs">Next →</button>
+        </div>
+      </section>
+
+
+      <!-- ─── 4B. ALL POSTS MODERATION TAB ───────────────────────────────── -->
+      <section data-panel="all_posts" class="hidden max-w-6xl mx-auto w-full space-y-5">
+        <div class="flex items-center justify-between">
+          <div>
+            <h1 class="text-2xl font-bold text-zinc-100">All Posts</h1>
+            <p class="text-xs text-zinc-400 mt-0.5">Review posts from every device and delete any post from all feeds.</p>
+          </div>
+          <button onclick="loadAllPosts()" class="btn-secondary text-xs">↻ Refresh</button>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="sm:col-span-2 relative">
+            <input id="all-posts-search" class="input pl-9" placeholder="Search by caption, author, or device…">
+            <svg class="w-4 h-4 text-zinc-500 absolute left-3 top-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+          </div>
+          <select id="all-posts-device-filter" class="input">
+            <option value="all">All Author Devices</option>
+          </select>
+        </div>
+        <div class="flex items-center gap-3">
+          <label class="flex items-center gap-2 text-xs text-zinc-400"><input type="checkbox" data-action="select-all-posts-page" class="rounded"> Select page</label>
+          <span id="all-posts-selected-count" class="text-xs text-zinc-400">0 selected</span>
+          <button data-action="bulk-delete-any-posts" class="btn-danger text-xs" disabled>Delete Selected</button>
+        </div>
+        <div id="all-posts-content" class="space-y-4"></div>
+        <div class="flex items-center justify-between pt-2">
+          <button id="all-posts-prev-btn" onclick="allPostsPrevPage()" class="btn-secondary text-xs">← Previous</button>
+          <span id="all-posts-page-lbl" class="text-xs text-zinc-400 font-mono">Page 1</span>
+          <button id="all-posts-next-btn" onclick="allPostsNextPage()" class="btn-secondary text-xs">Next →</button>
         </div>
       </section>
 
@@ -610,19 +653,36 @@
   <div class="bg-zinc-900 border border-zinc-700 rounded-2xl p-6 w-full max-w-md shadow-2xl space-y-4">
     <h3 id="shared-modal-title" class="text-base font-bold text-zinc-100">Add Shared Folder</h3>
 
-    <div>
-      <label class="label">Server Folder Path or Google Drive Folder Link</label>
-      <div class="flex gap-2">
-        <input id="shared-path-input" class="input font-mono text-xs flex-1" placeholder="e.g. C:\Photos, /storage/media, or drive.google.com/drive/folders/…">
-        <button type="button" onclick="openFsPickerFor('shared-path-input')" class="btn-secondary text-xs">📁 Browse</button>
+    <div id="shared-source-controls" class="space-y-4">
+      <div>
+        <label class="label">Folder Source</label>
+        <select id="shared-source-type" class="input" onchange="setSharedFolderSource(this.value)">
+          <option value="server">Server Folder</option>
+          <option value="google_drive">Google Drive Folder</option>
+        </select>
       </div>
-      <p class="text-[11px] text-zinc-500 mt-1.5">Drive folders must allow “Anyone with the link” access. Google asks apps to use a Drive API key to list folder contents.</p>
-    </div>
 
-    <div>
-      <label class="label">Google Drive API Key <span class="text-zinc-500 font-normal">(optional; save once)</span></label>
-      <input id="shared-drive-key-input" class="input font-mono text-xs" type="text" autocomplete="off" placeholder="Leave blank if already configured">
-      <p class="text-[11px] text-zinc-500 mt-1.5">Create a key in <a class="text-blue-400 underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud Console</a>, enable the Drive API, and restrict the key to that API. It is saved on this server.</p>
+      <div id="shared-server-source">
+        <label class="label">Server Folder Path</label>
+        <div class="flex gap-2">
+          <input id="shared-path-input" class="input font-mono text-xs flex-1" placeholder="e.g. C:\Photos or /storage/media">
+          <button type="button" onclick="openFsPickerFor('shared-path-input')" class="btn-secondary text-xs">📁 Browse</button>
+        </div>
+        <p class="text-[11px] text-zinc-500 mt-1.5">Choose a folder on the server filesystem, or enter its path.</p>
+      </div>
+
+      <div id="shared-google-source" class="hidden space-y-3">
+        <div>
+          <label class="label">Google Drive Folder Link</label>
+          <input id="shared-drive-link-input" class="input font-mono text-xs" placeholder="https://drive.google.com/drive/folders/…">
+          <p class="text-[11px] text-zinc-500 mt-1.5">The folder must allow “Anyone with the link” access.</p>
+        </div>
+        <div>
+          <label class="label">Google Drive API Key <span class="text-zinc-500 font-normal">(optional; save once)</span></label>
+          <input id="shared-drive-key-input" class="input font-mono text-xs" type="text" autocomplete="off" placeholder="Leave blank if already configured">
+          <p class="text-[11px] text-zinc-500 mt-1.5">Create a key in <a class="text-blue-400 underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud Console</a>, enable the Drive API, and restrict the key to that API. It is saved on this server.</p>
+        </div>
+      </div>
     </div>
 
     <div>
