@@ -611,11 +611,18 @@
     <h3 id="shared-modal-title" class="text-base font-bold text-zinc-100">Add Shared Folder</h3>
 
     <div>
-      <label class="label">Server Folder Path</label>
+      <label class="label">Server Folder Path or Google Drive Folder Link</label>
       <div class="flex gap-2">
-        <input id="shared-path-input" class="input font-mono text-xs flex-1" placeholder="e.g. C:\Photos or /storage/media">
+        <input id="shared-path-input" class="input font-mono text-xs flex-1" placeholder="e.g. C:\Photos, /storage/media, or drive.google.com/drive/folders/…">
         <button type="button" onclick="openFsPickerFor('shared-path-input')" class="btn-secondary text-xs">📁 Browse</button>
       </div>
+      <p class="text-[11px] text-zinc-500 mt-1.5">Drive folders must allow “Anyone with the link” access. Google asks apps to use a Drive API key to list folder contents.</p>
+    </div>
+
+    <div>
+      <label class="label">Google Drive API Key <span class="text-zinc-500 font-normal">(optional; save once)</span></label>
+      <input id="shared-drive-key-input" class="input font-mono text-xs" type="password" autocomplete="off" placeholder="Leave blank if already configured">
+      <p class="text-[11px] text-zinc-500 mt-1.5">Create a key in <a class="text-blue-400 underline" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">Google Cloud Console</a>, enable the Drive API, and restrict the key to that API. It is saved on this server.</p>
     </div>
 
     <div>
@@ -634,7 +641,7 @@
 
     <label class="flex items-center gap-2 cursor-pointer">
       <input type="checkbox" id="shared-reels-chk" class="rounded" checked>
-      <span class="text-xs text-zinc-300">Available in Rewind Reels</span>
+      <span class="text-xs text-zinc-300">Available in Rewind Reels (server folders)</span>
     </label>
 
     <div class="flex gap-3 justify-end pt-2">

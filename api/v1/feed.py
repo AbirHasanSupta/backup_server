@@ -253,7 +253,7 @@ async def list_shared_folders(
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     all_dirs = get_shared_dirs()
     if not device_id:
-        sources = [{"id": d["id"], "label": d.get("label") or d.get("path") or d["id"]} for d in all_dirs if d.get("id")]
+        sources = [{"id": d["id"], "label": d.get("label") or d.get("path") or d["id"], "type": d.get("type"), "drive_folder_id": d.get("drive_folder_id"), "drive_link": d.get("path") if d.get("type") == "google_drive" else None} for d in all_dirs if d.get("id")]
         return {"sources": sources, "shared_dirs": all_dirs}
 
     accessible = []
@@ -261,7 +261,7 @@ async def list_shared_folders(
         tags = entry.get("device_ids", ["all"])
         if not tags or "all" in tags or device_id in tags:
             accessible.append(entry)
-    sources = [{"id": d["id"], "label": d.get("label") or d.get("path") or d["id"]} for d in accessible if d.get("id")]
+    sources = [{"id": d["id"], "label": d.get("label") or d.get("path") or d["id"], "type": d.get("type"), "drive_folder_id": d.get("drive_folder_id"), "drive_link": d.get("path") if d.get("type") == "google_drive" else None} for d in accessible if d.get("id")]
     return {"sources": sources, "shared_dirs": accessible}
 
 

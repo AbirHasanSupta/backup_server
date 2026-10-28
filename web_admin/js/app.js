@@ -1287,8 +1287,10 @@ window.openAddSharedFolderModal = async function() {
   if (browseBtn) browseBtn.style.display = '';
 
   el('shared-label-input').value = '';
+  el('shared-drive-key-input').value = '';
   el('shared-all-devices-chk').checked = true;
   el('shared-reels-chk').checked = true;
+  el('shared-reels-chk').disabled = false;
 
   if (!_devices || !_devices.length) {
     try {
@@ -1301,15 +1303,21 @@ window.openAddSharedFolderModal = async function() {
   el('shared-save-btn').onclick = async () => {
     const path = el('shared-path-input').value.trim();
     const label = el('shared-label-input').value.trim();
+    const driveApiKey = el('shared-drive-key-input').value.trim();
     const isAll = el('shared-all-devices-chk').checked;
     const deviceIds = isAll ? ['all'] : qsa('.shared-dev-chk:checked').map(c => c.value);
     const availableInReels = el('shared-reels-chk').checked;
 
-    if (!path) { showToast('Please select or specify a server folder path.', 'warn'); return; }
+    if (!path) { showToast('Enter a server folder path or Google Drive folder link.', 'warn'); return; }
 
     try {
+      const isDriveSource = /drive\.google\.com/.test(path) || /\/folders\//.test(path);
+      if (isDriveSource && driveApiKey) {
+        await api.post('/api/admin/google-drive/api-key', { api_key: driveApiKey });
+      }
       await api.post('/api/admin/shared-folders/add', {
         path,
+        ...(isDriveSource ? { source_type: 'google_drive' } : {}),
         label,
         device_ids: deviceIds,
         available_in_reels: availableInReels,
@@ -1344,10 +1352,12 @@ async function openManageSharedFolderAccess(folderId) {
   if (browseBtn) browseBtn.style.display = 'none';
 
   el('shared-label-input').value = f.label || '';
+  el('shared-drive-key-input').value = '';
   const currentTags = f.device_ids || ['all'];
   const isAll = !currentTags.length || currentTags.includes('all');
   el('shared-all-devices-chk').checked = isAll;
   el('shared-reels-chk').checked = f.available_in_reels !== false;
+  el('shared-reels-chk').disabled = f.type === 'google_drive';
 
   renderSharedFolderDevicesChecklist(currentTags);
 

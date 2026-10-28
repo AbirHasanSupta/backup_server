@@ -2,6 +2,7 @@
 // Fast UI In-Memory SWR Cache (Parallel Instant Navigation)
 // ─────────────────────────────────────────────────────────────────────────────
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import Constants from 'expo-constants';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import {
@@ -20,6 +21,72 @@ import { sendDirectShareToPeer, sendDirectReaction, sendDirectComment } from './
 import { isServerMode, setServerAvailable } from './connectionMode';
 
 const P2PServerModule = NativeModules.PhoneBackupP2PServer;
+const DRIVE_SOURCES_KEY = 'google_drive_shared_folders_v1';
+const DRIVE_API_KEY_STORAGE_KEY = 'google_drive_api_key_v1';
+const DRIVE_EXPORT_FORMATS = {
+  'application/vnd.google-apps.document': ['application/pdf', '.pdf'],
+  'application/vnd.google-apps.spreadsheet': ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx'],
+  'application/vnd.google-apps.presentation': ['application/vnd.openxmlformats-officedocument.presentationml.presentation', '.pptx'],
+  'application/vnd.google-apps.drawing': ['application/pdf', '.pdf'],
+};
+let DRIVE_API_KEY = Constants.expoConfig?.extra?.googleDriveApiKey || '';
+
+async function getDriveApiKey() {
+  if (DRIVE_API_KEY) return DRIVE_API_KEY;
+  DRIVE_API_KEY = (await AsyncStorage.getItem(DRIVE_API_KEY_STORAGE_KEY)) || '';
+  return DRIVE_API_KEY;
+}
+
+function driveFolderId(link) {
+  const value = String(link || '').trim();
+  if (/^[A-Za-z0-9_-]{10,}$/.test(value)) return value;
+  const match = value.match(/\/folders\/([A-Za-z0-9_-]+)/);
+  if (!match) throw new Error('Enter a Google Drive folder link.');
+  return match[1];
+}
+
+async function driveRequest(path, params = {}) {
+  const apiKey = await getDriveApiKey();
+  if (!apiKey) throw new Error('To use a Drive folder without a connected server, add a Google Drive API key below.');
+  const query = new URLSearchParams({ ...params, key: apiKey }).toString();
+  const response = await fetch(`https://www.googleapis.com/drive/v3/${path}?${query}`);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body?.error?.message || `Google Drive request failed (${response.status}).`);
+  return body;
+}
+
+async function getLocalDriveSources() {
+  try {
+    const value = JSON.parse((await AsyncStorage.getItem(DRIVE_SOURCES_KEY)) || '[]');
+    return Array.isArray(value) ? value.filter(s => s && typeof s.id === 'string' && typeof s.folderId === 'string') : [];
+  }
+  catch { return []; }
+}
+
+export async function getLocalDriveSharedSources() {
+  return (await getLocalDriveSources()).map(s => ({
+    id: s.id, label: s.label, type: 'google_drive', local: true,
+    drive_folder_id: s.folderId,
+  }));
+}
+
+async function listDriveChildren(folderId) {
+  const output = [];
+  let pageToken;
+  do {
+    const page = await driveRequest('files', {
+      q: `'${folderId}' in parents and trashed = false`,
+      fields: 'nextPageToken,files(id,name,mimeType,size,modifiedTime)',
+      pageSize: '1000',
+      supportsAllDrives: 'true',
+      includeItemsFromAllDrives: 'true',
+      ...(pageToken ? { pageToken } : {}),
+    });
+    output.push(...(page.files || []));
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  return output;
+}
 
 const _uiMemoryCache = {
   feed: null,
@@ -280,6 +347,10 @@ export async function getConfig() {
 }
 
 export function buildPreviewUrl(config, relativePath, sourceMode, sourceId) {
+  if (sourceMode === 'shared' && isLocalDriveSource(sourceId)) {
+    const fileId = String(relativePath).split('/')[0];
+    return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&key=${encodeURIComponent(DRIVE_API_KEY)}`;
+  }
   if (!config || !config.ip || !config.port) return '';
   const host = formatHostForUrl(config.ip);
   if (sourceMode === 'shared' && sourceId) {
@@ -289,6 +360,10 @@ export function buildPreviewUrl(config, relativePath, sourceMode, sourceId) {
 }
 
 export function buildVideoPreviewUrl(config, relativePath, sourceMode, sourceId) {
+  if (sourceMode === 'shared' && isLocalDriveSource(sourceId)) {
+    const fileId = String(relativePath).split('/')[0];
+    return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&key=${encodeURIComponent(DRIVE_API_KEY)}`;
+  }
   if (!config || !config.ip || !config.port) return '';
   const host = formatHostForUrl(config.ip);
   if (sourceMode === 'shared' && sourceId) {
@@ -298,6 +373,10 @@ export function buildVideoPreviewUrl(config, relativePath, sourceMode, sourceId)
 }
 
 export function buildThumbnailUrl(config, relativePath, sourceMode, sourceId) {
+  if (sourceMode === 'shared' && isLocalDriveSource(sourceId)) {
+    const fileId = String(relativePath).split('/')[0];
+    return `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w640`;
+  }
   if (!config || !config.ip || !config.port) return '';
   const host = formatHostForUrl(config.ip);
   if (sourceMode === 'shared' && sourceId) {
@@ -333,6 +412,7 @@ export function buildShareThumbnailUrl(config, shareId) {
 
 export async function warmVideoPreviews(relativePaths, sourceMode, sourceId) {
   if (!relativePaths || relativePaths.length === 0) return { ok: true, scheduled: 0 };
+  if (sourceMode === 'shared' && isLocalDriveSource(sourceId)) return { ok: true, scheduled: 0 };
   const { ip, port, key, deviceId } = await getConfig();
 
   const basePath = (sourceMode === 'shared' && sourceId)
@@ -452,16 +532,148 @@ export async function withDownloadMeshRetry(downloadAttempt) {
 }
 
 export async function listSharedSources() {
-  return fetchJsonWithMeshRetry(async () => {
-    const { ip, port, key, deviceId } = await getConfig();
-    return {
-      url: `http://${ip}:${port}/shared/list?device_id=${encodeURIComponent(deviceId)}`,
-      options: { headers: { Authorization: `Bearer ${key}` } },
-    };
-  }).then((data) => data.sources ?? []);
+  const localSources = await getLocalDriveSources();
+  const localEntries = localSources.map(s => ({ id: s.id, label: s.label, type: 'google_drive', local: true }));
+  if (!(await isServerMode())) return localEntries;
+  if (!(await getServerIp())) return localEntries;
+  try {
+    const remote = await fetchJsonWithMeshRetry(async () => {
+      const { ip, port, key, deviceId } = await getConfig();
+      return {
+        url: `http://${ip}:${port}/shared/list?device_id=${encodeURIComponent(deviceId)}`,
+        options: { headers: { Authorization: `Bearer ${key}` } },
+      };
+    });
+    const remoteSources = remote.sources ?? [];
+    for (const source of remoteSources) {
+      if (source.type !== 'google_drive' || !source.drive_folder_id || !source.drive_link) continue;
+      if (!localSources.some(local => local.folderId === source.drive_folder_id)) {
+        localSources.push({
+          id: `local_drive_${source.drive_folder_id}`,
+          folderId: source.drive_folder_id,
+          link: source.drive_link,
+          label: source.label || 'Google Drive Folder',
+        });
+      }
+    }
+    await AsyncStorage.setItem(DRIVE_SOURCES_KEY, JSON.stringify(localSources)).catch(() => {});
+    const remoteIds = new Set(remoteSources.map(s => s.id));
+    const remoteDriveIds = new Set(remoteSources.map(s => s.drive_folder_id).filter(Boolean));
+    return [...remoteSources, ...localEntries.filter(s => !remoteIds.has(s.id) && !remoteDriveIds.has(localSources.find(local => local.id === s.id)?.folderId))];
+  } catch {
+    if (localEntries.length) return localEntries;
+    throw new Error('Could not load shared folders. Check that the server is running and try again.');
+  }
+}
+
+export async function addGoogleDriveSource(link, label = '', apiKey = '') {
+  const folderId = driveFolderId(link);
+  if (apiKey.trim()) {
+    DRIVE_API_KEY = apiKey.trim();
+    await AsyncStorage.setItem(DRIVE_API_KEY_STORAGE_KEY, DRIVE_API_KEY);
+  }
+  if (await isServerMode()) {
+    try {
+      const saved = await fetchJsonWithMeshRetry(async () => {
+        const { ip, port, key, deviceId } = await getConfig();
+        return {
+          url: `http://${ip}:${port}/shared/google-drive/add?device_id=${encodeURIComponent(deviceId)}`,
+          options: {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ link: String(link).trim(), label: String(label).trim() || 'Google Drive Folder' }),
+          },
+        };
+      });
+      const sources = await getLocalDriveSources();
+      if (!sources.some(s => s.folderId === folderId)) {
+        sources.push({ id: `local_drive_${folderId}`, folderId, link: String(link).trim(), label: String(label).trim() || 'Google Drive Folder' });
+        await AsyncStorage.setItem(DRIVE_SOURCES_KEY, JSON.stringify(sources));
+      }
+      return { id: saved.entry.id, label: saved.entry.label, type: 'google_drive' };
+    } catch {
+      // A disconnected server or a server without a Drive key still allows
+      // the app to use this folder directly in offline/P2P mode.
+    }
+  }
+  const folder = await driveRequest(`files/${encodeURIComponent(folderId)}`, {
+    fields: 'id,mimeType', supportsAllDrives: 'true',
+  });
+  if (folder.mimeType !== 'application/vnd.google-apps.folder') {
+    throw new Error('That link is not a Google Drive folder. Paste a folder link.');
+  }
+  await listDriveChildren(folderId); // Validate public access before saving it.
+  const sources = await getLocalDriveSources();
+  const id = `local_drive_${folderId}`;
+  const existing = sources.find(s => s.id === id);
+  if (existing) return { id, label: existing.label, type: 'google_drive', local: true };
+  sources.push({ id, folderId, link: String(link).trim(), label: String(label).trim() || 'Google Drive Folder' });
+  await AsyncStorage.setItem(DRIVE_SOURCES_KEY, JSON.stringify(sources));
+  return { id, label: sources[sources.length - 1].label, type: 'google_drive', local: true };
+}
+
+export async function removeGoogleDriveSource(sourceId) {
+  const sources = await getLocalDriveSources();
+  const next = sources.filter(source => source.id !== sourceId);
+  await AsyncStorage.setItem(DRIVE_SOURCES_KEY, JSON.stringify(next));
+  return next.length !== sources.length;
+}
+
+function isLocalDriveSource(sourceId) {
+  return String(sourceId || '').startsWith('local_drive_');
+}
+
+async function driveContentUrl(fileId) {
+  const metadata = await driveRequest(`files/${encodeURIComponent(fileId)}`, {
+    fields: 'mimeType,webContentLink,exportLinks', supportsAllDrives: 'true',
+  });
+  const exportFormat = DRIVE_EXPORT_FORMATS[metadata.mimeType];
+  if (exportFormat) {
+    if (metadata.exportLinks?.[exportFormat[0]]) return metadata.exportLinks[exportFormat[0]];
+    const key = await getDriveApiKey();
+    return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}/export?mimeType=${encodeURIComponent(exportFormat[0])}&key=${encodeURIComponent(key)}`;
+  }
+  if (metadata.webContentLink) return metadata.webContentLink;
+  const key = await getDriveApiKey();
+  return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&key=${encodeURIComponent(key)}`;
+}
+
+function driveFilePath(item, parentPath = '') {
+  const name = driveDisplayName(item.name || 'file', item.mimeType);
+  const relativePath = parentPath ? `${parentPath}/${name}` : name;
+  return `${item.id}/${relativePath}`;
+}
+
+function driveDisplayName(name, mimeType) {
+  const format = DRIVE_EXPORT_FORMATS[mimeType];
+  return format && !String(name).toLowerCase().endsWith(format[1]) ? `${name}${format[1]}` : name;
+}
+
+function driveTimestamp(value) {
+  const parsed = Date.parse(value || '');
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+}
+
+async function driveFilesForFolder(folderId) {
+  const result = [];
+  const queue = [{ id: folderId, parentPath: '' }];
+  while (queue.length) {
+    const { id: current, parentPath } = queue.pop();
+    const children = await listDriveChildren(current);
+    for (const item of children) {
+      const relativePath = parentPath ? `${parentPath}/${item.name}` : item.name;
+      if (item.mimeType === 'application/vnd.google-apps.folder') queue.push({ id: item.id, parentPath: relativePath });
+      else result.push({ path: driveFilePath(item, parentPath), name: driveDisplayName(item.name, item.mimeType), drive_id: item.id, size: Number(item.size || 0), modified_time: driveTimestamp(item.modifiedTime) });
+    }
+  }
+  return result;
 }
 
 export async function listSharedFiles(sourceId, prefix = '') {
+  if (isLocalDriveSource(sourceId)) {
+    const folderId = prefix ? prefix.split('/')[0] : sourceId.slice('local_drive_'.length);
+    return driveFilesForFolder(folderId);
+  }
   const query = prefix ? `&prefix=${encodeURIComponent(prefix)}` : '';
   const data = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
@@ -497,6 +709,10 @@ export async function searchFiles(query) {
 }
 
 export async function searchSharedFiles(sourceId, query) {
+  if (isLocalDriveSource(sourceId)) {
+    const all = await listSharedFiles(sourceId);
+    return all.filter(f => f.name.toLowerCase().includes(String(query || '').toLowerCase()));
+  }
   const data = await fetchJsonWithMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     return {
@@ -533,6 +749,15 @@ export async function browseFiles(prefix = '') {
 }
 
 export async function browseSharedFiles(sourceId, prefix = '') {
+  if (isLocalDriveSource(sourceId)) {
+    const folderId = prefix ? prefix.split('/')[0] : sourceId.slice('local_drive_'.length);
+    const parentPath = prefix ? prefix.split('/').slice(1).join('/') : '';
+    const children = await listDriveChildren(folderId);
+    return {
+      folders: children.filter(f => f.mimeType === 'application/vnd.google-apps.folder').map(f => ({ name: f.name, path: `${f.id}/${parentPath ? `${parentPath}/` : ''}${f.name}` })),
+      files: children.filter(f => f.mimeType !== 'application/vnd.google-apps.folder').map(f => ({ name: driveDisplayName(f.name, f.mimeType), path: driveFilePath(f, parentPath), size: Number(f.size || 0), modified_time: driveTimestamp(f.modifiedTime) })),
+    };
+  }
   const isServer = await isServerMode();
   if (!isServer) {
     return { folders: [], files: [] };
@@ -619,6 +844,15 @@ export async function getFilePreviewUrl(relativePath) {
  * @param {(written: number, total: number) => void} [onProgress]
  */
 export async function downloadSharedFile(sourceId, relativePath, destUri, onProgress) {
+  if (isLocalDriveSource(sourceId)) {
+    const fileId = String(relativePath).split('/')[0];
+    const url = await driveContentUrl(fileId);
+    const result = await FileSystem.createDownloadResumable(url, destUri, {}, progress => {
+      onProgress?.(progress.totalBytesWritten, progress.totalBytesExpectedToWrite);
+    }).downloadAsync();
+    if (!result || result.status < 200 || result.status >= 300) throw new Error(`Google Drive download failed (${result?.status || 'unknown'}).`);
+    return result;
+  }
   return withDownloadMeshRetry(async () => {
     const { ip, port, key, deviceId } = await getConfig();
     const url =
@@ -689,6 +923,10 @@ export async function downloadShareFile(shareId, destUri, onProgress) {
  * @returns {Promise<string>}
  */
 export async function getSharedFilePreviewUrl(sourceId, relativePath) {
+  if (isLocalDriveSource(sourceId)) {
+    const fileId = String(relativePath).split('/')[0];
+    return driveContentUrl(fileId);
+  }
   const { ip, port, key, deviceId } = await getConfig();
   return (
     `http://${ip}:${port}/shared/${encodeURIComponent(sourceId)}/download` +

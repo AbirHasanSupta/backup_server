@@ -68,6 +68,9 @@ _DEFAULTS = {
     # List of dicts: [{id: str, label: str, path: str}, ...]
     # IDs are stable slugs like "shared_0", "shared_1", etc.
     "SHARED_DIRS": [],
+    # Public Google Drive folders are listed/downloaded through Drive API v3.
+    # The key should be restricted to the Drive API in Google Cloud Console.
+    "GOOGLE_DRIVE_API_KEY": os.environ.get("GOOGLE_DRIVE_API_KEY", ""),
     "START_WITH_WINDOWS": False,
     "MINIMIZE_TO_TRAY": True,
     # Display name shown on feed cards for posts sent from this desktop server.
@@ -122,6 +125,7 @@ _ENV_CONFIG_KEYS = {
     "ADVERTISED_PORT": int,
     "TAILSCALE_IPS": str,
     "TAILSCALE_DNS_NAME": str,
+    "GOOGLE_DRIVE_API_KEY": str,
 }
 
 
@@ -136,6 +140,7 @@ def _apply_environment_overrides(cfg: dict) -> dict:
             "TAILSCALE_IPS",
             "TAILSCALE_DNS_NAME",
             "ADVERTISED_IPS",
+            "GOOGLE_DRIVE_API_KEY",
         ):
             continue
         try:
@@ -391,7 +396,7 @@ def get_shared_dirs() -> list:
         for d in dirs:
             if isinstance(d, dict):
                 entry = dict(d)
-                if "path" in entry:
+                if "path" in entry and entry.get("type") != "google_drive" and entry.get("kind") != "google_drive":
                     entry["path"] = normalize_fs_path(entry["path"])
                 res.append(entry)
             else:

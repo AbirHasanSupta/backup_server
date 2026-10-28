@@ -742,6 +742,25 @@ async def search_device_files(
 
 # ── Shared Folders Management ──────────────────────────────────────────────────
 
+class GoogleDriveApiKeyRequest(BaseModel):
+    api_key: str
+
+
+@router.post("/api/admin/google-drive/api-key")
+async def save_google_drive_api_key(
+    body: GoogleDriveApiKeyRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    _auth(authorization, token)
+    key = body.api_key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Google Drive API key cannot be empty")
+    cfg = load_config()
+    cfg["GOOGLE_DRIVE_API_KEY"] = key
+    save_config(cfg)
+    return {"ok": True, "configured": True}
+
 @router.get("/api/admin/shared-folders")
 async def list_admin_shared_folders(
     authorization: str = Header(None),
@@ -765,6 +784,7 @@ async def list_admin_shared_folders(
 
 class AddSharedFolderRequest(BaseModel):
     path: str
+    source_type: str | None = None
     label: str | None = None
     device_ids: list[str] | None = None
     available_in_reels: bool = True
@@ -778,6 +798,41 @@ async def add_admin_shared_folder(
 ):
     _auth(authorization, token)
     raw_path = body.path.strip()
+    drive_folder = False
+    try:
+        from core.google_drive import FOLDER_MIME, GoogleDriveError, folder_id_from_link, get_file, list_children
+        # Do not reinterpret ordinary relative directory names (for example,
+        # "holidayPhotos") as Drive IDs. Bare IDs require an explicit type.
+        drive_folder = body.source_type == "google_drive" or "/folders/" in raw_path or "drive.google.com" in raw_path
+        if drive_folder:
+            folder_id = folder_id_from_link(raw_path)
+            metadata = await asyncio.to_thread(get_file, folder_id)
+            if metadata.get("mimeType") != FOLDER_MIME:
+                raise GoogleDriveError("That link is not a Google Drive folder. Paste a folder link.")
+            await asyncio.to_thread(list_children, folder_id)
+    except GoogleDriveError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if drive_folder:
+        cfg = load_config()
+        dirs = list(cfg.get("SHARED_DIRS", []))
+        folder_id = folder_id_from_link(raw_path)
+        if any(d.get("type") == "google_drive" and (d.get("drive_folder_id") == folder_id or d.get("path") == raw_path) for d in dirs):
+            raise HTTPException(status_code=409, detail="This Google Drive folder is already shared")
+        label = body.label.strip() if body.label else "Google Drive Folder"
+        entry = {
+            "id": f"shared_{int(time.time() * 1000)}",
+            "path": raw_path,
+            "label": label,
+            "type": "google_drive",
+            "drive_folder_id": folder_id,
+            "device_ids": body.device_ids if body.device_ids is not None else ["all"],
+            "available_in_reels": False,
+        }
+        dirs.append(entry)
+        cfg["SHARED_DIRS"] = dirs
+        save_config(cfg)
+        return {"ok": True, "entry": entry}
+
     norm_path = normalize_fs_path(raw_path)
     target = norm_path if (norm_path and os.path.exists(norm_path)) else os.path.abspath(os.path.expandvars(os.path.expanduser(raw_path)))
     if not os.path.exists(target):
@@ -856,7 +911,7 @@ async def update_admin_shared_folder(
     if body.device_ids is not None:
         entry["device_ids"] = body.device_ids
     if body.available_in_reels is not None:
-        entry["available_in_reels"] = bool(body.available_in_reels)
+        entry["available_in_reels"] = False if entry.get("type") == "google_drive" else bool(body.available_in_reels)
 
     dirs[idx] = entry
     cfg["SHARED_DIRS"] = dirs

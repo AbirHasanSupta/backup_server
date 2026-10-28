@@ -77,6 +77,8 @@ services:
       # All containers write config/cache/posts/reels/memories here
       # — same physical folder as the desktop EXE's AppData directory
       - APP_DATA_DIR=/app_data
+      # Public Drive folder listing and server-side previews/downloads.
+      - GOOGLE_DRIVE_API_KEY=${GOOGLE_DRIVE_API_KEY:-}
       # Local calendar for On-This-Day / capture-day bucketing.
       # Default Asia/Dhaka; override via TZ/APP_TZ in .env if needed.
       - TZ=${TZ:-Asia/Dhaka}

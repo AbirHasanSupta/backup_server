@@ -30,6 +30,7 @@ remain available for installed clients that use the legacy paths.
 - **Desktop Post Composer (Share Files to Devices)**: Compose and push direct media posts and PC files from desktop to target mobile devices with custom captions and recipient selection.
 - **Post Moderation & Management**: Browse, edit, and moderate posts created by Desktop or Mobile devices, edit post captions, edit attached files, manage recipient device permissions, or delete posts.
 - **Shared Desktop Folders**: Expose local PC directories to connected mobile clients with per-folder device tagging (`device_ids` / `all`) so each shared folder is only visible to designated phones.
+- **Google Drive Shared Folders**: Add public Drive folder links from Web Admin or Android, then browse, search, preview, and restore their files in Library. Server mode uses the server's Drive API key; Android can save a key for offline and P2P use.
 - **Device-to-Device Media Sharing**: Relay shared photo and video albums between approved mobile devices with captions, access controls, target recipient filtering, and post management.
 - **Social Feedback (Reactions & Comments)**: Threaded comments and emoji reactions on backed-up and shared media items across devices with post owner moderation.
 - **Smart Trip Clustering & Albums**: `trips.py` groups media into auto-curated trip albums based on temporal proximity (gap < 36h) and spatial distance (< 50km), reverse-geocoding cluster centroids into place names with a thread-safe SQLite cache.

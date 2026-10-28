@@ -8,9 +8,10 @@ import os
 import time
 from pydantic import BaseModel
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
-from core.config import get_shared_dirs
+from core.config import get_shared_dirs, load_config, save_config
+from core.google_drive import EXPORT_FORMATS, GoogleDriveError, all_files as drive_all_files, browse as drive_browse, ensure_descendant as drive_ensure_descendant, folder_id_from_link
 from core.path_utils import normalize_fs_path
 from core.security import verify_api_key_or_device_token
 from repositories import device_repo, file_repo, social_repo
@@ -61,6 +62,11 @@ class WarmPreviewsRequest(BaseModel):
     device_id: str | None = None
 
 
+class AddGoogleDriveFolderRequest(BaseModel):
+    link: str
+    label: str | None = None
+
+
 def _find_shared_dir(source_id: str) -> dict | None:
     for entry in get_shared_dirs():
         if entry.get("id") == source_id:
@@ -73,6 +79,68 @@ def _is_folder_tagged_for_device(entry: dict, device_id: str | None) -> bool:
         return True
     tags = entry.get("device_ids", ["all"])
     return not tags or "all" in tags or device_id in tags
+
+
+def _drive_source(entry: dict) -> bool:
+    return entry.get("type") == "google_drive" or entry.get("kind") == "google_drive"
+
+
+def _drive_file_id(relative_path: str) -> str:
+    # Drive source paths carry the opaque file ID as their first segment and
+    # the original filename as their final segment for the existing UI.
+    parts = relative_path.replace("\\", "/").strip("/").split("/")
+    if len(parts) < 2 or not parts[0]:
+        raise HTTPException(status_code=400, detail="Invalid Google Drive file path")
+    return parts[0]
+
+
+def _drive_media_response(file_id: str, request: Request, metadata: dict | None = None):
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    from config import load_config
+
+    api_key = str(load_config().get("GOOGLE_DRIVE_API_KEY") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="Google Drive API key is not configured")
+    metadata = metadata or {}
+    # Public blob links are the most compatible anonymous download route. The
+    # API alt=media endpoint remains a fallback for files without a browser link.
+    mime_type = metadata.get("mimeType") or ""
+    export = EXPORT_FORMATS.get(mime_type)
+    if export:
+        url = (metadata.get("exportLinks") or {}).get(export[0]) or (
+            f"https://www.googleapis.com/drive/v3/files/{urllib.parse.quote(file_id, safe='')}/export?mimeType={urllib.parse.quote(export[0], safe='')}&key={urllib.parse.quote(api_key)}"
+        )
+    else:
+        url = metadata.get("webContentLink") or (
+            f"https://www.googleapis.com/drive/v3/files/{urllib.parse.quote(file_id, safe='')}?alt=media&supportsAllDrives=true&key={urllib.parse.quote(api_key)}"
+        )
+    headers = {}
+    if request.headers.get("range"):
+        headers["Range"] = request.headers["range"]
+    try:
+        upstream = urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60)
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(status_code=404 if exc.code == 404 else 502, detail="Google Drive file could not be downloaded") from exc
+    response_headers = {}
+    for header in ("Content-Length", "Content-Range", "Accept-Ranges", "Content-Disposition"):
+        if upstream.headers.get(header):
+            response_headers[header] = upstream.headers[header]
+    media_type = upstream.headers.get_content_type()
+    def _stream():
+        try:
+            while chunk := upstream.read(1024 * 1024):
+                yield chunk
+        finally:
+            upstream.close()
+    return StreamingResponse(_stream(), status_code=upstream.status, media_type=media_type, headers=response_headers)
+
+
+def _fetch_drive_thumbnail(url: str) -> tuple[bytes, str]:
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=15) as response:
+        return response.read(), response.headers.get_content_type()
 
 
 @router.get("/files/list")
@@ -218,6 +286,19 @@ async def list_shared_files(
     if not _is_folder_tagged_for_device(entry, device_id):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
+    if _drive_source(entry):
+        try:
+            root_id = entry.get("drive_folder_id") or folder_id_from_link(entry.get("path", ""))
+            folder_id = prefix.split("/", 1)[0] if prefix else root_id
+            if folder_id != root_id:
+                nested = await asyncio.to_thread(drive_ensure_descendant, root_id, folder_id)
+                if nested.get("mimeType") != "application/vnd.google-apps.folder":
+                    raise GoogleDriveError("Invalid Google Drive folder path.")
+            files = await asyncio.to_thread(drive_all_files, folder_id)
+        except GoogleDriveError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"files": files, "source_id": source_id, "label": entry.get("label")}
+
     root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         return {"files": [], "warning": "Directory does not exist on server"}
@@ -270,6 +351,12 @@ async def search_shared_files(
     q = q.strip().lower()
     if not q:
         return {"files": []}
+    if _drive_source(entry):
+        try:
+            files = await asyncio.to_thread(drive_all_files, folder_id_from_link(entry.get("path", "")))
+        except GoogleDriveError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {"files": [f for f in files if q in f.get("name", "").lower()]}
     root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         return {"files": []}
@@ -312,6 +399,20 @@ async def browse_shared_files(
         raise HTTPException(status_code=404, detail="Shared source not found")
     if not _is_folder_tagged_for_device(entry, device_id):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
+
+    if _drive_source(entry):
+        try:
+            root_id = entry.get("drive_folder_id") or folder_id_from_link(entry.get("path", ""))
+            if prefix:
+                nested_id = prefix.split("/", 1)[0]
+                if nested_id != root_id:
+                    nested = await asyncio.to_thread(drive_ensure_descendant, root_id, nested_id)
+                    if nested.get("mimeType") != "application/vnd.google-apps.folder":
+                        raise GoogleDriveError("Invalid Google Drive folder path.")
+            result = await asyncio.to_thread(drive_browse, root_id, prefix)
+        except GoogleDriveError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return result
 
     root = os.path.abspath(normalize_fs_path(entry["path"]))
     norm_prefix = prefix.strip("/").replace("\\", "/")
@@ -372,6 +473,14 @@ async def download_shared_file(
     if not _is_folder_tagged_for_device(entry, device_id):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
+    if _drive_source(entry):
+        try:
+            root_id = entry.get("drive_folder_id") or folder_id_from_link(entry.get("path", ""))
+            metadata = await asyncio.to_thread(drive_ensure_descendant, root_id, _drive_file_id(relative_path))
+        except GoogleDriveError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return await asyncio.to_thread(_drive_media_response, _drive_file_id(relative_path), request, metadata)
+
     root = os.path.abspath(normalize_fs_path(entry["path"]))
     safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
     full_path = os.path.abspath(os.path.join(root, safe_rel))
@@ -396,6 +505,17 @@ async def preview_shared_file(
         raise HTTPException(status_code=404, detail="Shared source not found")
     if not _is_folder_tagged_for_device(entry, device_id):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
+
+    if _drive_source(entry):
+        file_id = _drive_file_id(relative_path)
+        try:
+            root_id = entry.get("drive_folder_id") or folder_id_from_link(entry.get("path", ""))
+            metadata = await asyncio.to_thread(drive_ensure_descendant, root_id, file_id)
+        except GoogleDriveError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if not str(metadata.get("mimeType", "")).startswith("video/"):
+            raise HTTPException(status_code=400, detail="Preview is only available for video files")
+        return await asyncio.to_thread(_drive_media_response, file_id, request, metadata)
 
     root = os.path.abspath(normalize_fs_path(entry["path"]))
     safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
@@ -426,6 +546,21 @@ async def thumbnail_shared_file(
     if not _is_folder_tagged_for_device(entry, device_id):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
+    if _drive_source(entry):
+        try:
+            root_id = entry.get("drive_folder_id") or folder_id_from_link(entry.get("path", ""))
+            metadata = await asyncio.to_thread(drive_ensure_descendant, root_id, _drive_file_id(relative_path))
+        except GoogleDriveError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        thumbnail = metadata.get("thumbnailLink")
+        if not thumbnail:
+            raise HTTPException(status_code=404, detail="Thumbnail is not available")
+        try:
+            content, media_type = await asyncio.to_thread(_fetch_drive_thumbnail, thumbnail)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="Google Drive thumbnail is not available") from exc
+        return StreamingResponse(iter([content]), media_type=media_type, headers={"Cache-Control": "private, max-age=3600"})
+
     root = os.path.abspath(normalize_fs_path(entry["path"]))
     safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
     full_path = os.path.abspath(os.path.join(root, safe_rel))
@@ -446,6 +581,8 @@ async def warm_shared_previews(
     entry = _find_shared_dir(source_id)
     if not entry:
         raise HTTPException(status_code=404, detail="Shared source not found")
+    if _drive_source(entry):
+        return {"ok": True, "scheduled": 0}
     root = os.path.abspath(normalize_fs_path(entry["path"]))
     for rel_path in body.paths[:3]:
         try:
@@ -456,3 +593,43 @@ async def warm_shared_previews(
         except Exception:
             pass
     return {"ok": True}
+
+
+@router.post("/api/shared/google-drive/add")
+@router.post("/shared/google-drive/add")
+async def add_shared_google_drive_folder(
+    body: AddGoogleDriveFolderRequest,
+    device_id: str | None = None,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    try:
+        folder_id = folder_id_from_link(body.link)
+        from core.google_drive import FOLDER_MIME, get_file, list_children
+        metadata = await asyncio.to_thread(get_file, folder_id)
+        if metadata.get("mimeType") != FOLDER_MIME:
+            raise GoogleDriveError("That link is not a Google Drive folder. Paste a folder link.")
+        await asyncio.to_thread(list_children, folder_id)
+    except GoogleDriveError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    cfg = load_config()
+    dirs = list(cfg.get("SHARED_DIRS", []))
+    existing = next((d for d in dirs if _drive_source(d) and d.get("drive_folder_id") == folder_id), None)
+    if existing:
+        return {"ok": True, "entry": existing, "existing": True}
+    entry = {
+        "id": f"drive_{folder_id}",
+        "path": body.link.strip(),
+        "drive_folder_id": folder_id,
+        "type": "google_drive",
+        "label": (body.label or "Google Drive Folder").strip() or "Google Drive Folder",
+        # A device-token request creates a source for that device only. Admin
+        # API-key requests may intentionally publish it to every paired device.
+        "device_ids": [device_id] if device_id else ["all"],
+        "available_in_reels": False,
+    }
+    dirs.append(entry)
+    cfg["SHARED_DIRS"] = dirs
+    save_config(cfg)
+    return {"ok": True, "entry": entry, "existing": False}

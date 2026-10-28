@@ -16,5 +16,9 @@ module.exports = ({ config }) => {
       ...config.android,
       versionCode: androidVersionCode(version),
     },
+    extra: {
+      ...config.extra,
+      googleDriveApiKey: process.env.EXPO_PUBLIC_GOOGLE_DRIVE_API_KEY || '',
+    },
   };
 };

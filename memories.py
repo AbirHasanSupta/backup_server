@@ -737,6 +737,8 @@ def _do_reindex_all() -> None:
         for s in shared_dirs:
             sid = s.get("id")
             spath = s.get("path")
+            if s.get("type") == "google_drive" or s.get("kind") == "google_drive":
+                continue
             if sid and spath:
                 tasks.append(("shared", sid, spath))
 

@@ -49,6 +49,9 @@ import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   downloadFile,
   listSharedSources,
+  getLocalDriveSharedSources,
+  addGoogleDriveSource,
+  removeGoogleDriveSource,
   downloadSharedFile,
   getConfig,
   buildPreviewUrl,
@@ -146,7 +149,7 @@ function registerDoubleTap(ref: { current: number }): boolean {
 
 type SourceMode = 'phone' | 'shared';
 
-type SharedSource = { id: string; label: string };
+type SharedSource = { id: string; label: string; type?: string; local?: boolean; drive_folder_id?: string };
 
 type RemoteFile = {
   path: string;
@@ -2145,6 +2148,8 @@ type SourceSelectorProps = {
   isOffline: boolean;
   onModeChange: (mode: SourceMode) => void;
   onSourceSelect: (source: SharedSource) => void;
+  onAddDriveFolder: (link: string, apiKey: string) => Promise<void>;
+  onRemoveDriveFolder: (source: SharedSource) => void;
   colors: AppColors;
   showModeSwitch?: boolean;
 };
@@ -2152,10 +2157,14 @@ type SourceSelectorProps = {
 function SourceSelector({
   mode, sharedSources, selectedSourceId,
   isLoadingSources, isOffline,
-  onModeChange, onSourceSelect, colors,
+  onModeChange, onSourceSelect, onAddDriveFolder, onRemoveDriveFolder, colors,
   showModeSwitch = true,
 }: SourceSelectorProps) {
   const [showSourceMenu, setShowSourceMenu] = useState(false);
+  const [showDriveModal, setShowDriveModal] = useState(false);
+  const [driveLink, setDriveLink] = useState('');
+  const [driveApiKey, setDriveApiKey] = useState('');
+  const [driveBusy, setDriveBusy] = useState(false);
   const selectedSource = sharedSources.find(s => s.id === selectedSourceId);
 
   if (!showModeSwitch) return null;
@@ -2201,9 +2210,17 @@ function SourceSelector({
 
       {mode === 'shared' && (
         <View style={srcStyles.sourceRow}>
+          <TouchableOpacity
+            style={[srcStyles.addDriveButton, { borderColor: colors.primary, backgroundColor: colors.primarySoft }]}
+            onPress={() => setShowDriveModal(true)}
+            activeOpacity={0.8}
+          >
+            <AppIcon androidName="add_link" iosName="link.badge.plus" color={colors.primary} size={16} />
+            <Text style={[srcStyles.addDriveText, { color: colors.primary }]}>Add Google Drive folder</Text>
+          </TouchableOpacity>
           {isOffline ? (
             <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
-              Connect to a server to load shared folders.
+              Connect to a server for its shared folders, or add a public Drive folder above.
             </Text>
           ) : isLoadingSources ? (
             <View style={srcStyles.sourceLoadingRow}>
@@ -2214,7 +2231,7 @@ function SourceSelector({
             </View>
           ) : sharedSources.length === 0 ? (
             <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
-              No shared folders configured. Add folders in the Desktop app → Settings.
+              No shared folders configured. Add a server folder in Settings or add a public Drive folder above.
             </Text>
           ) : (
             <>
@@ -2235,31 +2252,100 @@ function SourceSelector({
               {showSourceMenu && (
                 <View style={[srcStyles.sourceMenu, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
                   {sharedSources.map(src => (
-                    <TouchableOpacity
+                    <View
                       key={src.id}
                       style={[
                         srcStyles.sourceMenuItem,
                         src.id === selectedSourceId && { backgroundColor: colors.primarySoft },
                       ]}
-                      onPress={() => {
-                        onSourceSelect(src);
-                        setShowSourceMenu(false);
-                      }}
-                      activeOpacity={0.75}
                     >
-                      <AppIcon androidName="folder" iosName="folder.fill" color={src.id === selectedSourceId ? colors.primary : colors.textSecondary} size={16} />
-                      <Text style={[srcStyles.sourceMenuItemText, { color: src.id === selectedSourceId ? colors.primary : colors.text }]}>
-                        {src.label}
-                      </Text>
-                      {src.id === selectedSourceId && (
-                        <AppIcon androidName="check" iosName="checkmark" color={colors.primary} size={14} />
+                      <TouchableOpacity
+                        style={srcStyles.sourceMenuSelect}
+                        onPress={() => {
+                          onSourceSelect(src);
+                          setShowSourceMenu(false);
+                        }}
+                        activeOpacity={0.75}
+                      >
+                        <AppIcon androidName="folder" iosName="folder.fill" color={src.id === selectedSourceId ? colors.primary : colors.textSecondary} size={16} />
+                        <Text style={[srcStyles.sourceMenuItemText, { color: src.id === selectedSourceId ? colors.primary : colors.text }]} numberOfLines={1}>
+                          {src.label}
+                        </Text>
+                        {src.id === selectedSourceId && (
+                          <AppIcon androidName="check" iosName="checkmark" color={colors.primary} size={14} />
+                        )}
+                      </TouchableOpacity>
+                      {src.local && (
+                        <TouchableOpacity
+                          onPress={() => onRemoveDriveFolder(src)}
+                          style={srcStyles.sourceRemove}
+                          accessibilityLabel={`Remove ${src.label} from this phone`}
+                        >
+                          <AppIcon androidName="delete_outline" iosName="trash" color={colors.textMuted} size={16} />
+                        </TouchableOpacity>
                       )}
-                    </TouchableOpacity>
+                    </View>
                   ))}
                 </View>
               )}
             </>
           )}
+          <Modal visible={showDriveModal} transparent animationType="fade" onRequestClose={() => setShowDriveModal(false)}>
+            <View style={srcStyles.driveModalBackdrop}>
+              <View style={[srcStyles.driveModal, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
+                <Text style={[srcStyles.driveModalTitle, { color: colors.text }]}>Add Google Drive folder</Text>
+                <Text style={[srcStyles.driveModalHint, { color: colors.textSecondary }]}>Share the folder as “Anyone with the link”. Google also requires an API key for apps to list its contents.</Text>
+                <TextInput
+                  value={driveLink}
+                  onChangeText={setDriveLink}
+                  placeholder="Paste Google Drive folder link"
+                  placeholderTextColor={colors.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  style={[srcStyles.driveInput, { color: colors.text, borderColor: colors.surfaceBorder, backgroundColor: colors.surfaceElevated }]}
+                />
+                <TextInput
+                  value={driveApiKey}
+                  onChangeText={setDriveApiKey}
+                  placeholder="Google Drive API key (needed for offline/P2P)"
+                  placeholderTextColor={colors.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  secureTextEntry
+                  style={[srcStyles.driveInput, { color: colors.text, borderColor: colors.surfaceBorder, backgroundColor: colors.surfaceElevated }]}
+                />
+                <Text style={[srcStyles.driveModalHint, { color: colors.textMuted }]}>Optional when the connected server already has a key. Add one here for offline and P2P use; it is saved in the app.</Text>
+                <Text
+                  onPress={() => Linking.openURL('https://console.cloud.google.com/apis/credentials').catch(() => {})}
+                  style={[srcStyles.driveHelpLink, { color: colors.primary }]}
+                >Need an API key? Open Google Cloud Console</Text>
+                <View style={srcStyles.driveModalActions}>
+                  <TouchableOpacity onPress={() => setShowDriveModal(false)} style={srcStyles.driveAction}>
+                    <Text style={{ color: colors.textSecondary, fontWeight: '700' }}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    disabled={driveBusy || !driveLink.trim()}
+                    style={[srcStyles.driveAction, { backgroundColor: colors.primary, borderRadius: Radius.md, opacity: driveBusy || !driveLink.trim() ? 0.6 : 1 }]}
+                    onPress={async () => {
+                      setDriveBusy(true);
+                      try {
+                        await onAddDriveFolder(driveLink.trim(), driveApiKey.trim());
+                        setDriveLink('');
+                        setDriveApiKey('');
+                        setShowDriveModal(false);
+                      } catch (err: any) {
+                        Alert.alert('Google Drive folder', sanitizeErrorMessage(err, 'Could not access this folder.'));
+                      } finally {
+                        setDriveBusy(false);
+                      }
+                    }}
+                  >
+                    {driveBusy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: '#fff', fontWeight: '700' }}>Add folder</Text>}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </Modal>
         </View>
       )}
     </View>
@@ -2289,6 +2375,16 @@ const srcStyles = StyleSheet.create({
   },
   pillText: { fontSize: TextScale.xs, fontWeight: '700' },
   sourceRow: { paddingHorizontal: Spacing.four, paddingTop: Spacing.two },
+  addDriveButton: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 7, borderWidth: 1, borderRadius: Radius.md, paddingHorizontal: 11, paddingVertical: 8, marginBottom: Spacing.two },
+  addDriveText: { fontSize: TextScale.xs, fontWeight: '700' },
+  driveModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', padding: 22 },
+  driveModal: { borderWidth: 1, borderRadius: Radius.lg, padding: 20, gap: 12 },
+  driveModalTitle: { fontSize: 18, fontWeight: '800' },
+  driveModalHint: { fontSize: 13, lineHeight: 18 },
+  driveHelpLink: { fontSize: 12, fontWeight: '700', textDecorationLine: 'underline' },
+  driveInput: { borderWidth: 1, borderRadius: Radius.md, paddingHorizontal: 12, paddingVertical: 11, fontSize: 14 },
+  driveModalActions: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 4 },
+  driveAction: { paddingHorizontal: 13, paddingVertical: 10, minWidth: 70, alignItems: 'center' },
   sourceLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   sourceLoadingText: { fontSize: TextScale.xs },
   noSourceText: { fontSize: TextScale.xs, lineHeight: 18 },
@@ -2317,10 +2413,9 @@ const srcStyles = StyleSheet.create({
   sourceMenuItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Spacing.two,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.three,
   },
+  sourceMenuSelect: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: Spacing.two, paddingHorizontal: Spacing.three, paddingVertical: Spacing.three },
+  sourceRemove: { paddingHorizontal: Spacing.three, paddingVertical: Spacing.three },
   sourceMenuItemText: { flex: 1, fontSize: TextScale.sm, fontWeight: '500' },
   viewSwitcherWrap: {
     flexDirection: 'row',
@@ -4193,10 +4288,14 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   }, []);
 
   const sourceModeRef = useRef(sourceMode);
+  const sharedSourcesRef = useRef(sharedSources);
   const sharedSourcesGen = useRef(0);
   useEffect(() => {
     sourceModeRef.current = sourceMode;
   }, [sourceMode]);
+  useEffect(() => {
+    sharedSourcesRef.current = sharedSources;
+  }, [sharedSources]);
 
   // Load shared sources — invoke when not offline (connected or checking)
   const loadSharedSources = useCallback(async () => {
@@ -4227,9 +4326,50 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
   }, []);
 
+  const handleAddDriveFolder = useCallback(async (link: string, apiKey: string) => {
+    const source = await addGoogleDriveSource(link, '', apiKey);
+    setSharedSources(prev => [...prev.filter(s => s.id !== source.id), source]);
+    setSelectedSourceId(source.id);
+    setFiles([]);
+    setTree(null);
+    setExpandedKeys(new Set());
+    setSelectedPaths(new Set());
+  }, []);
+
+  const handleRemoveDriveFolder = useCallback((source: SharedSource) => {
+    Alert.alert('Remove Google Drive folder?', `“${source.label}” will be removed from this phone. The files in Google Drive will not be deleted.`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Remove', style: 'destructive', onPress: () => {
+        void removeGoogleDriveSource(source.id).then(() => {
+          setSharedSources(prev => prev.filter(item => item.id !== source.id));
+          if (selectedSourceId === source.id) {
+            setSelectedSourceId(null);
+            setFiles([]);
+            setTree(null);
+            setSelectedPaths(new Set());
+          }
+        }).catch(() => Alert.alert('Could not remove folder', 'Please try again.'));
+      } },
+    ]);
+  }, [selectedSourceId]);
+
   // Server connection check: fast probe (≤1500ms) with mutual exclusivity (server vs p2p)
   const checkServer = useCallback(async (alive?: () => boolean) => {
     const stillAlive = alive ?? (() => true);
+    const showOfflineDriveSources = async () => {
+      if (sourceModeRef.current !== 'shared') return;
+      const localSources: SharedSource[] = await getLocalDriveSharedSources();
+      if (!stillAlive() || !restoreMountedRef.current) return;
+      setSharedSources(localSources);
+      setSelectedSourceId(prev => {
+        if (!localSources.length) return null;
+        const previous = sharedSourcesRef.current.find(source => source.id === prev);
+        const matching = previous?.drive_folder_id
+          ? localSources.find(source => source.drive_folder_id === previous.drive_folder_id)
+          : null;
+        return matching?.id || (localSources.some(source => source.id === prev) ? prev : localSources[0].id);
+      });
+    };
     const ip = await getServerIp();
     if (!stillAlive()) return;
     if (!ip) {
@@ -4237,6 +4377,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       setIsLoadingSources(false);
       setServerStatus('disconnected');
       await setServerAvailable(false);
+      await showOfflineDriveSources();
       return;
     }
 
@@ -4265,6 +4406,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       sharedSourcesGen.current += 1;
       setIsLoadingSources(false);
       setServerStatus('disconnected');
+      await showOfflineDriveSources();
     }
   }, [loadServerConfig, loadSharedSources]);
 
@@ -4276,6 +4418,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   // True offline only — "checking" stays fully interactive like before.
   const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
+  const isLocalDriveSelection = sourceMode === 'shared' && String(selectedSourceId || '').startsWith('local_drive_');
 
   const handleModeChange = useCallback((mode: SourceMode) => {
     if (mode === sourceModeRef.current) return;
@@ -4297,10 +4440,9 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       setSelectedSourceId(null);
       return;
     }
-    // Load whenever we are not offline (connected or checking).
-    if (serverStatus !== 'disconnected' && serverStatus !== 'unknown') {
-      void loadSharedSources();
-    }
+    // The picker merges the server sources with locally saved public Drive
+    // sources, so it remains useful while offline and in P2P mode.
+    void loadSharedSources();
   }, [loadSharedSources, serverStatus]);
 
   const handleSourceSelect = useCallback((source: SharedSource) => {
@@ -4599,7 +4741,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   // Fetch files from server
   const handleFetch = useCallback(async (opts?: { quiet?: boolean; ignoreOffline?: boolean; preserveSelection?: boolean }) => {
     if (fetchingRef.current || isDownloading) return;
-    if (!opts?.ignoreOffline && isOffline && !isFeedMode) return;
+    if (!opts?.ignoreOffline && isOffline && !isFeedMode && !isLocalDriveSelection) return;
     if (sourceMode === 'shared' && !selectedSourceId) {
       if (!opts?.quiet) Alert.alert('No Source', 'Please select a shared folder first.');
       return;
@@ -4703,7 +4845,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       fetchingRef.current = false;
       if (restoreMountedRef.current) setIsFetching(false);
     }
-  }, [isOffline, isDownloading, sourceMode, selectedSourceId, isFeedMode, sortField, sortDir, loadServerConfig]);
+  }, [isOffline, isDownloading, sourceMode, selectedSourceId, isFeedMode, sortField, sortDir, loadServerConfig, isLocalDriveSelection]);
 
   // Real-time listener: refresh feed and update social metrics live
   useEffect(() => {
@@ -5014,17 +5156,17 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   useEffect(() => {
     if (isDownloading) return;
-    if (isOffline && !isFeedMode) return;
+    if (isOffline && !isFeedMode && !isLocalDriveSelection) return;
     // Feed sources from /api/feed (no shared source needed); shared mode requires selectedSourceId.
     if (!isFeedMode && sourceMode === 'shared' && !selectedSourceId) return;
     queueMicrotask(() => {
       void handleFetch({ quiet: true, preserveSelection: true });
     });
-  }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]);
+  }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch, isLocalDriveSelection]);
 
   useFocusEffect(useCallback(() => {
     if (isDownloading) return;
-    if (isOffline && !isFeedMode) return;
+    if (isOffline && !isFeedMode && !isLocalDriveSelection) return;
     if (!isFeedMode && sourceMode === 'shared' && !selectedSourceId) return;
 
     // If a notification tap flagged a forced refresh, bypass any in-flight guard
@@ -5041,7 +5183,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
 
     void handleFetch({ quiet: true, preserveSelection: true });
-  }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]));
+  }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch, isLocalDriveSelection]));
 
   // Poll reactions/comments every 45 s while Feed tab is in focus, app is active, and server is online.
   useFocusEffect(useCallback(() => {
@@ -5435,7 +5577,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       const f = previewableFiles.find(x => x.path === path) || files.find(x => x.path === path);
       return Boolean((f as any)?.uri);
     });
-    if (!hasOnlyLocalFiles && (serverStatus === 'disconnected' || serverStatus === 'unknown')) {
+    const isDriveSource = sourceMode === 'shared' && String(selectedSourceId || '').startsWith('local_drive_');
+    if (!hasOnlyLocalFiles && !isDriveSource && (serverStatus === 'disconnected' || serverStatus === 'unknown')) {
       Alert.alert('Offline', 'Connect to a server before downloading files.');
       return;
     }
@@ -5489,7 +5632,9 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
               await MediaLibrary.saveToLibraryAsync(localUri);
               saved++;
             } else if (FileSystem.documentDirectory) {
-              const localPath = sanitizeRelativePath(path);
+              const safePath = sanitizeRelativePath(path);
+              const isDriveFile = String(selectedSourceId || '').startsWith('local_drive_') || sharedSources.some(s => s.id === selectedSourceId && s.type === 'google_drive');
+              const localPath = isDriveFile ? safePath.split('/').slice(1).join('/') : safePath;
               const destUri = FileSystem.documentDirectory + localPath;
               const folderUri = destUri.substring(0, destUri.lastIndexOf('/'));
               const folderInfo = await FileSystem.getInfoAsync(folderUri);
@@ -5508,7 +5653,9 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             continue;
           }
 
-          const localPath = sanitizeRelativePath(path);
+          const safePath = sanitizeRelativePath(path);
+          const isDriveFile = String(selectedSourceId || '').startsWith('local_drive_') || sharedSources.some(s => s.id === selectedSourceId && s.type === 'google_drive');
+          const localPath = isDriveFile ? safePath.split('/').slice(1).join('/') : safePath;
           const ext = localPath.split('.').pop()?.toLowerCase() ?? '';
           const isMedia = isMediaExtension(ext);
 
@@ -5612,7 +5759,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         setDownloadProgress(null);
       }
     }
-  }, [files, previewableFiles, sourceMode, selectedSourceId, serverStatus]);
+  }, [files, previewableFiles, sourceMode, selectedSourceId, serverStatus, sharedSources]);
 
   const handleDownloadSingle = useCallback(async (file: RemoteFile) => {
     closePreview();
@@ -5644,7 +5791,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     return buildVideoPreviewUrl(serverConfig, warmPreviewFile.path, sourceMode, selectedSourceId);
   }, [warmPreviewFile, serverConfig, sourceMode, selectedSourceId]);
 
-  const fetchDisabled = isFetching || isDownloading || isOffline ||
+  const fetchDisabled = isFetching || isDownloading || (isOffline && !isLocalDriveSelection) ||
     (sourceMode === 'shared' && !selectedSourceId);
 
   // Single overall progress: finished files + current file byte fraction.
@@ -5793,6 +5940,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
               isOffline={isOffline}
               onModeChange={handleModeChange}
               onSourceSelect={handleSourceSelect}
+              onAddDriveFolder={handleAddDriveFolder}
+              onRemoveDriveFolder={handleRemoveDriveFolder}
               colors={colors}
               showModeSwitch
             />

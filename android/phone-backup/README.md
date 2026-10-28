@@ -18,6 +18,12 @@ and the social/memory features provided by the companion server.
   already run by `npm run start`, `npm run android`, and the APK build scripts.
 - Use a tag formatted as `vMAJOR.MINOR.PATCH`. Android's version code is derived
   as `major * 1,000,000 + minor * 1,000 + patch`.
+- For direct Google Drive access while offline or in P2P mode, users can paste
+  a Drive API key in the add-folder sheet. Builds may instead provide
+  `EXPO_PUBLIC_GOOGLE_DRIVE_API_KEY` as a default. A connected server uses its
+  own configured key. The build-time key is visible in the installed app, so
+  use a separate key restricted to the Drive API and this Android app's
+  package/signing certificate. Shared folders must allow anyone with the link.
 
 ---
 
@@ -33,7 +39,7 @@ and the social/memory features provided by the companion server.
   - Subnet LAN server discovery modal (`serverDiscovery.js`).
 
 - 📥 **Library & Restore (`src/app/restore.tsx`)**:
-  - Dual source support: Browse phone backup archives, PC-shared folders (`/shared/list`), or switch to shared social feed view.
+  - Browse phone backup archives, server-shared folders (`/shared/list`), and public Google Drive folders in Server, Offline, or P2P mode.
   - Virtualized tree and grid view for lag-free expansion, sorting, and navigation across thousands of files.
   - Folder-level selection states (none / partial / all) and batch download restore engine with progress tracking.
   - In-app media player: Photo gallery, audio playback (`expo-audio`), and video streaming (`expo-video`) with on-demand range requests and video preview pre-warming.

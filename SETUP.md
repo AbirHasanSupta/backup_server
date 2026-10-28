@@ -143,6 +143,7 @@ Important environment settings are:
 | Variable | Purpose |
 | --- | --- |
 | `API_KEY` | Required long, private API key used by devices before pairing |
+| `GOOGLE_DRIVE_API_KEY` | Optional Google API key restricted to the Drive API; required for shared public Drive folders in Docker/server mode |
 | `BACKUP_ROOT` | Directory containing backed-up device files |
 | `APP_DATA_DIR` | Durable location for config, SQLite data, caches, and generated media |
 | `HOST`, `PORT` | Listener address and port |
@@ -173,6 +174,22 @@ rewind, and indexing), PostgreSQL, and Redis. Nginx path-routes `/upload*`,
 interactive pages. Other features use already-backed-up files; reload a page
 after sync to see newly uploaded media. Its Docker volumes retain the database,
 backups, caches, and Redis state.
+
+Google Drive lets apps list public folder contents through the Drive API using
+an API key; “Anyone with the link” grants access to the folder but does not
+provide an API identity for listing its files. [Google's Drive guide](https://developers.google.com/workspace/drive/api/guides/search-files)
+documents API-key access for public folders.
+
+To share a folder, set its Google Drive access to **Anyone with the link**. In
+**Web Admin → Shared Folders**, paste the folder link. If this server does not
+already have a Drive key, paste one into the optional key field once. Create a
+key in [Google Cloud Console](https://console.cloud.google.com/apis/credentials),
+enable the Google Drive API for that project, and restrict the key to the Drive
+API. Android users can paste a key in the add-folder sheet when they need direct
+offline/P2P access. A key embedded through `EXPO_PUBLIC_GOOGLE_DRIVE_API_KEY` is
+visible in the installed app, so use a separate key restricted to the Drive API
+and the Android app's package/signing certificate. A connected server uses its
+own configured key.
 
 1. Copy the supplied environment template and replace every placeholder with a
    long random value. Percent-encode special characters in the PostgreSQL URL.
