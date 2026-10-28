@@ -195,6 +195,23 @@ html:not(.dark) .section-header { color: #64748b; }
   z-index: 70;
 }
 
+#post-gallery-modal { z-index: 60; }
+#media-modal { z-index: 80; }
+
+.post-gallery-panel {
+  height: 88vh;
+  max-height: 88vh;
+  min-height: 0;
+}
+
+.post-gallery-grid {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-y: auto;
+  align-content: start;
+  overscroll-behavior: contain;
+}
+
 /* ── Tab Active Navigation ────────────────────────────────────────────────── */
 [data-tab].tab-active {
   color: #ffffff;

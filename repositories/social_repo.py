@@ -338,6 +338,30 @@ def get_all_device_shares() -> List[Dict[str, Any]]:
     return db_get_all_device_shares()
 
 
+def get_all_share_targets() -> Dict[str, List[Dict[str, Any]]]:
+    """Return each post group's target devices for the admin posts view."""
+    if is_postgres():
+        rows = execute_read_query(
+            """
+            SELECT DISTINCT ds.share_group_id, dst.target_device_id,
+                   d.device_name, d.device_model, d.username
+            FROM device_shares ds
+            JOIN device_share_targets dst ON dst.share_id = ds.share_id
+            LEFT JOIN devices d ON d.device_id = dst.target_device_id
+            WHERE ds.share_group_id IS NOT NULL
+            """
+        )
+    else:
+        from database import get_all_share_targets_for_admin as db_get_all_share_targets_for_admin
+        rows = db_get_all_share_targets_for_admin()
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        group_id = row.get("share_group_id")
+        if group_id:
+            groups.setdefault(str(group_id), []).append(row)
+    return groups
+
+
 def get_device_share_by_id(share_id: int) -> Dict[str, Any] | None:
     if is_postgres():
         sql = """

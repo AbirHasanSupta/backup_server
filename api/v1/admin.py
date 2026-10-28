@@ -63,6 +63,7 @@ import subprocess
 import time
 import uuid
 from typing import Any, List, Optional
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, File, Header, HTTPException, Query, Response, UploadFile, status
 from pydantic import BaseModel
@@ -1094,7 +1095,9 @@ async def list_all_admin_posts(
 ):
     """Compact moderation list covering posts created by every device."""
     _auth(authorization, token)
+    api_key = token or (authorization.split(" ", 1)[1] if authorization and " " in authorization else "")
     rows = await asyncio.to_thread(social_repo.get_all_device_shares)
+    all_targets = await asyncio.to_thread(social_repo.get_all_share_targets)
     groups: dict[str, list[dict]] = {}
     order: list[str] = []
     for row in rows:
@@ -1106,7 +1109,7 @@ async def list_all_admin_posts(
 
     posts = []
     author_devices = {}
-    query = q.strip().lower()
+    search_query = q.strip().lower()
     for group_id in order:
         items = groups[group_id]
         head = items[0]
@@ -1120,11 +1123,28 @@ async def list_all_admin_posts(
         )
         author = head.get("shared_by_username") or head.get("shared_by_name") or device_id
         caption = head.get("group_caption") or head.get("caption") or ""
+        targets = all_targets.get(group_id, [])
+        target_names = [device_repo.format_device_display_name(target) for target in targets]
         author_devices[device_id] = device_name
-        if query and query not in caption.lower() and query not in author.lower() and query not in device_name.lower():
+        if search_query and search_query not in caption.lower() and search_query not in author.lower() and search_query not in device_name.lower():
             continue
         if device_filter and device_filter != "all" and device_filter != device_id:
             continue
+        item_list = []
+        for item in items[:6]:
+            share_id = item.get("share_id")
+            query_params = {"device_id": device_id}
+            if api_key:
+                query_params["token"] = api_key
+            media_query = urlencode(query_params)
+            relative_path = item.get("relative_path", "")
+            item_list.append({
+                "share_id": share_id,
+                "name": os.path.basename(relative_path) or relative_path,
+                "thumbnail_url": f"/api/share/{share_id}/thumbnail?{media_query}",
+                "download_url": f"/api/share/{share_id}/download?{media_query}",
+                "preview_url": f"/api/share/{share_id}/preview?{media_query}",
+            })
         posts.append({
             "group_id": group_id,
             "caption": caption,
@@ -1133,6 +1153,8 @@ async def list_all_admin_posts(
             "device_id": device_id,
             "device_name": device_name,
             "item_count": len(items),
+            "target_names": target_names,
+            "items": item_list,
         })
 
     return {
@@ -1144,6 +1166,38 @@ async def list_all_admin_posts(
             for device_id, name in sorted(author_devices.items(), key=lambda item: item[1].lower())
         ],
     }
+
+
+@router.get("/api/admin/all-posts/{group_id}/items")
+async def get_all_admin_post_items(
+    group_id: str,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    _auth(authorization, token)
+    api_key = token or (authorization.split(" ", 1)[1] if authorization and " " in authorization else "")
+    rows = await asyncio.to_thread(social_repo.get_all_device_shares)
+    items = [row for row in rows if (row.get("share_group_id") or str(row.get("share_id"))) == group_id]
+    if not items:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    device_id = items[0].get("shared_by_device_id") or "unknown"
+    query_params = {"device_id": device_id}
+    if api_key:
+        query_params["token"] = api_key
+    media_query = urlencode(query_params)
+    enriched = []
+    for item in items:
+        share_id = item.get("share_id")
+        relative_path = item.get("relative_path", "")
+        enriched.append({
+            "share_id": share_id,
+            "name": os.path.basename(relative_path) or relative_path,
+            "thumbnail_url": f"/api/share/{share_id}/thumbnail?{media_query}",
+            "download_url": f"/api/share/{share_id}/download?{media_query}",
+            "preview_url": f"/api/share/{share_id}/preview?{media_query}",
+        })
+    return {"items": enriched, "total": len(enriched)}
 
 
 @router.get("/api/admin/posts/{group_id}/targets")

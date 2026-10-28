@@ -280,11 +280,34 @@ async function refreshDashboard() {
       api.get('/api/admin/devices'),
     ]);
 
+    try {
+      const logRes = await api.get('/api/logs');
+      mergeRecentActivities(logRes.logs || []);
+    } catch (_) {}
+
     updateStatusBar(statusRes.status === 'online', statusRes.host, statusRes.port);
     renderDashboard(statusRes, devRes.devices || []);
   } catch (e) {
     updateStatusBar(false);
   }
+}
+
+function makeRecentActivity(entry) {
+  const level = detectLogLevel(entry.message || '');
+  return {
+    time: Number(entry.time || Date.now() / 1000),
+    badge: level.toUpperCase(),
+    badgeClass: level === 'error' ? 'bg-red-500/20 text-red-400' : level === 'warn' ? 'bg-amber-500/20 text-amber-400' : 'bg-emerald-500/20 text-emerald-400',
+    text: entry.message || '',
+  };
+}
+
+function mergeRecentActivities(entries) {
+  const merged = new Map();
+  [..._recentActivities, ...entries.map(makeRecentActivity)].forEach(item => {
+    merged.set(`${item.time}:${item.text}`, item);
+  });
+  _recentActivities = [...merged.values()].sort((a, b) => b.time - a.time).slice(0, 30);
 }
 
 function renderDashboard(status, devices) {
@@ -568,6 +591,9 @@ document.addEventListener('click', e => {
       openMediaPreviewUrl(url, cat);
       break;
     }
+    case 'show-post-files':
+      openPostFilesGrid(btn.dataset.groupId, btn.dataset.postKind || 'server');
+      break;
     case 'copy-file-path':
       navigator.clipboard.writeText(btn.dataset.path || '').then(() => showToast('Path copied to clipboard!'));
       break;
@@ -1045,7 +1071,7 @@ function renderPosts() {
             ${isVid ? '<div class="absolute inset-0 bg-black/40 flex items-center justify-center text-white text-xs pointer-events-none">▶</div>' : ''}
           </div>`;
         }).join('')}
-        ${items.length > 6 ? `<div class="w-16 h-16 rounded-lg bg-zinc-800/80 border border-zinc-700/60 flex items-center justify-center text-xs text-zinc-400 font-semibold shrink-0">+${items.length - 6} more</div>` : ''}
+        ${items.length > previewItems.length ? `<button data-action="show-post-files" data-group-id="${gid}" data-post-kind="server" class="w-16 h-16 rounded-lg bg-zinc-800/80 border border-zinc-700/60 flex items-center justify-center text-xs text-zinc-300 font-semibold shrink-0 hover:bg-zinc-700">+${items.length - previewItems.length} files</button>` : ''}
       </div>` : ''}
 
       <div class="pt-2 border-t border-zinc-800/60 flex items-center justify-between gap-2 flex-wrap">
@@ -1066,6 +1092,46 @@ function renderPosts() {
       </div>
     </div>`;
   }).join('');
+}
+
+async function openPostFilesGrid(groupId, postKind = 'server') {
+  const post = postKind === 'all'
+    ? _allPostsData.find(item => item.group_id === groupId)
+    : _postsData.find(item => item.group_id === groupId);
+  if (!post) return;
+
+  openModal('post-gallery-modal');
+  el('post-gallery-title').textContent = post.caption || 'Post Files';
+  el('post-gallery-count').textContent = `${Number(post.item_count || 0).toLocaleString()} files`;
+  const grid = el('post-gallery-grid');
+  grid.innerHTML = loadingSpinner();
+
+  try {
+    const items = postKind === 'all'
+      ? (await api.get(`/api/admin/all-posts/${encodeURIComponent(groupId)}/items`)).items || []
+      : post.items || [];
+    if (!items.length) {
+      grid.innerHTML = emptyState('No files in this post');
+      return;
+    }
+    grid.innerHTML = items.map(item => {
+      const isVideo = /\.(mp4|mov|avi|mkv|webm|m4v)$/i.test(item.name || '');
+      const category = isVideo ? 'videos' : 'photos';
+      const previewUrl = isVideo ? (item.preview_url || item.download_url) : item.download_url;
+      return `
+        <button type="button" data-action="preview-media" data-url="${escHtml(previewUrl)}" data-cat="${category}"
+                class="group min-w-0 text-left rounded-xl overflow-hidden bg-zinc-950 border border-zinc-800 hover:border-blue-500/60 transition">
+          <div class="h-36 sm:h-40 relative bg-zinc-900">
+            <img src="${escHtml(item.thumbnail_url)}" alt="${escHtml(item.name)}" class="w-full h-full object-cover" onerror="this.style.display='none';this.nextElementSibling.classList.remove('hidden')">
+            <div class="hidden absolute inset-0 flex items-center justify-center text-3xl text-zinc-500">${isVideo ? '🎥' : '📄'}</div>
+            ${isVideo ? '<div class="absolute inset-0 bg-black/30 flex items-center justify-center text-white text-xl pointer-events-none">▶</div>' : ''}
+          </div>
+          <div class="px-2.5 py-2 text-[11px] text-zinc-300 truncate" title="${escHtml(item.name)}">${escHtml(item.name || 'File')}</div>
+        </button>`;
+    }).join('');
+  } catch (e) {
+    grid.innerHTML = errorBanner(e.message);
+  }
 }
 
 window.postsPrevPage = function() {
@@ -1152,26 +1218,53 @@ function renderAllPosts() {
     return;
   }
 
-  con.innerHTML = `
-    <div class="card overflow-x-auto p-0">
-      <table class="w-full min-w-[760px] text-left text-xs">
-        <thead class="bg-zinc-900 border-b border-zinc-800 text-zinc-400 font-semibold uppercase text-[10px] tracking-wider">
-          <tr><th class="p-3">Select</th><th class="p-3">Device</th><th class="p-3">Post Caption</th><th class="p-3">Post Time</th><th class="p-3">Total Files</th><th class="p-3">Post Author</th><th class="p-3 text-right">Operation</th></tr>
-        </thead>
-        <tbody class="divide-y divide-zinc-800/60">
-          ${_allPostsData.map(p => `
-            <tr class="hover:bg-zinc-800/30">
-              <td class="p-3"><input type="checkbox" data-action="select-any-post" data-group-id="${escHtml(p.group_id)}" class="rounded" ${_selectedAnyPostGroups.has(p.group_id) ? 'checked' : ''} aria-label="Select post"></td>
-              <td class="p-3 text-zinc-200">${escHtml(p.device_name || p.device_id || 'Unknown device')}</td>
-              <td class="p-3 text-zinc-200 max-w-sm"><div class="truncate" title="${escHtml(p.caption || '')}">${escHtml(p.caption || '(no caption)')}</div></td>
-              <td class="p-3 text-zinc-400 whitespace-nowrap" title="${escHtml(fmtRel(p.created_at))}">${escHtml(fmtTs(p.created_at))}</td>
-              <td class="p-3 text-zinc-300 font-mono">${Number(p.item_count || 0).toLocaleString()}</td>
-              <td class="p-3 text-zinc-300">${escHtml(p.shared_by || 'Unknown author')}</td>
-              <td class="p-3 text-right"><button data-action="delete-any-post" data-group-id="${escHtml(p.group_id)}" class="btn-danger text-xs py-1 px-2.5">Delete Post</button></td>
-            </tr>`).join('')}
-        </tbody>
-      </table>
+  con.innerHTML = _allPostsData.map(p => {
+    const gid = escHtml(p.group_id);
+    const caption = escHtml(p.caption || '(no caption)');
+    const deviceName = escHtml(p.device_name || p.device_id || 'Unknown device');
+    const author = escHtml(p.shared_by || 'Unknown author');
+    const targetNames = p.target_names?.length ? p.target_names.join(', ') : 'All Devices';
+    const items = p.items || [];
+    const previewItems = items.slice(0, 6);
+
+    return `
+    <div class="card space-y-3" data-group-id="${gid}">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <label class="flex items-center gap-2 mb-2 text-[10px] text-zinc-500"><input type="checkbox" data-action="select-any-post" data-group-id="${gid}" class="rounded" ${_selectedAnyPostGroups.has(p.group_id) ? 'checked' : ''}> Select post</label>
+          <div class="font-bold text-sm text-zinc-100">${caption}</div>
+          <div class="text-xs text-zinc-400 mt-0.5">
+            <span>${Number(p.item_count || 0).toLocaleString()} file${p.item_count !== 1 ? 's' : ''}</span>
+            <span class="mx-1.5">·</span><span>By ${author}</span>
+            <span class="mx-1.5">·</span><span class="text-blue-400 font-medium">From: ${deviceName}</span>
+            <span class="mx-1.5">·</span><span class="text-blue-400 font-medium">To: ${escHtml(targetNames)}</span>
+          </div>
+        </div>
+        <div class="text-right shrink-0">
+          <div class="text-xs text-zinc-400">${escHtml(fmtTs(p.created_at))}</div>
+          <div class="text-[10px] text-zinc-500">${escHtml(fmtRel(p.created_at))}</div>
+        </div>
+      </div>
+
+      ${previewItems.length ? `
+      <div class="flex items-center gap-2 overflow-x-auto py-1">
+        ${previewItems.map(it => {
+          const isVid = /\.(mp4|mov|avi|mkv|webm|m4v)$/i.test(it.name || '');
+          return `
+          <div class="relative w-16 h-16 rounded-lg bg-zinc-800 overflow-hidden shrink-0 cursor-pointer border border-zinc-700/60 group/item"
+               data-action="preview-media" data-url="${escHtml(isVid ? it.preview_url : it.download_url)}" data-cat="${isVid ? 'videos' : 'photos'}">
+            <img src="${escHtml(it.thumbnail_url)}" class="w-full h-full object-cover pointer-events-none" onerror="this.style.display='none'">
+            ${isVid ? '<div class="absolute inset-0 bg-black/40 flex items-center justify-center text-white text-xs pointer-events-none">▶</div>' : ''}
+          </div>`;
+        }).join('')}
+        ${Number(p.item_count || 0) > items.length ? `<button data-action="show-post-files" data-group-id="${gid}" data-post-kind="all" class="w-16 h-16 rounded-lg bg-zinc-800/80 border border-zinc-700/60 flex items-center justify-center text-xs text-zinc-300 font-semibold shrink-0 hover:bg-zinc-700">+${Number(p.item_count || 0) - items.length} files</button>` : ''}
+      </div>` : ''}
+
+      <div class="pt-2 border-t border-zinc-800/60 flex items-center justify-end">
+        <button data-action="delete-any-post" data-group-id="${gid}" class="btn-danger text-xs py-1 px-2.5">Delete Post</button>
+      </div>
     </div>`;
+  }).join('');
 }
 
 window.allPostsPrevPage = function() {
@@ -2330,13 +2423,7 @@ function initWebSocketListeners() {
       }
     }
 
-    _recentActivities.unshift({
-      time,
-      badge: level.toUpperCase(),
-      badgeClass: level === 'error' ? 'bg-red-500/20 text-red-400' : level === 'warn' ? 'bg-amber-500/20 text-amber-400' : 'bg-emerald-500/20 text-emerald-400',
-      text: message,
-    });
-    if (_recentActivities.length > 30) _recentActivities.pop();
+    mergeRecentActivities([{ time, message }]);
     if (_currentTab === 'dashboard') renderDashboardActivities();
   });
 

@@ -3745,6 +3745,23 @@ def get_all_device_shares() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_all_share_targets_for_admin() -> list[dict]:
+    """Return recipient device names for all shared-post groups."""
+    conn = get_read_conn()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT ds.share_group_id, dst.target_device_id,
+               d.device_name, d.device_model, d.username
+        FROM device_shares ds
+        JOIN device_share_targets dst ON dst.share_id = ds.id
+        LEFT JOIN devices d ON d.device_id = dst.target_device_id
+        WHERE ds.share_group_id IS NOT NULL
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 def get_all_share_targets_for_sharer(sharer_device_id: str) -> dict[str, list[dict]]:
     """Return all target devices for every group owned by sharer_device_id in one query.
 
