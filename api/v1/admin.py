@@ -776,6 +776,16 @@ async def list_admin_shared_folders(
         if m:
             d["path"] = m.group(1).replace("/", "\\")
             cleaned = True
+        if d.get("type") == "google_drive" and str(d.get("label") or "").strip().casefold() in ("", "google drive folder"):
+            try:
+                from core.google_drive import folder_id_from_link, folder_name
+                folder_id = d.get("drive_folder_id") or folder_id_from_link(d.get("path", ""))
+                actual_name = await asyncio.to_thread(folder_name, folder_id)
+                if actual_name and actual_name != d.get("label"):
+                    d["label"] = actual_name
+                    cleaned = True
+            except Exception:
+                pass
     if cleaned:
         cfg["SHARED_DIRS"] = dirs
         save_config(cfg)
@@ -818,7 +828,10 @@ async def add_admin_shared_folder(
         folder_id = folder_id_from_link(raw_path)
         if any(d.get("type") == "google_drive" and (d.get("drive_folder_id") == folder_id or d.get("path") == raw_path) for d in dirs):
             raise HTTPException(status_code=409, detail="This Google Drive folder is already shared")
-        label = body.label.strip() if body.label else "Google Drive Folder"
+        requested_label = (body.label or "").strip()
+        if not requested_label or requested_label.casefold() == "google drive folder":
+            requested_label = str(metadata.get("name") or "Google Drive Folder").strip()
+        label = requested_label or "Google Drive Folder"
         entry = {
             "id": f"shared_{int(time.time() * 1000)}",
             "path": raw_path,

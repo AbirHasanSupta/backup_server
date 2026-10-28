@@ -252,8 +252,27 @@ async def list_shared_folders(
 ):
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     all_dirs = get_shared_dirs()
+
+    async def source_for(entry: dict) -> dict:
+        label = entry.get("label")
+        if entry.get("type") == "google_drive" and str(label or "").strip().casefold() in ("", "google drive folder"):
+            try:
+                from core.google_drive import folder_id_from_link, folder_name
+                folder_id = entry.get("drive_folder_id") or folder_id_from_link(entry.get("path", ""))
+                label = await asyncio.to_thread(folder_name, folder_id) or label
+            except Exception:
+                pass
+        label = label or entry.get("path") or entry["id"]
+        return {
+            "id": entry["id"],
+            "label": label,
+            "type": entry.get("type"),
+            "drive_folder_id": entry.get("drive_folder_id"),
+            "drive_link": entry.get("path") if entry.get("type") == "google_drive" else None,
+        }
+
     if not device_id:
-        sources = [{"id": d["id"], "label": d.get("label") or d.get("path") or d["id"], "type": d.get("type"), "drive_folder_id": d.get("drive_folder_id"), "drive_link": d.get("path") if d.get("type") == "google_drive" else None} for d in all_dirs if d.get("id")]
+        sources = await asyncio.gather(*(source_for(d) for d in all_dirs if d.get("id")))
         return {"sources": sources, "shared_dirs": all_dirs}
 
     accessible = []
@@ -261,7 +280,7 @@ async def list_shared_folders(
         tags = entry.get("device_ids", ["all"])
         if not tags or "all" in tags or device_id in tags:
             accessible.append(entry)
-    sources = [{"id": d["id"], "label": d.get("label") or d.get("path") or d["id"], "type": d.get("type"), "drive_folder_id": d.get("drive_folder_id"), "drive_link": d.get("path") if d.get("type") == "google_drive" else None} for d in accessible if d.get("id")]
+    sources = await asyncio.gather(*(source_for(d) for d in accessible if d.get("id")))
     return {"sources": sources, "shared_dirs": accessible}
 
 

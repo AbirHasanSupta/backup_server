@@ -28,6 +28,33 @@ router = APIRouter(tags=["Files & Library"])
 _BROWSE_SHARED_CACHE: dict[tuple[str, str], tuple[dict, float, float]] = {}
 _BROWSE_SHARED_TTL = 10.0  # seconds
 
+# Warm the next folder level after a Google Drive listing. The mobile client
+# expands folders over separate requests, so doing this work after returning
+# the current listing makes the next tap use a cached response.
+_DRIVE_PREFETCH_SEMAPHORE = asyncio.Semaphore(4)
+_DRIVE_PREFETCH_TASKS: dict[tuple[str, str], asyncio.Task] = {}
+
+
+async def _prefetch_drive_folder(root_id: str, prefix: str) -> None:
+    try:
+        async with _DRIVE_PREFETCH_SEMAPHORE:
+            await asyncio.to_thread(drive_browse, root_id, prefix, root_id=root_id)
+    except Exception:
+        # Prefetch must never affect the interactive browse response.
+        pass
+
+
+def _schedule_drive_prefetch(root_id: str, folders: list[dict]) -> None:
+    for folder in folders[:12]:
+        prefix = str(folder.get("path") or "")
+        folder_id = prefix.split("/", 1)[0]
+        task_key = (root_id, folder_id)
+        if not folder_id or task_key in _DRIVE_PREFETCH_TASKS:
+            continue
+        task = asyncio.create_task(_prefetch_drive_folder(root_id, prefix))
+        _DRIVE_PREFETCH_TASKS[task_key] = task
+        task.add_done_callback(lambda done, key=task_key: _DRIVE_PREFETCH_TASKS.pop(key, None))
+
 # Bound concurrent full-tree shared-folder walks under Docker/Postgres so sync
 # I/O cannot exhaust the thread pool. Desktop SQLite keeps unlimited concurrency.
 _HEAVY_FS_SEM: asyncio.Semaphore | None = None
@@ -409,9 +436,10 @@ async def browse_shared_files(
                     nested = await asyncio.to_thread(drive_ensure_descendant, root_id, nested_id)
                     if nested.get("mimeType") != "application/vnd.google-apps.folder":
                         raise GoogleDriveError("Invalid Google Drive folder path.")
-            result = await asyncio.to_thread(drive_browse, root_id, prefix)
+            result = await asyncio.to_thread(drive_browse, root_id, prefix, root_id=root_id)
         except GoogleDriveError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        _schedule_drive_prefetch(root_id, result.get("folders") or [])
         return result
 
     root = os.path.abspath(normalize_fs_path(entry["path"]))
@@ -617,13 +645,20 @@ async def add_shared_google_drive_folder(
     dirs = list(cfg.get("SHARED_DIRS", []))
     existing = next((d for d in dirs if _drive_source(d) and d.get("drive_folder_id") == folder_id), None)
     if existing:
+        if str(existing.get("label") or "").strip().casefold() in ("", "google drive folder") and metadata.get("name"):
+            existing["label"] = str(metadata["name"]).strip()
+            cfg["SHARED_DIRS"] = dirs
+            save_config(cfg)
         return {"ok": True, "entry": existing, "existing": True}
+    requested_label = (body.label or "").strip()
+    if not requested_label or requested_label.casefold() == "google drive folder":
+        requested_label = str(metadata.get("name") or "Google Drive Folder").strip()
     entry = {
         "id": f"drive_{folder_id}",
         "path": body.link.strip(),
         "drive_folder_id": folder_id,
         "type": "google_drive",
-        "label": (body.label or "Google Drive Folder").strip() or "Google Drive Folder",
+        "label": requested_label or "Google Drive Folder",
         # A device-token request creates a source for that device only. Admin
         # API-key requests may intentionally publish it to every paired device.
         "device_ids": [device_id] if device_id else ["all"],

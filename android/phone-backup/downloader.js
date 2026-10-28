@@ -64,7 +64,26 @@ async function getLocalDriveSources() {
 }
 
 export async function getLocalDriveSharedSources() {
-  return (await getLocalDriveSources()).map(s => ({
+  const sources = await getLocalDriveSources();
+  let changed = false;
+  await Promise.all(sources.map(async source => {
+    if (String(source.label || '').trim().toLowerCase() !== 'google drive folder') return;
+    try {
+      const metadata = await driveRequest(`files/${encodeURIComponent(source.folderId)}`, {
+        fields: 'id,name,mimeType', supportsAllDrives: 'true',
+      });
+      if (metadata.name) {
+        source.label = metadata.name;
+        changed = true;
+      }
+    } catch {
+      // Keep the saved entry visible even if Drive is temporarily unavailable.
+    }
+  }));
+  if (changed) {
+    await AsyncStorage.setItem(DRIVE_SOURCES_KEY, JSON.stringify(sources)).catch(() => {});
+  }
+  return sources.map(s => ({
     id: s.id, label: s.label, type: 'google_drive', local: true,
     drive_folder_id: s.folderId,
   }));
@@ -585,19 +604,20 @@ export async function addGoogleDriveSource(link, label = '', apiKey = '') {
           },
         };
       });
+      const resolvedLabel = saved.entry.label || String(label).trim() || 'Google Drive Folder';
       const sources = await getLocalDriveSources();
       if (!sources.some(s => s.folderId === folderId)) {
-        sources.push({ id: `local_drive_${folderId}`, folderId, link: String(link).trim(), label: String(label).trim() || 'Google Drive Folder' });
+        sources.push({ id: `local_drive_${folderId}`, folderId, link: String(link).trim(), label: resolvedLabel });
         await AsyncStorage.setItem(DRIVE_SOURCES_KEY, JSON.stringify(sources));
       }
-      return { id: saved.entry.id, label: saved.entry.label, type: 'google_drive' };
+      return { id: saved.entry.id, label: resolvedLabel, type: 'google_drive' };
     } catch {
       // A disconnected server or a server without a Drive key still allows
       // the app to use this folder directly in offline/P2P mode.
     }
   }
   const folder = await driveRequest(`files/${encodeURIComponent(folderId)}`, {
-    fields: 'id,mimeType', supportsAllDrives: 'true',
+    fields: 'id,name,mimeType', supportsAllDrives: 'true',
   });
   if (folder.mimeType !== 'application/vnd.google-apps.folder') {
     throw new Error('That link is not a Google Drive folder. Paste a folder link.');
@@ -606,10 +626,17 @@ export async function addGoogleDriveSource(link, label = '', apiKey = '') {
   const sources = await getLocalDriveSources();
   const id = `local_drive_${folderId}`;
   const existing = sources.find(s => s.id === id);
-  if (existing) return { id, label: existing.label, type: 'google_drive', local: true };
-  sources.push({ id, folderId, link: String(link).trim(), label: String(label).trim() || 'Google Drive Folder' });
+  if (existing) {
+    if (String(existing.label || '').trim().toLowerCase() === 'google drive folder' && folder.name) {
+      existing.label = folder.name;
+      await AsyncStorage.setItem(DRIVE_SOURCES_KEY, JSON.stringify(sources));
+    }
+    return { id, label: existing.label, type: 'google_drive', local: true };
+  }
+  const resolvedLabel = String(label).trim() || folder.name || 'Google Drive Folder';
+  sources.push({ id, folderId, link: String(link).trim(), label: resolvedLabel });
   await AsyncStorage.setItem(DRIVE_SOURCES_KEY, JSON.stringify(sources));
-  return { id, label: sources[sources.length - 1].label, type: 'google_drive', local: true };
+  return { id, label: resolvedLabel, type: 'google_drive', local: true };
 }
 
 export async function removeGoogleDriveSource(sourceId) {

@@ -2218,7 +2218,7 @@ function SourceSelector({
             <AppIcon androidName="add_link" iosName="link.badge.plus" color={colors.primary} size={16} />
             <Text style={[srcStyles.addDriveText, { color: colors.primary }]}>Add Google Drive folder</Text>
           </TouchableOpacity>
-          {isOffline ? (
+          {isOffline && sharedSources.length === 0 ? (
             <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
               Connect to a server for its shared folders, or add a public Drive folder above.
             </Text>
@@ -2235,6 +2235,11 @@ function SourceSelector({
             </Text>
           ) : (
             <>
+              {isOffline && (
+                <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
+                  Offline mode — showing Google Drive folders saved on this phone.
+                </Text>
+              )}
               <View style={srcStyles.sharedControlsRow}>
                 <TouchableOpacity
                   style={[srcStyles.sourcePicker, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}
