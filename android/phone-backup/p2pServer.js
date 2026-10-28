@@ -137,6 +137,8 @@ export function initializeP2PServer() {
         post_kind: data.postKind || 'direct_post',
         created_at: Number(data.createdAt) || Date.now(),
         files: parsedFiles,
+        reaction_counts: {},
+        reactors: [],
         is_p2p: true,
       };
 
@@ -265,10 +267,30 @@ export function initializeP2PServer() {
       if (targetPost) {
         const counts = { ...(targetPost.reaction_counts || {}) };
         const emoji = data.emoji || '❤️';
+        const reactorDeviceId = data.reactorDeviceId || '';
+        const reactorName = data.reactorName || 'Nearby Peer';
+        const reactors = (Array.isArray(targetPost.reactors) ? targetPost.reactors : [])
+          .filter((reactor) => typeof reactor === 'string' || (reactor && typeof reactor === 'object'));
         if (data.action === 'remove') {
           counts[emoji] = Math.max(0, (counts[emoji] || 1) - 1);
+          targetPost.reactors = reactors.filter((r) =>
+            !(r.source_id === reactorDeviceId && r.emoji === emoji)
+          );
         } else {
+          const exists = reactors.some((r) => r.source_id === reactorDeviceId && r.emoji === emoji);
           counts[emoji] = (counts[emoji] || 0) + 1;
+          targetPost.reactors = exists ? reactors : [
+            ...reactors,
+            {
+              id: `${reactorDeviceId || reactorName}:${emoji}`,
+              media_id: targetPost.id,
+              source_id: reactorDeviceId,
+              emoji,
+              created_at: Date.now(),
+              display_name: reactorName,
+              is_own: false,
+            },
+          ];
         }
         targetPost.reaction_counts = counts;
         await saveP2PFeedItem(targetPost);

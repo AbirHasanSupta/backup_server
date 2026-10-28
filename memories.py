@@ -28,6 +28,7 @@ except Exception:
 
 from config import load_config
 from core.path_utils import normalize_fs_path
+from core.shared_folders import non_overlapping_shared_folders
 from core.timeutil import (
     datetime_from_timestamp,
     naive_local_to_epoch,
@@ -895,14 +896,12 @@ def startup_scan_loop() -> None:
 def _shared_sources_for_device(device_id: str, shared_dirs: list) -> tuple[list[tuple[str, str]], dict[str, str]]:
     sources = [("phone", device_id)]
     shared_labels = {}
-    for d in shared_dirs:
+    memory_dirs = [d for d in shared_dirs if d.get("id") and d.get("label")]
+    for d in non_overlapping_shared_folders(memory_dirs, device_id):
         sid = d.get("id")
         label = d.get("label")
-        tagged = d.get("device_ids", [])
-        if sid and label:
-            shared_labels[sid] = label
-            if not tagged or (isinstance(tagged, list) and (device_id in tagged or "all" in tagged)):
-                sources.append(("shared", sid))
+        shared_labels[sid] = label
+        sources.append(("shared", sid))
     return sources, shared_labels
 
 

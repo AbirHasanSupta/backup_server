@@ -1286,10 +1286,15 @@ export async function reclusterTrips(sourceId) {
  */
 async function handleLocalP2PReaction(mediaId, emoji) {
   const feed = await getLocalP2PFeed();
+  const localIdentity = await getLocalPeerIdentity().catch(() => ({
+    deviceId: '',
+    username: '',
+    deviceName: 'Nearby Device',
+  }));
   const idStr = String(mediaId || '');
   const targetPost = feed.find((p) => p.id === idStr || String(p.group_id) === idStr || (p.files || []).some((f) => f.name === idStr || f.fileName === idStr));
 
-  const currentReactions = targetPost?.user_reactions || [];
+  const currentReactions = Array.isArray(targetPost?.user_reactions) ? targetPost.user_reactions : [];
   const hasReacted = currentReactions.includes(emoji);
   const updatedReactions = hasReacted
     ? currentReactions.filter((e) => e !== emoji)
@@ -1304,15 +1309,52 @@ async function handleLocalP2PReaction(mediaId, emoji) {
   if (targetPost) {
     targetPost.user_reactions = updatedReactions;
     targetPost.reaction_counts = updatedCounts;
+    const reactors = (Array.isArray(targetPost.reactors) ? targetPost.reactors : [])
+      .filter((reactor) => typeof reactor === 'string' || (reactor && typeof reactor === 'object'))
+      .map((reactor, index) => {
+        if (typeof reactor !== 'string') return reactor;
+        return {
+          id: `${localIdentity.deviceId}:${reactor}:${index}`,
+          media_id: targetPost.id,
+          source_id: localIdentity.deviceId,
+          emoji: reactor,
+          created_at: targetPost.created_at || Date.now(),
+          display_name: localIdentity.username || localIdentity.deviceName || 'You',
+        };
+      });
+    const existingOwn = reactors.filter((r) => r.source_id === localIdentity.deviceId);
+    const legacyOwn = currentReactions
+      .filter((e) => !existingOwn.some((r) => r.emoji === e))
+      .map((e) => ({
+        id: `${localIdentity.deviceId}:${e}`,
+        media_id: targetPost.id,
+        source_id: localIdentity.deviceId,
+        emoji: e,
+        created_at: targetPost.created_at || Date.now(),
+        display_name: localIdentity.username || localIdentity.deviceName || 'You',
+        is_own: true,
+      }));
+    const normalizedReactors = [...reactors, ...legacyOwn];
+    targetPost.reactors = hasReacted
+      ? normalizedReactors.filter((r) => !(r.source_id === localIdentity.deviceId && r.emoji === emoji))
+      : [
+          ...normalizedReactors.filter((r) => !(r.source_id === localIdentity.deviceId && r.emoji === emoji)),
+          {
+            id: `${localIdentity.deviceId}:${emoji}`,
+            media_id: targetPost.id,
+            source_id: localIdentity.deviceId,
+            emoji,
+            created_at: Date.now(),
+            display_name: localIdentity.username || localIdentity.deviceName || 'You',
+            is_own: true,
+          },
+        ];
     await saveP2PFeedItem(targetPost);
   }
 
   // Broadcast reaction to paired peers
   try {
-    const [localIdentity, peers] = await Promise.all([
-      getLocalPeerIdentity(),
-      getPairedPeers(),
-    ]);
+    const peers = await getPairedPeers();
     for (const peer of peers || []) {
       if (peer.ip && peer.port) {
         sendDirectReaction(peer.ip, peer.port, {
@@ -1386,18 +1428,60 @@ export async function reactToMedia(mediaId, emoji, scope = 'post') {
  * @param {number|string} mediaId
  * @param {string} [scope='post']
  */
+function getP2PReactors(targetPost, deviceId, mediaId) {
+  const storedReactors = (Array.isArray(targetPost?.reactors) ? targetPost.reactors : [])
+    .filter((reactor) => typeof reactor === 'string' || (reactor && typeof reactor === 'object'));
+  const reactors = storedReactors.map((reactor, index) => {
+    if (typeof reactor === 'string') {
+      return {
+        id: `${deviceId}:${reactor}:${index}`,
+        media_id: targetPost?.id || mediaId,
+        source_id: deviceId,
+        emoji: reactor,
+        created_at: targetPost?.created_at || Date.now(),
+        display_name: 'You',
+      };
+    }
+    const sourceId = reactor?.source_id || deviceId;
+    return {
+      ...reactor,
+      id: reactor?.id ?? `${sourceId}:${reactor?.emoji || ''}:${index}`,
+      media_id: reactor?.media_id ?? targetPost?.id ?? mediaId,
+      source_id: sourceId,
+      created_at: reactor?.created_at ?? targetPost?.created_at ?? Date.now(),
+      display_name: reactor?.display_name || (sourceId === deviceId ? 'You' : 'Nearby Peer'),
+      is_own: reactor?.is_own ?? sourceId === deviceId,
+    };
+  });
+  const knownOwnEmojis = new Set(
+    reactors.filter((reactor) => reactor.source_id === deviceId).map((reactor) => reactor.emoji)
+  );
+  for (const emoji of Array.isArray(targetPost?.user_reactions) ? targetPost.user_reactions : []) {
+    if (knownOwnEmojis.has(emoji)) continue;
+    reactors.push({
+      id: `${deviceId}:${emoji}`,
+      media_id: targetPost?.id || mediaId,
+      source_id: deviceId,
+      emoji,
+      created_at: targetPost?.created_at || Date.now(),
+      display_name: 'You',
+    });
+    knownOwnEmojis.add(emoji);
+  }
+  return reactors;
+}
+
 export async function getMediaReactions(mediaId, scope = 'post') {
   const isServer = await isServerMode();
   const isP2P = !mediaId || String(mediaId).startsWith('p2p_');
 
   if (!isServer || isP2P) {
     const feed = await getLocalP2PFeed();
+    const { deviceId } = await getLocalPeerIdentity().catch(() => ({ deviceId: '' }));
     const idStr = String(mediaId || '');
     const targetPost = feed.find((p) => p.id === idStr || String(p.group_id) === idStr);
     const counts = targetPost?.reaction_counts || {};
-    const reactors = (targetPost?.reactors || targetPost?.user_reactions || []).map((r) =>
-      typeof r === 'string' ? { emoji: r, display_name: 'You' } : r
-    );
+    const reactors = getP2PReactors(targetPost, deviceId, mediaId);
     return {
       media_id: mediaId,
       counts,
@@ -1414,12 +1498,11 @@ export async function getMediaReactions(mediaId, scope = 'post') {
     );
   } catch (_err) {
     const feed = await getLocalP2PFeed();
+    const { deviceId } = await getLocalPeerIdentity().catch(() => ({ deviceId: '' }));
     const idStr = String(mediaId || '');
     const targetPost = feed.find((p) => p.id === idStr || String(p.group_id) === idStr);
     const counts = targetPost?.reaction_counts || {};
-    const reactors = (targetPost?.reactors || targetPost?.user_reactions || []).map((r) =>
-      typeof r === 'string' ? { emoji: r, display_name: 'You' } : r
-    );
+    const reactors = getP2PReactors(targetPost, deviceId, mediaId);
     return {
       media_id: mediaId,
       counts,
