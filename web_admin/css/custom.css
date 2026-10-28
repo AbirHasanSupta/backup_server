@@ -199,17 +199,40 @@ html:not(.dark) .section-header { color: #64748b; }
 #media-modal { z-index: 80; }
 
 .post-gallery-panel {
-  height: 88vh;
-  max-height: 88vh;
+  height: 88vh !important;
+  max-height: 88vh !important;
   min-height: 0;
+  display: flex !important;
+  flex-direction: column !important;
 }
 
-.post-gallery-grid {
-  flex: 1 1 0%;
-  min-height: 0;
-  overflow-y: auto;
-  align-content: start;
+.post-gallery-grid#post-gallery-grid {
+  display: grid !important;
+  flex: 1 1 auto !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  grid-auto-rows: 204px !important;
+  align-content: start !important;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.post-gallery-item {
+  height: 204px !important;
+  min-height: 204px !important;
+}
+
+.post-gallery-item-media {
+  height: 164px !important;
+  min-height: 164px !important;
+}
+
+.post-gallery-item-caption {
+  height: 40px !important;
+  min-height: 40px !important;
+  flex: 0 0 40px !important;
 }
 
 /* ── Tab Active Navigation ────────────────────────────────────────────────── */

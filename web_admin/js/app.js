@@ -1120,13 +1120,13 @@ async function openPostFilesGrid(groupId, postKind = 'server') {
       const previewUrl = isVideo ? (item.preview_url || item.download_url) : item.download_url;
       return `
         <button type="button" data-action="preview-media" data-url="${escHtml(previewUrl)}" data-cat="${category}"
-                class="group min-w-0 text-left rounded-xl overflow-hidden bg-zinc-950 border border-zinc-800 hover:border-blue-500/60 transition">
-          <div class="h-36 sm:h-40 relative bg-zinc-900">
+                class="post-gallery-item group min-w-0 flex flex-col text-left rounded-xl overflow-hidden bg-zinc-950 border border-zinc-800 hover:border-blue-500/60 transition">
+          <div class="post-gallery-item-media relative bg-zinc-900 shrink-0">
             <img src="${escHtml(item.thumbnail_url)}" alt="${escHtml(item.name)}" class="w-full h-full object-cover" onerror="this.style.display='none';this.nextElementSibling.classList.remove('hidden')">
             <div class="hidden absolute inset-0 flex items-center justify-center text-3xl text-zinc-500">${isVideo ? '🎥' : '📄'}</div>
             ${isVideo ? '<div class="absolute inset-0 bg-black/30 flex items-center justify-center text-white text-xl pointer-events-none">▶</div>' : ''}
           </div>
-          <div class="px-2.5 py-2 text-[11px] text-zinc-300 truncate" title="${escHtml(item.name)}">${escHtml(item.name || 'File')}</div>
+          <div class="post-gallery-item-caption px-2.5 text-[11px] text-zinc-300 truncate flex items-center" title="${escHtml(item.name)}">${escHtml(item.name || 'File')}</div>
         </button>`;
     }).join('');
   } catch (e) {
