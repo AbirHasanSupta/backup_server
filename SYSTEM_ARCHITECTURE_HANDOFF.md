@@ -1,9 +1,9 @@
 # Phone Backup Server & Mobile Client — Architecture Progression & Handoff Guide
 
 ## 1. Executive Summary & Purpose
-This document provides a current technical handover of the **Phone Backup Server** and its companion **React Native Android Mobile Client**. The implementation is a high-concurrency, modular, event-driven system with local or S3-compatible storage, resumable large-media upload, device-scoped authentication, and a production deployment template.
+This document describes the checked-out architecture of the **Phone Backup Server** and its companion **React Native Android client**. The backend is layered into API, service, repository, and storage modules, with SQLite for a standalone install and a Docker template using PostgreSQL, Redis, Celery, and Nginx. Android supports device-authenticated server sync and a separate local-Wi-Fi peer sharing service.
 
-The latest local synthetic benchmark passed the 20-device/5-streamer SLA. It is a regression signal, not a substitute for real-device, network, or deployed-infrastructure acceptance testing.
+The benchmark numbers below are previously recorded synthetic results, not a fresh run for this handoff. They are regression signals and do not replace real-device, network, or deployed-infrastructure acceptance testing. The release version is resolved from the nearest semantic Git tag; generated package metadata can lag until `python scripts/sync_version.py` is run.
 
 ---
 
@@ -61,7 +61,7 @@ backup_server/
 │   ├── social_repo.py               # Device shares, comments, reactions
 │   └── trips_repo.py                # GPS bounding boxes, DBSCAN trip clustering
 ├── routers/
-│   └── websocket_hub.py             # Room-based connection manager (/ws/{client_id}, /ws)
+│   └── websocket_hub.py             # Authenticated device-room WebSocket gateway
 ├── services/                        # Business logic layer
 │   ├── feed_service.py              # Paginated feed aggregation & social grouping
 │   ├── lock_service.py              # Lock orchestration for background tasks
@@ -82,6 +82,7 @@ backup_server/
 │   ├── indexing_tasks.py            # Trip clustering & EXIF indexing
 │   ├── rewind_tasks.py              # Annual/monthly Rewind reel compilation
 │   └── video_tasks.py               # FFmpeg video preview transcoding
+├── web_admin/                        # Static, zero-build admin panel served at /admin
 ├── tests/
 │   ├── test_system_architecture.py  # 9-suite architecture regression suite
 │   ├── test_multiuser_load.py       # 20-device concurrent synthetic benchmark
@@ -97,18 +98,18 @@ backup_server/
 1. **Atomic Single-Transaction File Ingestion**:
    - Implemented `insert_file_and_touch_device()` in `database.py` and `repositories/file_repo.py`.
    - Combines file upsert, device timestamp update, and incremental counter increment (`files_backed_up = files_backed_up + 1`, `total_bytes = total_bytes + ?`) into a **single atomic SQLite transaction**.
-   - Reduces database lock acquisitions by 50%, dropping p95 upload latency from ~64ms to **7.22ms**.
+   - Reduces database lock acquisitions by combining file upsert and device counter updates in one transaction. Performance measurements are environment-specific; see the recorded benchmark table below.
 2. **Batch Differential Diff Check**:
    - `file_repo.batch_check_files()` processes 500+ items per query using SQL `IN (...)` parameter chunking.
-   - 10,000 files across 20 concurrent devices are validated in **35.97ms p95**.
+   - `file_repo.batch_check_files()` chunks large metadata checks into bounded SQL queries.
 3. **Debounced Background Clustering**:
    - `trips.py` checks active debounce timers before spawning threads, eliminating redundant OS thread creation during high-frequency upload bursts.
 
 ### 3.3 Real-Time WebSocket Hub & Push Architecture
 1. **WebSocket Gateway (`routers/websocket_hub.py`)**:
-   - Supports targeted device rooms (`/ws/{client_id}`) and global broadcast channel (`/ws`).
+   - Supports authenticated device rooms at `/ws/{client_id}`.
    - Authenticates the room before accepting the socket; Android supplies its scoped device token (or the pairing API key) as an Authorization header.
-   - Handles text/binary frame decoding, connection tracking, and 25s ping/pong keepalives.
+   - Tracks authenticated room connections and handles JSON ping, typing, and read-receipt actions. The Android client sends a 25-second heartbeat.
 2. **Event Emitter (`services/ws_service.py`)**:
    - Publishes real-time events: `file_uploaded`, `new_share`, `new_reaction`, `new_comment`, `preview_ready`, `rewind_ready`, `pairing_approved`, `sync_progress`.
    - Redis Pub/Sub backend with transparent in-memory fallback.
@@ -125,19 +126,25 @@ backup_server/
 - Hooked into App lifecycle in `src/app/_layout.tsx` and pairing approval in `connectToServer.js`.
 
 ### 4.2 Dynamic UI Priority Mode
-- Added `setUIPriorityMode(true / false)` to `backgroundTask.js` / `backgroundSync.js`.
+- Added `setUIPriorityMode(true / false)` to `backgroundTask.js`.
 - Automatically throttles background sync worker bandwidth, concurrency, and chunk size whenever the user enters active interactive screens:
   - `folders.tsx`, `quiz.tsx`, `places.tsx`, `wrapped.tsx`, `roulette.tsx`, `saved-reels.tsx`, `reels.tsx`, `restore.tsx`, `memories.tsx`.
 - Yields upload work while interactive screens are active to protect scroll and playback responsiveness; verify target-device frame pacing during release acceptance.
 
-### 4.3 Elimination of Polling in Social Feed
+### 4.3 WebSocket Events and Social UI
 - `src/app/restore.tsx` subscribed to `feed_updated` and `social_updated` WebSocket events.
-- Replaced 3-second polling interval with instant, event-driven UI updates.
+- The server pushes share, comment, and reaction events to connected clients. Some screen refreshes and notification counters still use HTTP requests when entering or refreshing a view; the entire app is not polling-free.
+- Client helpers for typing and read-receipt messages exist, and the server emits those events, but the current comment controls do not expose visible typing or read-receipt UX.
 
 ### 4.4 Resumable Large-Media Upload
 - Files at or above 64 MiB use 8 MiB pieces through `/upload/chunk`; smaller files retain native streaming/multipart uploads.
 - A deterministic per-device upload ID lets the client request persisted chunk indexes after process death, roaming, or a network interruption.
 - The server bounds chunk size/count, scopes temporary files per device, validates final size and SHA-256 before replacement, serializes completion retries, and removes abandoned sessions after the configured TTL.
+
+### 4.5 Local Android Peer-to-Peer Sharing
+- The native Android peer service listens on TCP port `8088` by default. Discovery uses a UDP beacon on port `8822` and probes the current Wi-Fi subnet.
+- Users confirm a short pairing PIN on both phones. Peer credentials, peer records, and received feed items are stored locally; this pairing is independent of server pairing.
+- Paired phones can exchange media, feed posts, comments, and reactions directly over local Wi-Fi. The P2P service is Android-native and does not use the backend WebSocket or work over remote Tailscale/WireGuard links.
 
 ---
 
@@ -150,11 +157,15 @@ backup_server/
 3. **Configuration consistency**
    - `core.config` is a compatibility facade over `config.py`, so desktop/legacy and modular layers read one configuration source. Environment-owned deployment settings override persisted values for credential rotation.
 4. **Deployment template**
-   - Compose requires `API_KEY`, `POSTGRES_PASSWORD`, and `POSTGRES_URL` from `.env`, adds API/PostgreSQL/Redis health checks, persists app data, and does not publish an unconfigured TLS port. TLS must terminate at a configured external proxy/load balancer before public exposure.
+   - Compose requires `API_KEY`, `POSTGRES_PASSWORD`, and `POSTGRES_URL` from `.env`, adds API/PostgreSQL/Redis health checks, and persists PostgreSQL/Redis in named volumes. Backup and app-data paths are host bind mounts. Compose exposes HTTP only; terminate TLS at a configured external proxy/load balancer before public exposure.
 
 ---
 
-## 6. Verification & Benchmark SLA Summary
+## 6. Previously Recorded Verification & Benchmark Results
+
+The results in this section were present in the prior handoff. They were not
+re-run while updating documentation on 2026-10-28; rerun the named commands
+against the current checkout before treating them as release evidence.
 
 ### 6.1 System Architecture Test Suite (`tests/test_system_architecture.py`)
 All 9 core architectural modules verified 100%:
@@ -182,7 +193,7 @@ Simulates **20 concurrent mobile backup devices** + **5 concurrent feed streamer
 | **Data Integrity & Exact Counters** | **100% Match across all 20 devices** | 100% | **PASS** |
 | **WebSocket Hub Room Isolation** | **100% Verified** | 100% | **PASS** |
 
-### 6.3 Mobile App Build & Lint Verification
+### 6.3 Previously Recorded Mobile App Build & Lint Results
 - **TypeScript Type Checking (`npx tsc --noEmit`)**: **0 Errors**.
 - **ESLint (`npm run lint` / `expo lint`)**: **0 Errors, 0 Warnings**.
 - **Expo Doctor (`npx expo-doctor`)**: **21/21 checks passed**.
@@ -192,17 +203,15 @@ Simulates **20 concurrent mobile backup devices** + **5 concurrent feed streamer
 
 ---
 
-## 7. Remaining Deployment and Product Work
-
-When continuing work on this project, prioritize the following roadmap items:
+## 7. Current Deployment and Product Validation
 
 ### 7.1 Deployment Acceptance
-- The Compose topology and health checks are implemented, but this workspace has no Docker CLI. Validate `docker compose --env-file .env config` and bring up the stack in the target environment before release.
-- Run the SQLite-to-PostgreSQL migration only against a backed-up production database, then perform upload, restore, background-task, Redis, and Celery smoke tests against the deployed services.
-- Build and install an Android EAS production artifact on supported physical devices. Lint/type/SDK diagnostics do not exercise SAF permission changes, foreground-service constraints, Wi-Fi roaming, or large-media memory behavior.
+- Validate the Compose topology in its target Docker environment, then smoke-test pairing, uploads, restore, background tasks, Redis, and Celery.
+- If importing a desktop SQLite installation, back it up before running the SQLite-to-PostgreSQL migration; then validate migrated records and client behavior.
+- Build and install an Android EAS artifact on supported physical devices. Static diagnostics do not exercise SAF permissions, foreground-service limits, local peer discovery, Wi-Fi roaming, or large-media memory behavior.
 
 ### 7.2 Cloud & Remote Storage Providers
-- S3/MinIO/R2 support is wired through `storage/s3.py`, including sanitized object keys and checksum validation. Provision the `S3_*` environment credentials/bucket and verify the provider in its actual target account before selecting `STORAGE_BACKEND=s3`.
+- `storage/s3.py` implements an S3-compatible provider, but the bundled Compose file currently passes neither `STORAGE_BACKEND` nor `S3_*` credentials and mounts local backup storage. Treat S3/MinIO/R2 as a separately configured provider that needs deployment-level wiring and acceptance before use.
 
 ### 7.3 Enhanced Real-Time Social Features
-- WebSocket transport and client event emission for typing/read receipts exist, but `restore.tsx` does not yet render or send those states from comment controls. Treat visible typing/read UX as a product feature still requiring a dedicated design and implementation pass.
+- WebSocket transport and client helpers for typing/read receipts exist, but current comment controls do not display or send those states. Visible typing/read UX remains unimplemented.

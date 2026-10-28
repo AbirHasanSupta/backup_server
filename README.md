@@ -1,16 +1,23 @@
 # Phone Backup Server
 
-A self-hosted, high-performance photo, video, and file backup & restore ecosystem over LAN. The project consists of a feature-rich **Windows Desktop Control Center** (FastAPI backend + CustomTkinter GUI) and a **React Native / Expo Android App** that provides automatic background synchronization, differential file transfers, cross-device file restoration, short video Reels with reposting and bookmarking, device-to-device media sharing with comments and reactions, an "On This Day" media memories feed, automated video rewind reels, smart trip albums, photo quizzes, location clusters, safe local storage cleanup, and shared desktop folder access.
+A self-hosted photo, video, and file backup and restore system. It includes a **FastAPI server** with a Windows **CustomTkinter Desktop Control Center** and a **React Native / Expo Android app**. The app supports background and differential backup, resumable large uploads, restore and shared-folder browsing, Reels and social sharing, memories and trip albums, safe local cleanup, and direct phone-to-phone sharing over local Wi-Fi. The web admin panel is served by the backend at `/admin`.
 
 The server supports a simple Windows/SQLite installation as well as a
-production-oriented Docker deployment with PostgreSQL, Redis, Celery workers,
-and Nginx. New API routes live in `api/v1/`; the existing routes in `upload.py`
-remain available for installed clients that use the legacy paths.
+Docker deployment with PostgreSQL, Redis, Celery workers, and Nginx. Modular
+REST routes live in `api/v1/` and are served at their registered paths and
+beneath `/api/v1/`. `upload.py` remains as a legacy compatibility router. Docker
+separates interactive API traffic from sync and upload traffic. Android phones
+can also discover and pair directly with nearby Android phones for local
+sharing when the backup server is unavailable.
 
 ## Documentation and release version
 
 - Follow the complete, step-by-step [setup and installation guide](SETUP.md)
   for Windows, headless, Docker, and Android deployments.
+- Read the [Android client guide](android/phone-backup/README.md) for its
+  screens, P2P mode, and development workflow.
+- See the [architecture handoff](SYSTEM_ARCHITECTURE_HANDOFF.md) for backend
+  layers, deployment roles, storage, sync, and real-time events.
 - Release identity comes from the nearest semantic Git tag reachable from
   `HEAD`; use `git describe --tags --abbrev=0` to inspect it. The server API,
   OpenAPI metadata, LAN discovery, Android app config, and release builds share
@@ -30,8 +37,9 @@ remain available for installed clients that use the legacy paths.
 - **Desktop Post Composer (Share Files to Devices)**: Compose and push direct media posts and PC files from desktop to target mobile devices with custom captions and recipient selection.
 - **Post Moderation & Management**: Browse, edit, and moderate posts created by Desktop or Mobile devices, edit post captions, edit attached files, manage recipient device permissions, or delete posts.
 - **Shared Desktop Folders**: Expose local PC directories to connected mobile clients with per-folder device tagging (`device_ids` / `all`) so each shared folder is only visible to designated phones.
-- **Google Drive Shared Folders**: Add public Drive folder links from Web Admin or Android, then browse, search, preview, and restore their files in Library. Server mode uses the server's Drive API key; Android can save a key for offline and P2P use.
+- **Google Drive Shared Folders**: Manage the server Drive API key from Web Admin, add public Drive folder links from Web Admin or Android, then browse, search, preview, and restore their files in Library. Android can also save a separate key for offline and P2P use.
 - **Device-to-Device Media Sharing**: Relay shared photo and video albums between approved mobile devices with captions, access controls, target recipient filtering, and post management.
+- **Android Peer-to-Peer Sharing**: Nearby Android phones can discover and pair over Wi-Fi, then share media and feed posts directly without routing those transfers through the backup server.
 - **Social Feedback (Reactions & Comments)**: Threaded comments and emoji reactions on backed-up and shared media items across devices with post owner moderation.
 - **Smart Trip Clustering & Albums**: `trips.py` groups media into auto-curated trip albums based on temporal proximity (gap < 36h) and spatial distance (< 50km), reverse-geocoding cluster centroids into place names with a thread-safe SQLite cache.
 - **Background Media Indexer**: A daemon thread (`memories.py`) scans phone backups and tagged shared folders daily, extracting capture dates and GPS from EXIF (with `pillow-heif` for HEIC/HEIF) and `ffprobe` video metadata into a SQLite cache.
@@ -51,6 +59,7 @@ remain available for installed clients that use the legacy paths.
 - **Parallel Upload Engine**: Concurrent native transfers maximize LAN and private-tunnel backup throughput while API handlers continue serving Feed, Reels, and Library requests.
 - **Private Remote Backup**: Tailscale MagicDNS/IP and user-managed WireGuard tunnel endpoints can be saved separately from LAN discovery, so away-from-home backups never trigger a local subnet sweep.
 - **5-Tab Modern Floating Navigation**: Dedicated tabs for **Backup**, **Library**, **Reels**, **Feed**, and **Settings** with fluid reanimated spring tab icons.
+- **Direct Phone-to-Phone Mode**: Native local HTTP peer service (default port `8088`), UDP discovery beacon (port `8822`), PIN-confirmed mutual pairing, and a local P2P feed. This requires Android native builds and nearby devices on the same Wi-Fi network.
 - **Short Video Reels Tab (`reels.tsx`)**: TikTok/Instagram Reels style vertical snap-scrolling video feed (`expo-video`) with double-tap like gesture, inline comment threads, reel bookmarking/saving (`/reels/save`), reposting to peer feeds (`/reels/repost`), and capturing device author tags.
 - **Saved Reels Collection (`saved-reels.tsx`)**: Dedicated tabbed gallery for Saved Reels, Liked Reels, and Reposted Reels with thumbnail grid and full-screen player.
 - **Device-to-Device Sharing Feed (`feed.tsx`)**: Browse shared media albums sent between devices, view multi-photo carousels with dot indicators, like/react with emojis, participate in comment threads, and manage shared recipients.
@@ -116,7 +125,7 @@ available without removing the lightweight SQLite desktop mode.
     │   ├── quiz.tsx          Photo trivia guessing game & quiz card generator
     │   ├── roulette.tsx      Photo roulette random memory spinner
     │   ├── wrapped.tsx       Backup Wrapped summary recap
-    │   └── _layout.tsx       Root 5-tab layout, deep linking & background notification listeners
+    │   └── _layout.tsx       Root 5-tab layout, deep linking, P2P lifecycle & notification listeners
     ├── src/components/       Reusable UI components (FolderCard, ServerDiscoverySheet, SyncProgressRing, AppIcon, ...)
     ├── src/constants/        App theme tokens, typography, radii, shadows, and color palettes
     ├── src/hooks/            Theme hooks (use-app-theme) & collapsible header hooks
@@ -132,6 +141,7 @@ available without removing the lightweight SQLite desktop mode.
     ├── streak.js              Daily backup streak calculation and risk monitoring
     ├── widget.js              Home screen widget synchronization helper
     ├── serverDiscovery.js     Subnet LAN scanner for automatic server discovery
+    ├── p2pClient.js / p2pDiscovery.js / p2pServer.js Direct nearby-phone pairing, discovery & sharing
     ├── connectToServer.js     Device pairing & token negotiation logic
     ├── syncHistory.js         Local session logging & server synchronization
     ├── settings.js            AsyncStorage wrapper for server IP, tokens, usernames & sync preferences
@@ -145,8 +155,8 @@ available without removing the lightweight SQLite desktop mode.
 
 1. **Server Launch**: The desktop app starts the FastAPI server on `0.0.0.0:8000` (or configured port) and displays server IPs, active devices, and system status.
 2. **Device Pairing & Username Customization**: When connecting for the first time, the Android app sends device details to `/connect`. If `REQUIRE_APPROVAL` is enabled, the desktop app prompts the user to Accept or Reject the connection within 30 seconds and issues a scoped device token upon approval. Custom device usernames can be set via `/devices/{id}/username`.
-3. **Upload Cache & Fast Differential Check**: On sync initialization, the client pre-fetches the server upload cache (`/sync/upload-cache`). The phone recursively scans configured folders and posts metadata (relative path, size, modified time, SHA-256) to `/files/check`. Missing or modified files are returned instantly.
-4. **File Transfer**: The Android client uploads normal files through `/upload` (multipart) or `/upload/raw` (streaming). Files of 64 MiB or larger use the resumable `/upload/chunk` and `/upload/complete` flow: 8 MiB chunks are device-scoped, interrupted sessions resume from the server-reported missing indexes, and the final size and SHA-256 are verified before publication. Incomplete sessions expire after 24 hours by default.
+3. **Upload Cache & Fast Differential Check**: On sync initialization, the client pre-fetches the server upload cache (`/sync/upload-cache`). The phone recursively scans configured folders and posts each file's relative path, size, modified time, and platform file ID to `/files/check`. The server returns files that are missing or changed; content hashes are used for transfer integrity where supplied during upload.
+4. **File Transfer**: The Android client uploads normal files through `/upload` (multipart) or `/upload/raw` (streaming). Files of 64 MiB or larger use the resumable `/upload/chunk` and `/upload/complete` flow: 8 MiB chunks are scoped to an approved device, interrupted sessions resume from server-reported chunk state, and final size and SHA-256 are verified before publication. Incomplete sessions expire after 24 hours by default.
 5. **Library & Restore**: Mobile users browse backed-up files or PC-shared directories in the **Library** tab, previewing media and downloading files back to phone storage.
 6. **Short Video Reels**: Users watch full-screen vertical video reels (`/reels`) backed up across devices, like videos, comment, bookmark/save reels (`/reels/save`), or repost reels to peer feeds (`/reels/repost`). Saved and reposted reels can be accessed anytime from **Saved Reels** (`saved-reels.tsx`).
 7. **Device-to-Device Sharing & Feed**: Users select backed-up photos/videos or create direct posts/quiz cards, add a caption, and share them to specific approved devices. Recipients view these in the **Feed** tab, react with emojis, and leave comments. Desktop users can also compose and moderate posts via the Desktop Control Center.
@@ -158,7 +168,8 @@ available without removing the lightweight SQLite desktop mode.
    - **Trips & Places**: Automated trip album clustering based on date and geographical proximity, plus map clusters.
    - **Quizzes & Roulette**: Photo trivia guessing games and random memory wheels.
 10. **Video Preview Streaming**: Opening a video in Library, Feed, Reels, or Memories streams the original file immediately via HTTP range requests; the server builds an optimized cached copy in the background only when needed.
-11. **Background Maintenance & Notifications**: A background task maintains periodic sync execution even when the screen is off or the app is closed, acquiring a CPU WakeLock during transfers. Unseen share notifications are tracked via `/notifications/pending` and `/notifications/seen`.
+11. **Background Maintenance & Notifications**: Android schedules sync through a foreground service and may continue while minimized; Android battery policy can defer work while the app is idle. A CPU WakeLock is used during transfers. Unseen share notifications are tracked via `/notifications/pending` and `/notifications/seen`.
+12. **Local Phone-to-Phone Sharing**: Android phones on the same Wi-Fi can discover the P2P service, verify a shared pairing PIN on both devices, and exchange media and feed items directly. Peer state and received P2P posts are stored on-device; this is separate from server pairing and backup sync.
 
 ---
 
@@ -173,9 +184,9 @@ available without removing the lightweight SQLite desktop mode.
 - **FFmpeg / ffprobe** on `PATH` (optional but recommended): enables video capture-date extraction for Memories, video rewind reel generation, and background video preview transcoding.
 
 ### Android Client
-- **Node.js (v18+) & npm**
+- **Node.js 22.13+ & npm** (Expo SDK 57 requirement)
 - **Expo CLI** (`npx expo`)
-- **Android Dev Client / EAS Build** (Native Android modules like `react-native-background-actions`, `expo-notifications`, and `expo-network` require a native build and cannot run in standard Expo Go).
+- **Android Dev Client / EAS Build**. Native background-service and P2P modules require a native build; standard Expo Go does not include them.
 
 ---
 
@@ -299,7 +310,7 @@ per-device approval still apply.
 
 ## API Surface Specification
 
-All endpoints except `/ping` require authentication via `Authorization: Bearer <TOKEN>` (accepting a global API key or issued device token, or a `?token=` query parameter for media streaming clients). Current modular routes are available at their unversioned path and under `/api/v1`; legacy compatibility routes remain at their historical paths. Browser clients must be explicitly allowed with `CORS_ORIGINS`; native Android requests are not subject to browser CORS.
+Most API endpoints require `Authorization: Bearer <TOKEN>`. Device sync and upload routes require valid credentials and an approved device ID; the global API key is used for enrollment and authorized administration, while paired clients use a scoped device token. `/ping` is unauthenticated for discovery. Media clients may use a `?token=` query parameter where supported. Modular REST routes are available at their registered paths and under `/api/v1`; legacy compatibility routes remain at historical paths. The web admin is served at `/admin`. Browser clients must be explicitly allowed with `CORS_ORIGINS`; native Android requests are not subject to browser CORS.
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -315,6 +326,10 @@ All endpoints except `/ping` require authentication via `Authorization: Bearer <
 | `/files/check` | `POST` | Batch metadata differential diffing against DB & disk |
 | `/upload` | `POST` | Standard multipart file upload |
 | `/upload/raw` | `POST` | Raw body stream upload with SHA-256 verification |
+| `/upload/chunk/{upload_id}` | `GET` | Inspect resumable-upload state and received chunk indexes |
+| `/upload/chunk` | `POST` | Store one bounded chunk of a resumable upload |
+| `/upload/complete` | `POST` | Verify and publish a completed chunked upload |
+| `/upload/chunk/{upload_id}` | `DELETE` | Cancel a resumable upload session |
 | `/files/list` | `GET` | Paginated/filtered file index for a specific device |
 | `/files/browse` | `GET` | Prefix-based directory tree browse for device backups |
 | `/files/search` | `GET` | Search backed-up files by filename query |
@@ -336,6 +351,8 @@ All endpoints except `/ping` require authentication via `Authorization: Bearer <
 | `/shared/{source_id}/preview` | `GET` | Range-request video preview stream for a shared-folder video |
 | `/shared/{source_id}/thumbnail` | `GET` | Fast thumbnail generation for shared folder media |
 | `/shared/{source_id}/warm_previews` | `POST` | Arm active video in shared-folder browsing session for preview caching |
+| `/shared/google-drive/api-key` | `GET` | Return whether a server-side Google Drive API key is configured |
+| `/shared/google-drive/add` | `POST` | Add a public Google Drive folder to shared sources |
 | **Storage Cleanup (Free Up Space)** | | |
 | `/cleanup/candidates` | `GET` | Verify that scanned local device files exist safely on the server |
 | `/cleanup/delete` | `POST` | Report local deletions to record in the server audit cleanup log |
@@ -389,6 +406,12 @@ All endpoints except `/ping` require authentication via `Authorization: Bearer <
 | `/trips` | `GET` | List auto-curated trip albums for a device |
 | `/trips/{trip_id}/media` | `GET` | Retrieve photos and videos within a specific trip album |
 | `/trips/recluster` | `POST` | Manually trigger trip clustering for a device |
+| `/admin` | `GET` | Serve the browser-based administration panel |
+| `/api/admin/status` | `GET` | Read server/admin status for the web panel |
+| `/api/admin/devices` | `GET` | Manage paired devices from the web panel |
+| `/api/admin/shared-folders` | `GET` | List configured desktop and Drive shared folders |
+| `/api/admin/google-drive/api-key` | `GET` / `POST` | Read or save the server-side Google Drive API key |
+| `/api/admin/posts` | `GET` | Browse and moderate shared posts from the web panel |
 
 ---
 

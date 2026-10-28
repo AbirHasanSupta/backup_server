@@ -6,6 +6,9 @@ This repository contains two applications that work together:
   backups, pairs devices, serves media, and runs indexing/rewind jobs.
 - **Android client:** an Expo/React Native app in `android/phone-backup` that
   scans the phone, uploads files, restores media, and connects to the server.
+- **Android peer mode:** Android phones can discover and pair over local Wi-Fi
+  and share media directly, even when the backup server is unavailable. This is
+  separate from server pairing and backup synchronization.
 
 It can run as a simple single-PC installation with SQLite, or as a container
 stack with PostgreSQL, Redis, Celery workers, and Nginx.
@@ -30,7 +33,6 @@ directory where you keep projects:
 ```powershell
 git clone https://github.com/AbirHasanSupta/backup_server.git
 Set-Location backup_server
-git submodule update --init --recursive
 ```
 
 If the repository was provided by another means, make sure it is a Git checkout
@@ -55,8 +57,10 @@ rather than a copied source folder. Release versions are derived from Git tags.
 
 ### Android development or APK builds
 
-1. Install Node.js 18 or newer (the current LTS version is a good choice).
-2. Install Android Studio and its Android SDK if you will use `expo run:android`.
+1. Install Node.js 22.13 or newer from the current LTS line for the app's Expo
+   SDK 57 toolchain.
+2. Install Android Studio, Android SDK tools, and a compatible JDK 17 if you
+   will use `npm run android` for local native builds.
 3. Install the EAS CLI if you will create cloud builds:
 
    ```powershell
@@ -64,8 +68,10 @@ rather than a copied source folder. Release versions are derived from Git tags.
    eas login
    ```
 
-The Android app contains native background-service modules, so standard Expo Go
-is not sufficient for testing those features. Use a development client or APK.
+The Android app contains native background-service and peer-to-peer modules, so
+standard Expo Go does not include all app features. Use a development client or
+APK. For P2P sharing, install the build on physical Android phones on the same
+Wi-Fi network; both phones must accept the displayed pairing PIN.
 
 ### Docker deployment
 
@@ -96,7 +102,9 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 `requirements.txt` is the desktop-development set. `requirements-server.txt`
 is the headless/container set and additionally includes PostgreSQL, Redis,
-Celery, and S3 support.
+Celery, and the S3 client library. The bundled Compose file currently uses the
+local shared bind-mounted backup directory; S3 storage requires separate
+configuration and is not enabled by the Compose template.
 
 ## 4. Start the Windows desktop server
 
@@ -166,14 +174,17 @@ successful multi-user deployment.
 
 ## 6. Run the Docker deployment
 
-The Compose deployment starts Nginx on port 80, two FastAPI services
+The Compose deployment starts Nginx on ports 80 and 8000, two FastAPI services
 (`api` / `SERVICE_ROLE=app` for feed·reels·library·memories, and `sync_api` /
 `SERVICE_ROLE=sync` for phone uploads), three isolated Celery workers (video,
 rewind, and indexing), PostgreSQL, and Redis. Nginx path-routes `/upload*`,
 `/files/check`, and `/sync/*` to `sync_api` so bulk sync cannot starve
 interactive pages. Other features use already-backed-up files; reload a page
-after sync to see newly uploaded media. Its Docker volumes retain the database,
-backups, caches, and Redis state.
+after sync to see newly uploaded media. Backup files, app data, configuration,
+and generated caches use host bind mounts (`BACKUP_ROOT` and `APP_DATA_DIR`);
+PostgreSQL and Redis use named Docker volumes. `docker compose down` keeps the
+data. `docker compose down --volumes` removes the PostgreSQL and Redis volumes,
+while host bind-mounted files remain in place.
 
 Google Drive lets apps list public folder contents through the Drive API using
 an API key; “Anyone with the link” grants access to the folder but does not
@@ -221,7 +232,8 @@ own configured key.
    ```
 
 Do not use `docker compose down --volumes` unless you intend to permanently
-delete the PostgreSQL database, backups, and cached data.
+delete the PostgreSQL and Redis named volumes. Backup files, app configuration,
+and generated caches are host bind-mounted and remain on disk.
 
 The included Nginx configuration exposes HTTP only. Terminate TLS at a trusted
 reverse proxy or load balancer before allowing access outside a private network.
@@ -269,6 +281,15 @@ After installing the client:
 4. Approve the pairing request in the desktop server's **Devices** tab.
 5. Select backup folders and start a sync.
 
+To share directly with another Android phone on the same Wi-Fi network, open
+**Settings → Direct Phone-to-Phone (P2P)**, leave **Local Wi-Fi P2P** enabled,
+and choose **Find Nearby Phones**. Start discovery on the other phone as well,
+then confirm the matching PIN on both devices. The peer service uses TCP port
+`8088` by default and UDP port `8822` for discovery; allow local Wi-Fi traffic
+between the phones if the network isolates wireless clients. This pairing is
+independent of **Connect & Register** and does not make a P2P share a server
+backup by itself.
+
 ## 8. Verify the installation
 
 Use a token or API key when calling protected routes. For a local standalone
@@ -293,7 +314,7 @@ python -m unittest tests.test_api_contract tests.test_websocket_security tests.t
 ## 9. Release versioning from Git tags
 
 The Git tag is the only release-version source. Supported release tags use
-Semantic Versioning: `vMAJOR.MINOR.PATCH` (for example, `v4.5.0`) or the same
+Semantic Versioning: `vMAJOR.MINOR.PATCH` (for example, `v5.3.0` in this checkout) or the same
 tag without the leading `v`.
 
 When the running server is a Git checkout, it resolves the nearest semantic tag
@@ -303,12 +324,13 @@ shared value. Android's Expo configuration resolves the same tag when it is
 evaluated and derives Android's numeric `versionCode` as
 `major * 1,000,000 + minor * 1,000 + patch`.
 
-Create a release by committing the release changes, tagging that commit, and
-then rebuilding:
+The current checkout resolves to `v5.3.0`. For a new release, commit the
+release changes and tag that commit with the next intended version (the command
+below uses `v5.4.0` as an example), then rebuild:
 
 ```powershell
-git tag -a v4.5.0 -m 'Release v4.5.0'
-git push origin v4.5.0
+git tag -a v5.4.0 -m 'Release v5.4.0'
+git push origin v5.4.0
 python scripts/sync_version.py
 python build.py
 ```
@@ -329,16 +351,18 @@ an untagged build as a known release.
 | `desktop_app.py` | Windows CustomTkinter control centre and embedded server launcher |
 | `server.py` | FastAPI application, lifespan initialization, CORS, and headless runner |
 | `api/v1/` | Current structured API routes; `upload.py` preserves legacy route compatibility |
+| `web_admin/` | Browser-based server, device, folder, Drive-key, and post administration at `/admin` |
 | `database.py`, `database_pg.py` | SQLite and PostgreSQL persistence implementations |
 | `storage/` | Local/S3 storage abstraction and resumable-upload chunk cleanup |
 | `services/`, `repositories/`, `tasks/` | Modular business logic, database access, and Celery jobs |
 | `memories.py`, `rewind.py`, `trips.py` | Media indexing, memory/reel generation, and location trip clustering |
 | `docker-compose.yml`, `nginx/` | Production-oriented multi-service deployment |
-| `android/phone-backup/` | Expo mobile client, custom native config plugin, and EAS configuration |
+| `android/phone-backup/` | Expo mobile client, Android native P2P service, custom config plugin, and EAS configuration |
 
-Back up the configured backup root and application-data directory (or the
-Docker volumes) before upgrades. Test restoration of a small file periodically;
-a backup is only useful if it can be restored.
+Back up the configured backup root and application-data directory, plus the
+PostgreSQL and Redis named volumes in Docker deployments, before upgrades. Test
+restoration of a small file periodically; a backup is only useful if it can be
+restored.
 
 ## Troubleshooting
 
