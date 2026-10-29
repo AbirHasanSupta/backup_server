@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Phone Backup Server — Web Console & Admin</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="/admin/css/custom.css">
+  <link rel="stylesheet" href="/admin/css/custom.css?v=20261029.7">
   <script>
     tailwind.config = {
       darkMode: 'class',
@@ -59,7 +59,7 @@
 <div id="app-shell" class="hidden flex h-screen overflow-hidden">
 
   <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
-  <aside class="w-60 shrink-0 bg-zinc-900 border-r border-zinc-800 flex flex-col justify-between overflow-y-auto">
+  <aside id="app-sidebar" class="w-60 shrink-0 bg-zinc-900 border-r border-zinc-800 flex flex-col justify-between overflow-y-auto">
     <div>
       <!-- Brand Header -->
       <div class="px-4 pt-5 pb-3 border-b border-zinc-800">
@@ -95,8 +95,9 @@
       </div>
 
       <!-- Workspace Navigation -->
-      <nav class="px-2 py-3 space-y-1">
-        <p class="px-2.5 pb-1 text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Workspace</p>
+      <nav class="admin-nav px-2 py-3 space-y-1">
+        <div class="nav-group">
+        <p class="nav-group-title">Overview</p>
 
         <button data-tab="dashboard" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
           <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 5a1 1 0 011-1h4a1 1 0 011 1v5a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v2a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 13a1 1 0 011-1h4a1 1 0 011 1v6a1 1 0 01-1 1h-4a1 1 0 01-1-1v-6z"/></svg>
@@ -107,6 +108,10 @@
           <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
           Devices
         </button>
+
+        </div>
+        <div class="nav-group">
+        <p class="nav-group-title">Sharing &amp; moderation</p>
 
         <button data-tab="post_to_devices" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
           <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
@@ -128,6 +133,10 @@
           Shared Folders
         </button>
 
+        </div>
+        <div class="nav-group">
+        <p class="nav-group-title">System</p>
+
         <button data-tab="settings" class="tab-btn w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition">
           <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
           Settings
@@ -142,6 +151,7 @@
           <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
           Sync History
         </button>
+        </div>
       </nav>
     </div>
 
@@ -153,15 +163,27 @@
           <span id="theme-icon">🌙</span>
         </button>
       </div>
-      <button onclick="logout()" class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition">
+      <button id="logout-btn" onclick="logout()" class="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-xs text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition">
         <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
         Logout
       </button>
     </div>
   </aside>
+  <button id="sidebar-scrim" class="sidebar-scrim hidden" type="button" aria-label="Close navigation"></button>
 
   <!-- ── Main Content Area ────────────────────────────────────────────────── -->
   <main class="flex-1 flex flex-col overflow-hidden bg-zinc-950">
+
+    <header id="app-topbar" class="app-topbar">
+      <button id="mobile-menu-btn" class="mobile-menu-btn" type="button" aria-label="Open navigation" aria-controls="app-sidebar" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+      <div class="topbar-heading">
+        <span class="topbar-eyebrow">PHONE BACKUP · ADMIN</span>
+        <span id="app-page-title" class="topbar-title">Dashboard</span>
+      </div>
+      <div class="topbar-meta"><span id="topbar-live-dot" class="topbar-live-dot"></span><span id="topbar-server-state">Live server</span><span class="topbar-divider"></span><span id="topbar-uptime">Uptime · 00:00:00</span></div>
+    </header>
 
     <!-- Real-time Pairing Approval Banner -->
     <div id="pairing-banner" class="hidden bg-amber-500/15 border-b border-amber-500/30 px-5 py-3 flex items-center gap-4">
@@ -183,8 +205,8 @@
     <div class="flex-1 overflow-y-auto p-6">
 
       <!-- ─── 1. DASHBOARD TAB ───────────────────────────────────────────── -->
-      <section data-panel="dashboard" class="hidden max-w-6xl mx-auto w-full space-y-6">
-        <div class="flex items-center justify-between">
+      <section data-panel="dashboard" class="hidden max-w-6xl mx-auto w-full dashboard-page space-y-6">
+        <div class="page-intro flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-bold text-zinc-100">Dashboard</h1>
             <p class="text-xs text-zinc-400 mt-0.5">Overview of backup server operations and connected devices.</p>
@@ -192,20 +214,24 @@
           <button onclick="loadDashboard()" class="btn-secondary text-xs">↻ Refresh</button>
         </div>
 
-        <!-- 4 Key Stat Cards Matching Desktop App -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <!-- Server Status -->
-          <div class="card">
-            <div class="flex items-center justify-between mb-2">
-              <span class="section-header">Server Status</span>
-              <span id="dash-status-pill" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold">Running</span>
-            </div>
-            <div id="dash-version" class="text-lg font-bold text-zinc-100">v2.1.0</div>
-            <div id="dash-hostport" class="text-xs text-zinc-400 mt-1 font-mono">0.0.0.0:8000</div>
+        <div class="dashboard-hero card">
+          <div class="dashboard-hero-copy">
+            <div class="eyebrow"><span class="dashboard-pulse"></span> SERVER HEALTH</div>
+            <div class="dashboard-hero-title"><span id="dash-status-pill" class="status-pill">Running</span><span id="dash-version">v2.1.0</span></div>
+            <div class="dashboard-hero-endpoint"><span class="endpoint-label">Listening on</span><code id="dash-hostport">0.0.0.0:8000</code></div>
+            <p>Your backup server is ready to receive files and serve your connected devices.</p>
           </div>
+          <div class="dashboard-hero-actions">
+            <button onclick="showTab('devices')" class="btn-primary">Manage devices <span aria-hidden="true">→</span></button>
+            <button onclick="showTab('logs')" class="btn-quiet">View server logs</button>
+          </div>
+          <div class="dashboard-orbit orbit-one"></div><div class="dashboard-orbit orbit-two"></div>
+        </div>
 
+        <!-- Operational summary -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <!-- Connected Devices -->
-          <div class="card cursor-pointer hover:border-blue-500/50 transition" onclick="showTab('devices')">
+          <div class="card metric-card cursor-pointer hover:border-blue-500/50 transition" onclick="showTab('devices')">
             <div class="flex items-center justify-between mb-2">
               <span class="section-header">Connected Devices</span>
               <span class="text-xs text-blue-400 font-medium">View all →</span>
@@ -215,7 +241,7 @@
           </div>
 
           <!-- Total Storage Used -->
-          <div class="card">
+          <div class="card metric-card">
             <div class="flex items-center justify-between mb-2">
               <span class="section-header">Backup Storage</span>
               <span class="text-xs text-emerald-400 font-mono">📦</span>
@@ -225,7 +251,7 @@
           </div>
 
           <!-- Backup Root Directory -->
-          <div class="card">
+          <div class="card metric-card metric-path">
             <div class="flex items-center justify-between mb-2">
               <span class="section-header">Backup Root</span>
               <button onclick="openExplorerAt(window._currentBackupRoot)" class="text-xs text-blue-400 hover:text-blue-300 font-medium">Explore 📁</button>
@@ -270,7 +296,7 @@
 
 
       <!-- ─── 2. DEVICES TAB ─────────────────────────────────────────────── -->
-      <section data-panel="devices" class="hidden max-w-6xl mx-auto w-full space-y-5">
+      <section data-panel="devices" class="devices-page hidden max-w-6xl mx-auto w-full space-y-5">
         <div class="flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-bold text-zinc-100">Devices</h1>
@@ -294,7 +320,7 @@
 
 
       <!-- ─── 3. POST TO DEVICES TAB ─────────────────────────────────────── -->
-      <section data-panel="post_to_devices" class="hidden max-w-4xl mx-auto w-full space-y-6">
+      <section data-panel="post_to_devices" class="compose-page hidden max-w-4xl mx-auto w-full space-y-6">
         <div>
           <h1 class="text-2xl font-bold text-zinc-100">Post to Devices</h1>
           <p class="text-xs text-zinc-400 mt-0.5">Directly share photos, videos, audio, and documents with paired phones.</p>
@@ -358,7 +384,7 @@
 
 
       <!-- ─── 4. POSTS TAB ───────────────────────────────────────────────── -->
-      <section data-panel="posts" class="hidden max-w-6xl mx-auto w-full space-y-5">
+      <section data-panel="posts" class="posts-page hidden max-w-6xl mx-auto w-full space-y-5">
         <div class="flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-bold text-zinc-100">Server Posts</h1>
@@ -400,7 +426,7 @@
 
 
       <!-- ─── 4B. ALL POSTS MODERATION TAB ───────────────────────────────── -->
-      <section data-panel="all_posts" class="hidden max-w-6xl mx-auto w-full space-y-5">
+      <section data-panel="all_posts" class="all-posts-page hidden max-w-6xl mx-auto w-full space-y-5">
         <div class="flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-bold text-zinc-100">All Posts</h1>
@@ -432,7 +458,7 @@
 
 
       <!-- ─── 5. SHARED FOLDERS TAB ───────────────────────────────────────── -->
-      <section data-panel="shared_folders" class="hidden max-w-6xl mx-auto w-full space-y-5">
+      <section data-panel="shared_folders" class="folders-page hidden max-w-6xl mx-auto w-full space-y-5">
         <div class="flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-bold text-zinc-100">Shared Folders</h1>
@@ -449,7 +475,7 @@
 
 
       <!-- ─── 6. SETTINGS TAB ────────────────────────────────────────────── -->
-      <section data-panel="settings" class="hidden max-w-4xl mx-auto w-full space-y-6">
+      <section data-panel="settings" class="settings-page hidden max-w-4xl mx-auto w-full space-y-6">
         <div>
           <h1 class="text-2xl font-bold text-zinc-100">Settings</h1>
           <p class="text-xs text-zinc-400 mt-0.5">Configure network ports, storage directories, caches, and security options.</p>
@@ -460,7 +486,7 @@
 
 
       <!-- ─── 7. LIVE LOGS TAB ───────────────────────────────────────────── -->
-      <section data-panel="logs" class="hidden max-w-6xl mx-auto w-full flex flex-col h-full space-y-4">
+      <section data-panel="logs" class="logs-page hidden max-w-6xl mx-auto w-full flex flex-col h-full space-y-4">
         <div class="flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-bold text-zinc-100">Live Logs</h1>
@@ -496,7 +522,7 @@
 
 
       <!-- ─── 8. SYNC HISTORY TAB ────────────────────────────────────────── -->
-      <section data-panel="history" class="hidden max-w-6xl mx-auto w-full space-y-5">
+      <section data-panel="history" class="history-page hidden max-w-6xl mx-auto w-full space-y-5">
         <div class="flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-bold text-zinc-100">Sync History</h1>

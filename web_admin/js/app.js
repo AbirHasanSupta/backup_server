@@ -116,6 +116,8 @@ function startUptimeTicker() {
     const secs = String(elapsed % 60).padStart(2, '0');
     const upEl = el('uptime-display');
     if (upEl) upEl.textContent = `Uptime: ${hrs}:${mins}:${secs}`;
+    const topbarUptime = el('topbar-uptime');
+    if (topbarUptime) topbarUptime.textContent = `Uptime · ${hrs}:${mins}:${secs}`;
   }, 1000);
 }
 
@@ -124,6 +126,8 @@ function updateStatusBar(online, host = '0.0.0.0', port = 8000) {
   const lbl = el('status-label');
   const ep = el('sidebar-endpoint');
   const dashStatus = el('dash-status-pill');
+  const topbarDot = el('topbar-live-dot');
+  const topbarState = el('topbar-server-state');
   const proto = location.protocol;
   const hostName = location.hostname || '127.0.0.1';
   const displayPort = port || location.port || 8000;
@@ -136,16 +140,20 @@ function updateStatusBar(online, host = '0.0.0.0', port = 8000) {
     if (dot) dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse';
     if (lbl) lbl.textContent = 'Server Online';
     if (dashStatus) {
-      dashStatus.className = 'text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold';
+      dashStatus.className = 'status-pill text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 font-semibold';
       dashStatus.textContent = 'Running';
     }
+    if (topbarDot) topbarDot.classList.remove('offline');
+    if (topbarState) topbarState.textContent = 'Live server';
   } else {
     if (dot) dot.className = 'w-2.5 h-2.5 rounded-full bg-red-400';
     if (lbl) lbl.textContent = 'Server Offline';
     if (dashStatus) {
-      dashStatus.className = 'text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 font-semibold';
+      dashStatus.className = 'status-pill status-offline text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-400 font-semibold';
       dashStatus.textContent = 'Offline';
     }
+    if (topbarDot) topbarDot.classList.add('offline');
+    if (topbarState) topbarState.textContent = 'Server offline';
   }
 }
 
@@ -185,6 +193,12 @@ let _currentTab = null;
 export function showTab(tabId) {
   if (!TABS.includes(tabId)) tabId = 'dashboard';
   _currentTab = tabId;
+  const pageTitle = el('app-page-title');
+  if (pageTitle) pageTitle.textContent = ({
+    dashboard: 'Dashboard', devices: 'Devices', post_to_devices: 'Post to Devices',
+    posts: 'Server Posts', all_posts: 'All Posts', shared_folders: 'Shared Folders',
+    settings: 'Settings', logs: 'Live Logs', history: 'Sync History',
+  })[tabId];
 
   // Update nav pills
   qsa('[data-tab]').forEach(btn => {
@@ -200,8 +214,17 @@ export function showTab(tabId) {
   // Load active tab data
   loadTab(tabId);
   location.hash = tabId;
+  closeMobileSidebar();
 }
 window.showTab = showTab;
+
+function closeMobileSidebar() {
+  const shell = el('app-shell');
+  const menuButton = el('mobile-menu-btn');
+  if (!shell) return;
+  shell.classList.remove('sidebar-open');
+  menuButton?.setAttribute('aria-expanded', 'false');
+}
 
 function loadTab(tabId) {
   switch (tabId) {
@@ -2563,6 +2586,16 @@ function errorBanner(msg) {
 
 async function boot() {
   initTheme();
+
+  el('mobile-menu-btn')?.addEventListener('click', () => {
+    const shell = el('app-shell');
+    const open = shell?.classList.toggle('sidebar-open') || false;
+    el('mobile-menu-btn')?.setAttribute('aria-expanded', String(open));
+  });
+  el('sidebar-scrim')?.addEventListener('click', closeMobileSidebar);
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeMobileSidebar();
+  });
 
   // Wire nav tab clicks
   qsa('[data-tab]').forEach(btn => {
