@@ -218,6 +218,26 @@ Phone sync/upload is isolated in a dedicated `sync_api` container
 `/sync/*` so Android keeps one host:port. Reload a page after sync to see
 newly uploaded media.
 
+Compose assigns higher relative CPU weight to `api` than to `sync_api` and
+the Celery batch workers, so feed/reels/memories keep CPU time when uploads are
+active. The API services can also be scaled independently; they intentionally
+have no fixed `container_name`, and Nginx refreshes Docker DNS for its
+`least_conn` upstreams:
+
+```bash
+docker compose up -d --scale api=2 --scale sync_api=2
+```
+
+Each Gunicorn worker and Celery child owns a process-local PostgreSQL pool.
+Before scaling, budget `replicas × Gunicorn workers × PG_POOL_MAX_SIZE` for
+each API service, plus Celery concurrency, desktop clients, and administration
+connections. The default `PG_POOL_MAX_SIZE=8` can exceed PostgreSQL's
+96-connection limit when replicas are added; setting it to `4` leaves more
+headroom for two replicas of each API service with the default worker counts.
+CPU shares are relative weights, not hard CPU caps. Change the integer
+`cpu_shares` values in `docker-compose.yml` if the host needs different
+priorities.
+
 Nginx publishes both **port 80** (admin UI) and **port 8000** (Android discovery
 default). Terminate TLS at a configured reverse proxy/load balancer before
 allowing non-private-network access.

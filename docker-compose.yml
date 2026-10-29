@@ -40,6 +40,8 @@ services:
     image: nginx:alpine
     container_name: backup_nginx
     restart: unless-stopped
+    # Keep ingress responsive while media uploads and workers are busy.
+    cpu_shares: 1024
     ports:
       # Browser / admin UI
       - "80:80"
@@ -62,8 +64,10 @@ services:
   # ── 2. Interactive App API (feed / reels / library / memories) ─────────────
   api:
     build: .
-    container_name: backup_api
     restart: unless-stopped
+    # Higher weight than sync and batch workers when Docker's host CPU is busy.
+    # Remove container_name so Compose can create API replicas for Nginx to balance.
+    cpu_shares: 2048
     environment:
       - SERVICE_ROLE=app
       - API_KEY=${API_KEY:?Set API_KEY in .env}
@@ -135,8 +139,10 @@ services:
   # interactive feed/reels/library workers. Shares Postgres + BACKUP_ROOT.
   sync_api:
     build: .
-    container_name: backup_sync_api
     restart: unless-stopped
+    # Uploads remain concurrent, while interactive requests get CPU priority.
+    # Remove container_name so Compose can scale this service independently.
+    cpu_shares: 512
     environment:
       - SERVICE_ROLE=sync
       - API_KEY=${API_KEY:?Set API_KEY in .env}
@@ -192,6 +198,7 @@ services:
     build: .
     container_name: backup_celery_video
     restart: unless-stopped
+    cpu_shares: 512
     command: ["sh", "-c", "exec celery -A celery_app worker -Q transcode_video -c $${CELERY_VIDEO_CONCURRENCY:-2} -l INFO"]
     environment:
       - API_KEY=${API_KEY:?Set API_KEY in .env}
@@ -231,6 +238,7 @@ services:
     build: .
     container_name: backup_celery_rewind
     restart: unless-stopped
+    cpu_shares: 256
     command: ["sh", "-c", "exec celery -A celery_app worker -Q render_rewind -c $${CELERY_REWIND_CONCURRENCY:-1} -l INFO"]
     environment:
       - API_KEY=${API_KEY:?Set API_KEY in .env}
@@ -269,6 +277,7 @@ services:
     build: .
     container_name: backup_celery_indexing
     restart: unless-stopped
+    cpu_shares: 256
     command: ["sh", "-c", "exec celery -A celery_app worker -Q indexing_queue -c $${CELERY_INDEXING_CONCURRENCY:-2} -l INFO"]
     environment:
       - API_KEY=${API_KEY:?Set API_KEY in .env}
@@ -305,6 +314,7 @@ services:
     image: postgres:16-alpine
     container_name: backup_postgres
     restart: unless-stopped
+    cpu_shares: 1024
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
@@ -343,6 +353,7 @@ services:
     image: redis:7-alpine
     container_name: backup_redis
     restart: unless-stopped
+    cpu_shares: 512
     # Keep queue data durable enough for task recovery, and never evict Celery
     # broker keys to make room for response-cache entries.
     command:

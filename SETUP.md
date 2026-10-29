@@ -186,6 +186,16 @@ PostgreSQL and Redis use named Docker volumes. `docker compose down` keeps the
 data. `docker compose down --volumes` removes the PostgreSQL and Redis volumes,
 while host bind-mounted files remain in place.
 
+The `api` and `sync_api` services can be scaled independently. For example,
+`docker compose up -d --scale api=2 --scale sync_api=2` adds replicas that
+Nginx balances with `least_conn`. Before scaling, budget PostgreSQL connections:
+each replica's Gunicorn workers and each Celery child can open a process-local
+pool up to `PG_POOL_MAX_SIZE`. With the default PostgreSQL cap of 96, set
+`PG_POOL_MAX_SIZE=4` before running two replicas of each API service with the
+default worker counts, leaving room for Celery and administration connections.
+CPU shares are fixed integer weights in `docker-compose.yml`; adjust them there
+if a host needs different priorities. They are relative weights, not hard caps.
+
 Google Drive lets apps list public folder contents through the Drive API using
 an API key; “Anyone with the link” grants access to the folder but does not
 provide an API identity for listing its files. [Google's Drive guide](https://developers.google.com/workspace/drive/api/guides/search-files)

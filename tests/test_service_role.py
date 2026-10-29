@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -184,6 +185,25 @@ class ServiceRoleTests(unittest.TestCase):
         self.assertIn("SERVICE_ROLE=app", text)
         self.assertIn("SYNC_GUNICORN_WORKERS", text)
         self.assertIn("SYNC_API_THREADPOOL_WORKERS", text)
+
+        # API services must remain scalable; a fixed container_name prevents
+        # Compose from creating the replicas Nginx's upstream can balance.
+        for service in ("api", "sync_api"):
+            match = re.search(
+                rf"(?ms)^  {service}:\n(?P<body>.*?)(?=^  [A-Za-z_][A-Za-z0-9_]*:|\Z)",
+                text,
+            )
+            self.assertIsNotNone(match, f"Missing Compose service {service}")
+            self.assertNotRegex(match.group("body"), r"(?m)^\s+container_name:")
+
+        self.assertIn("cpu_shares: 2048", text)
+        self.assertIn("cpu_shares: 512", text)
+        self.assertIn("cpu_shares: 256", text)
+
+        nginx = Path(__file__).resolve().parents[1] / "nginx" / "nginx.conf"
+        nginx_text = nginx.read_text(encoding="utf-8")
+        self.assertRegex(nginx_text, r"(?s)upstream app_upstream\s*\{[^}]*least_conn;[^}]*server api:8000 resolve")
+        self.assertRegex(nginx_text, r"(?s)upstream sync_upstream\s*\{[^}]*least_conn;[^}]*server sync_api:8000 resolve")
 
 
 if __name__ == "__main__":
