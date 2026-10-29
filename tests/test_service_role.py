@@ -105,6 +105,26 @@ class ServiceRoleTests(unittest.TestCase):
         self.assertIn("/feed", paths)
         self.assertIn("/ping", paths)
 
+    def test_desktop_monolith_exposes_android_feature_surfaces(self):
+        """The desktop all-role backend must retain every Android API family."""
+        paths = _openapi_paths(build_v1_router("all"))
+        expected = {
+            # Pairing, device identity, backup and resumable transfer.
+            "/connect", "/devices", "/devices/{target_device_id}/username",
+            "/files/check", "/upload", "/upload/chunk", "/upload/complete",
+            "/sync/upload-cache", "/sync/session",
+            # Library, shared folders, Google Drive, feed and social feedback.
+            "/files/browse", "/files/download", "/shared/list",
+            "/shared/google-drive/add", "/shared/google-drive/api-key",
+            "/feed", "/media/{media_id}/react", "/media/{media_id}/comments",
+            "/share/create", "/share/direct-post/create", "/share/quiz/create",
+            # Reels, memories, trips, cleanup and notifications.
+            "/reels", "/reels/saved", "/reels/repost", "/reels/telemetry",
+            "/memories/today", "/memories/rewind/generate", "/trips",
+            "/cleanup/candidates", "/cleanup/delete", "/notifications/pending",
+        }
+        self.assertTrue(expected.issubset(paths), f"Missing Android endpoints: {sorted(expected - paths)}")
+
     def test_sync_app_header_and_ping(self):
         app = create_app("sync")
         status, headers, body = _async_request(app, "GET", "/ping")

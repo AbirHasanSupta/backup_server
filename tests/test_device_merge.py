@@ -4,6 +4,18 @@ from repositories import device_repo
 
 
 class DeviceMergeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from database import init_db
+        init_db()
+        cls.seed_device_id = f"test_seed_{uuid.uuid4().hex[:8]}"
+        cls.seed_device_ip = "192.0.2.44"
+        device_repo.upsert_device("Seed Phone", cls.seed_device_ip, cls.seed_device_id, "Test Model", "Seed")
+
+    @classmethod
+    def tearDownClass(cls):
+        device_repo.remove_device(cls.seed_device_id)
+
     def test_is_device_known_does_not_cross_match_by_ip_when_device_id_provided(self):
         # A known device exists
         devs = device_repo.get_devices()
