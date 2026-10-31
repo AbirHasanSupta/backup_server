@@ -481,7 +481,7 @@ def _init_pg_schema_direct(pg_conn) -> None:
     CREATE TABLE IF NOT EXISTS files (
         id BIGSERIAL,
         device_id VARCHAR(64),
-        external_id VARCHAR(255),
+        external_id TEXT,
         path TEXT NOT NULL,
         size BIGINT NOT NULL,
         modified_time BIGINT NOT NULL,

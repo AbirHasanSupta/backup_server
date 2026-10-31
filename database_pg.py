@@ -145,7 +145,7 @@ def init_pg_db():
             CREATE TABLE IF NOT EXISTS files (
                 id BIGSERIAL,
                 device_id VARCHAR(64),
-                external_id VARCHAR(255),
+                external_id TEXT,
                 path TEXT NOT NULL,
                 size BIGINT NOT NULL,
                 modified_time BIGINT NOT NULL,
@@ -156,6 +156,20 @@ def init_pg_db():
                 PRIMARY KEY (id, device_id)
             ) PARTITION BY HASH (device_id);
             """)
+
+            # Upgrade existing databases once. Reissuing ALTER TABLE on every
+            # worker startup would take an avoidable lock on the files table.
+            cur.execute("""
+                SELECT data_type
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'files'
+                  AND column_name = 'external_id'
+            """)
+            external_id_type = cur.fetchone()
+            if external_id_type and external_id_type[0] != "text":
+                # Android SAF content URIs are used as IDs and may exceed 255 chars.
+                cur.execute("ALTER TABLE files ALTER COLUMN external_id TYPE TEXT")
 
             # Create 8 default partitions for files table if they don't exist
             for i in range(8):
