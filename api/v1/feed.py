@@ -562,25 +562,52 @@ async def create_direct_post(
 ):
     content_type = (request.headers.get("content-type") or "").lower()
     raw_files_data: list[tuple[str, bytes]] = []
+    file_paths: list[str] = []
 
     if "application/json" in content_type:
         body = await request.json()
         shared_by_device_id = str(body.get("shared_by_device_id") or "")
         targets = body.get("target_device_ids") or []
         caption = str(body.get("caption") or "").strip()[:2000]
+        for p in (body.get("file_paths") or []):
+            if isinstance(p, str) and p.strip():
+                file_paths.append(p.strip())
         json_files = body.get("files") or []
         for idx, file_obj in enumerate(json_files):
-            fname = str(file_obj.get("name") or f"file_{idx + 1}")
-            b64_str = file_obj.get("base64") or file_obj.get("data") or ""
-            if "," in b64_str:
-                b64_str = b64_str.split(",", 1)[1]
-            raw_files_data.append((fname, base64.b64decode(b64_str)))
+            if isinstance(file_obj, str) and file_obj.strip():
+                file_paths.append(file_obj.strip())
+                continue
+            if isinstance(file_obj, dict):
+                if file_obj.get("path"):
+                    file_paths.append(str(file_obj["path"]).strip())
+                    continue
+                fname = str(file_obj.get("name") or f"file_{idx + 1}")
+                b64_str = file_obj.get("base64") or file_obj.get("data") or ""
+                if "," in b64_str:
+                    b64_str = b64_str.split(",", 1)[1]
+                if b64_str:
+                    raw_files_data.append((fname, base64.b64decode(b64_str)))
     else:
         form = await request.form()
         shared_by_device_id = str(form.get("shared_by_device_id") or "")
         target_raw = form.get("target_device_ids")
         targets = json.loads(target_raw) if isinstance(target_raw, str) else (target_raw or [])
         caption = str(form.get("caption") or "").strip()[:2000]
+
+        file_paths_raw = form.get("file_paths")
+        if file_paths_raw:
+            try:
+                parsed_fp = json.loads(file_paths_raw)
+                if isinstance(parsed_fp, list):
+                    file_paths.extend([str(p).strip() for p in parsed_fp if str(p).strip()])
+                elif isinstance(parsed_fp, str) and parsed_fp.strip():
+                    file_paths.append(parsed_fp.strip())
+            except Exception:
+                file_paths.append(str(file_paths_raw).strip())
+        for fp in form.getlist("file_paths"):
+            if isinstance(fp, str) and fp.strip() and fp.strip() not in file_paths:
+                file_paths.append(fp.strip())
+
         uploads = form.getlist("files")
         for idx, upload in enumerate(uploads):
             if hasattr(upload, "read"):
@@ -591,17 +618,54 @@ async def create_direct_post(
                 original_name = f"file_{idx + 1}"
             else:
                 continue
-            raw_files_data.append((original_name, content))
+            if content:
+                raw_files_data.append((original_name, content))
 
     verify_api_key_or_device_token(authorization, token, shared_by_device_id, device_repo.verify_device_token)
-    if not raw_files_data:
-        raise HTTPException(status_code=400, detail="No files provided")
+    if not raw_files_data and not file_paths:
+        raise HTTPException(status_code=400, detail="No files or file paths provided")
     if not targets:
         raise HTTPException(status_code=400, detail="No target devices")
 
     persisted_paths = []
     share_items = []
     try:
+        # 1. Server file path references — instant, zero copy
+        for raw_p in file_paths:
+            p_str = str(raw_p).strip()
+            if not p_str:
+                continue
+            norm_p = normalize_fs_path(p_str)
+            if not os.path.exists(norm_p):
+                norm_p = os.path.abspath(p_str)
+            if os.path.isdir(norm_p):
+                with os.scandir(norm_p) as it:
+                    for entry in it:
+                        if entry.is_file(follow_symlinks=False):
+                            try:
+                                st = entry.stat()
+                                share_items.append({
+                                    "source_type": "desktop",
+                                    "source_key": shared_by_device_id or "desktop-server",
+                                    "relative_path": entry.path,
+                                    "size": st.st_size,
+                                    "modified_time": int(st.st_mtime),
+                                })
+                            except (OSError, PermissionError):
+                                continue
+                continue
+            if not os.path.isfile(norm_p):
+                raise HTTPException(status_code=404, detail=f"File not found on server: {p_str}")
+            st = os.stat(norm_p)
+            share_items.append({
+                "source_type": "desktop",
+                "source_key": shared_by_device_id or "desktop-server",
+                "relative_path": p_str,
+                "size": st.st_size,
+                "modified_time": int(st.st_mtime),
+            })
+
+        # 2. Uploaded file contents — write to SHARED_DIRECT_POST_DIR
         for idx, (orig_name, content) in enumerate(raw_files_data):
             safe_name = os.path.basename(str(orig_name).replace("\\", "/")) or f"file_{idx + 1}"
             _, ext = os.path.splitext(safe_name)
@@ -617,6 +681,9 @@ async def create_direct_post(
                 "size": len(content),
                 "modified_time": int(time.time()),
             })
+
+        if not share_items:
+            raise HTTPException(status_code=400, detail="No valid items to share")
 
         return social_repo.create_device_share(
             shared_by_device_id,

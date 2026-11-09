@@ -81,6 +81,12 @@ async def lifespan(app: FastAPI):
             from database_pg import init_pg_db
             init_pg_db()
             logger.info("PostgreSQL multi-user database backend initialized.")
+            if role in ("all", "app"):
+                try:
+                    from database_pg import autoseed_pg_if_empty
+                    autoseed_pg_if_empty()
+                except Exception as e:
+                    logger.warning("PostgreSQL auto-seed check: %s", e)
         except Exception as e:
             logger.warning("Failed to initialize PostgreSQL (%s), falling back to SQLite.", e)
 

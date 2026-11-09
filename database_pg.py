@@ -413,3 +413,152 @@ def init_pg_db():
             conn.commit()
 
             logger.info("PostgreSQL database initialized successfully with partitioned tables.")
+
+
+def autoseed_pg_if_empty() -> bool:
+    """Check if PostgreSQL is empty (0 devices) and auto-seed from host backup.db or backup dumps.
+
+    This ensures that when Docker Desktop is reinstalled, WSL is reset, or containers/volumes
+    are recreated, the database is seamlessly restored from the persistent host storage
+    (%APPDATA%/PhoneBackupServer/backup.db) without losing any posts, devices, or shares.
+    """
+    from config import APP_DATA_DIR
+    try:
+        with get_pg_connection() as conn:
+            with conn.cursor() as cur:
+                # Check advisory lock so only one worker process runs the auto-seed
+                cur.execute("SELECT pg_try_advisory_lock(987654321);")
+                locked = cur.fetchone()[0]
+                if not locked:
+                    return False
+
+                try:
+                    cur.execute("SELECT COUNT(*) FROM devices;")
+                    count = cur.fetchone()[0]
+                    if count > 0:
+                        return False
+
+                    # Search for candidate SQLite databases in host APP_DATA_DIR
+                    candidates = [
+                        os.path.join(APP_DATA_DIR, "backup.db"),
+                        os.path.join(os.environ.get("APPDATA", ""), "PhoneBackupServer", "backup.db"),
+                    ]
+                    found = None
+                    for cand in candidates:
+                        if cand and os.path.isfile(cand) and os.path.getsize(cand) > 0:
+                            found = cand
+                            break
+
+                    if not found:
+                        logger.info("PostgreSQL is empty, and no host SQLite database was found to seed from.")
+                        return False
+
+                    logger.warning(
+                        "PostgreSQL is empty (0 devices), but host database was detected at %s (%s bytes). "
+                        "Auto-restoring database to PostgreSQL...",
+                        found,
+                        os.path.getsize(found),
+                    )
+
+                    from scripts.migrate_sqlite_to_postgres import migrate
+                    migrate([found], _get_pg_url())
+                    logger.info("PostgreSQL auto-seed completed successfully.")
+                    return True
+                finally:
+                    cur.execute("SELECT pg_advisory_unlock(987654321);")
+    except Exception as exc:
+        logger.warning("PostgreSQL auto-seed check encountered an error: %s", exc)
+        return False
+
+
+def backup_pg_to_host() -> dict:
+    """Export PostgreSQL data to host APP_DATA_DIR/db_backups.
+
+    Creates a standalone JSON dump in the persistent host directory
+    so that data survives any Docker reinstalls or volume prunes.
+    """
+    from config import APP_DATA_DIR
+    backups_dir = os.path.join(APP_DATA_DIR, "db_backups")
+    os.makedirs(backups_dir, exist_ok=True)
+
+    ts = _time.strftime("%Y%m%d_%H%M%S")
+    backup_file = os.path.join(backups_dir, f"backup_db_{ts}.json")
+    latest_file = os.path.join(backups_dir, "backup_db_latest.json")
+
+    tables = [
+        "devices", "files", "sync_sessions", "media_index", "trips",
+        "trip_media", "reactions", "comments", "device_share_groups",
+        "device_shares", "device_share_targets", "saved_reels", "reel_telemetry", "geocode_cache"
+    ]
+
+    dump_data: dict[str, Any] = {
+        "timestamp": int(_time.time()),
+        "datetime": ts,
+        "tables": {},
+    }
+
+    with get_pg_connection() as conn:
+        with conn.cursor() as cur:
+            for tbl in tables:
+                try:
+                    cur.execute(f"SELECT * FROM {tbl};")
+                    cols = [desc[0] for desc in cur.description]
+                    rows = cur.fetchall()
+                    tbl_rows = []
+                    for row in rows:
+                        row_dict = {}
+                        for col, val in zip(cols, row):
+                            if isinstance(val, (int, float, str, bool)) or val is None:
+                                row_dict[col] = val
+                            else:
+                                row_dict[col] = str(val)
+                        tbl_rows.append(row_dict)
+                    dump_data["tables"][tbl] = tbl_rows
+                except Exception as e:
+                    logger.warning("Failed to dump table %s: %s", tbl, e)
+
+    with open(backup_file, "w", encoding="utf-8") as f:
+        json.dump(dump_data, f)
+    with open(latest_file, "w", encoding="utf-8") as f:
+        json.dump(dump_data, f)
+
+    # Rotate: keep last 10 backups
+    all_backups = sorted([
+        os.path.join(backups_dir, f) for f in os.listdir(backups_dir)
+        if f.startswith("backup_db_") and f.endswith(".json") and f != "backup_db_latest.json"
+    ])
+    while len(all_backups) > 10:
+        oldest = all_backups.pop(0)
+        try:
+            os.remove(oldest)
+        except OSError:
+            pass
+
+    return {
+        "ok": True,
+        "file": backup_file,
+        "latest": latest_file,
+        "timestamp": ts,
+        "total_tables": len(dump_data["tables"]),
+    }
+
+
+def get_pg_backup_status() -> dict:
+    """Check the status of database backups on the host."""
+    from config import APP_DATA_DIR
+    backups_dir = os.path.join(APP_DATA_DIR, "db_backups")
+    latest_file = os.path.join(backups_dir, "backup_db_latest.json")
+    host_sqlite = os.path.join(APP_DATA_DIR, "backup.db")
+
+    has_latest = os.path.isfile(latest_file)
+    has_sqlite = os.path.isfile(host_sqlite)
+
+    return {
+        "has_backup": has_latest or has_sqlite,
+        "latest_backup_path": latest_file if has_latest else None,
+        "latest_backup_size": os.path.getsize(latest_file) if has_latest else None,
+        "latest_backup_mtime": int(os.path.getmtime(latest_file)) if has_latest else None,
+        "host_sqlite_path": host_sqlite if has_sqlite else None,
+        "host_sqlite_size": os.path.getsize(host_sqlite) if has_sqlite else None,
+        "host_sqlite_mtime": int(os.path.getmtime(host_sqlite)) if has_sqlite else None,
+    }

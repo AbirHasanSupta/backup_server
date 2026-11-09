@@ -1342,6 +1342,144 @@ async def upload_admin_post_items(
     return {"ok": True, "total_items": len(new_items)}
 
 
+class AddPostPathsRequest(BaseModel):
+    file_paths: list[str]
+
+
+@router.post("/api/admin/posts/{group_id}/items/add-paths")
+async def add_admin_post_paths(
+    group_id: str,
+    body: AddPostPathsRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    _auth(authorization, token)
+    if not body.file_paths:
+        raise HTTPException(status_code=400, detail="No file paths provided")
+
+    # Get existing items
+    shares = await asyncio.to_thread(social_repo.get_device_shares_by_sharer, "desktop-server")
+    current_items = [
+        {
+            "source_type": it.get("source_type", "desktop"),
+            "source_key": it.get("source_key", "desktop-server"),
+            "relative_path": it.get("relative_path", ""),
+            "size": int(it.get("size") or 0),
+            "modified_time": int(it.get("modified_time") or 0),
+        }
+        for it in shares if (it.get("share_group_id") or str(it["share_id"])) == group_id
+    ]
+
+    new_items = list(current_items)
+    for raw_p in body.file_paths:
+        p_str = str(raw_p).strip()
+        if not p_str:
+            continue
+        norm_p = normalize_fs_path(p_str)
+        if not os.path.exists(norm_p):
+            norm_p = os.path.abspath(p_str)
+        if os.path.isdir(norm_p):
+            with os.scandir(norm_p) as it:
+                for entry in it:
+                    if entry.is_file(follow_symlinks=False):
+                        try:
+                            st = entry.stat()
+                            new_items.append({
+                                "source_type": "desktop",
+                                "source_key": "desktop-server",
+                                "relative_path": entry.path,
+                                "size": st.st_size,
+                                "modified_time": int(st.st_mtime),
+                            })
+                        except (OSError, PermissionError):
+                            continue
+            continue
+        if not os.path.isfile(norm_p):
+            raise HTTPException(status_code=404, detail=f"File not found on server: {p_str}")
+        st = os.stat(norm_p)
+        new_items.append({
+            "source_type": "desktop",
+            "source_key": "desktop-server",
+            "relative_path": p_str,
+            "size": st.st_size,
+            "modified_time": int(st.st_mtime),
+        })
+
+    ok = await asyncio.to_thread(social_repo.update_share_group_items, group_id, "desktop-server", new_items)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Failed to add file paths to post")
+    return {"ok": True, "total_items": len(new_items)}
+
+
+class CreateAdminPostRequest(BaseModel):
+    file_paths: list[str]
+    target_device_ids: list[str]
+    caption: str = ""
+    shared_by_device_id: str = "desktop-server"
+
+
+@router.post("/api/admin/posts/create")
+async def create_admin_post_by_paths(
+    body: CreateAdminPostRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    _auth(authorization, token)
+    if not body.file_paths:
+        raise HTTPException(status_code=400, detail="No file paths provided")
+    if not body.target_device_ids:
+        raise HTTPException(status_code=400, detail="No target devices selected")
+
+    items = []
+    for raw_p in body.file_paths:
+        p_str = str(raw_p).strip()
+        if not p_str:
+            continue
+        norm_p = normalize_fs_path(p_str)
+        if not os.path.exists(norm_p):
+            norm_p = os.path.abspath(p_str)
+        if os.path.isdir(norm_p):
+            with os.scandir(norm_p) as it:
+                for entry in it:
+                    if entry.is_file(follow_symlinks=False):
+                        try:
+                            st = entry.stat()
+                            items.append({
+                                "source_type": "desktop",
+                                "source_key": body.shared_by_device_id,
+                                "relative_path": entry.path,
+                                "size": st.st_size,
+                                "modified_time": int(st.st_mtime),
+                            })
+                        except (OSError, PermissionError):
+                            continue
+            continue
+
+        if not os.path.isfile(norm_p):
+            raise HTTPException(status_code=404, detail=f"File not found on server: {p_str}")
+
+        st = os.stat(norm_p)
+        items.append({
+            "source_type": "desktop",
+            "source_key": body.shared_by_device_id,
+            "relative_path": p_str,
+            "size": st.st_size,
+            "modified_time": int(st.st_mtime),
+        })
+
+    if not items:
+        raise HTTPException(status_code=400, detail="No valid files resolved from provided paths")
+
+    res = await asyncio.to_thread(
+        social_repo.create_device_share,
+        body.shared_by_device_id,
+        body.target_device_ids,
+        body.caption or None,
+        items,
+    )
+    return res
+
+
 class EditCaptionRequest(BaseModel):
     caption: str | None = None
 
@@ -1424,3 +1562,40 @@ async def bulk_delete_any_admin_posts(
             ok = await asyncio.to_thread(social_repo.delete_device_share, matching[0]["share_id"], owner)
         (deleted_ids if ok else failed_ids).append(group_id)
     return {"ok": not failed_ids, "deleted_ids": deleted_ids, "failed_ids": failed_ids}
+
+
+# ── Database Backup & Restore ─────────────────────────────────────────────────
+
+@router.post("/api/admin/database/backup")
+async def trigger_database_backup(
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    _auth(authorization, token)
+    cfg = load_config()
+    if cfg.get("DATABASE_BACKEND") == "postgres":
+        from database_pg import backup_pg_to_host
+        res = await asyncio.to_thread(backup_pg_to_host)
+        return res
+    return {"ok": True, "message": "SQLite database is stored directly on host filesystem."}
+
+
+@router.get("/api/admin/database/backup/status")
+async def get_database_backup_status(
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    _auth(authorization, token)
+    cfg = load_config()
+    if cfg.get("DATABASE_BACKEND") == "postgres":
+        from database_pg import get_pg_backup_status
+        return get_pg_backup_status()
+    from config import APP_DATA_DIR
+    host_sqlite = os.path.join(APP_DATA_DIR, "backup.db")
+    has_sqlite = os.path.isfile(host_sqlite)
+    return {
+        "has_backup": has_sqlite,
+        "host_sqlite_path": host_sqlite if has_sqlite else None,
+        "host_sqlite_size": os.path.getsize(host_sqlite) if has_sqlite else None,
+        "host_sqlite_mtime": int(os.path.getmtime(host_sqlite)) if has_sqlite else None,
+    }

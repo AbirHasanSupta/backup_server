@@ -331,9 +331,15 @@
           <div class="card">
             <div class="flex items-center justify-between mb-3">
               <span class="section-header">Select Files to Post</span>
-              <div class="flex gap-2">
+              <div class="flex flex-wrap gap-2">
+                <button type="button" onclick="openServerFilePickerForPost()" class="btn-primary text-xs font-semibold">
+                  🖥️ + Browse Server Files
+                </button>
+                <button type="button" onclick="promptAddServerPath()" class="btn-secondary text-xs">
+                  📝 + Add Server Path
+                </button>
                 <button type="button" onclick="el('post-file-input').click()" class="btn-secondary text-xs">
-                  📁 + Browse Files
+                  📁 + Upload from PC
                 </button>
                 <button type="button" onclick="clearPostFiles()" id="post-clear-files-btn" class="btn-secondary text-xs hidden text-red-400">
                   Clear
@@ -341,12 +347,12 @@
               </div>
             </div>
 
-            <div id="drop-zone" class="border-2 border-dashed border-zinc-700/80 rounded-2xl p-8 text-center cursor-pointer hover:border-blue-500 transition-colors bg-zinc-900/40">
-              <div class="w-12 h-12 rounded-2xl bg-blue-500/10 text-blue-400 flex items-center justify-center mx-auto mb-3">
+            <div id="drop-zone" onclick="openServerFilePickerForPost()" class="border-2 border-dashed border-zinc-700/80 rounded-2xl p-8 text-center cursor-pointer hover:border-blue-500 transition-colors bg-zinc-900/40 group">
+              <div class="w-12 h-12 rounded-2xl bg-blue-500/10 text-blue-400 flex items-center justify-center mx-auto mb-3 group-hover:scale-110 transition-transform">
                 <svg class="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
               </div>
-              <div class="text-sm font-semibold text-zinc-200">Drag &amp; drop photos, videos, audio, or documents here</div>
-              <div class="text-xs text-zinc-500 mt-1">or click to browse your local computer</div>
+              <div class="text-sm font-semibold text-zinc-200">Click to browse server files, paste paths, or drop files here</div>
+              <div class="text-xs text-zinc-400 mt-1">Posts take file path references directly &amp; instantly without copying files</div>
               <input id="post-file-input" type="file" multiple class="hidden">
             </div>
 
@@ -636,7 +642,7 @@
         <span class="text-lg">📁</span>
         <div>
           <h3 id="fs-modal-title" class="text-sm font-bold text-zinc-100">Server File &amp; Folder Explorer</h3>
-          <p class="text-[11px] text-zinc-400">Browse server filesystem directories.</p>
+          <p id="fs-modal-subtitle" class="text-[11px] text-zinc-400">Browse server filesystem directories.</p>
         </div>
       </div>
       <button onclick="closeModal('fs-explorer-modal')" class="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white transition">✕</button>
@@ -644,11 +650,13 @@
 
     <!-- Breadcrumb & Path Bar -->
     <div class="p-3 border-b border-zinc-800 bg-zinc-925 space-y-2">
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
         <button id="fs-parent-btn" onclick="fsNavigateParent()" title="Go to Parent Folder" class="btn-secondary text-xs px-2.5 py-1.5">⬆ Up</button>
-        <input id="fs-path-input" class="input text-xs py-1.5 font-mono flex-1" placeholder="/path/to/folder">
+        <input id="fs-path-input" class="input text-xs py-1.5 font-mono flex-1 min-w-[200px]" placeholder="/path/to/folder">
         <button onclick="fsNavigateTo(el('fs-path-input').value)" class="btn-secondary text-xs py-1.5">Go</button>
-        <button onclick="fsPromptNewFolder()" class="btn-secondary text-xs py-1.5">+ New Folder</button>
+        <button onclick="fsPromptNewFolder()" id="fs-new-folder-btn" class="btn-secondary text-xs py-1.5">+ New Folder</button>
+        <button onclick="fsToggleSelectAllCurrentFiles()" id="fs-select-all-btn" class="btn-secondary text-xs py-1.5 hidden">✓ Select All in Folder</button>
+        <button onclick="fsAddEntireCurrentFolder()" id="fs-add-folder-btn" class="btn-secondary text-xs py-1.5 hidden">📂 Add Whole Folder</button>
       </div>
 
       <!-- Quick access shortcuts -->
@@ -789,10 +797,18 @@
 
     <div id="post-edit-files-list" class="flex-1 overflow-y-auto space-y-2 p-2 bg-zinc-950 rounded-lg border border-zinc-800 min-h-[200px]"></div>
 
-    <div class="flex items-center justify-between pt-2">
-      <button onclick="el('post-edit-file-input').click()" class="btn-secondary text-xs">
-        📁 + Add Files
-      </button>
+    <div class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-zinc-800">
+      <div class="flex flex-wrap gap-2">
+        <button type="button" onclick="openServerFilePickerForEditPost()" class="btn-primary text-xs font-semibold">
+          🖥️ + Server Files
+        </button>
+        <button type="button" onclick="promptAddServerPath('edit_modal')" class="btn-secondary text-xs">
+          📝 + Server Path
+        </button>
+        <button type="button" onclick="el('post-edit-file-input').click()" class="btn-secondary text-xs">
+          📁 + Upload
+        </button>
+      </div>
       <input id="post-edit-file-input" type="file" multiple class="hidden">
 
       <div class="flex gap-2">
@@ -804,15 +820,43 @@
 </div>
 
 
+<!-- 7b. Server Path Input Modal -->
+<div id="server-path-modal" class="hidden modal-backdrop">
+  <div class="bg-zinc-900 border border-zinc-700 rounded-2xl w-full max-w-lg p-5 shadow-2xl space-y-4 mx-4">
+    <div class="flex items-center justify-between">
+      <h3 class="text-base font-bold text-zinc-100">Add Server File Path(s)</h3>
+      <button onclick="closeModal('server-path-modal')" class="p-1 rounded text-zinc-400 hover:text-white">✕</button>
+    </div>
+    <p class="text-xs text-zinc-400">
+      Enter server file or folder paths (one per line). Posts reference these paths directly without copying files.
+    </p>
+    <textarea id="server-path-textarea" class="input h-32 font-mono text-xs resize-none" placeholder="D:\PhoneBackup\Abir\DCIM\Camera\VID_001.mp4&#10;G:\Photos\Vacation"></textarea>
+    <div class="flex justify-end gap-2">
+      <button onclick="closeModal('server-path-modal')" class="btn-secondary text-xs">Cancel</button>
+      <button onclick="confirmAddServerPaths()" class="btn-primary text-xs font-semibold">Add to Post</button>
+    </div>
+  </div>
+</div>
+
+
 <!-- 8. Full Post File Gallery -->
 <div id="post-gallery-modal" class="hidden modal-backdrop">
   <div class="post-gallery-panel bg-zinc-900 border border-zinc-700 rounded-2xl w-full max-w-5xl mx-4 shadow-2xl flex flex-col overflow-hidden">
-    <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between shrink-0">
-      <div>
-        <h3 id="post-gallery-title" class="text-base font-bold text-zinc-100">Post Files</h3>
+    <div class="px-5 py-4 border-b border-zinc-800 flex items-center justify-between shrink-0 gap-3">
+      <div class="min-w-0 flex-1">
+        <h3 id="post-gallery-title" class="text-base font-bold text-zinc-100 truncate">Post Files</h3>
         <p id="post-gallery-count" class="text-xs text-zinc-400 mt-0.5"></p>
       </div>
-      <button onclick="closeModal('post-gallery-modal')" class="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white">✕</button>
+      <div class="flex items-center gap-2 shrink-0">
+        <button id="post-gallery-prev-btn" data-action="gallery-prev" class="btn-secondary text-xs px-2.5 py-1.5 flex items-center gap-1 cursor-pointer select-none" title="Previous post (Left arrow)">
+          <span>←</span> <span class="hidden sm:inline">Prev</span>
+        </button>
+        <span id="post-gallery-pos" class="text-xs text-zinc-400 font-mono px-1"></span>
+        <button id="post-gallery-next-btn" data-action="gallery-next" class="btn-secondary text-xs px-2.5 py-1.5 flex items-center gap-1 cursor-pointer select-none" title="Next post (Right arrow)">
+          <span class="hidden sm:inline">Next</span> <span>→</span>
+        </button>
+        <button onclick="closeModal('post-gallery-modal')" class="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-white ml-1">✕</button>
+      </div>
     </div>
     <div id="post-gallery-grid" class="post-gallery-grid p-4 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3"></div>
   </div>
@@ -822,6 +866,9 @@
 <div id="media-modal" class="hidden modal-backdrop">
   <div class="relative bg-zinc-900 border border-zinc-700 rounded-2xl overflow-hidden shadow-2xl max-w-4xl w-full mx-4 flex flex-col items-center justify-center p-2">
     <button onclick="closeModal('media-modal')" class="absolute top-4 right-4 z-10 w-9 h-9 rounded-full bg-zinc-800/90 flex items-center justify-center text-zinc-300 hover:text-white transition shadow-lg">✕</button>
+    <button id="media-modal-prev-btn" data-action="media-prev" class="hidden absolute left-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-zinc-800/90 hover:bg-zinc-700 text-zinc-200 hover:text-white transition shadow-lg flex items-center justify-center text-2xl pb-1 cursor-pointer select-none disabled:opacity-30 disabled:pointer-events-none" title="Previous (Left arrow)">‹</button>
+    <button id="media-modal-next-btn" data-action="media-next" class="hidden absolute right-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-zinc-800/90 hover:bg-zinc-700 text-zinc-200 hover:text-white transition shadow-lg flex items-center justify-center text-2xl pb-1 cursor-pointer select-none disabled:opacity-30 disabled:pointer-events-none" title="Next (Right arrow)">›</button>
+    <div id="media-modal-counter" class="hidden absolute bottom-4 left-1/2 -translate-x-1/2 z-10 px-3 py-1 rounded-full bg-zinc-900/80 text-xs text-zinc-300 backdrop-blur pointer-events-none font-mono"></div>
     <div id="media-modal-content" class="w-full flex items-center justify-center min-h-[300px] p-2"></div>
   </div>
 </div>

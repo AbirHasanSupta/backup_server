@@ -335,8 +335,12 @@ services:
       - -c
       - max_connections=${POSTGRES_MAX_CONNECTIONS:-96}
     volumes:
-      # PG data lives in a named volume (managed by Docker) — no conflict with SQLite
+      # PG internal data lives in a named volume inside WSL2
       - pg_data:/var/lib/postgresql/data
+      # Mount persistent host AppData for automated dumps & recovery across Docker reinstalls
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
     ports:
       # Expose to host so the desktop app and migration scripts can connect directly
       - "5432:5432"

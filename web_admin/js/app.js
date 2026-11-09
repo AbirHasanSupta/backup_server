@@ -611,9 +611,40 @@ document.addEventListener('click', e => {
     case 'preview-media': {
       const url = btn.dataset.url;
       const cat = btn.dataset.cat || 'photos';
-      openMediaPreviewUrl(url, cat);
+      if (btn.dataset.galleryIndex !== undefined && _currentGalleryItems.length) {
+        _activePreviewList = _currentGalleryItems;
+        _activePreviewIndex = Number(btn.dataset.galleryIndex);
+      } else if (btn.dataset.previewIndex !== undefined && btn.dataset.groupId) {
+        const postKind = btn.dataset.postKind || 'server';
+        const list = postKind === 'all' ? _allPostsData : _postsData;
+        const post = list.find(p => p.group_id === btn.dataset.groupId);
+        if (post && post.items && post.items.length) {
+          _activePreviewList = post.items;
+          _activePreviewIndex = Number(btn.dataset.previewIndex);
+        } else {
+          _activePreviewList = [];
+          _activePreviewIndex = -1;
+        }
+      } else {
+        _activePreviewList = [];
+        _activePreviewIndex = -1;
+      }
+      openMediaPreviewUrl(url, cat, false);
+      updateMediaModalNavUi();
       break;
     }
+    case 'gallery-prev':
+      galleryNavigatePost(-1);
+      break;
+    case 'gallery-next':
+      galleryNavigatePost(1);
+      break;
+    case 'media-prev':
+      navigateMediaPreview(-1);
+      break;
+    case 'media-next':
+      navigateMediaPreview(1);
+      break;
     case 'show-post-files':
       openPostFilesGrid(btn.dataset.groupId, btn.dataset.postKind || 'server');
       break;
@@ -625,6 +656,24 @@ document.addEventListener('click', e => {
       break;
     case 'fs-select-folder':
       fsSelectFolder(btn.dataset.path);
+      break;
+    case 'fs-toggle-file':
+      fsToggleFileSelection(btn.dataset.path, btn.dataset.name, parseInt(btn.dataset.size || '0', 10), parseInt(btn.dataset.mtime || '0', 10));
+      break;
+    case 'fs-add-folder-files':
+      fsAddFolderFilesToSelection(btn.dataset.path);
+      break;
+    case 'move-post-file':
+      movePostFile(Number(btn.dataset.index), Number(btn.dataset.dir));
+      break;
+    case 'remove-post-file':
+      removePostFile(Number(btn.dataset.index));
+      break;
+    case 'move-edit-post-item':
+      moveEditPostItem(Number(btn.dataset.index), Number(btn.dataset.dir));
+      break;
+    case 'remove-edit-post-item':
+      removeEditPostItem(Number(btn.dataset.index));
       break;
   }
 });
@@ -869,6 +918,62 @@ function handlePostFiles(files) {
   renderPostFileList();
 }
 
+window.addServerFilesToPost = function(files) {
+  const newItems = files.map(f => ({
+    name: f.name,
+    size: f.size || 0,
+    path: f.path,
+    is_server_ref: true,
+  }));
+  _postSelectedFiles = [..._postSelectedFiles, ...newItems];
+  renderPostFileList();
+  showToast(`Added ${newItems.length} server file reference(s). Posting will be instant!`);
+};
+
+let _serverPathTarget = null;
+window.promptAddServerPath = function(target = null) {
+  _serverPathTarget = target;
+  if (el('server-path-textarea')) el('server-path-textarea').value = '';
+  openModal('server-path-modal');
+};
+
+window.confirmAddServerPaths = async function() {
+  const text = (el('server-path-textarea')?.value || '').trim();
+  if (!text) {
+    showToast('Please enter at least one server path.', 'warn');
+    return;
+  }
+  const lines = text.split(/[\r\n,]+/).map(s => s.trim()).filter(Boolean);
+  if (!lines.length) return;
+
+  closeModal('server-path-modal');
+
+  if (_serverPathTarget === 'edit_modal' && _editingPostGroupId) {
+    try {
+      await api.post(`/api/admin/posts/${_editingPostGroupId}/items/add-paths`, { file_paths: lines });
+      showToast(`Added ${lines.length} path(s) to post!`);
+      openEditFilesModal(_editingPostGroupId);
+      loadPosts();
+    } catch (e) {
+      showToast(`Failed to add paths: ${e.message}`, 'error');
+    }
+    return;
+  }
+
+  const newItems = lines.map(p => {
+    const name = p.replace(/\\/g, '/').split('/').pop() || p;
+    return {
+      name: name,
+      path: p,
+      size: 0,
+      is_server_ref: true,
+    };
+  });
+  _postSelectedFiles = [..._postSelectedFiles, ...newItems];
+  renderPostFileList();
+  showToast(`Added ${newItems.length} server path(s). Posting will be instant!`);
+};
+
 function renderPostFileList() {
   const con = el('post-file-list');
   const summary = el('post-files-summary');
@@ -883,32 +988,38 @@ function renderPostFileList() {
   }
 
   if (clearBtn) clearBtn.classList.remove('hidden');
-  const totalBytes = _postSelectedFiles.reduce((s, f) => s + f.size, 0);
+  const totalBytes = _postSelectedFiles.reduce((s, f) => s + (f.size || 0), 0);
   if (summary) {
-    summary.textContent = `${_postSelectedFiles.length} file(s) selected (${fmtBytes(totalBytes)})`;
+    const refCount = _postSelectedFiles.filter(f => f.is_server_ref || f.path).length;
+    const refText = refCount > 0 ? ` • ${refCount} server reference(s) (instant, zero-copy)` : '';
+    summary.textContent = `${_postSelectedFiles.length} file(s) selected (${fmtBytes(totalBytes)})${refText}`;
     summary.classList.remove('hidden');
   }
 
   // Use data-index — File objects can't be stored as strings
   con.innerHTML = _postSelectedFiles.map((f, i) => {
-    const isVid = f.type.startsWith('video/') || f.name.match(/\.(mp4|mov|avi|mkv)$/i);
-    const isImg = f.type.startsWith('image/') || f.name.match(/\.(jpg|jpeg|png|heic|webp|gif)$/i);
-    const isAudio = f.type.startsWith('audio/') || f.name.match(/\.(mp3|m4a|wav|flac|aac)$/i);
+    const isVid = f.type ? (f.type.startsWith('video/') || f.name.match(/\.(mp4|mov|avi|mkv)$/i)) : f.name.match(/\.(mp4|mov|avi|mkv)$/i);
+    const isImg = f.type ? (f.type.startsWith('image/') || f.name.match(/\.(jpg|jpeg|png|heic|webp|gif)$/i)) : f.name.match(/\.(jpg|jpeg|png|heic|webp|gif)$/i);
+    const isAudio = f.type ? (f.type.startsWith('audio/') || f.name.match(/\.(mp3|m4a|wav|flac|aac)$/i)) : f.name.match(/\.(mp3|m4a|wav|flac|aac)$/i);
     const icon = isVid ? '🎥' : isImg ? '🖼️' : isAudio ? '🎵' : '📄';
+    const isRef = Boolean(f.is_server_ref || f.path);
 
     return `
     <div class="flex items-center justify-between p-2 rounded-xl bg-zinc-800/80 border border-zinc-700/60 text-xs">
       <div class="flex items-center gap-2.5 min-w-0">
         <span class="text-base">${icon}</span>
         <div class="min-w-0">
-          <div class="font-semibold text-zinc-100 truncate">${escHtml(f.name)}</div>
-          <div class="text-[10px] text-zinc-400">${fmtBytes(f.size)}</div>
+          <div class="flex items-center gap-2">
+            <span class="font-semibold text-zinc-100 truncate">${escHtml(f.name)}</span>
+            ${isRef ? '<span class="px-1.5 py-0.2 rounded text-[10px] bg-blue-500/20 text-blue-300 font-mono shrink-0">Server Ref (Instant)</span>' : ''}
+          </div>
+          <div class="text-[10px] text-zinc-400 truncate">${f.path ? escHtml(f.path) + (f.size ? ' • ' + fmtBytes(f.size) : '') : fmtBytes(f.size)}</div>
         </div>
       </div>
       <div class="flex items-center gap-1 shrink-0">
-        <button onclick="movePostFile(${i}, -1)" ${i === 0 ? 'disabled' : ''} class="p-1 text-zinc-400 hover:text-white disabled:opacity-30">▲</button>
-        <button onclick="movePostFile(${i}, 1)" ${i === _postSelectedFiles.length - 1 ? 'disabled' : ''} class="p-1 text-zinc-400 hover:text-white disabled:opacity-30">▼</button>
-        <button onclick="removePostFile(${i})" class="p-1 text-zinc-400 hover:text-red-400 transition ml-1">✕</button>
+        <button type="button" data-action="move-post-file" data-index="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} class="p-1 text-zinc-400 hover:text-white disabled:opacity-30">▲</button>
+        <button type="button" data-action="move-post-file" data-index="${i}" data-dir="1" ${i === _postSelectedFiles.length - 1 ? 'disabled' : ''} class="p-1 text-zinc-400 hover:text-white disabled:opacity-30">▼</button>
+        <button type="button" data-action="remove-post-file" data-index="${i}" class="p-1 text-zinc-400 hover:text-red-400 transition ml-1">✕</button>
       </div>
     </div>`;
   }).join('');
@@ -958,14 +1069,32 @@ window.submitDirectPost = async function() {
   if (bar) bar.classList.remove('hidden');
 
   try {
-    const formData = new FormData();
-    formData.append('shared_by_device_id', 'desktop-server');
-    formData.append('target_device_ids', JSON.stringify(selectedDevices));
-    formData.append('caption', caption);
-    _postSelectedFiles.forEach(f => formData.append('files', f));
+    const serverRefs = _postSelectedFiles.filter(f => f.is_server_ref || f.path);
+    const uploadedFiles = _postSelectedFiles.filter(f => !f.is_server_ref && !f.path && (typeof File !== 'undefined' && f instanceof File));
 
-    await api.postForm('/api/share/direct-post/create', formData);
-    showToast(`Successfully posted ${_postSelectedFiles.length} file(s) to ${selectedDevices.length} device(s)!`);
+    // If all items are server path references (instant zero-copy posting):
+    if (serverRefs.length > 0 && uploadedFiles.length === 0) {
+      const paths = serverRefs.map(f => f.path);
+      await api.post('/api/admin/posts/create', {
+        file_paths: paths,
+        target_device_ids: selectedDevices,
+        caption: caption,
+        shared_by_device_id: 'desktop-server',
+      });
+      showToast(`Successfully posted ${paths.length} file reference(s) instantly to ${selectedDevices.length} device(s)!`);
+    } else {
+      const formData = new FormData();
+      formData.append('shared_by_device_id', 'desktop-server');
+      formData.append('target_device_ids', JSON.stringify(selectedDevices));
+      formData.append('caption', caption);
+      if (serverRefs.length > 0) {
+        formData.append('file_paths', JSON.stringify(serverRefs.map(f => f.path)));
+      }
+      uploadedFiles.forEach(f => formData.append('files', f));
+
+      await api.postForm('/api/share/direct-post/create', formData);
+      showToast(`Successfully posted ${_postSelectedFiles.length} file(s) to ${selectedDevices.length} device(s)!`);
+    }
 
     _postSelectedFiles = [];
     renderPostFileList();
@@ -1084,12 +1213,12 @@ function renderPosts() {
 
       ${previewItems.length ? `
       <div class="flex items-center gap-2 overflow-x-auto py-1">
-        ${previewItems.map(it => {
+        ${previewItems.map((it, idx) => {
           const isVid = it.name.match(/\.(mp4|mov|avi|mkv)$/i);
           const cat = isVid ? 'videos' : 'photos';
           return `
           <div class="relative w-16 h-16 rounded-lg bg-zinc-800 overflow-hidden shrink-0 cursor-pointer border border-zinc-700/60 group/item"
-               data-action="preview-media" data-url="${escHtml(it.download_url)}" data-cat="${cat}">
+               data-action="preview-media" data-url="${escHtml(it.download_url)}" data-cat="${cat}" data-group-id="${gid}" data-preview-index="${idx}" data-post-kind="server">
             <img src="${escHtml(it.thumbnail_url)}" class="w-full h-full object-cover pointer-events-none" onerror="this.style.display='none'">
             ${isVid ? '<div class="absolute inset-0 bg-black/40 flex items-center justify-center text-white text-xs pointer-events-none">▶</div>' : ''}
           </div>`;
@@ -1117,15 +1246,67 @@ function renderPosts() {
   }).join('');
 }
 
+let _currentGalleryGroupId = null;
+let _currentGalleryPostKind = 'server';
+let _currentGalleryItems = [];
+let _galleryNavSeq = 0;
+
+function getGalleryPostList() {
+  return _currentGalleryPostKind === 'all' ? _allPostsData : _postsData;
+}
+
+function getGalleryCurrentIndex() {
+  const list = getGalleryPostList();
+  return list.findIndex(item => item.group_id === _currentGalleryGroupId);
+}
+
+function updateGalleryNavUi() {
+  const list = getGalleryPostList();
+  const idx = getGalleryCurrentIndex();
+  const prevBtn = el('post-gallery-prev-btn');
+  const nextBtn = el('post-gallery-next-btn');
+  const posLbl = el('post-gallery-pos');
+
+  if (idx !== -1 && list.length > 0) {
+    if (prevBtn) prevBtn.disabled = idx <= 0;
+    if (nextBtn) nextBtn.disabled = idx >= list.length - 1;
+    if (posLbl) posLbl.textContent = `${idx + 1} / ${list.length}`;
+  } else {
+    if (prevBtn) prevBtn.disabled = true;
+    if (nextBtn) nextBtn.disabled = true;
+    if (posLbl) posLbl.textContent = '';
+  }
+}
+
+function galleryNavigatePost(direction) {
+  const list = getGalleryPostList();
+  if (!list.length) return false;
+  const currIdx = getGalleryCurrentIndex();
+  if (currIdx === -1) return false;
+  const nextIdx = currIdx + direction;
+  if (nextIdx >= 0 && nextIdx < list.length) {
+    const nextPost = list[nextIdx];
+    openPostFilesGrid(nextPost.group_id, _currentGalleryPostKind);
+    return true;
+  }
+  return false;
+}
+window.galleryNavigatePost = galleryNavigatePost;
+
 async function openPostFilesGrid(groupId, postKind = 'server') {
-  const post = postKind === 'all'
-    ? _allPostsData.find(item => item.group_id === groupId)
-    : _postsData.find(item => item.group_id === groupId);
+  _currentGalleryGroupId = groupId;
+  _currentGalleryPostKind = postKind;
+  const seq = ++_galleryNavSeq;
+
+  const list = getGalleryPostList();
+  const post = list.find(item => item.group_id === groupId);
   if (!post) return;
 
   openModal('post-gallery-modal');
   el('post-gallery-title').textContent = post.caption || 'Post Files';
   el('post-gallery-count').textContent = `${Number(post.item_count || 0).toLocaleString()} files`;
+  updateGalleryNavUi();
+
   const grid = el('post-gallery-grid');
   grid.innerHTML = loadingSpinner();
 
@@ -1133,16 +1314,20 @@ async function openPostFilesGrid(groupId, postKind = 'server') {
     const items = postKind === 'all'
       ? (await api.get(`/api/admin/all-posts/${encodeURIComponent(groupId)}/items`)).items || []
       : post.items || [];
+
+    if (seq !== _galleryNavSeq) return;
+
+    _currentGalleryItems = items;
     if (!items.length) {
       grid.innerHTML = emptyState('No files in this post');
       return;
     }
-    grid.innerHTML = items.map(item => {
+    grid.innerHTML = items.map((item, idx) => {
       const isVideo = /\.(mp4|mov|avi|mkv|webm|m4v)$/i.test(item.name || '');
       const category = isVideo ? 'videos' : 'photos';
       const previewUrl = isVideo ? (item.preview_url || item.download_url) : item.download_url;
       return `
-        <button type="button" data-action="preview-media" data-url="${escHtml(previewUrl)}" data-cat="${category}"
+        <button type="button" data-action="preview-media" data-url="${escHtml(previewUrl)}" data-cat="${category}" data-gallery-index="${idx}"
                 class="post-gallery-item group min-w-0 flex flex-col text-left rounded-xl overflow-hidden bg-zinc-950 border border-zinc-800 hover:border-blue-500/60 transition">
           <div class="post-gallery-item-media relative bg-zinc-900 shrink-0">
             <img src="${escHtml(item.thumbnail_url)}" alt="${escHtml(item.name)}" class="w-full h-full object-cover" onerror="this.style.display='none';this.nextElementSibling.classList.remove('hidden')">
@@ -1153,6 +1338,7 @@ async function openPostFilesGrid(groupId, postKind = 'server') {
         </button>`;
     }).join('');
   } catch (e) {
+    if (seq !== _galleryNavSeq) return;
     grid.innerHTML = errorBanner(e.message);
   }
 }
@@ -1271,11 +1457,11 @@ function renderAllPosts() {
 
       ${previewItems.length ? `
       <div class="flex items-center gap-2 overflow-x-auto py-1">
-        ${previewItems.map(it => {
+        ${previewItems.map((it, idx) => {
           const isVid = /\.(mp4|mov|avi|mkv|webm|m4v)$/i.test(it.name || '');
           return `
           <div class="relative w-16 h-16 rounded-lg bg-zinc-800 overflow-hidden shrink-0 cursor-pointer border border-zinc-700/60 group/item"
-               data-action="preview-media" data-url="${escHtml(isVid ? it.preview_url : it.download_url)}" data-cat="${isVid ? 'videos' : 'photos'}">
+               data-action="preview-media" data-url="${escHtml(isVid ? it.preview_url : it.download_url)}" data-cat="${isVid ? 'videos' : 'photos'}" data-group-id="${gid}" data-preview-index="${idx}" data-post-kind="all">
             <img src="${escHtml(it.thumbnail_url)}" class="w-full h-full object-cover pointer-events-none" onerror="this.style.display='none'">
             ${isVid ? '<div class="absolute inset-0 bg-black/40 flex items-center justify-center text-white text-xs pointer-events-none">▶</div>' : ''}
           </div>`;
@@ -1513,9 +1699,9 @@ function renderEditPostFilesList() {
         </div>
       </div>
       <div class="flex items-center gap-1 shrink-0">
-        <button onclick="moveEditPostItem(${i}, -1)" ${i === 0 ? 'disabled' : ''} class="p-1 text-zinc-400 hover:text-white disabled:opacity-30">▲</button>
-        <button onclick="moveEditPostItem(${i}, 1)" ${i === _editingPostItems.length - 1 ? 'disabled' : ''} class="p-1 text-zinc-400 hover:text-white disabled:opacity-30">▼</button>
-        <button onclick="removeEditPostItem(${i})" class="p-1 text-zinc-400 hover:text-red-400 ml-1">✕</button>
+        <button type="button" data-action="move-edit-post-item" data-index="${i}" data-dir="-1" ${i === 0 ? 'disabled' : ''} class="p-1 text-zinc-400 hover:text-white disabled:opacity-30">▲</button>
+        <button type="button" data-action="move-edit-post-item" data-index="${i}" data-dir="1" ${i === _editingPostItems.length - 1 ? 'disabled' : ''} class="p-1 text-zinc-400 hover:text-white disabled:opacity-30">▼</button>
+        <button type="button" data-action="remove-edit-post-item" data-index="${i}" class="p-1 text-zinc-400 hover:text-red-400 ml-1">✕</button>
       </div>
     </div>
   `).join('');
@@ -2251,17 +2437,82 @@ let _fsCurrentPath = '';
 let _fsParentPath = null;
 let _fsSelectedPath = '';
 
+let _fsMode = 'folder'; // 'folder' | 'files'
+const _fsSelectedFiles = new Map(); // path -> { path, name, size, modified_time, formatted_size, is_server_ref }
+let _fsOnFileSelectCallback = null;
+let _fsCurrentDirs = [];
+let _fsCurrentFiles = [];
+
+window.openServerFilePicker = function(callback, title = 'Select Server Files to Post') {
+  _fsMode = 'files';
+  _fsOnFileSelectCallback = callback;
+  _fsSelectedFiles.clear();
+  _fsTargetInputId = null;
+
+  if (el('fs-modal-title')) el('fs-modal-title').textContent = title;
+  if (el('fs-modal-subtitle')) el('fs-modal-subtitle').textContent = 'Select files or folders on the server. Reference paths are posted instantly without copying.';
+  if (el('fs-select-btn')) el('fs-select-btn').textContent = 'Add Selected Files (0)';
+  if (el('fs-select-all-btn')) el('fs-select-all-btn').classList.remove('hidden');
+  if (el('fs-add-folder-btn')) el('fs-add-folder-btn').classList.remove('hidden');
+  if (el('fs-new-folder-btn')) el('fs-new-folder-btn').classList.add('hidden');
+
+  openModal('fs-explorer-modal');
+  fsNavigateTo('');
+};
+
+window.openServerFilePickerForPost = function() {
+  openServerFilePicker(files => {
+    addServerFilesToPost(files);
+  }, 'Select Server Files to Post');
+};
+
+window.openServerFilePickerForEditPost = function() {
+  openServerFilePicker(async files => {
+    if (!_editingPostGroupId) return;
+    try {
+      const paths = files.map(f => f.path);
+      await api.post(`/api/admin/posts/${_editingPostGroupId}/items/add-paths`, { file_paths: paths });
+      showToast(`Added ${paths.length} file reference(s) to post!`);
+      openEditFilesModal(_editingPostGroupId);
+      loadPosts();
+    } catch (e) {
+      showToast(`Failed to add files: ${e.message}`, 'error');
+    }
+  }, 'Add Server Files to Post');
+};
+
 window.openFsPickerFor = async function(inputId) {
+  _fsMode = 'folder';
   _fsTargetInputId = inputId;
+  _fsOnFileSelectCallback = null;
+  _fsSelectedFiles.clear();
+
+  if (el('fs-modal-title')) el('fs-modal-title').textContent = 'Server File & Folder Explorer';
+  if (el('fs-modal-subtitle')) el('fs-modal-subtitle').textContent = 'Browse server filesystem directories.';
+  if (el('fs-select-btn')) el('fs-select-btn').textContent = 'Select This Folder';
+  if (el('fs-select-all-btn')) el('fs-select-all-btn').classList.add('hidden');
+  if (el('fs-add-folder-btn')) el('fs-add-folder-btn').classList.add('hidden');
+  if (el('fs-new-folder-btn')) el('fs-new-folder-btn').classList.remove('hidden');
+
   const currentVal = el(inputId)?.value.trim();
   openModal('fs-explorer-modal');
   await fsNavigateTo(currentVal || '');
 };
 
 // openExplorerAt — opens the FS explorer for browsing (not picking)
-// Path comes from data-* attribute lookups or direct values, NOT from inline onclick strings
 async function openExplorerAt(path) {
+  _fsMode = 'folder';
   _fsTargetInputId = null;
+  _fsOnFileSelectCallback = null;
+  _fsSelectedFiles.clear();
+
+  if (el('fs-modal-title')) el('fs-modal-title').textContent = 'Server File & Folder Explorer';
+  if (el('fs-modal-subtitle')) el('fs-modal-subtitle').textContent = 'Browse server filesystem directories.';
+  if (el('fs-select-btn')) el('fs-select-btn').textContent = 'Select This Folder';
+  if (el('fs-select-all-btn')) el('fs-select-all-btn').classList.add('hidden');
+  if (el('fs-add-folder-btn')) el('fs-add-folder-btn').classList.add('hidden');
+  if (el('fs-new-folder-btn')) el('fs-new-folder-btn').classList.remove('hidden');
+
   openModal('fs-explorer-modal');
   await fsNavigateTo(path || '');
 }
@@ -2276,10 +2527,17 @@ window.fsNavigateTo = async function(path) {
     _fsCurrentPath = res.current_path;
     _fsParentPath = res.parent_path;
     _fsSelectedPath = res.current_path;
+    _fsCurrentDirs = res.directories || [];
+    _fsCurrentFiles = res.files || [];
 
     el('fs-path-input').value = res.current_path;
     el('fs-parent-btn').disabled = !res.parent_path;
-    el('fs-selected-path-display').textContent = `Selected: ${res.current_path}`;
+
+    if (_fsMode === 'files') {
+      fsUpdateFilesSelectionCount();
+    } else {
+      el('fs-selected-path-display').textContent = `Selected: ${res.current_path}`;
+    }
 
     // Roots chips — use data-action="fs-navigate" data-path
     const rootsEl = el('fs-roots-chips');
@@ -2290,7 +2548,7 @@ window.fsNavigateTo = async function(path) {
         </button>`).join('');
     }
 
-    renderFsDirectoryEntries(res.directories || [], res.files || []);
+    renderFsDirectoryEntries(_fsCurrentDirs, _fsCurrentFiles);
   } catch (e) {
     if (listEl) listEl.innerHTML = errorBanner(e.message);
   }
@@ -2310,38 +2568,155 @@ function renderFsDirectoryEntries(dirs, files) {
     return;
   }
 
-  // Use data-action="fs-select-folder" data-path — paths may contain backslashes
+  const isFileMode = _fsMode === 'files';
+
   listEl.innerHTML = `
     <table class="w-full text-left text-xs">
       <thead class="bg-zinc-925 text-zinc-500 font-semibold border-b border-zinc-800 text-[10px] uppercase tracking-wider">
         <tr>
+          ${isFileMode ? '<th class="p-2.5 w-10 text-center">✓</th>' : ''}
           <th class="p-2.5">Name</th>
           <th class="p-2.5">Size</th>
           <th class="p-2.5 text-right">Modified</th>
+          ${isFileMode ? '<th class="p-2.5 text-right w-20">Action</th>' : ''}
         </tr>
       </thead>
       <tbody class="divide-y divide-zinc-800/40">
         ${dirs.map(d => `
-        <tr class="hover:bg-blue-500/10 cursor-pointer transition select-none group" data-action="fs-select-folder" data-path="${escHtml(d.path)}">
-          <td class="p-2.5 flex items-center gap-2 font-medium text-zinc-200">
+        <tr class="hover:bg-blue-500/10 cursor-pointer transition select-none group">
+          ${isFileMode ? '<td class="p-2.5 text-center text-zinc-600 font-mono text-[10px]">—</td>' : ''}
+          <td class="p-2.5 flex items-center gap-2 font-medium text-zinc-200" data-action="fs-select-folder" data-path="${escHtml(d.path)}">
             <span class="text-base text-amber-400">📁</span>
-            <span class="truncate">${escHtml(d.name)}</span>
+            <span class="truncate hover:underline text-blue-300">${escHtml(d.name)}</span>
           </td>
-          <td class="p-2.5 text-zinc-500 text-[11px]">Folder</td>
-          <td class="p-2.5 text-right text-zinc-500 text-[11px]">${fmtTs(d.modified_time)}</td>
+          <td class="p-2.5 text-zinc-500 text-[11px]" data-action="fs-select-folder" data-path="${escHtml(d.path)}">Folder</td>
+          <td class="p-2.5 text-right text-zinc-500 text-[11px]" data-action="fs-select-folder" data-path="${escHtml(d.path)}">${fmtTs(d.modified_time)}</td>
+          ${isFileMode ? `
+          <td class="p-2.5 text-right">
+            <button type="button" data-action="fs-add-folder-files" data-path="${escHtml(d.path)}" class="chip text-[10px] py-0.5 px-2 hover:bg-blue-600 hover:text-white" title="Add all files in this subfolder">
+              + Folder
+            </button>
+          </td>` : ''}
         </tr>`).join('')}
-        ${files.map(f => `
-        <tr class="hover:bg-zinc-800/30 transition text-zinc-400">
-          <td class="p-2.5 flex items-center gap-2">
-            <span class="text-base text-zinc-500">📄</span>
-            <span class="truncate text-zinc-300">${escHtml(f.name)}</span>
-          </td>
-          <td class="p-2.5 font-mono text-[11px] text-zinc-500">${f.formatted_size}</td>
-          <td class="p-2.5 text-right text-zinc-500 text-[11px]">${fmtTs(f.modified_time)}</td>
-        </tr>`).join('')}
+        ${files.map(f => {
+          const isSelected = _fsSelectedFiles.has(f.path);
+          const isVid = f.name.match(/\.(mp4|mov|avi|mkv)$/i);
+          const isImg = f.name.match(/\.(jpg|jpeg|png|heic|webp|gif)$/i);
+          const isAudio = f.name.match(/\.(mp3|m4a|wav|flac|aac)$/i);
+          const icon = isVid ? '🎥' : isImg ? '🖼️' : isAudio ? '🎵' : '📄';
+
+          return `
+          <tr class="hover:bg-blue-500/10 cursor-pointer transition select-none ${isSelected ? 'bg-blue-500/15' : 'text-zinc-400'}"
+              data-action="fs-toggle-file"
+              data-path="${escHtml(f.path)}"
+              data-name="${escHtml(f.name)}"
+              data-size="${f.size || 0}"
+              data-mtime="${f.modified_time || 0}">
+            ${isFileMode ? `
+            <td class="p-2.5 text-center">
+              <input type="checkbox" ${isSelected ? 'checked' : ''} class="pointer-events-none rounded border-zinc-700 text-blue-500 bg-zinc-800">
+            </td>` : ''}
+            <td class="p-2.5 flex items-center gap-2">
+              <span class="text-base text-zinc-500">${icon}</span>
+              <span class="truncate ${isSelected ? 'text-blue-300 font-semibold' : 'text-zinc-300'}">${escHtml(f.name)}</span>
+            </td>
+            <td class="p-2.5 font-mono text-[11px] text-zinc-500">${f.formatted_size}</td>
+            <td class="p-2.5 text-right text-zinc-500 text-[11px]">${fmtTs(f.modified_time)}</td>
+            ${isFileMode ? `
+            <td class="p-2.5 text-right font-mono text-[11px]">
+              <span class="${isSelected ? 'text-blue-400 font-semibold' : 'text-zinc-500'}">${isSelected ? '✓ Added' : 'Select'}</span>
+            </td>` : ''}
+          </tr>`;
+        }).join('')}
       </tbody>
     </table>`;
 }
+
+window.fsToggleFileSelection = function(path, name, size, mtime) {
+  if (_fsSelectedFiles.has(path)) {
+    _fsSelectedFiles.delete(path);
+  } else {
+    _fsSelectedFiles.set(path, {
+      path,
+      name,
+      size: size || 0,
+      modified_time: mtime || 0,
+      is_server_ref: true,
+    });
+  }
+  fsUpdateFilesSelectionCount();
+  renderFsDirectoryEntries(_fsCurrentDirs, _fsCurrentFiles);
+};
+
+window.fsUpdateFilesSelectionCount = function() {
+  const cnt = _fsSelectedFiles.size;
+  if (el('fs-select-btn')) {
+    el('fs-select-btn').textContent = cnt > 0 ? `Add Selected Files (${cnt})` : 'Add Selected Files';
+  }
+  if (el('fs-selected-path-display')) {
+    let totalBytes = 0;
+    _fsSelectedFiles.forEach(f => totalBytes += (f.size || 0));
+    el('fs-selected-path-display').textContent = cnt > 0 ? `${cnt} file(s) selected (${fmtBytes(totalBytes)})` : `In: ${_fsCurrentPath}`;
+  }
+};
+
+window.fsToggleSelectAllCurrentFiles = function() {
+  if (!_fsCurrentFiles.length) return;
+  const allSelected = _fsCurrentFiles.every(f => _fsSelectedFiles.has(f.path));
+  if (allSelected) {
+    _fsCurrentFiles.forEach(f => _fsSelectedFiles.delete(f.path));
+  } else {
+    _fsCurrentFiles.forEach(f => _fsSelectedFiles.set(f.path, {
+      path: f.path,
+      name: f.name,
+      size: f.size || 0,
+      modified_time: f.modified_time || 0,
+      is_server_ref: true,
+    }));
+  }
+  fsUpdateFilesSelectionCount();
+  renderFsDirectoryEntries(_fsCurrentDirs, _fsCurrentFiles);
+};
+
+window.fsAddEntireCurrentFolder = function() {
+  if (!_fsCurrentFiles.length) {
+    showToast('No files in this folder to add.', 'warn');
+    return;
+  }
+  _fsCurrentFiles.forEach(f => _fsSelectedFiles.set(f.path, {
+    path: f.path,
+    name: f.name,
+    size: f.size || 0,
+    modified_time: f.modified_time || 0,
+    is_server_ref: true,
+  }));
+  fsUpdateFilesSelectionCount();
+  renderFsDirectoryEntries(_fsCurrentDirs, _fsCurrentFiles);
+  showToast(`Added all ${_fsCurrentFiles.length} file(s) from current folder.`);
+};
+
+window.fsAddFolderFilesToSelection = async function(folderPath) {
+  try {
+    const res = await api.get('/api/admin/fs/browse', { path: folderPath });
+    const files = res.files || [];
+    if (!files.length) {
+      showToast('No files found in folder.', 'warn');
+      return;
+    }
+    files.forEach(f => _fsSelectedFiles.set(f.path, {
+      path: f.path,
+      name: f.name,
+      size: f.size || 0,
+      modified_time: f.modified_time || 0,
+      is_server_ref: true,
+    }));
+    fsUpdateFilesSelectionCount();
+    renderFsDirectoryEntries(_fsCurrentDirs, _fsCurrentFiles);
+    showToast(`Added ${files.length} file(s) from "${res.current_path.split(/[\\/]/).pop()}".`);
+  } catch (e) {
+    showToast(`Failed to load folder: ${e.message}`, 'error');
+  }
+};
 
 function fsSelectFolder(folderPath) {
   _fsSelectedPath = folderPath;
@@ -2351,6 +2726,20 @@ function fsSelectFolder(folderPath) {
 window.fsSelectFolder = fsSelectFolder;
 
 window.fsConfirmSelection = function() {
+  if (_fsMode === 'files') {
+    if (_fsSelectedFiles.size === 0) {
+      showToast('Please select at least one file, or click "Add Whole Folder".', 'warn');
+      return;
+    }
+    const files = Array.from(_fsSelectedFiles.values());
+    if (typeof _fsOnFileSelectCallback === 'function') {
+      _fsOnFileSelectCallback(files);
+    }
+    closeModal('fs-explorer-modal');
+    return;
+  }
+
+  // Folder mode:
   if (_fsTargetInputId && el(_fsTargetInputId)) {
     el(_fsTargetInputId).value = _fsSelectedPath;
   }
@@ -2476,7 +2865,12 @@ export function openModal(id) {
 export function closeModal(id) {
   const modal = el(id);
   if (!modal) return;
-  if (id === 'media-modal') stopMediaModalPlayback();
+  if (id === 'media-modal') stopMediaModalPlayback(true);
+  if (id === 'post-gallery-modal') {
+    _currentGalleryGroupId = null;
+    _currentGalleryItems = [];
+    _galleryNavSeq++;
+  }
   modal.classList.remove('flex');
   modal.classList.add('hidden');
 }
@@ -2491,8 +2885,35 @@ document.addEventListener('click', e => {
 });
 
 let _activePreviewMedia = null;
+let _activePreviewList = [];
+let _activePreviewIndex = -1;
 
-function stopMediaModalPlayback() {
+function updateMediaModalNavUi() {
+  const prevBtn = el('media-modal-prev-btn');
+  const nextBtn = el('media-modal-next-btn');
+  const counter = el('media-modal-counter');
+
+  if (_activePreviewList.length > 1 && _activePreviewIndex >= 0) {
+    prevBtn?.classList.remove('hidden');
+    nextBtn?.classList.remove('hidden');
+    counter?.classList.remove('hidden');
+
+    if (prevBtn) prevBtn.disabled = _activePreviewIndex <= 0;
+    if (nextBtn) nextBtn.disabled = _activePreviewIndex >= _activePreviewList.length - 1;
+    if (counter) counter.textContent = `${_activePreviewIndex + 1} / ${_activePreviewList.length}`;
+  } else {
+    prevBtn?.classList.add('hidden');
+    nextBtn?.classList.add('hidden');
+    counter?.classList.add('hidden');
+  }
+}
+
+function stopMediaModalPlayback(resetList = true) {
+  if (resetList) {
+    _activePreviewList = [];
+    _activePreviewIndex = -1;
+    updateMediaModalNavUi();
+  }
   const content = el('media-modal-content');
   const mediaElements = new Set(content ? content.querySelectorAll('video, audio') : []);
   if (_activePreviewMedia) mediaElements.add(_activePreviewMedia);
@@ -2512,11 +2933,28 @@ function stopMediaModalPlayback() {
   _activePreviewMedia = null;
 }
 
-function openMediaPreviewUrl(url, cat = 'photos') {
+function navigateMediaPreview(direction) {
+  if (!_activePreviewList.length || _activePreviewIndex < 0) return false;
+  const nextIdx = _activePreviewIndex + direction;
+  if (nextIdx >= 0 && nextIdx < _activePreviewList.length) {
+    _activePreviewIndex = nextIdx;
+    const item = _activePreviewList[nextIdx];
+    const isVideo = /\.(mp4|mov|avi|mkv|webm|m4v)$/i.test(item.name || '');
+    const category = isVideo ? 'videos' : 'photos';
+    const previewUrl = isVideo ? (item.preview_url || item.download_url) : item.download_url;
+    openMediaPreviewUrl(previewUrl, category, false);
+    updateMediaModalNavUi();
+    return true;
+  }
+  return false;
+}
+window.navigateMediaPreview = navigateMediaPreview;
+
+function openMediaPreviewUrl(url, cat = 'photos', resetList = true) {
   openModal('media-modal');
   const cont = el('media-modal-content');
   if (!cont) return;
-  stopMediaModalPlayback();
+  stopMediaModalPlayback(resetList);
 
   if (cat === 'videos' || (url && url.match(/\.(mp4|mov|mkv|webm)$/i))) {
     const video = document.createElement('video');
@@ -2536,13 +2974,56 @@ window.openMediaPreviewUrl = openMediaPreviewUrl;
 const mediaModal = el('media-modal');
 if (mediaModal) {
   new MutationObserver(() => {
-    if (mediaModal.classList.contains('hidden')) stopMediaModalPlayback();
+    if (mediaModal.classList.contains('hidden')) stopMediaModalPlayback(true);
   }).observe(mediaModal, { attributes: true, attributeFilter: ['class'] });
 }
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && mediaModal && !mediaModal.classList.contains('hidden')) {
-    closeModal('media-modal');
+  const targetTag = (e.target && e.target.tagName) || '';
+  if (targetTag === 'INPUT' || targetTag === 'TEXTAREA' || e.target?.isContentEditable) {
+    return;
+  }
+
+  const mediaModalEl = el('media-modal');
+  const isMediaOpen = mediaModalEl && !mediaModalEl.classList.contains('hidden');
+  if (isMediaOpen) {
+    if (e.key === 'Escape') {
+      closeModal('media-modal');
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 'ArrowLeft') {
+      if (navigateMediaPreview(-1)) {
+        e.preventDefault();
+        return;
+      }
+    } else if (e.key === 'ArrowRight') {
+      if (navigateMediaPreview(1)) {
+        e.preventDefault();
+        return;
+      }
+    }
+  }
+
+  const galleryModal = el('post-gallery-modal');
+  const isGalleryOpen = galleryModal && !galleryModal.classList.contains('hidden');
+  if (isGalleryOpen && !isMediaOpen) {
+    if (e.key === 'Escape') {
+      closeModal('post-gallery-modal');
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 'ArrowLeft') {
+      if (galleryNavigatePost(-1)) {
+        e.preventDefault();
+        return;
+      }
+    } else if (e.key === 'ArrowRight') {
+      if (galleryNavigatePost(1)) {
+        e.preventDefault();
+        return;
+      }
+    }
   }
 });
 

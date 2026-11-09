@@ -68,11 +68,17 @@ except ImportError:
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_DIR = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
 
-_EXE_DB = os.path.join(
-    os.environ.get("APPDATA", os.path.expanduser("~")),
-    "PhoneBackupServer",
-    "backup.db",
-)
+_app_data_env = os.environ.get("APP_DATA_DIR")
+if _app_data_env and os.path.isfile(os.path.join(_app_data_env, "backup.db")):
+    _EXE_DB = os.path.join(_app_data_env, "backup.db")
+elif _app_data_env and os.path.isdir(_app_data_env):
+    _EXE_DB = os.path.join(_app_data_env, "backup.db")
+else:
+    _EXE_DB = os.path.join(
+        os.environ.get("APPDATA", os.path.expanduser("~")),
+        "PhoneBackupServer",
+        "backup.db",
+    )
 _DEV_DB = os.path.join(_PROJECT_DIR, "backup.db")
 _DEFAULT_PG = (
     os.environ.get("POSTGRES_URL")
