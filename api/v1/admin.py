@@ -218,6 +218,11 @@ async def update_config(
         if k in _EDITABLE_KEYS:
             cfg[k] = v
     save_config(cfg)
+    if "DESKTOP_NAME" in update:
+        try:
+            device_repo.ensure_desktop_device(cfg.get("DESKTOP_NAME"))
+        except Exception:
+            pass
     return {"ok": True}
 
 
@@ -616,6 +621,8 @@ async def list_admin_devices(
     enriched = []
     for d in devices:
         did = str(d.get("device_id") or "")
+        if did == "desktop-server":
+            continue
         folder_name = d.get("folder_name") or d.get("device_name") or did
         backup_folder = os.path.join(cfg_root, folder_name) if cfg_root else ""
         
@@ -967,6 +974,11 @@ async def delete_admin_shared_folder(
     dirs = [d for d in cfg.get("SHARED_DIRS", []) if d.get("id") != body.id]
     cfg["SHARED_DIRS"] = dirs
     save_config(cfg)
+    if "DESKTOP_NAME" in update:
+        try:
+            device_repo.ensure_desktop_device(cfg.get("DESKTOP_NAME"))
+        except Exception:
+            pass
     return {"ok": True}
 
 

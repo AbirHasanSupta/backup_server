@@ -125,14 +125,27 @@ router = APIRouter()
 # Auth helper
 # ──────────────────────────────────────────────────────────────────────────────
 
-def format_display_name(username: str | None, device_name: str | None, device_model: str | None = None) -> str | None:
-    """Primary: username (device_name). Fallback: device_name only."""
+def format_display_name(username: str | None, device_name: str | None, device_model: str | None = None, device_id: str | None = None) -> str | None:
+    """Primary: username (device_name). Fallback: device_name only or desktop name."""
+    if device_id == "desktop-server":
+        try:
+            from repositories.device_repo import get_device_display_name
+            return get_device_display_name("desktop-server")
+        except Exception:
+            return "Desktop Server"
     res = format_device_display_name(
         username=username,
         device_name=device_name,
         device_model=device_model,
+        device_id=device_id,
         fallback="",
     )
+    if (not res or res == "Unknown device") and device_id:
+        try:
+            from repositories.device_repo import get_device_display_name
+            return get_device_display_name(device_id, fallback=device_id)
+        except Exception:
+            pass
     return res or None
 
 
@@ -2663,7 +2676,7 @@ async def get_unified_feed(
                 groups[gid] = {
                     "group_id": gid,
                     "caption": s.get("group_caption") or s.get("caption"),
-                    "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
+                    "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=s.get("shared_by_device_id")) or s["shared_by_device_id"],
                     "shared_by_device_id": s["shared_by_device_id"],
                     "created_at": s["created_at"],
                     "is_own_post": s["is_own_post"],
@@ -3009,7 +3022,7 @@ async def get_reels_feed(
                 "share_id": s["share_id"],
                 "media_id": s.get("media_id"),
                 "path": s["relative_path"],
-                "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
+                "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 "shared_by_device_id": s["shared_by_device_id"],
                 "is_repost": is_repost,
                 "user_has_reposted": has_reposted,
@@ -3017,13 +3030,13 @@ async def get_reels_feed(
                     "device_id": orig_id,
                     "name": orig_name,
                     "username": orig_username,
-                    "display_name": format_display_name(orig_username, orig_name) or orig_id,
+                    "display_name": format_display_name(orig_username, orig_name, device_id=orig_id) or orig_id,
                 },
                 "reposted_by": {
                     "device_id": s["shared_by_device_id"],
                     "name": reposter_name,
                     "username": reposter_username,
-                    "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                    "display_name": format_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 } if is_repost else None,
                 "caption": cap_text,
                 "created_at": s["created_at"],
@@ -3278,7 +3291,7 @@ async def get_saved_reels_endpoint(
                 "share_id": s["share_id"],
                 "media_id": s.get("media_id"),
                 "path": s["relative_path"],
-                "shared_by": library_label if is_library_reel else (format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"]),
+                "shared_by": library_label if is_library_reel else (format_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=s["shared_by_device_id"]) or s["shared_by_device_id"]),
                 "shared_by_device_id": orig_id if is_library_reel else s["shared_by_device_id"],
                 "is_repost": is_repost,
                 "user_has_reposted": has_reposted,
@@ -3286,13 +3299,13 @@ async def get_saved_reels_endpoint(
                     "device_id": orig_id,
                     "name": library_label if is_library_reel else orig_name,
                     "username": None if is_library_reel else orig_username,
-                    "display_name": library_label if is_library_reel else (format_display_name(orig_username, orig_name) or orig_id),
+                    "display_name": library_label if is_library_reel else (format_display_name(orig_username, orig_name, device_id=orig_id) or orig_id),
                 },
                 "reposted_by": {
                     "device_id": s["shared_by_device_id"],
                     "name": reposter_name,
                     "username": reposter_username,
-                    "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                    "display_name": format_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 } if is_repost else None,
                 "caption": s.get("group_caption") or s.get("caption"),
                 "created_at": s["created_at"],
@@ -3386,7 +3399,7 @@ async def get_liked_reels_endpoint(
                 "share_id": s["share_id"],
                 "media_id": s.get("media_id"),
                 "path": s["relative_path"],
-                "shared_by": library_label if is_library_reel else (format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"]),
+                "shared_by": library_label if is_library_reel else (format_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=s["shared_by_device_id"]) or s["shared_by_device_id"]),
                 "shared_by_device_id": orig_id if is_library_reel else s["shared_by_device_id"],
                 "is_repost": is_repost,
                 "user_has_reposted": has_reposted,
@@ -3394,13 +3407,13 @@ async def get_liked_reels_endpoint(
                     "device_id": orig_id,
                     "name": library_label if is_library_reel else orig_name,
                     "username": None if is_library_reel else orig_username,
-                    "display_name": library_label if is_library_reel else (format_display_name(orig_username, orig_name) or orig_id),
+                    "display_name": library_label if is_library_reel else (format_display_name(orig_username, orig_name, device_id=orig_id) or orig_id),
                 },
                 "reposted_by": {
                     "device_id": s["shared_by_device_id"],
                     "name": reposter_name,
                     "username": reposter_username,
-                    "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                    "display_name": format_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 } if is_repost else None,
                 "caption": s.get("group_caption") or s.get("caption"),
                 "created_at": s["created_at"],
@@ -3469,7 +3482,7 @@ async def get_reposted_reels_endpoint(
                 "share_id": s["share_id"],
                 "media_id": s.get("media_id"),
                 "path": s["relative_path"],
-                "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
+                "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 "shared_by_device_id": s["shared_by_device_id"],
                 "is_repost": True,
                 "user_has_reposted": True,
@@ -3477,13 +3490,13 @@ async def get_reposted_reels_endpoint(
                     "device_id": orig_id,
                     "name": orig_name,
                     "username": orig_username,
-                    "display_name": format_display_name(orig_username, orig_name) or orig_id,
+                    "display_name": format_display_name(orig_username, orig_name, device_id=orig_id) or orig_id,
                 },
                 "reposted_by": {
                     "device_id": s["shared_by_device_id"],
                     "name": reposter_name,
                     "username": reposter_username,
-                    "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                    "display_name": format_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 },
                 "caption": s.get("group_caption") or s.get("caption"),
                 "created_at": s["created_at"],
@@ -3516,7 +3529,7 @@ async def get_pending_share_notifications(
     verify_known_device_by_id(device_id)
     posts = await asyncio.to_thread(get_unseen_share_notifications, device_id)
     for p in posts:
-        p["shared_by"] = format_display_name(p.get("shared_by_username"), p.get("shared_by_name")) or p["shared_by_device_id"]
+        p["shared_by"] = format_display_name(p.get("shared_by_username"), p.get("shared_by_name"), device_id=p.get("shared_by_device_id")) or p["shared_by_device_id"]
     return {"posts": posts}
 
 

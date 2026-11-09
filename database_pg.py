@@ -413,6 +413,11 @@ def init_pg_db():
             conn.commit()
 
             logger.info("PostgreSQL database initialized successfully with partitioned tables.")
+            try:
+                from repositories.device_repo import ensure_desktop_device
+                ensure_desktop_device()
+            except Exception:
+                pass
 
 
 def autoseed_pg_if_empty() -> bool:

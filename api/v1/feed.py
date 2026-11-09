@@ -970,7 +970,12 @@ async def get_pending_notifications(
     verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
     posts = social_repo.get_unseen_share_notifications(device_id)
     for p in posts:
-        p["shared_by"] = feed_service.format_display_name(p.get("shared_by_username"), p.get("shared_by_name")) or p["shared_by_device_id"]
+        sharer_id = p.get("shared_by_device_id")
+        if sharer_id == "desktop-server":
+            p["shared_by"] = device_repo.get_device_display_name("desktop-server")
+        else:
+            disp = feed_service.format_display_name(p.get("shared_by_username"), p.get("shared_by_name"))
+            p["shared_by"] = disp if disp != "Unknown device" else device_repo.get_device_display_name(sharer_id, fallback=sharer_id)
     return {"posts": posts}
 
 

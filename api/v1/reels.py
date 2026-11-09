@@ -661,7 +661,34 @@ async def get_saved_reels(
             or (s.get("post_kind") == "reel_repost" and s.get("shared_by_device_id") == device_id)
         )
 
-        display_name = library_label if is_library_reel else (device_repo.format_device_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"])
+        sharer_dev_id = s["shared_by_device_id"]
+        if is_library_reel:
+            display_name = library_label
+        elif sharer_dev_id == "desktop-server":
+            display_name = device_repo.get_device_display_name("desktop-server")
+        else:
+            formatted = device_repo.format_device_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=sharer_dev_id)
+            display_name = formatted if formatted != "Unknown device" else device_repo.get_device_display_name(sharer_dev_id, fallback=sharer_dev_id)
+
+        if is_library_reel:
+            orig_disp = library_label
+            orig_author_name = library_label
+        elif orig_id == "desktop-server":
+            orig_disp = device_repo.get_device_display_name("desktop-server")
+            orig_author_name = orig_name or orig_disp
+        else:
+            formatted_orig = device_repo.format_device_display_name(orig_username, orig_name, device_id=orig_id)
+            orig_disp = formatted_orig if formatted_orig != "Unknown device" else (orig_name or device_repo.get_device_display_name(orig_id, fallback=orig_id))
+            orig_author_name = orig_name
+
+        if reposter_name or reposter_username or s["shared_by_device_id"] == "desktop-server":
+            if s["shared_by_device_id"] == "desktop-server":
+                reposter_disp = device_repo.get_device_display_name("desktop-server")
+            else:
+                formatted_rep = device_repo.format_device_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"])
+                reposter_disp = formatted_rep if formatted_rep != "Unknown device" else (reposter_name or device_repo.get_device_display_name(s["shared_by_device_id"], fallback=s["shared_by_device_id"]))
+        else:
+            reposter_disp = s["shared_by_device_id"]
 
         reels.append({
             "reel_id": str(s["reel_id"]),
@@ -674,15 +701,15 @@ async def get_saved_reels(
             "user_has_reposted": has_reposted,
             "original_author": {
                 "device_id": orig_id,
-                "name": library_label if is_library_reel else orig_name,
+                "name": orig_author_name,
                 "username": None if is_library_reel else orig_username,
-                "display_name": library_label if is_library_reel else (device_repo.format_device_display_name(orig_username, orig_name) or orig_id),
+                "display_name": orig_disp,
             },
             "reposted_by": {
                 "device_id": s["shared_by_device_id"],
                 "name": reposter_name,
                 "username": reposter_username,
-                "display_name": device_repo.format_device_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                "display_name": reposter_disp,
             } if is_repost else None,
             "caption": s.get("group_caption") or s.get("caption"),
             "created_at": s["created_at"],
@@ -767,7 +794,34 @@ async def get_liked_reels(
             or (s.get("post_kind") == "reel_repost" and s.get("shared_by_device_id") == device_id)
         )
 
-        display_name = library_label if is_library_reel else (device_repo.format_device_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"])
+        sharer_dev_id = s["shared_by_device_id"]
+        if is_library_reel:
+            display_name = library_label
+        elif sharer_dev_id == "desktop-server":
+            display_name = device_repo.get_device_display_name("desktop-server")
+        else:
+            formatted = device_repo.format_device_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=sharer_dev_id)
+            display_name = formatted if formatted != "Unknown device" else device_repo.get_device_display_name(sharer_dev_id, fallback=sharer_dev_id)
+
+        if is_library_reel:
+            orig_disp = library_label
+            orig_author_name = library_label
+        elif orig_id == "desktop-server":
+            orig_disp = device_repo.get_device_display_name("desktop-server")
+            orig_author_name = orig_name or orig_disp
+        else:
+            formatted_orig = device_repo.format_device_display_name(orig_username, orig_name, device_id=orig_id)
+            orig_disp = formatted_orig if formatted_orig != "Unknown device" else (orig_name or device_repo.get_device_display_name(orig_id, fallback=orig_id))
+            orig_author_name = orig_name
+
+        if reposter_name or reposter_username or s["shared_by_device_id"] == "desktop-server":
+            if s["shared_by_device_id"] == "desktop-server":
+                reposter_disp = device_repo.get_device_display_name("desktop-server")
+            else:
+                formatted_rep = device_repo.format_device_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"])
+                reposter_disp = formatted_rep if formatted_rep != "Unknown device" else (reposter_name or device_repo.get_device_display_name(s["shared_by_device_id"], fallback=s["shared_by_device_id"]))
+        else:
+            reposter_disp = s["shared_by_device_id"]
 
         reels.append({
             "reel_id": reel_id,
@@ -780,15 +834,15 @@ async def get_liked_reels(
             "user_has_reposted": has_reposted,
             "original_author": {
                 "device_id": orig_id,
-                "name": library_label if is_library_reel else orig_name,
+                "name": orig_author_name,
                 "username": None if is_library_reel else orig_username,
-                "display_name": library_label if is_library_reel else (device_repo.format_device_display_name(orig_username, orig_name) or orig_id),
+                "display_name": orig_disp,
             },
             "reposted_by": {
                 "device_id": s["shared_by_device_id"],
                 "name": reposter_name,
                 "username": reposter_username,
-                "display_name": device_repo.format_device_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                "display_name": reposter_disp,
             } if is_repost else None,
             "caption": s.get("group_caption") or s.get("caption"),
             "created_at": s["created_at"],
@@ -851,26 +905,50 @@ async def get_reposted_reels(
         reposter_name = s.get("shared_by_name")
         reposter_username = s.get("shared_by_username")
 
+        sharer_dev_id = s["shared_by_device_id"]
+        if sharer_dev_id == "desktop-server":
+            display_name = device_repo.get_device_display_name("desktop-server")
+        else:
+            formatted = device_repo.format_device_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=sharer_dev_id)
+            display_name = formatted if formatted != "Unknown device" else device_repo.get_device_display_name(sharer_dev_id, fallback=sharer_dev_id)
+
+        if orig_id == "desktop-server":
+            orig_disp = device_repo.get_device_display_name("desktop-server")
+            orig_author_name = orig_name or orig_disp
+        else:
+            formatted_orig = device_repo.format_device_display_name(orig_username, orig_name, device_id=orig_id)
+            orig_disp = formatted_orig if formatted_orig != "Unknown device" else (orig_name or device_repo.get_device_display_name(orig_id, fallback=orig_id))
+            orig_author_name = orig_name
+
+        if reposter_name or reposter_username or s["shared_by_device_id"] == "desktop-server":
+            if s["shared_by_device_id"] == "desktop-server":
+                reposter_disp = device_repo.get_device_display_name("desktop-server")
+            else:
+                formatted_rep = device_repo.format_device_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"])
+                reposter_disp = formatted_rep if formatted_rep != "Unknown device" else (reposter_name or device_repo.get_device_display_name(s["shared_by_device_id"], fallback=s["shared_by_device_id"]))
+        else:
+            reposter_disp = s["shared_by_device_id"]
+
         reels.append({
             "reel_id": str(s["share_id"]),
             "share_id": s["share_id"],
             "media_id": s.get("media_id"),
             "path": s["relative_path"],
-            "shared_by": device_repo.format_device_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
+            "shared_by": display_name,
             "shared_by_device_id": s["shared_by_device_id"],
             "is_repost": True,
             "user_has_reposted": True,
             "original_author": {
                 "device_id": orig_id,
-                "name": orig_name,
+                "name": orig_author_name,
                 "username": orig_username,
-                "display_name": device_repo.format_device_display_name(orig_username, orig_name) or orig_id,
+                "display_name": orig_disp,
             },
             "reposted_by": {
                 "device_id": s["shared_by_device_id"],
                 "name": reposter_name,
                 "username": reposter_username,
-                "display_name": device_repo.format_device_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                "display_name": reposter_disp,
             },
             "caption": s.get("group_caption") or s.get("caption"),
             "created_at": s["created_at"],

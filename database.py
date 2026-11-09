@@ -1520,6 +1520,20 @@ def format_device_display_name(
     did = (device_id or "").strip()
     fb = (fallback or "").strip()
 
+    if did == "desktop-server" or fb == "desktop-server":
+        srv_name = d or m
+        if not srv_name:
+            try:
+                import platform
+                from config import load_config
+                cfg = load_config()
+                srv_name = (cfg.get("DESKTOP_NAME") or "").strip() or platform.node() or "Desktop Server"
+            except Exception:
+                srv_name = "Desktop Server"
+        if u:
+            return f"{u} ({srv_name})"
+        return srv_name
+
     name = d or m
     if u and name:
         return f"{u} ({name})"
@@ -1575,6 +1589,25 @@ def get_device_display_name(identifier: str | None, fallback: str | None = None)
         pass
 
     return fallback or identifier_str
+
+
+def ensure_desktop_device(name: str | None = None) -> None:
+    """Register or update the desktop server row in the devices table so that
+    SQL queries joining `devices d ON d.device_id = ds.shared_by_device_id`
+    will always resolve `shared_by_name` to the server's configured DESKTOP_NAME."""
+    try:
+        import platform
+        from config import load_config
+        cfg = load_config()
+        display_name = (name or cfg.get("DESKTOP_NAME") or "").strip() or platform.node() or "Desktop Server"
+        upsert_device(
+            device_name=display_name,
+            device_ip="127.0.0.1",
+            device_id="desktop-server",
+            device_model="Desktop Server",
+        )
+    except Exception:
+        pass
 
 
 

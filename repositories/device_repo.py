@@ -85,15 +85,40 @@ def format_device_display_name(
     fallback: str | None = None,
 ) -> str:
     """Flexible device display name formatter supporting (username, device_name, device_model), (dict), or kwargs."""
+    if device_id == "desktop-server" or fallback == "desktop-server":
+        return get_device_display_name("desktop-server")
+    if isinstance(dev, dict) and dev.get("device_id") == "desktop-server":
+        return get_device_display_name("desktop-server")
+
     if isinstance(dev, str):
         u = username or dev
         dn = device_name
         dm = device_model
-        return db_format_device_display_name(username=u, device_name=dn, device_model=dm, fallback=fallback)
+        return db_format_device_display_name(username=u, device_name=dn, device_model=dm, device_id=device_id, fallback=fallback)
     elif isinstance(dev, dict):
         return db_format_device_display_name(dev, username=username, device_name=device_name, device_model=device_model, device_id=device_id, fallback=fallback)
     else:
         return db_format_device_display_name(username=username, device_name=device_name, device_model=device_model, device_id=device_id, fallback=fallback)
+
+
+def ensure_desktop_device(name: str | None = None) -> None:
+    """Register or update the desktop server row in the devices table so that
+    SQL queries joining `devices d ON d.device_id = ds.shared_by_device_id`
+    will always resolve `shared_by_name` to the server's configured DESKTOP_NAME."""
+    try:
+        import platform
+        from config import load_config
+        cfg = load_config()
+        display_name = (name or cfg.get("DESKTOP_NAME") or "").strip() or platform.node() or "Desktop Server"
+        upsert_device(
+            device_name=display_name,
+            device_ip="127.0.0.1",
+            device_id="desktop-server",
+            device_model="Desktop Server",
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger("uvicorn.error").warning(f"Failed to ensure desktop-server device: {e}")
 
 
 def get_devices() -> List[Dict[str, Any]]:

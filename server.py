@@ -90,6 +90,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Failed to initialize PostgreSQL (%s), falling back to SQLite.", e)
 
+    # Ensure desktop server row exists in devices table so shares/reels resolve server name
+    try:
+        from repositories import device_repo
+        device_repo.ensure_desktop_device()
+    except Exception as e:
+        logger.warning("Desktop device registration: %s", e)
+
     # Redis Connection Warmup
     try:
         from services.redis_service import get_redis_client

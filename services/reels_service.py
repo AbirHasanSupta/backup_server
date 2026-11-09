@@ -118,9 +118,29 @@ class ReelsService:
             cap_text = s.get("group_caption") or s.get("caption")
             tokens = self.extract_reel_tokens(cap_text)
 
-            shared_by = device_repo.format_device_display_name(
-                s.get("shared_by_username"), s.get("shared_by_name")
-            ) or s["shared_by_device_id"]
+            sharer_dev_id = s.get("shared_by_device_id")
+            if sharer_dev_id == "desktop-server":
+                shared_by = device_repo.get_device_display_name("desktop-server")
+            else:
+                formatted = device_repo.format_device_display_name(
+                    s.get("shared_by_username"), s.get("shared_by_name"), device_id=sharer_dev_id
+                )
+                shared_by = formatted if formatted != "Unknown device" else device_repo.get_device_display_name(sharer_dev_id, fallback=sharer_dev_id)
+
+            if orig_id == "desktop-server":
+                orig_display_name = device_repo.get_device_display_name("desktop-server")
+                orig_name = orig_name or orig_display_name
+            else:
+                formatted_orig = device_repo.format_device_display_name(orig_username, orig_name, device_id=orig_id)
+                orig_display_name = formatted_orig if formatted_orig != "Unknown device" else (orig_name or device_repo.get_device_display_name(orig_id, fallback=orig_id))
+
+            reposter_dev_id = s.get("shared_by_device_id")
+            if reposter_dev_id == "desktop-server":
+                reposter_display_name = device_repo.get_device_display_name("desktop-server")
+                reposter_name = reposter_name or reposter_display_name
+            else:
+                formatted_rep = device_repo.format_device_display_name(reposter_username, reposter_name, device_id=reposter_dev_id)
+                reposter_display_name = formatted_rep if formatted_rep != "Unknown device" else (reposter_name or device_repo.get_device_display_name(reposter_dev_id, fallback=reposter_dev_id))
 
             reels.append({
                 "reel_id": str(s["share_id"]),
@@ -135,13 +155,13 @@ class ReelsService:
                     "device_id": orig_id,
                     "name": orig_name,
                     "username": orig_username,
-                    "display_name": device_repo.format_device_display_name(orig_username, orig_name) or orig_id,
+                    "display_name": orig_display_name,
                 },
                 "reposted_by": {
                     "device_id": s["shared_by_device_id"],
                     "name": reposter_name,
                     "username": reposter_username,
-                    "display_name": device_repo.format_device_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                    "display_name": reposter_display_name,
                 } if is_repost else None,
                 "caption": cap_text,
                 "created_at": s["created_at"],

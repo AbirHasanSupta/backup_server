@@ -56,15 +56,20 @@ class FeedService:
         for s in all_shares:
             gid = s.get("share_group_id") or f"__solo__{s['share_id']}"
             if gid not in groups:
-                shared_by = self.format_display_name(
-                    s.get("shared_by_username"), s.get("shared_by_name")
-                ) or s["shared_by_device_id"]
+                sharer_dev_id = s.get("shared_by_device_id")
+                if sharer_dev_id == "desktop-server":
+                    shared_by = device_repo.get_device_display_name("desktop-server")
+                else:
+                    formatted = self.format_display_name(
+                        s.get("shared_by_username"), s.get("shared_by_name"), device_model=s.get("shared_by_model")
+                    )
+                    shared_by = formatted if formatted != "Unknown device" else device_repo.get_device_display_name(sharer_dev_id, fallback=sharer_dev_id)
 
                 groups[gid] = {
                     "group_id": gid,
                     "caption": s.get("group_caption") or s.get("caption"),
                     "shared_by": shared_by,
-                    "shared_by_device_id": s["shared_by_device_id"],
+                    "shared_by_device_id": sharer_dev_id,
                     "created_at": s["created_at"],
                     "is_own_post": s["is_own_post"],
                     "post_kind": s.get("post_kind"),
