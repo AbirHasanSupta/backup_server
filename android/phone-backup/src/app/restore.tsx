@@ -43,6 +43,8 @@ import { formatCaptureDateTime, formatRelativeOrLocal } from '@/utils/dateFormat
 import { ReactorsListSheet } from '@/components/ReactorsListSheet';
 import { DirectPostModal, DeviceFileItem } from '@/components/DirectPostModal';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
+import { setCustomReelsSession } from '@/utils/customReelsQueue';
+import { ReelItem } from '@/utils/reelEngine';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
@@ -5810,6 +5812,99 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     [handleDownloadFiles, selectedPaths],
   );
 
+  const selectedVideoFiles = useMemo<RemoteFile[]>(() => {
+    if (selectedPaths.size === 0) return [];
+    const isVideo = (f: RemoteFile) => Boolean(f.is_video || getFileCategory(f.path) === 'video');
+    const matched = previewableFiles.filter(f => selectedPaths.has(f.path) && isVideo(f));
+    const matchedPaths = new Set(matched.map(f => f.path));
+    const extra = files.filter(f => selectedPaths.has(f.path) && !matchedPaths.has(f.path) && isVideo(f));
+    if (extra.length > 0) {
+      extra.sort((a, b) => compareRemoteFiles(a, b, sortField, sortDir));
+      return [...matched, ...extra];
+    }
+    return matched;
+  }, [selectedPaths, previewableFiles, files, sortField, sortDir]);
+
+  const handleOpenInReels = useCallback(async () => {
+    if (selectedVideoFiles.length === 0) return;
+    hapticSelection();
+
+    const cfg = serverConfig || await getConfig().catch(() => null);
+    const isShared = sourceMode === 'shared';
+    const reelsToPlay: ReelItem[] = selectedVideoFiles.map((file, idx) => {
+      const sourceKey = isShared ? (file.source_id ?? selectedSourceId ?? '') : (cfg?.deviceId || '');
+      let previewUri = file.uri
+        ? file.uri
+        : cfg
+          ? buildVideoPreviewUrl(cfg, file.path, sourceMode, file.source_id ?? selectedSourceId)
+          : '';
+      let thumbUri = file.thumb_uri
+        ? file.thumb_uri
+        : file.uri
+          ? file.uri
+          : cfg
+            ? buildThumbnailUrl(cfg, file.path, sourceMode, file.source_id ?? selectedSourceId)
+            : '';
+      let downloadUrl = file.uri
+        ? file.uri
+        : cfg
+          ? (isShared
+              ? `http://:/shared//download?relative_path=&device_id=&token=`
+              : `http://:/files/download?relative_path=&device_id=&token=`)
+          : '';
+
+      if (file.kind === 'share' && file.share_id != null && cfg) {
+        previewUri = file.uri || buildSharePreviewUrl(cfg, file.share_id);
+        thumbUri = file.thumb_uri || file.uri || buildShareThumbnailUrl(cfg, file.share_id);
+        downloadUrl = file.uri || buildShareDownloadUrl(cfg, file.share_id);
+      }
+
+      const filename = file.path.split(/[/\\]/).pop() ?? file.path;
+      const authorName = isShared
+        ? (sharedSources.find(s => s.id === sourceKey)?.label || 'Shared Folder')
+        : (cfg?.deviceId ? 'My Backup' : 'Phone Backup');
+
+      return {
+        reel_id: `custom_selection__`,
+        share_id: typeof file.share_id === 'number' ? file.share_id : (idx + 1),
+        media_id: file.media_id ?? null,
+        path: file.path,
+        shared_by: authorName,
+        shared_by_device_id: cfg?.deviceId || 'device',
+        caption: file.caption || filename,
+        created_at: file.modified_time || file.uploaded_time || Date.now(),
+        reaction_counts: {},
+        user_reactions: [],
+        comment_count: 0,
+        repost_count: 0,
+        view_count: 0,
+        duration: 0,
+        size: file.size,
+        is_own_post: true,
+        is_saved: false,
+        uri: previewUri,
+        thumb_uri: thumbUri,
+        library_source: isShared ? 'reel_shared' : 'reel_backup',
+        source_type: isShared ? 'shared' : 'phone',
+        source_key: sourceKey,
+        is_custom_selection: true,
+        download_url: downloadUrl,
+      } as ReelItem;
+    });
+
+    setCustomReelsSession({
+      reels: reelsToPlay,
+      sourceMode,
+      selectedSourceId,
+      timestamp: Date.now(),
+    });
+
+    router.push({
+      pathname: '/reels',
+      params: { custom: String(Date.now()) },
+    });
+  }, [selectedVideoFiles, sourceMode, selectedSourceId, serverConfig, sharedSources, router]);
+
 
   const warmPreviewUrl = useMemo(() => {
     if (!warmPreviewFile || !serverConfig || getFileCategory(warmPreviewFile.path) !== 'video') {
@@ -6010,20 +6105,16 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
               <Text style={[styles.selectionBarText, { color: colors.primary }]}>
                 {selectedPaths.size} {selectedPaths.size === 1 ? 'file' : 'files'} selected
               </Text>
-              <TouchableOpacity
-                onPress={() => {
-                  if (selectedPaths.size > MAX_SHARE_POST_FILES) {
-                    Alert.alert('Too many files', `You can share up to ${MAX_SHARE_POST_FILES} files in a single post.`);
-                    return;
-                  }
-                  setShareModalVisible(true);
-                }}
-                style={[styles.shareSelBtn, { backgroundColor: colors.primarySoft }, isOffline && styles.disabledBtn]}
-                disabled={isOffline}
-              >
-                <AppIcon androidName="share" iosName="square.and.arrow.up" color={colors.primary} size={15} />
-                <Text style={[styles.shareSelText, { color: colors.primary }]}>Share</Text>
-              </TouchableOpacity>
+              {selectedVideoFiles.length > 0 && (
+                <TouchableOpacity
+                  onPress={handleOpenInReels}
+                  style={[styles.reelsSelBtn, { backgroundColor: colors.primarySoft }]}
+                  activeOpacity={0.75}
+                >
+                  <AppIcon androidName="movie" iosName="play.rectangle" color={colors.primary} size={15} />
+                  <Text style={[styles.reelsSelText, { color: colors.primary }]}>Open in Reels</Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity
                 onPress={() => { setSelectedPaths(new Set()); setSelectionMode(false); }}
                 style={styles.clearSelBtn}
@@ -6193,23 +6284,45 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       />
       </View>
 
-      {/* Download FAB */}
+      {/* Bottom Action Bar (Share & Download) */}
       {selectedPaths.size > 0 && !isDownloading && (() => {
         const hasOnlyLocalFiles = Array.from(selectedPaths).every(p => {
           const f = previewableFiles.find(x => x.path === p) || files.find(x => x.path === p);
           return Boolean((f as any)?.uri);
         });
-        const isDisabled = isOffline && !hasOnlyLocalFiles;
+        const isDownloadDisabled = isOffline && !hasOnlyLocalFiles;
+        const isShareDisabled = isOffline;
+
+        const onSharePress = () => {
+          if (selectedPaths.size > MAX_SHARE_POST_FILES) {
+            Alert.alert('Too many files', `You can share up to ${MAX_SHARE_POST_FILES} files in a single post.`);
+            return;
+          }
+          setShareModalVisible(true);
+        };
+
         return (
-          <AnimatedPressable
-            style={[styles.fab, { bottom: BottomTabInset + Spacing.four }, isDisabled && styles.disabledBtn]}
-            onPress={handleDownload}
-            disabled={isDisabled}
-            scaleDown={0.94}
-          >
-            <AppIcon androidName="download" iosName="arrow.down.circle" color={colors.white} size={22} />
-            <Text style={styles.fabText}>Download {selectedPaths.size} {selectedPaths.size === 1 ? 'File' : 'Files'}</Text>
-          </AnimatedPressable>
+          <View style={[styles.fabContainer, { bottom: BottomTabInset + Spacing.four }]}>
+            <AnimatedPressable
+              style={[styles.fabBtn, styles.fabShareBtn, isShareDisabled && styles.disabledBtn]}
+              onPress={onSharePress}
+              disabled={isShareDisabled}
+              scaleDown={0.94}
+            >
+              <AppIcon androidName="share" iosName="square.and.arrow.up" color={colors.primary} size={18} />
+              <Text style={[styles.fabShareText, { color: colors.primary }]}>Share</Text>
+            </AnimatedPressable>
+
+            <AnimatedPressable
+              style={[styles.fabBtn, styles.fabDownloadBtn, isDownloadDisabled && styles.disabledBtn]}
+              onPress={handleDownload}
+              disabled={isDownloadDisabled}
+              scaleDown={0.94}
+            >
+              <AppIcon androidName="download" iosName="arrow.down.circle" color={colors.white} size={18} />
+              <Text style={styles.fabDownloadText}>Download</Text>
+            </AnimatedPressable>
+          </View>
         );
       })()}
 
@@ -6431,6 +6544,53 @@ const createStyles = (colors: AppColors) =>
       borderRadius: Radius.full, gap: Spacing.two, ...Shadows.soft,
     },
     fabText: { color: colors.white, fontWeight: '700', fontSize: TextScale.md },
+    fabContainer: {
+      position: 'absolute',
+      alignSelf: 'center',
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: Spacing.three,
+      zIndex: 10,
+    },
+    fabBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: Spacing.two + 4,
+      paddingHorizontal: Spacing.five,
+      borderRadius: Radius.full,
+      gap: Spacing.two,
+      ...Shadows.soft,
+    },
+    fabShareBtn: {
+      backgroundColor: colors.surface,
+      borderWidth: 1.5,
+      borderColor: colors.primary,
+    },
+    fabDownloadBtn: {
+      backgroundColor: colors.primary,
+    },
+    fabShareText: {
+      fontWeight: '700',
+      fontSize: TextScale.sm,
+    },
+    fabDownloadText: {
+      color: colors.white,
+      fontWeight: '700',
+      fontSize: TextScale.sm,
+    },
+    reelsSelBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: Spacing.one,
+      paddingHorizontal: Spacing.three,
+      paddingVertical: Spacing.one,
+      borderRadius: Radius.full,
+    },
+    reelsSelText: {
+      fontSize: TextScale.sm,
+      fontWeight: '700',
+    },
     disabledBtn: { opacity: 0.4 },
 
     emptyContainer: {

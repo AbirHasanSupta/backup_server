@@ -3515,6 +3515,11 @@ export async function saveReelToDevice(shareId, relativePath, onProgress, source
     } catch {}
   }
 
+  if (sourceUrl && (sourceUrl.startsWith('file:') || sourceUrl.startsWith('content:'))) {
+    await MediaLibrary.saveToLibraryAsync(sourceUrl);
+    return true;
+  }
+
   const ext = (relativePath || '').split('.').pop()?.toLowerCase() || 'mp4';
   const filename = `reel_${shareId}_${Date.now()}.${ext}`;
   const tmpUri = `${FileSystem.cacheDirectory}${filename}`;

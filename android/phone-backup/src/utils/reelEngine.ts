@@ -60,6 +60,10 @@ export type ReelItem = {
   source_key?: string;
   /** Local Drive shelf reels have no server-side share/reaction identity. */
   is_local_drive?: boolean;
+  /** Custom selection opened from library for playback. */
+  is_custom_selection?: boolean;
+  /** Download URL for saving directly to device. */
+  download_url?: string;
 };
 
 export type PlaybackTelemetryEvent = {

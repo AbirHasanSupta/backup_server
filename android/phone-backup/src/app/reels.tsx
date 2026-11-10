@@ -26,7 +26,8 @@ import {
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect, useNavigation, useRouter } from 'expo-router';
+import { useFocusEffect, useNavigation, useRouter, useLocalSearchParams } from 'expo-router';
+import { getCustomReelsSession, clearCustomReelsSession } from '@/utils/customReelsQueue';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
@@ -42,6 +43,8 @@ import {
   getConfig,
   buildSharePreviewUrl,
   buildShareThumbnailUrl,
+  buildVideoPreviewUrl,
+  buildThumbnailUrl,
   reactToMedia,
   getComments,
   addComment,
@@ -413,6 +416,7 @@ type ReelCardProps = {
   onPlaybackTelemetry?: (ev: PlaybackTelemetryEvent) => void;
   colors: AppColors;
   isLibrary?: boolean;
+  onSaveToDeviceDirect?: (item: ReelItem) => void;
 };
 
 function ReelCardBase({
@@ -436,7 +440,9 @@ function ReelCardBase({
   onPlaybackTelemetry,
   colors,
   isLibrary = false,
+  onSaveToDeviceDirect,
 }: ReelCardProps) {
+  const isCustomSelection = Boolean(item.is_custom_selection);
   const [isPlaying, setIsPlaying] = useState(true);
   const [speed, setSpeed] = useState(1.0);
   const [progress, setProgress] = useState(0);
@@ -490,6 +496,7 @@ function ReelCardBase({
       const completion = dur > 0 ? watchSec / dur : 0;
       const isFastSkip = watchSec < 1.8 && completion < 0.25;
 
+      if (item.is_custom_selection) return;
       const authorKey = item.original_author?.device_id || item.shared_by_device_id || item.shared_by;
       onPlaybackTelemetryRef.current?.({
         share_id: item.share_id,
@@ -563,8 +570,22 @@ function ReelCardBase({
   useEffect(() => { seekBarWidthRef.current = cardWidth || SCREEN_W; }, [cardWidth]);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
-  const videoUrl = item.uri ? item.uri : serverConfig ? buildSharePreviewUrl(serverConfig, item.share_id) : '';
-  const thumbUrl = item.thumb_uri ? item.thumb_uri : item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
+  const videoUrl = item.uri
+    ? item.uri
+    : (item.is_custom_selection && serverConfig)
+      ? buildVideoPreviewUrl(serverConfig, item.path, item.source_type || 'phone', item.source_key)
+      : serverConfig
+        ? buildSharePreviewUrl(serverConfig, item.share_id)
+        : '';
+  const thumbUrl = item.thumb_uri
+    ? item.thumb_uri
+    : item.uri
+      ? item.uri
+      : (item.is_custom_selection && serverConfig)
+        ? buildThumbnailUrl(serverConfig, item.path, item.source_type || 'phone', item.source_key)
+        : serverConfig
+          ? buildShareThumbnailUrl(serverConfig, item.share_id)
+          : '';
   const totalReactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
   const myReaction = item.user_reactions?.[0];
   const isLiked = !!myReaction;
@@ -586,14 +607,16 @@ function ReelCardBase({
     lastTapRef.current = now;
     if (isDouble) {
       if (singleTapTimerRef.current) { clearTimeout(singleTapTimerRef.current); singleTapTimerRef.current = null; }
-      if (!item.is_local_drive && !item.user_reactions?.includes('❤️')) onReact(item, '❤️');
+      if (!isCustomSelection && !item.is_local_drive && !item.user_reactions?.includes('❤️')) {
+        onReact(item, '❤️');
+        setShowHeart(true);
+        heartScale.setValue(0);
+        Animated.sequence([
+          Animated.spring(heartScale, { toValue: 1, friction: 4, useNativeDriver: true }),
+          Animated.timing(heartScale, { toValue: 0, duration: 200, delay: 400, useNativeDriver: true }),
+        ]).start(() => setShowHeart(false));
+      }
       hapticSuccess();
-      setShowHeart(true);
-      heartScale.setValue(0);
-      Animated.sequence([
-        Animated.spring(heartScale, { toValue: 1, friction: 4, useNativeDriver: true }),
-        Animated.timing(heartScale, { toValue: 0, duration: 200, delay: 400, useNativeDriver: true }),
-      ]).start(() => setShowHeart(false));
     } else {
       singleTapTimerRef.current = setTimeout(() => {
         setIsPlaying(p => {
@@ -610,7 +633,7 @@ function ReelCardBase({
         flashControls();
       }, 300);
     }
-  }, [item, onReact, heartScale, flashControls]);
+  }, [item, onReact, heartScale, flashControls, isCustomSelection]);
 
   const handleLongPress = useCallback(() => {
     if (singleTapTimerRef.current) {
@@ -841,8 +864,8 @@ function ReelCardBase({
         pointerEvents={show2x ? 'none' : 'box-none'}
         importantForAccessibility={show2x ? 'no-hide-descendants' : 'auto'}
       >
-        {/* Like Button (Heart only) */}
-        {!item.is_local_drive && <TouchableOpacity
+        {/* Like Button (Heart only) - hidden in custom selection */}
+        {!isCustomSelection && !item.is_local_drive && <TouchableOpacity
           style={s.actionBtn}
           onPress={toggleHeartLike}
           activeOpacity={0.75}
@@ -860,8 +883,8 @@ function ReelCardBase({
           </Text>
         </TouchableOpacity>}
 
-        {/* Comments Button */}
-        {!item.is_local_drive && <TouchableOpacity
+        {/* Comments Button - hidden in custom selection */}
+        {!isCustomSelection && !item.is_local_drive && <TouchableOpacity
           style={s.actionBtn}
           onPress={() => { hapticLight(); onOpenComments(item); }}
           activeOpacity={0.75}
@@ -879,13 +902,13 @@ function ReelCardBase({
           </Text>
         </TouchableOpacity>}
 
-        {/* Share Button (Backup & Shared Folders) or Repost Button (Main Reels) */}
-        {!item.is_local_drive && (isLibrary ? (
+        {/* Share Button (Backup & Shared Folders & Custom Selection) or Repost Button (Main Reels) */}
+        {!item.is_local_drive && ((isLibrary || isCustomSelection) ? (
           <TouchableOpacity
             style={s.actionBtn}
             onPress={() => { hapticLight(); onOpenShare?.(item); }}
             activeOpacity={0.75}
-            accessibilityLabel="Share reel to feed"
+            accessibilityLabel="Share reel"
           >
             <View style={s.actionIconWrap}>
               <AppIcon
@@ -917,8 +940,8 @@ function ReelCardBase({
           </TouchableOpacity>
         ))}
 
-        {/* Save / Bookmark Button */}
-        {!item.is_local_drive && <TouchableOpacity
+        {/* Save / Bookmark Button - hidden in custom selection */}
+        {!isCustomSelection && !item.is_local_drive && <TouchableOpacity
           style={s.actionBtn}
           onPress={() => { onToggleSave(item); }}
           activeOpacity={0.75}
@@ -935,6 +958,26 @@ function ReelCardBase({
             {item.is_saved ? 'Saved' : 'Save'}
           </Text>
         </TouchableOpacity>}
+
+        {/* Save to Device Button - shown directly in custom selection mode */}
+        {isCustomSelection && (
+          <TouchableOpacity
+            style={s.actionBtn}
+            onPress={() => { hapticLight(); if (onSaveToDeviceDirect) { onSaveToDeviceDirect(item); } else { onOpenSettings(item); } }}
+            activeOpacity={0.75}
+            accessibilityLabel="Save video to device gallery"
+          >
+            <View style={s.actionIconWrap}>
+              <AppIcon
+                androidName="file_download"
+                iosName="arrow.down.to.line"
+                color="#FFFFFF"
+                size={23}
+              />
+            </View>
+            <Text style={s.actionCount}>Save</Text>
+          </TouchableOpacity>
+        )}
 
         {/* Settings / Options Button (More) */}
         <TouchableOpacity
@@ -1269,9 +1312,10 @@ function ReelsSettingsModal({
     setSaveProgress(0);
     setSaveSuccess(false);
     try {
+      const sourceUrl = item.download_url || (item.is_local_drive ? item.uri || undefined : undefined) || (item.uri && !item.uri.startsWith('http') ? item.uri : undefined);
       await saveReelToDevice(item.share_id, item.path, (p) => {
         setSaveProgress(p);
-      }, item.is_local_drive ? item.uri || undefined : undefined);
+      }, sourceUrl);
       setSaveSuccess(true);
       hapticSuccess();
       Alert.alert('Saved to device', 'This reel video has been saved to your photo gallery.');
@@ -1471,6 +1515,39 @@ export default function ReelsScreen() {
   const [sectionPickerVisible, setSectionPickerVisible] = useState(false);
   const isFastForwarding = fastForwardingReelId !== null;
 
+  const params = useLocalSearchParams<{ custom?: string }>();
+  const [isCustomMode, setIsCustomMode] = useState<boolean>(() => {
+    const s = getCustomReelsSession();
+    return Boolean(s && s.reels && s.reels.length > 0);
+  });
+
+  const exitCustomMode = useCallback(() => {
+    clearCustomReelsSession();
+    setIsCustomMode(false);
+    try {
+      (navigation as any)?.setParams?.({ custom: undefined });
+    } catch {}
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.push('/restore');
+    }
+  }, [router, navigation]);
+
+  useEffect(() => {
+    if (params.custom) {
+      const session = getCustomReelsSession();
+      if (session && session.reels && session.reels.length > 0) {
+        setIsCustomMode(true);
+        setReels(session.reels);
+        setActiveIndex(0);
+        setLoading(false);
+        setError(null);
+        listRef.current?.scrollToOffset({ offset: 0, animated: false });
+      }
+    }
+  }, [params.custom]);
+
   // Dynamic layout measurement to cleanly fit between status bar and floating bottom tab bar
   const defaultCardHeight = Math.round(Math.max(300, SCREEN_H - insets.top - TAB_BAR_TOTAL_CLEARANCE));
   const [viewportHeight, setViewportHeight] = useState(defaultCardHeight);
@@ -1503,10 +1580,14 @@ export default function ReelsScreen() {
         closeAuthorFilter();
         return true;
       }
+      if (isCustomMode) {
+        exitCustomMode();
+        return true;
+      }
       return false;
     });
     return () => sub.remove();
-  }, [authorFilter, closeAuthorFilter]));
+  }, [authorFilter, closeAuthorFilter, isCustomMode, exitCustomMode]));
 
   const handleOpenShare = useCallback((item: ReelItem) => {
     setShareTarget(item);
@@ -1710,29 +1791,47 @@ export default function ReelsScreen() {
   }, [loadReels]);
 
   const onRefreshReels = useCallback(async () => {
+    if (isCustomMode) {
+      setRefreshing(true);
+      setActiveIndex(0);
+      listRef.current?.scrollToOffset({ offset: 0, animated: true });
+      setRefreshing(false);
+      return;
+    }
     setRefreshing(true);
     try {
       await loadReels(true, { skipFullScreenLoading: true });
     } catch {
       setRefreshing(false);
     }
-  }, [loadReels]);
+  }, [loadReels, isCustomMode]);
 
   // Tab press: when already on Reels tab, scroll to top and shuffle-refresh.
   useEffect(() => {
     // Expo Router's TypeScript types don't expose `addListener` on the navigation
     // object even though it is present at runtime for tab navigators.
     return (navigation as any)?.addListener?.('tabPress', () => {
+      if (isCustomMode) {
+        clearCustomReelsSession();
+        setIsCustomMode(false);
+        setActiveIndex(0);
+        void loadReels(true);
+        return;
+      }
       if (!navigation.isFocused() || refreshing || loading || reloadInFlightRef.current) return;
       hapticLight();
       listRef.current?.scrollToOffset({ offset: 0, animated: true });
       void onRefreshReels();
     });
-  }, [navigation, onRefreshReels, refreshing, loading]);
+  }, [navigation, onRefreshReels, refreshing, loading, isCustomMode, loadReels]);
 
   useEffect(() => {
+    if (params.custom && getCustomReelsSession()) return;
+    if (reelsRef.current.some(r => r.is_custom_selection)) {
+      setIsCustomMode(false);
+    }
     void loadReels(true);
-  }, [loadReels]);
+  }, [loadReels, params.custom]);
 
   useFocusEffect(useCallback(() => {
     setUIPriorityMode(true);
@@ -1778,10 +1877,10 @@ export default function ReelsScreen() {
   }, []);
 
   const handleLoadMore = useCallback(() => {
-    if (loadingMoreRef.current || !hasMoreRef.current) return;
+    if (isCustomMode || loadingMoreRef.current || !hasMoreRef.current) return;
     loadingMoreRef.current = true;
     loadReels(false).finally(() => { loadingMoreRef.current = false; });
-  }, [loadReels]);
+  }, [loadReels, isCustomMode]);
 
   const displayedReels = useMemo(() => {
     if (!authorFilter) return reels;
@@ -1976,6 +2075,19 @@ export default function ReelsScreen() {
       modeSub.remove();
     };
   }, [loadReels]);
+
+  const handleSaveToDeviceDirect = useCallback(async (item: ReelItem) => {
+    if (!item) return;
+    try {
+      const sourceUrl = item.download_url || (item.is_local_drive ? item.uri || undefined : undefined) || (item.uri && !item.uri.startsWith('http') ? item.uri : undefined);
+      await saveReelToDevice(item.share_id, item.path, () => {}, sourceUrl);
+      hapticSuccess();
+      Alert.alert('Saved to device', 'This video has been saved to your photo gallery.');
+    } catch (err: any) {
+      hapticError();
+      Alert.alert('Save failed', err?.message || 'Could not save video to device.');
+    }
+  }, []);
 
   const handleReact = useCallback(async (item: ReelItem, emoji: string) => {
     if (item.media_id == null) return;
@@ -2244,6 +2356,7 @@ export default function ReelsScreen() {
 
   const renderItem = useCallback(({ item, index }: { item: ReelItem; index: number }) => {
     const isNearActive = Math.abs(index - activeIndex) <= 1;
+    const isCustomSelection = Boolean(item.is_custom_selection);
     return (
       <ReelCard
         key={item.reel_id}
@@ -2259,10 +2372,11 @@ export default function ReelsScreen() {
         onOpenSettings={setSettingsTarget}
         onReact={handleReact}
         onOpenComments={setCommentsTarget}
-        onOpenRepost={isLibrary ? undefined : handleOpenRepost}
-        onOpenShare={isLibrary ? handleOpenShare : undefined}
-        onOpenAuthorFilter={canFilterAuthor ? openAuthorFilter : undefined}
+        onOpenRepost={isLibrary || isCustomSelection ? undefined : handleOpenRepost}
+        onOpenShare={isLibrary || isCustomSelection ? handleOpenShare : undefined}
+        onOpenAuthorFilter={canFilterAuthor && !isCustomSelection ? openAuthorFilter : undefined}
         onToggleSave={handleToggleSave}
+        onSaveToDeviceDirect={handleSaveToDeviceDirect}
         onSpeedModeChange={handleSpeedModeChange}
         onPlaybackTelemetry={handlePlaybackTelemetry}
         colors={colors}
@@ -2285,6 +2399,7 @@ export default function ReelsScreen() {
     canFilterAuthor,
     openAuthorFilter,
     handleToggleSave,
+    handleSaveToDeviceDirect,
     handleSpeedModeChange,
     handlePlaybackTelemetry,
     colors,
@@ -2313,7 +2428,21 @@ export default function ReelsScreen() {
         pointerEvents={isFastForwarding ? 'none' : 'box-none'}
         importantForAccessibility={isFastForwarding ? 'no-hide-descendants' : 'auto'}
       >
-        {authorFilter ? (
+        {isCustomMode ? (
+          <View style={s.headerAuthorRow}>
+            <TouchableOpacity
+              style={s.headerBackBtn}
+              onPress={exitCustomMode}
+              hitSlop={10}
+              accessibilityLabel="Back to library"
+            >
+              <AppIcon androidName="arrow_back" iosName="chevron.left" color="#fff" size={22} />
+            </TouchableOpacity>
+            <Text style={s.headerTitle} numberOfLines={1}>
+              {reels.length > 0 ? `Videos (${activeIndex + 1}/${reels.length})` : 'Videos'}
+            </Text>
+          </View>
+        ) : authorFilter ? (
           <View style={s.headerAuthorRow}>
             <TouchableOpacity
               style={s.headerBackBtn}
@@ -2338,7 +2467,8 @@ export default function ReelsScreen() {
           </TouchableOpacity>
         )}
 
-        <View style={s.headerRightActions}>
+        {!isCustomMode && (
+          <View style={s.headerRightActions}>
           {/* Reels Library Screen Redirect (Saved, Liked, Reposts) */}
           <TouchableOpacity
             style={s.headerBtn}
@@ -2359,6 +2489,7 @@ export default function ReelsScreen() {
             <AppIcon androidName="shuffle" iosName="shuffle" color="#fff" size={18} />
           </TouchableOpacity>
         </View>
+        )}
       </View>
 
       {/* Main Reels Viewport Container */}
@@ -2371,26 +2502,28 @@ export default function ReelsScreen() {
         ) : displayedReels.length === 0 ? (
           <View style={s.center}>
             <AppIcon
-              androidName={authorFilter ? "person_off" : "videocam_off"}
-              iosName={authorFilter ? "person.slash" : "video.slash"}
+              androidName={isCustomMode ? "videocam_off" : authorFilter ? "person_off" : "videocam_off"}
+              iosName={isCustomMode ? "video.slash" : authorFilter ? "person.slash" : "video.slash"}
               color="rgba(255,255,255,0.55)"
               size={52}
             />
-            <Text style={s.emptyTitle}>{authorFilter ? "No Reels Found" : "No Reels Yet"}</Text>
+            <Text style={s.emptyTitle}>{isCustomMode ? "No Videos Available" : authorFilter ? "No Reels Found" : "No Reels Yet"}</Text>
             <Text style={s.emptyBody}>
-              {authorFilter
-                ? `No reels found for ${authorFilter.name}.`
-                : error || (reelSection === 'backups'
-                  ? 'Videos backed up from this device will appear here.'
-                  : reelSection === 'shared'
-                    ? 'Videos from desktop folders shared with this device will appear here.'
-                    : 'Post a video to the feed and it will appear here as a reel.')}
+              {isCustomMode
+                ? 'No playable videos were found in your selection.'
+                : authorFilter
+                  ? `No reels found for ${authorFilter.name}.`
+                  : error || (reelSection === 'backups'
+                    ? 'Videos backed up from this device will appear here.'
+                    : reelSection === 'shared'
+                      ? 'Videos from desktop folders shared with this device will appear here.'
+                      : 'Post a video to the feed and it will appear here as a reel.')}
             </Text>
             <TouchableOpacity
               style={s.retryBtn}
-              onPress={authorFilter ? closeAuthorFilter : () => loadReels(true)}
+              onPress={isCustomMode ? exitCustomMode : authorFilter ? closeAuthorFilter : () => loadReels(true)}
             >
-              <Text style={s.retryText}>{authorFilter ? "Show All Reels" : "Retry"}</Text>
+              <Text style={s.retryText}>{isCustomMode ? "Back to Library" : authorFilter ? "Show All Reels" : "Retry"}</Text>
             </TouchableOpacity>
           </View>
         ) : (
