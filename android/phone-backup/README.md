@@ -1,6 +1,31 @@
-# Phone Backup - Android Client (v4.4.1)
+# Phone Backup - Android Client
 
 React Native & Expo client app for the **Phone Backup Server**. Built with Expo SDK 57, React Native 0.86, React 19, TypeScript, and Expo Router.
+
+For server backup and restore, the client pairs with an approved Phone Backup
+Server device profile. It supports LAN discovery and saved Tailscale/WireGuard
+endpoints, device-scoped authentication, resumable large-file uploads,
+background sync, media restore, and the social/memory features provided by the
+companion server. Separately, Android builds can pair directly with nearby
+phones over local Wi-Fi for P2P sharing.
+
+## Configuration and release version
+
+- `app.json` is the human-readable base Expo configuration.
+- `app.config.js` loads that base and derives the Expo `version` and Android
+  `versionCode` from the nearest semantic Git tag (with fallbacks to a bundled
+  `VERSION` file and `package.json`). Do not add version fields to `app.json`.
+- Run `npm run version:sync` before EAS builds so `package.json` matches the tag;
+  EAS archives omit `.git`, so the builder relies on that synced metadata. It is
+  already run by `npm run start`, `npm run android`, and the APK build scripts.
+- Use a tag formatted as `vMAJOR.MINOR.PATCH`. Android's version code is derived
+  as `major * 1,000,000 + minor * 1,000 + patch`.
+- For direct Google Drive access while offline or in P2P mode, users can paste
+  a Drive API key in the add-folder sheet. Builds may instead provide
+  `EXPO_PUBLIC_GOOGLE_DRIVE_API_KEY` as a default. A connected server uses its
+  own configured key. The build-time key is visible in the installed app, so
+  use a separate key restricted to the Drive API and this Android app's
+  package/signing certificate. Shared folders must allow anyone with the link.
 
 ---
 
@@ -16,7 +41,7 @@ React Native & Expo client app for the **Phone Backup Server**. Built with Expo 
   - Subnet LAN server discovery modal (`serverDiscovery.js`).
 
 - 📥 **Library & Restore (`src/app/restore.tsx`)**:
-  - Dual source support: Browse phone backup archives, PC-shared folders (`/shared/list`), or switch to shared social feed view.
+  - Browse phone backup archives, server-shared folders (`/shared/list`), and public Google Drive folders in Server, Offline, or P2P mode.
   - Virtualized tree and grid view for lag-free expansion, sorting, and navigation across thousands of files.
   - Folder-level selection states (none / partial / all) and batch download restore engine with progress tracking.
   - In-app media player: Photo gallery, audio playback (`expo-audio`), and video streaming (`expo-video`) with on-demand range requests and video preview pre-warming.
@@ -39,6 +64,21 @@ React Native & Expo client app for the **Phone Backup Server**. Built with Expo 
   - Emoji reactions with live toggle states and counts.
   - Threaded comment section with real-time author tags and deletion rights.
   - Post management: Share target inspection, recipient addition/removal, caption editing, and post deletion by the owner.
+
+- **Nearby Phone Sharing (Android native P2P)**:
+  - Discover nearby Phone Backup installations on the same Wi-Fi using a UDP
+    beacon and subnet probes; the embedded peer service listens on port `8088`
+    by default and uses UDP port `8822` for discovery.
+  - Pair mutually with a short verification PIN shown on both phones. P2P
+    pairing is stored locally and is distinct from pairing with the backup
+    server.
+  - Send and receive direct media shares, feed posts, comments, and reactions
+    over the local network. Received posts and peer metadata remain available
+    on the phone; they do not automatically become server backups until the
+    received media is included in a later sync.
+  - This mode requires an Android native build, nearby phones on the same Wi-Fi
+    network, and local-network access. It does not provide remote P2P over
+    Tailscale/WireGuard.
 
 - ⚙️ **Settings Screen (`src/app/settings.tsx`)**:
   - Server connection parameters (IP, Port, API Key, Device Token, Custom Username).
@@ -99,31 +139,38 @@ React Native & Expo client app for the **Phone Backup Server**. Built with Expo 
 
 ## Native Architecture & Background Engine
 
-- **Foreground Service Loop (`backgroundTask.js`)**: Powered by `react-native-background-actions`, ensuring continuous timer-based differential syncs even when the app is minimized or the screen is turned off.
+- **Foreground Service Loop (`backgroundTask.js`)**: Uses `react-native-background-actions` for scheduled differential syncs while the app is minimized. Android battery and background-execution policy can defer work; the service does not guarantee every scheduled run executes immediately.
 - **Android CPU WakeLock (`wakeLock.js`)**: Prevents CPU throttling or Wi-Fi radio sleep during active bulk uploads.
 - **Single Live Notification & Unseen Badge Tracking (`notificationService.js`)**: Real-time batch progress updates via `expo-notifications` without sending individual per-file notifications; handles pending notification tracking (`/notifications/pending`, `/notifications/seen`) and deep links for Memories, Flashbacks, Streak Risks, Rewind Reels, and Shared Posts.
 - **Differential Backup Engine (`uploader.js`, `scanner.js` & `crypto.js`)**: Walks Android media storage, generates relative paths & modified timestamps, hashes file contents (pure-JS SHA-256), pre-fetches server upload cache (`/sync/upload-cache`), and sends payload to `/files/check` before transferring missing files via `/upload` or `/upload/raw`.
 - **Reels & Social API Client (`downloader.js`)**: Wraps `/files/*`, `/shared/*`, `/memories/*`, `/trips/*`, `/share/*`, `/reels/*`, `/comments/*`, and `/notifications/*` endpoints — file listing, ranged preview URLs, downloads, thumbnails, reactions, comments, reels reposting/saving, direct post creation, and feed fetching.
 - **Storage Cleaner Engine (`freeUpStorage.js`)**: Coordinates hybrid backup verification (upload cache + candidate endpoints) and maintains an offline deletion queue with server sync.
 - **Pending Files Engine (`pendingBackup.js`)**: Lightweight incremental scanner and snapshot cache for unbacked files.
+- **Nearby peer stack (`p2pDiscovery.js`, `p2pClient.js`, `p2pServer.js`, `p2pSettings.js`)**: Local Wi-Fi discovery, mutual PIN pairing, peer authentication, direct media transfer, and an on-device feed backed by a native Android HTTP service.
 - **Dynamic Theming System (`use-app-theme.tsx` & `theme.ts`)**: System-aware and user-configurable light/dark theme palettes with animated icon transitions.
 
 ---
 
 ## Development Setup
 
+The app uses Expo SDK 57, React Native 0.86, and React 19. Use Node.js 22.13
+or newer from the current LTS line, Android Studio/Android SDK, and JDK 17 for
+local Android builds. See the [Expo SDK 57 reference](https://docs.expo.dev/versions/v57.0.0/) for the SDK toolchain.
+
 ### 1. Install Dependencies
 ```bash
-npm install
+npm ci
 ```
 
 ### 2. Start Development Server
 ```bash
-npx expo start
+npm run start
 ```
 
 ### 3. Build Native Android Development Client / APK
-Note: The app requires native Android modules (`react-native-background-actions`, `expo-notifications`, `expo-network`) which are **not supported in standard Expo Go**. You must build a Development Client or APK:
+Note: The app requires native Android modules for background sync and P2P
+sharing. Standard Expo Go does not include those native modules. Build a
+Development Client or APK:
 
 ```bash
 # Build development build via EAS
@@ -142,8 +189,18 @@ npm run build:apk:prod
 
 ## Scripts
 
-- `npm start`: Runs `expo start`
-- `npm run android`: Runs `expo run:android`
+- `npm run version:sync`: Synchronizes package metadata with the Git release tag
+- `npm start`: Synchronizes the version then runs `expo start`
+- `npm run android`: Synchronizes the version then runs `expo run:android`
+- `npm run ios`: Synchronizes the version then runs `expo run:ios`
+- `npm run web`: Synchronizes the version then runs `expo start --web`
 - `npm run lint`: Runs `expo lint`
-- `npm run build:apk`: Builds preview APK via EAS
-- `npm run build:apk:prod`: Builds production standalone APK via EAS
+- `npm run build:apk`: Synchronizes the version then builds a preview APK via EAS
+- `npm run build:apk:prod`: Synchronizes the version then builds a production APK via EAS
+
+For server installation, pairing, and deployment guidance, see the root
+[setup guide](../../SETUP.md).
+
+The native P2P server and UDP discovery are Android-only. EAS configuration
+contains an iOS bundle identifier and an `ios` script, but that does not imply
+feature parity: the P2P server is unavailable on iOS.

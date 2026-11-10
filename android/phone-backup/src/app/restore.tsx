@@ -21,7 +21,10 @@ import {
   Platform,
   BackHandler,
   ScrollView,
+  AppState,
+  DeviceEventEmitter,
 } from 'react-native';
+
 import ReAnimated from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
@@ -29,20 +32,30 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter, useNavigation } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { addSharedPostTapListener } from '../../notificationService';
+import { getPairedPeers, getLocalP2PFeed, saveP2PFeedItem, deleteP2PFeedItem } from '../../p2pSettings';
+import { setUIPriorityMode, getCurrentSyncState } from '../../backgroundTask';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { ShareModal } from '@/components/ShareModal';
+import { formatCaptureDateTime, formatRelativeOrLocal } from '@/utils/dateFormat';
 import { ReactorsListSheet } from '@/components/ReactorsListSheet';
 import { DirectPostModal, DeviceFileItem } from '@/components/DirectPostModal';
 import { AnimatedPressable } from '@/components/AnimatedPressable';
+import { setCustomReelsSession } from '@/utils/customReelsQueue';
+import { ReelItem } from '@/utils/reelEngine';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useCollapsibleHeader } from '@/hooks/useCollapsibleHeader';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import {
   downloadFile,
   listSharedSources,
+  getLocalDriveSharedSources,
+  addGoogleDriveSource,
+  getGoogleDriveApiKey,
+  saveGoogleDriveApiKey,
+  removeGoogleDriveSource,
   downloadSharedFile,
   getConfig,
   buildPreviewUrl,
@@ -73,6 +86,9 @@ import {
   removeShareTarget,
   getShareGroupTargets,
   getAllDevices,
+  DESKTOP_SHARE_DEVICE_ID,
+  resolveExcludedShareRecipientIds,
+  filterShareRecipientDevices,
   addShareGroupTarget,
   editShareGroupCaption,
   deleteShare,
@@ -81,9 +97,8 @@ import {
   buildShareDownloadUrl,
   downloadShareFile,
 } from '../../downloader';
-import { checkDeviceConnection } from '../../uploader';
-import { getServerIp, resolveReachableServer } from '../../settings';
-import { getCurrentSyncState } from '../../backgroundTask';
+import { getServerIp } from '../../settings';
+import { checkServerReachable, setServerAvailable } from '../../connectionMode';
 import { prunePreviewCache } from '@/utils/previewCacheManager';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticSelection, hapticLongPress, hapticSuccess, hapticError, hapticLight } from '@/utils/haptics';
@@ -138,7 +153,7 @@ function registerDoubleTap(ref: { current: number }): boolean {
 
 type SourceMode = 'phone' | 'shared';
 
-type SharedSource = { id: string; label: string };
+type SharedSource = { id: string; label: string; type?: string; local?: boolean; drive_folder_id?: string };
 
 type RemoteFile = {
   path: string;
@@ -153,19 +168,25 @@ type RemoteFile = {
   // Feed-only fields (device-to-device shares)
   kind?: 'share' | 'shared';
   is_device_share?: boolean;
-  share_id?: number;
+  share_id?: number | string;
   source_id?: string;
   caption?: string | null;
   shared_by?: string;
   shared_by_device_id?: string;
   comment_count?: number;
   created_at?: number;
+  id?: string | number;
   group_id?: string;
   group_caption?: string | null;
   group_items?: RemoteFile[];
   is_own_post?: boolean;
   post_kind?: string | null;
   post_title?: string | null;
+  uri?: string | null;
+  thumb_uri?: string | null;
+  is_p2p?: boolean;
+  targets?: { target_device_id?: string; device_id?: string; device_name?: string; device_model?: string }[];
+  target_device_ids?: string[];
 };
 
 type ServerConfig = { ip: string; port: string; key: string; deviceId: string } | null;
@@ -238,7 +259,7 @@ function isMediaExtension(ext: string): boolean {
 }
 
 /** Identity check for two RemoteFile-shaped records: prefer share_id when both have one, else path. */
-function isSameRemoteFile(a: { share_id?: number | null; path: string } | null | undefined, b: { share_id?: number | null; path: string } | null | undefined): boolean {
+function isSameRemoteFile(a: { share_id?: number | string | null; path: string } | null | undefined, b: { share_id?: number | string | null; path: string } | null | undefined): boolean {
   if (!a || !b) return false;
   return a.share_id != null && b.share_id != null ? a.share_id === b.share_id : a.path === b.path;
 }
@@ -266,20 +287,12 @@ function formatSize(bytes: number) {
 
 function formatDate(ts: number | undefined): string {
   if (!ts) return '—';
-  return new Date(ts * 1000).toLocaleDateString(undefined, {
-    year: 'numeric', month: 'short', day: 'numeric',
-  });
+  return formatCaptureDateTime(ts) || '—';
 }
 
 // Relative time for comments (created_at is a unix second timestamp).
 function formatTimeAgo(ts: number | undefined): string {
-  if (!ts) return '';
-  const diff = Math.floor(Date.now() / 1000) - ts;
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return formatDate(ts);
+  return formatRelativeOrLocal(ts);
 }
 
 function formatMediaTime(sec: number): string {
@@ -522,6 +535,9 @@ function mapFeedItem(f: any): RemoteFile {
     caption: it.caption ?? f.caption,
     is_own_post: it.is_own_post ?? f.is_own_post,
     source_id: it.source_id ?? f.source_id,
+    uri: it.uri || f.uri || null,
+    thumb_uri: it.thumb_uri || it.thumbUri || it.uri || f.thumb_uri || f.thumbUri || f.uri || null,
+    is_p2p: it.is_p2p ?? f.is_p2p,
   }));
   const firstItem = items[0] || {};
   return {
@@ -548,6 +564,11 @@ function mapFeedItem(f: any): RemoteFile {
     is_own_post: f.is_own_post,
     post_kind: f.post_kind,
     post_title: f.post_title,
+    uri: firstItem.uri || f.uri || null,
+    thumb_uri: firstItem.thumb_uri || f.thumb_uri || f.thumbUri || firstItem.uri || f.uri || null,
+    is_p2p: f.is_p2p ?? firstItem.is_p2p,
+    targets: f.targets,
+    target_device_ids: f.target_device_ids,
   };
 }
 
@@ -797,13 +818,18 @@ function SharedFeedCard({
             const category = getFileCategory(subItem.path);
             const isVideo = subItem.is_video ?? category === 'video';
             const effectiveSourceId = subItem.source_id ?? item.source_id ?? sourceId;
-            const thumbUrl = !serverConfig
-              ? ''
-              : subItem.share_id != null
-                ? buildShareThumbnailUrl(serverConfig, subItem.share_id)
-                : isVideo
-                  ? buildThumbnailUrl(serverConfig, subItem.path, 'shared', effectiveSourceId)
-                  : buildPreviewUrl(serverConfig, subItem.path, 'shared', effectiveSourceId);
+            const localThumb = subItem.thumb_uri || (subItem as any).thumbUri || (isVideo ? null : (subItem as any).uri);
+            const thumbUrl = localThumb
+              ? localThumb
+              : (subItem as any).uri && !isVideo
+                ? (subItem as any).uri
+                : !serverConfig
+                  ? ((subItem as any).uri || '')
+                  : subItem.share_id != null
+                    ? buildShareThumbnailUrl(serverConfig, subItem.share_id)
+                    : isVideo
+                      ? buildThumbnailUrl(serverConfig, subItem.path, 'shared', effectiveSourceId)
+                      : buildPreviewUrl(serverConfig, subItem.path, 'shared', effectiveSourceId);
 
             return (
               <TouchableOpacity
@@ -932,8 +958,8 @@ function SharedFeedCard({
 // ─────────────────────────────────────────────────────────────────────────────
 
 type CommentItem = {
-  id: number;
-  media_id: number;
+  id: number | string;
+  media_id: number | string;
   source_id: string;
   device_name?: string | null;
   username?: string | null;
@@ -957,7 +983,7 @@ function CommentsModal({
   serverConfig?: ServerConfig;
   colors: AppColors;
   onClose: () => void;
-  onCountChange: (mediaId: number, delta: number) => void;
+  onCountChange: (mediaId: number | string, delta: number) => void;
 }) {
   const insets = useSafeAreaInsets();
   const { keyboardHeight } = useModalKeyboardHeight();
@@ -965,7 +991,7 @@ function CommentsModal({
   const [loading, setLoading] = useState(false);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const mediaId = item?.media_id;
+  const mediaId = item?.media_id ?? (item as any)?.group_id ?? (item as any)?.share_id;
   const isPostCreator = Boolean(
     item?.is_own_post ||
     (serverConfig?.deviceId && item?.shared_by_device_id === serverConfig.deviceId)
@@ -1070,7 +1096,7 @@ function CommentsModal({
                   <View style={modalSheetStyles.commentBody}>
                     <View style={modalSheetStyles.commentMeta}>
                       <Text style={[modalSheetStyles.commentAuthor, { color: colors.text }]} numberOfLines={1}>
-                        {c.display_name || c.device_name || 'Unknown device'}
+                        {c.display_name || c.device_name || (c as any).author_name || (c as any).author_device_name || (c.is_own ? 'You' : 'Nearby Peer')}
                       </Text>
                       <Text style={[modalSheetStyles.commentTime, { color: colors.textMuted }]}>
                         {formatTimeAgo(c.created_at)}
@@ -1132,12 +1158,19 @@ function ManageShareModal({
   colors: AppColors;
   onClose: () => void;
   onDeleted: () => void;
-  onUpdated?: (updated: { caption?: string; removedShareId?: number }) => void;
+  onUpdated?: (updated: { caption?: string; removedShareId?: number | string }) => void;
 }) {
   const insets = useSafeAreaInsets();
   const { keyboardHeight } = useModalKeyboardHeight();
   const groupId = item?.group_id || null;
   const initialCaption = item?.group_caption || item?.caption || '';
+  // Determine whether this post lives in the local P2P feed (no server round-trip needed).
+  const isP2PPost =
+    item?.is_p2p === true ||
+    (typeof groupId === 'string' && groupId.startsWith('p2p_')) ||
+    (item?.share_id != null && String(item.share_id).startsWith('p2p_'));
+  // Stable identifier for P2P operations — prefer group_id, fall back to share_id.
+  const p2pPostId = groupId || (item?.share_id != null ? String(item.share_id) : null);
 
   const [caption, setCaption] = useState(initialCaption);
   const [savingCaption, setSavingCaption] = useState(false);
@@ -1146,7 +1179,7 @@ function ManageShareModal({
   const [loading, setLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
-  const [removingFileId, setRemovingFileId] = useState<number | null>(null);
+  const [removingFileId, setRemovingFileId] = useState<number | string | null>(null);
   const [files, setFiles] = useState<RemoteFile[]>([]);
 
   useEffect(() => {
@@ -1160,27 +1193,34 @@ function ManageShareModal({
     setCaption(item.group_caption || item.caption || '');
     setFiles(item.group_items && item.group_items.length > 0 ? item.group_items : [item]);
 
+    // Use p2pPostId (group_id or share_id) for P2P target lookup so it works
+    // even when groupId and share_id differ in prefix format.
+    const targetsQueryId = isP2PPost ? p2pPostId : groupId;
     Promise.all([
       getAllDevices().catch(() => ({ devices: [] })),
-      groupId ? getShareGroupTargets(groupId).catch(() => ({ targets: [] })) : Promise.resolve({ targets: [] }),
+      targetsQueryId ? getShareGroupTargets(targetsQueryId).catch(() => ({ targets: [] })) : Promise.resolve({ targets: [] }),
+      resolveExcludedShareRecipientIds(serverConfig?.deviceId ? [serverConfig.deviceId] : []),
     ])
-      .then(([devRes, tgtRes]) => {
+      .then(([devRes, tgtRes, excluded]) => {
         if (!active) return;
-        setAllDevices(Array.isArray(devRes?.devices) ? devRes.devices : []);
-        setTargets(Array.isArray(tgtRes?.targets) ? tgtRes.targets : []);
+        excluded.add(DESKTOP_SHARE_DEVICE_ID);
+        setAllDevices(filterShareRecipientDevices(Array.isArray(devRes?.devices) ? devRes.devices : [], excluded));
+        setTargets(filterShareRecipientDevices(Array.isArray(tgtRes?.targets) ? tgtRes.targets : [], excluded));
       })
       .finally(() => {
         if (active) setLoading(false);
       });
 
     return () => { active = false; };
-  }, [visible, item, groupId]);
+  }, [visible, item, groupId, isP2PPost, p2pPostId, serverConfig?.deviceId]);
 
   const handleSaveCaption = useCallback(async () => {
-    if (!groupId) return;
+    // For P2P posts use p2pPostId (group_id or share_id); for server posts require groupId.
+    const targetId = isP2PPost ? p2pPostId : groupId;
+    if (!targetId) return;
     setSavingCaption(true);
     try {
-      await editShareGroupCaption(groupId, caption.trim() || null);
+      await editShareGroupCaption(targetId, caption.trim() || null);
       hapticSuccess();
       onUpdated?.({ caption: caption.trim() });
       Alert.alert('Saved', 'Post caption updated successfully.');
@@ -1190,18 +1230,23 @@ function ManageShareModal({
     } finally {
       setSavingCaption(false);
     }
-  }, [groupId, caption, onUpdated]);
+  }, [isP2PPost, p2pPostId, groupId, caption, onUpdated]);
 
   const handleToggleRecipient = useCallback(async (dev: { device_id: string; device_name: string; display_name?: string }) => {
-    if (!groupId) return;
+    // For P2P posts use p2pPostId; for server posts require groupId.
+    const targetId = isP2PPost ? p2pPostId : groupId;
+    if (!targetId) return;
+    if (dev.device_id === DESKTOP_SHARE_DEVICE_ID || (serverConfig?.deviceId && dev.device_id === serverConfig.deviceId)) {
+      return;
+    }
     const isCurrent = targets.some((t) => t.target_device_id === dev.device_id);
     setTogglingId(dev.device_id);
     try {
       if (isCurrent) {
-        await removeShareTarget(groupId, dev.device_id);
+        await removeShareTarget(targetId, dev.device_id);
         setTargets((prev) => prev.filter((t) => t.target_device_id !== dev.device_id));
       } else {
-        await addShareGroupTarget(groupId, dev.device_id);
+        await addShareGroupTarget(targetId, dev.device_id);
         setTargets((prev) => [
           ...prev,
           {
@@ -1218,7 +1263,7 @@ function ManageShareModal({
     } finally {
       setTogglingId(null);
     }
-  }, [groupId, targets]);
+  }, [isP2PPost, p2pPostId, groupId, targets, serverConfig]);
 
   const handleRemoveFile = useCallback((file: RemoteFile) => {
     if (file.share_id == null) return;
@@ -1235,7 +1280,25 @@ function ManageShareModal({
             const isLastFile = files.length <= 1;
             setRemovingFileId(file.share_id!);
             try {
-              await deleteShare(file.share_id!);
+              const isP2P = isP2PPost || (typeof file.share_id === 'string' && file.share_id.startsWith('p2p_')) || (typeof groupId === 'string' && groupId.startsWith('p2p_'));
+              if (isP2P) {
+                const p2pId = p2pPostId || (typeof groupId === 'string' ? groupId : null) || String(file.share_id);
+                if (isLastFile) {
+                  await deleteShareGroup(p2pId);
+                } else {
+                  const feed = await getLocalP2PFeed();
+                  const targetPost = (feed || []).find((p: any) => String(p.id) === String(p2pId) || String(p.id) === String(item?.group_id));
+                  if (targetPost && Array.isArray(targetPost.files)) {
+                    targetPost.files = targetPost.files.filter((f: any, idx: number) => {
+                      const fId = `${targetPost.id}_${idx}`;
+                      return fId !== String(file.share_id) && f.name !== file.path;
+                    });
+                    await saveP2PFeedItem(targetPost);
+                  }
+                }
+              } else {
+                await deleteShare(file.share_id!);
+              }
               hapticSuccess();
               if (isLastFile) {
                 onClose();
@@ -1254,7 +1317,7 @@ function ManageShareModal({
         },
       ]
     );
-  }, [files.length, onClose, onDeleted, onUpdated]);
+  }, [files.length, onClose, onDeleted, onUpdated, isP2PPost, p2pPostId, groupId, item?.group_id]);
 
   const handleDeletePost = useCallback(() => {
     if (deleting) return;
@@ -1269,9 +1332,11 @@ function ManageShareModal({
           onPress: async () => {
             setDeleting(true);
             try {
-              if (groupId) {
-                await deleteShareGroup(groupId);
-              } else if (item?.share_id != null) {
+              // For P2P posts use p2pPostId (group_id or share_id); server posts use groupId.
+              const deleteId = isP2PPost ? p2pPostId : groupId;
+              if (deleteId) {
+                await deleteShareGroup(deleteId);
+              } else if (!isP2PPost && item?.share_id != null) {
                 await deleteShare(item.share_id);
               }
               hapticSuccess();
@@ -1287,7 +1352,7 @@ function ManageShareModal({
         },
       ]
     );
-  }, [groupId, item, deleting, onClose, onDeleted]);
+  }, [isP2PPost, p2pPostId, groupId, item, deleting, onClose, onDeleted]);
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
@@ -1470,9 +1535,11 @@ function ManageShareModal({
                 </Text>
                 <View style={modalSheetStyles.fileListContainer}>
                   {files.map((file, idx) => {
-                    const thumbUrl = file.share_id != null && serverConfig
-                      ? buildShareThumbnailUrl(serverConfig, file.share_id)
-                      : null;
+                    const thumbUrl = (file as any).uri
+                      ? (file as any).uri
+                      : file.share_id != null && serverConfig
+                        ? buildShareThumbnailUrl(serverConfig, file.share_id)
+                        : null;
                     const fileName = (file.path ? file.path.split(/[\\/]/).pop() : '') || `File ${idx + 1}`;
                     const isRemoving = removingFileId === file.share_id;
                     const category = getFileCategory(file.path);
@@ -2085,6 +2152,8 @@ type SourceSelectorProps = {
   isOffline: boolean;
   onModeChange: (mode: SourceMode) => void;
   onSourceSelect: (source: SharedSource) => void;
+  onAddDriveFolder: (link: string, apiKey: string) => Promise<void>;
+  onRemoveDriveFolder: (source: SharedSource) => void;
   colors: AppColors;
   showModeSwitch?: boolean;
 };
@@ -2092,11 +2161,33 @@ type SourceSelectorProps = {
 function SourceSelector({
   mode, sharedSources, selectedSourceId,
   isLoadingSources, isOffline,
-  onModeChange, onSourceSelect, colors,
+  onModeChange, onSourceSelect, onAddDriveFolder, onRemoveDriveFolder, colors,
   showModeSwitch = true,
 }: SourceSelectorProps) {
   const [showSourceMenu, setShowSourceMenu] = useState(false);
+  const [showDriveModal, setShowDriveModal] = useState(false);
+  const [driveLink, setDriveLink] = useState('');
+  const [driveApiKey, setDriveApiKey] = useState('');
+  const driveApiKeyRef = useRef(driveApiKey);
+  const [driveBusy, setDriveBusy] = useState(false);
   const selectedSource = sharedSources.find(s => s.id === selectedSourceId);
+
+  useEffect(() => {
+    driveApiKeyRef.current = driveApiKey;
+  }, [driveApiKey]);
+
+  useEffect(() => {
+    if (!showDriveModal) return;
+    let active = true;
+    const valueWhenRequested = driveApiKeyRef.current;
+    getGoogleDriveApiKey().then(key => {
+      if (active && key && driveApiKeyRef.current === valueWhenRequested) {
+        driveApiKeyRef.current = key;
+        setDriveApiKey(key);
+      }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [showDriveModal]);
 
   if (!showModeSwitch) return null;
 
@@ -2141,9 +2232,17 @@ function SourceSelector({
 
       {mode === 'shared' && (
         <View style={srcStyles.sourceRow}>
-          {isOffline ? (
+          <TouchableOpacity
+            style={[srcStyles.addDriveButton, { borderColor: colors.primary, backgroundColor: colors.primarySoft }]}
+            onPress={() => setShowDriveModal(true)}
+            activeOpacity={0.8}
+          >
+            <AppIcon androidName="add_link" iosName="link.badge.plus" color={colors.primary} size={16} />
+            <Text style={[srcStyles.addDriveText, { color: colors.primary }]}>Add Google Drive folder</Text>
+          </TouchableOpacity>
+          {isOffline && sharedSources.length === 0 ? (
             <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
-              Connect to a server to load shared folders.
+              Connect to a server for its shared folders, or add a public Drive folder above.
             </Text>
           ) : isLoadingSources ? (
             <View style={srcStyles.sourceLoadingRow}>
@@ -2154,10 +2253,15 @@ function SourceSelector({
             </View>
           ) : sharedSources.length === 0 ? (
             <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
-              No shared folders configured. Add folders in the Desktop app → Settings.
+              No shared folders configured. Add a server folder in Settings or add a public Drive folder above.
             </Text>
           ) : (
             <>
+              {isOffline && (
+                <Text style={[srcStyles.noSourceText, { color: colors.textMuted }]}>
+                  Offline mode — showing Google Drive folders saved on this phone.
+                </Text>
+              )}
               <View style={srcStyles.sharedControlsRow}>
                 <TouchableOpacity
                   style={[srcStyles.sourcePicker, { backgroundColor: colors.surfaceElevated, borderColor: colors.surfaceBorder }]}
@@ -2175,31 +2279,108 @@ function SourceSelector({
               {showSourceMenu && (
                 <View style={[srcStyles.sourceMenu, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
                   {sharedSources.map(src => (
-                    <TouchableOpacity
+                    <View
                       key={src.id}
                       style={[
                         srcStyles.sourceMenuItem,
                         src.id === selectedSourceId && { backgroundColor: colors.primarySoft },
                       ]}
-                      onPress={() => {
-                        onSourceSelect(src);
-                        setShowSourceMenu(false);
-                      }}
-                      activeOpacity={0.75}
                     >
-                      <AppIcon androidName="folder" iosName="folder.fill" color={src.id === selectedSourceId ? colors.primary : colors.textSecondary} size={16} />
-                      <Text style={[srcStyles.sourceMenuItemText, { color: src.id === selectedSourceId ? colors.primary : colors.text }]}>
-                        {src.label}
-                      </Text>
-                      {src.id === selectedSourceId && (
-                        <AppIcon androidName="check" iosName="checkmark" color={colors.primary} size={14} />
+                      <TouchableOpacity
+                        style={srcStyles.sourceMenuSelect}
+                        onPress={() => {
+                          onSourceSelect(src);
+                          setShowSourceMenu(false);
+                        }}
+                        activeOpacity={0.75}
+                      >
+                        <AppIcon androidName="folder" iosName="folder.fill" color={src.id === selectedSourceId ? colors.primary : colors.textSecondary} size={16} />
+                        <Text style={[srcStyles.sourceMenuItemText, { color: src.id === selectedSourceId ? colors.primary : colors.text }]} numberOfLines={1}>
+                          {src.label}
+                        </Text>
+                        {src.id === selectedSourceId && (
+                          <AppIcon androidName="check" iosName="checkmark" color={colors.primary} size={14} />
+                        )}
+                      </TouchableOpacity>
+                      {src.local && (
+                        <TouchableOpacity
+                          onPress={() => onRemoveDriveFolder(src)}
+                          style={srcStyles.sourceRemove}
+                          accessibilityLabel={`Remove ${src.label} from this phone`}
+                        >
+                          <AppIcon androidName="delete_outline" iosName="trash" color={colors.textMuted} size={16} />
+                        </TouchableOpacity>
                       )}
-                    </TouchableOpacity>
+                    </View>
                   ))}
                 </View>
               )}
             </>
           )}
+          <Modal visible={showDriveModal} transparent animationType="fade" onRequestClose={() => {
+            void saveGoogleDriveApiKey(driveApiKey).catch(() => {});
+            setShowDriveModal(false);
+          }}>
+            <View style={srcStyles.driveModalBackdrop}>
+              <View style={[srcStyles.driveModal, { backgroundColor: colors.surface, borderColor: colors.surfaceBorder }]}>
+                <Text style={[srcStyles.driveModalTitle, { color: colors.text }]}>Add Google Drive folder</Text>
+                <Text style={[srcStyles.driveModalHint, { color: colors.textSecondary }]}>Share the folder as “Anyone with the link”. Google also requires an API key for apps to list its contents.</Text>
+                <TextInput
+                  value={driveLink}
+                  onChangeText={setDriveLink}
+                  placeholder="Paste Google Drive folder link"
+                  placeholderTextColor={colors.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  style={[srcStyles.driveInput, { color: colors.text, borderColor: colors.surfaceBorder, backgroundColor: colors.surfaceElevated }]}
+                />
+                <TextInput
+                  value={driveApiKey}
+                  onChangeText={value => {
+                    driveApiKeyRef.current = value;
+                    setDriveApiKey(value);
+                  }}
+                  onEndEditing={() => { void saveGoogleDriveApiKey(driveApiKey).catch(() => {}); }}
+                  placeholder="Google Drive API key (needed for offline/P2P)"
+                  placeholderTextColor={colors.textMuted}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  style={[srcStyles.driveInput, { color: colors.text, borderColor: colors.surfaceBorder, backgroundColor: colors.surfaceElevated }]}
+                />
+                <Text style={[srcStyles.driveModalHint, { color: colors.textMuted }]}>Optional when the connected server already has a key. Add one here for offline and P2P use; it is saved in the app.</Text>
+                <Text
+                  onPress={() => Linking.openURL('https://console.cloud.google.com/apis/credentials').catch(() => {})}
+                  style={[srcStyles.driveHelpLink, { color: colors.primary }]}
+                >Need an API key? Open Google Cloud Console</Text>
+                <View style={srcStyles.driveModalActions}>
+                  <TouchableOpacity onPress={() => {
+                    void saveGoogleDriveApiKey(driveApiKey).catch(() => {});
+                    setShowDriveModal(false);
+                  }} style={srcStyles.driveAction}>
+                    <Text style={{ color: colors.textSecondary, fontWeight: '700' }}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    disabled={driveBusy || !driveLink.trim()}
+                    style={[srcStyles.driveAction, { backgroundColor: colors.primary, borderRadius: Radius.md, opacity: driveBusy || !driveLink.trim() ? 0.6 : 1 }]}
+                    onPress={async () => {
+                      setDriveBusy(true);
+                      try {
+                        await onAddDriveFolder(driveLink.trim(), driveApiKey.trim());
+                        setDriveLink('');
+                        setShowDriveModal(false);
+                      } catch (err: any) {
+                        Alert.alert('Google Drive folder', sanitizeErrorMessage(err, 'Could not access this folder.'));
+                      } finally {
+                        setDriveBusy(false);
+                      }
+                    }}
+                  >
+                    {driveBusy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: '#fff', fontWeight: '700' }}>Add folder</Text>}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </Modal>
         </View>
       )}
     </View>
@@ -2229,6 +2410,16 @@ const srcStyles = StyleSheet.create({
   },
   pillText: { fontSize: TextScale.xs, fontWeight: '700' },
   sourceRow: { paddingHorizontal: Spacing.four, paddingTop: Spacing.two },
+  addDriveButton: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 7, borderWidth: 1, borderRadius: Radius.md, paddingHorizontal: 11, paddingVertical: 8, marginBottom: Spacing.two },
+  addDriveText: { fontSize: TextScale.xs, fontWeight: '700' },
+  driveModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', padding: 22 },
+  driveModal: { borderWidth: 1, borderRadius: Radius.lg, padding: 20, gap: 12 },
+  driveModalTitle: { fontSize: 18, fontWeight: '800' },
+  driveModalHint: { fontSize: 13, lineHeight: 18 },
+  driveHelpLink: { fontSize: 12, fontWeight: '700', textDecorationLine: 'underline' },
+  driveInput: { borderWidth: 1, borderRadius: Radius.md, paddingHorizontal: 12, paddingVertical: 11, fontSize: 14 },
+  driveModalActions: { flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 4 },
+  driveAction: { paddingHorizontal: 13, paddingVertical: 10, minWidth: 70, alignItems: 'center' },
   sourceLoadingRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   sourceLoadingText: { fontSize: TextScale.xs },
   noSourceText: { fontSize: TextScale.xs, lineHeight: 18 },
@@ -2257,10 +2448,9 @@ const srcStyles = StyleSheet.create({
   sourceMenuItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: Spacing.two,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.three,
   },
+  sourceMenuSelect: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: Spacing.two, paddingHorizontal: Spacing.three, paddingVertical: Spacing.three },
+  sourceRemove: { paddingHorizontal: Spacing.three, paddingVertical: Spacing.three },
   sourceMenuItemText: { flex: 1, fontSize: TextScale.sm, fontWeight: '500' },
   viewSwitcherWrap: {
     flexDirection: 'row',
@@ -2509,7 +2699,9 @@ const PreviewModal = React.memo(function PreviewModal({
   // 'shared' mode with the item's own source_id (the modal's sourceMode is
   // 'phone' in the Feed tab). Library rows keep the modal's sourceMode.
   const getUrlForFile = useCallback((f: RemoteFile | null): string => {
-    if (!f || !serverConfig) return '';
+    if (!f) return '';
+    if ((f as any).uri) return (f as any).uri;
+    if (!serverConfig) return '';
     if (f.kind === 'share' && f.share_id != null) {
       return buildShareDownloadUrl(serverConfig, f.share_id);
     }
@@ -2520,7 +2712,9 @@ const PreviewModal = React.memo(function PreviewModal({
   }, [serverConfig, sourceMode, selectedSourceId]);
 
   const getVideoPreviewUrlForFile = useCallback((f: RemoteFile | null): string => {
-    if (!f || !serverConfig) return '';
+    if (!f) return '';
+    if ((f as any).uri) return (f as any).uri;
+    if (!serverConfig) return '';
     if (f.kind === 'share' && f.share_id != null) {
       return buildSharePreviewUrl(serverConfig, f.share_id);
     }
@@ -3208,11 +3402,13 @@ function NativeVideoPreviewPlayer({
     };
   }, [onSeekingChange]);
 
+  const isLocal = Boolean(previewUri && (previewUri.startsWith('file://') || previewUri.startsWith('content://')));
+
   const source = useMemo<VideoSource>(() => ({
     uri: previewUri,
-    useCaching: true,
-    contentType: 'progressive',
-  }), [previewUri]);
+    useCaching: !isLocal,
+    contentType: isLocal ? undefined : 'progressive',
+  }), [previewUri, isLocal]);
 
   const player = videoModule.useVideoPlayer(source, p => {
     p.loop = true;
@@ -3271,10 +3467,11 @@ function NativeVideoPreviewPlayer({
       ) {
         previewFallbackAttemptedRef.current = true;
         isUpgradingRef.current = true;
+        const isOrigLocal = Boolean(originalUri && (originalUri.startsWith('file://') || originalUri.startsWith('content://')));
         void player.replaceAsync({
           uri: originalUri,
-          useCaching: true,
-          contentType: 'progressive',
+          useCaching: !isOrigLocal,
+          contentType: isOrigLocal ? undefined : 'progressive',
         }).catch(() => {
           initialLoadDoneRef.current = true;
           setShowBuffering(false);
@@ -3318,15 +3515,15 @@ function NativeVideoPreviewPlayer({
   const grantLocationXRef = useRef(0);
 
   useEffect(() => {
+    if (isSeeking || !player.playing) return;
     const interval = setInterval(() => {
-      if (isSeeking) return;
       safeMediaCall(() => {
         setPositionSec(player.currentTime || 0);
         setDurationSec(player.duration || 0);
       });
     }, 250);
     return () => clearInterval(interval);
-  }, [player, isSeeking]);
+  }, [player, player.playing, isSeeking]);
 
   const togglePlay = useCallback(() => {
     if (player.playing) {
@@ -3941,6 +4138,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   useFocusEffect(
     useCallback(() => {
+      setUIPriorityMode(true);
       let active = true;
       getTodaysMemories()
         .then(res => {
@@ -3954,6 +4152,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           if (active) setHasMemories(false);
         });
       return () => {
+        setUIPriorityMode(false);
         active = false;
       };
     }, [])
@@ -4022,6 +4221,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<{ current: number; total: number; fileName: string; bytesWritten: number; bytesTotal: number } | null>(null);
   const [serverStatus, setServerStatus] = useState<'connected' | 'disconnected' | 'unknown' | 'checking'>('unknown');
+  const [pairedPeers, setPairedPeers] = useState<any[]>([]);
   const downloadActiveRef = useRef(false);
   const navigation = useNavigation();
   const listRef = useRef<FlatList<any>>(null);
@@ -4040,6 +4240,12 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     sortFieldRef.current = sortField;
     sortDirRef.current = sortDir;
   }, [sortField, sortDir]);
+
+  useEffect(() => {
+    getPairedPeers().then(setPairedPeers).catch(() => {});
+    const peersSub = DeviceEventEmitter.addListener('p2p-peers-updated', (p) => setPairedPeers(p || []));
+    return () => { peersSub.remove(); };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -4117,10 +4323,14 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   }, []);
 
   const sourceModeRef = useRef(sourceMode);
+  const sharedSourcesRef = useRef(sharedSources);
   const sharedSourcesGen = useRef(0);
   useEffect(() => {
     sourceModeRef.current = sourceMode;
   }, [sourceMode]);
+  useEffect(() => {
+    sharedSourcesRef.current = sharedSources;
+  }, [sharedSources]);
 
   // Load shared sources — invoke when not offline (connected or checking)
   const loadSharedSources = useCallback(async () => {
@@ -4151,15 +4361,58 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
   }, []);
 
-  // Server connection check
+  const handleAddDriveFolder = useCallback(async (link: string, apiKey: string) => {
+    const source = await addGoogleDriveSource(link, '', apiKey);
+    setSharedSources(prev => [...prev.filter(s => s.id !== source.id), source]);
+    setSelectedSourceId(source.id);
+    setFiles([]);
+    setTree(null);
+    setExpandedKeys(new Set());
+    setSelectedPaths(new Set());
+  }, []);
+
+  const handleRemoveDriveFolder = useCallback((source: SharedSource) => {
+    Alert.alert('Remove Google Drive folder?', `“${source.label}” will be removed from this phone. The files in Google Drive will not be deleted.`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Remove', style: 'destructive', onPress: () => {
+        void removeGoogleDriveSource(source.id).then(() => {
+          setSharedSources(prev => prev.filter(item => item.id !== source.id));
+          if (selectedSourceId === source.id) {
+            setSelectedSourceId(null);
+            setFiles([]);
+            setTree(null);
+            setSelectedPaths(new Set());
+          }
+        }).catch(() => Alert.alert('Could not remove folder', 'Please try again.'));
+      } },
+    ]);
+  }, [selectedSourceId]);
+
+  // Server connection check: fast probe (≤1500ms) with mutual exclusivity (server vs p2p)
   const checkServer = useCallback(async (alive?: () => boolean) => {
     const stillAlive = alive ?? (() => true);
+    const showOfflineDriveSources = async () => {
+      if (sourceModeRef.current !== 'shared') return;
+      const localSources: SharedSource[] = await getLocalDriveSharedSources();
+      if (!stillAlive() || !restoreMountedRef.current) return;
+      setSharedSources(localSources);
+      setSelectedSourceId(prev => {
+        if (!localSources.length) return null;
+        const previous = sharedSourcesRef.current.find(source => source.id === prev);
+        const matching = previous?.drive_folder_id
+          ? localSources.find(source => source.drive_folder_id === previous.drive_folder_id)
+          : null;
+        return matching?.id || (localSources.some(source => source.id === prev) ? prev : localSources[0].id);
+      });
+    };
     const ip = await getServerIp();
     if (!stillAlive()) return;
     if (!ip) {
       sharedSourcesGen.current += 1;
       setIsLoadingSources(false);
-      setServerStatus('unknown');
+      setServerStatus('disconnected');
+      await setServerAvailable(false);
+      await showOfflineDriveSources();
       return;
     }
 
@@ -4167,6 +4420,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     if (!stillAlive()) return;
     if (snapshot?.active) {
       setServerStatus('connected');
+      await setServerAvailable(true);
       loadServerConfig();
       if (sourceModeRef.current === 'shared') {
         void loadSharedSources();
@@ -4174,65 +4428,20 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       return;
     }
 
-    // Keep showing connected while re-probing to avoid offline UI flash.
-    setServerStatus(prev => (prev === 'connected' ? prev : 'checking'));
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
-    try {
-      const result = await checkDeviceConnection({ signal: controller.signal });
-      if (!stillAlive()) return;
-      if (result.connected) {
-        setServerStatus('connected');
-        loadServerConfig();
-        if (sourceModeRef.current === 'shared') {
-          void loadSharedSources();
-        }
-        return;
-      }
+    const reachable = await checkServerReachable({ timeoutMs: 1500 });
+    if (!stillAlive()) return;
 
-      // Attempt mesh failover re-discovery before marking offline
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false, reconnected: false }));
-      if (!stillAlive()) return;
-      if (resolved.ok && resolved.reconnected) {
-        try {
-          const retry = await checkDeviceConnection();
-          if (!stillAlive()) return;
-          if (retry.connected) {
-            setServerStatus('connected');
-            loadServerConfig();
-            if (sourceModeRef.current === 'shared') {
-              void loadSharedSources();
-            }
-            return;
-          }
-        } catch {}
+    if (reachable) {
+      setServerStatus('connected');
+      loadServerConfig();
+      if (sourceModeRef.current === 'shared') {
+        void loadSharedSources();
       }
+    } else {
       sharedSourcesGen.current += 1;
       setIsLoadingSources(false);
       setServerStatus('disconnected');
-    } catch {
-      if (!stillAlive()) return;
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false, reconnected: false }));
-      if (!stillAlive()) return;
-      if (resolved.ok && resolved.reconnected) {
-        try {
-          const retry = await checkDeviceConnection();
-          if (!stillAlive()) return;
-          if (retry.connected) {
-            setServerStatus('connected');
-            loadServerConfig();
-            if (sourceModeRef.current === 'shared') {
-              void loadSharedSources();
-            }
-            return;
-          }
-        } catch {}
-      }
-      sharedSourcesGen.current += 1;
-      setIsLoadingSources(false);
-      setServerStatus('disconnected');
-    } finally {
-      clearTimeout(timeout);
+      await showOfflineDriveSources();
     }
   }, [loadServerConfig, loadSharedSources]);
 
@@ -4244,6 +4453,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   // True offline only — "checking" stays fully interactive like before.
   const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown';
+  const isLocalDriveSelection = sourceMode === 'shared' && String(selectedSourceId || '').startsWith('local_drive_');
 
   const handleModeChange = useCallback((mode: SourceMode) => {
     if (mode === sourceModeRef.current) return;
@@ -4265,11 +4475,10 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       setSelectedSourceId(null);
       return;
     }
-    // Load whenever we are not offline (connected or checking).
-    if (serverStatus !== 'disconnected' && serverStatus !== 'unknown') {
-      void loadSharedSources();
-    }
-  }, [loadSharedSources, serverStatus]);
+    // The picker merges the server sources with locally saved public Drive
+    // sources, so it remains useful while offline and in P2P mode.
+    void loadSharedSources();
+  }, [loadSharedSources]);
 
   const handleSourceSelect = useCallback((source: SharedSource) => {
     setSelectedSourceId(source.id);
@@ -4392,17 +4601,20 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   // Reaction handler
   const handleToggleReaction = useCallback(async (file: RemoteFile, emoji: string) => {
-    if (!file.media_id) return;
+    const targetId = file.media_id ?? file.group_id ?? file.share_id ?? (file as any).id;
+    if (!targetId) return;
     hapticSelection();
 
     const currentReactions = file.user_reactions || [];
     const currentCounts = { ...(file.reaction_counts || {}) };
     const hasReacted = currentReactions.includes(emoji);
-    // Prefer media_id identity so a reaction updates the right card even when
-    // the unified feed carries two items with the same relative path from
-    // different sources; fall back to path for library rows.
-    const sameMedia = (f: RemoteFile) =>
-      file.media_id != null && f.media_id != null ? f.media_id === file.media_id : f.path === file.path;
+
+    const sameMedia = (f: RemoteFile) => {
+      if (file.media_id != null && f.media_id != null) return f.media_id === file.media_id;
+      if (file.group_id != null && f.group_id != null) return f.group_id === file.group_id;
+      if (file.share_id != null && f.share_id != null) return f.share_id === file.share_id;
+      return f.path === file.path;
+    };
 
     const updatedReactions = hasReacted
       ? currentReactions.filter(e => e !== emoji)
@@ -4423,7 +4635,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     setFiles(updateList);
 
     try {
-      const res = await reactToMedia(file.media_id, emoji);
+      const res = await reactToMedia(targetId, emoji);
       if (res?.counts && res?.user_reactions) {
         const syncServer = (list: RemoteFile[]) =>
           list.map(f =>
@@ -4447,13 +4659,14 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
 
   // Keep a feed card's comment count in sync after add/delete inside the
   // CommentsModal, without refetching the whole feed (snapshot ordering holds).
-  const handleCommentCountChange = useCallback((mediaId: number, delta: number) => {
+  const handleCommentCountChange = useCallback((mediaId: number | string, delta: number) => {
     setFiles(list =>
-      list.map(f =>
-        f.media_id === mediaId
+      list.map(f => {
+        const matches = f.media_id === mediaId || f.group_id === mediaId || f.share_id === mediaId;
+        return matches
           ? { ...f, comment_count: Math.max(0, (f.comment_count || 0) + delta) }
-          : f
-      )
+          : f;
+      })
     );
   }, []);
 
@@ -4563,7 +4776,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   // Fetch files from server
   const handleFetch = useCallback(async (opts?: { quiet?: boolean; ignoreOffline?: boolean; preserveSelection?: boolean }) => {
     if (fetchingRef.current || isDownloading) return;
-    if (!opts?.ignoreOffline && isOffline) return;
+    if (!opts?.ignoreOffline && isOffline && !isFeedMode && !isLocalDriveSelection) return;
     if (sourceMode === 'shared' && !selectedSourceId) {
       if (!opts?.quiet) Alert.alert('No Source', 'Please select a shared folder first.');
       return;
@@ -4667,9 +4880,92 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       fetchingRef.current = false;
       if (restoreMountedRef.current) setIsFetching(false);
     }
-  }, [isOffline, isDownloading, sourceMode, selectedSourceId, isFeedMode, sortField, sortDir, loadServerConfig]);
+  }, [isOffline, isDownloading, sourceMode, selectedSourceId, isFeedMode, sortField, sortDir, loadServerConfig, isLocalDriveSelection]);
+
+  // Real-time listener: refresh feed and update social metrics live
+  useEffect(() => {
+    const feedSub = DeviceEventEmitter.addListener('feed_updated', (newPost?: any) => {
+      if (isFeedMode && restoreMountedRef.current) {
+        if (newPost && (newPost.id || newPost.group_id)) {
+          setFiles((prev) => {
+            const mapped = mapFeedItem(newPost);
+            const targetId = mapped.group_id || mapped.id;
+            const existingIdx = prev.findIndex((f) => (f.group_id || f.id) === targetId);
+            if (existingIdx >= 0) {
+              const updated = [...prev];
+              updated[existingIdx] = { ...updated[existingIdx], ...mapped };
+              return updated;
+            }
+            return [mapped, ...prev];
+          });
+        }
+        fetchingRef.current = false;
+        void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
+      }
+    });
+
+    const p2pFeedSub = DeviceEventEmitter.addListener('p2p-feed-updated', () => {
+      if (isFeedMode && restoreMountedRef.current) {
+        fetchingRef.current = false;
+        void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
+      }
+    });
+
+    const p2pShareSub = DeviceEventEmitter.addListener('p2p-share-received', (newPost?: any) => {
+      if (isFeedMode && restoreMountedRef.current) {
+        if (newPost && (newPost.id || newPost.group_id)) {
+          setFiles((prev) => {
+            const mapped = mapFeedItem(newPost);
+            const targetId = mapped.group_id || mapped.id;
+            const existingIdx = prev.findIndex((f) => (f.group_id || f.id) === targetId);
+            if (existingIdx >= 0) {
+              const updated = [...prev];
+              updated[existingIdx] = { ...updated[existingIdx], ...mapped };
+              return updated;
+            }
+            return [mapped, ...prev];
+          });
+        }
+        fetchingRef.current = false;
+        void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
+      }
+    });
+
+    const modeSub = DeviceEventEmitter.addListener('app_mode_changed', ({ mode }: { mode: string }) => {
+      if (isFeedMode && restoreMountedRef.current) {
+        setServerStatus(mode === 'server' ? 'connected' : 'disconnected');
+        fetchingRef.current = false;
+        void handleFetch({ quiet: true, ignoreOffline: true, preserveSelection: true });
+      }
+    });
+
+    const socialSub = DeviceEventEmitter.addListener('social_updated', (data: any) => {
+      if (!restoreMountedRef.current || !data?.media_id) return;
+      setFiles((prev) =>
+        prev.map((f) => {
+          if (f.media_id === data.media_id) {
+            return {
+              ...f,
+              reaction_counts: data.counts || f.reaction_counts,
+              comment_count: data.total_comments !== undefined ? data.total_comments : f.comment_count,
+            };
+          }
+          return f;
+        })
+      );
+    });
+
+    return () => {
+      feedSub.remove();
+      p2pFeedSub.remove();
+      p2pShareSub.remove();
+      modeSub.remove();
+      socialSub.remove();
+    };
+  }, [isFeedMode, handleFetch]);
 
   const handleLoadMoreFeed = useCallback(async () => {
+
     if (feedLoadingMore || !feedHasMore || isFetching || isOffline || isDownloading) return;
     setFeedLoadingMore(true);
     try {
@@ -4717,8 +5013,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   }, []);
 
   const pickDirectPostFiles = useCallback(async (append = false) => {
-    if (isOffline) {
-      Alert.alert('Server Offline', 'Please connect to the backup server first before sharing a post.');
+    if (isOffline && pairedPeers.length === 0) {
+      Alert.alert('No Connection', 'Connect to the backup server or pair a nearby phone before sharing a post.');
       return;
     }
 
@@ -4789,7 +5085,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     } finally {
       setIsOpeningFolder(false);
     }
-  }, [isOffline, buildDirectPostFileItems]);
+  }, [isOffline, pairedPeers.length, buildDirectPostFileItems]);
 
   const handleOpenDirectPost = useCallback(async () => {
     await pickDirectPostFiles(false);
@@ -4808,7 +5104,10 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       onProgress?: (statusText: string) => void
     ) => {
       if (isOffline) {
-        throw new Error('Server is offline. Connect to the backup server and try again.');
+        const hasP2P = targetIds.some((id) => (pairedPeers || []).some((p) => p.peerId === id));
+        if (!hasP2P) {
+          throw new Error('Server is offline. Connect to the backup server or select a nearby peer.');
+        }
       }
       if (!targetIds.length) {
         throw new Error('Select at least one target device.');
@@ -4828,17 +5127,27 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         onProgress(`Uploading ${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'}…`);
       }
 
-      await createDirectPostShare(targetIds, caption, selectedFiles, onProgress);
+      const shareRes = await createDirectPostShare(targetIds, caption, selectedFiles, onProgress);
       hapticSuccess();
       setDirectPostFiles([]);
 
+      if (shareRes?.post) {
+        setFiles((prev) => {
+          const mapped = mapFeedItem(shareRes.post);
+          const targetId = mapped.group_id || mapped.id;
+          if (prev.some((f) => (f.group_id || f.id) === targetId)) return prev;
+          return [mapped, ...prev];
+        });
+      }
+
+      fetchingRef.current = false;
       void handleFetch({ quiet: false, ignoreOffline: true, preserveSelection: true });
       Alert.alert(
         'Post Published!',
         `Successfully shared ${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'} to the feed.`
       );
     },
-    [handleFetch, isOffline]
+    [handleFetch, isOffline, pairedPeers]
   );
 
   const handleHidePost = useCallback((file: RemoteFile) => {
@@ -4852,7 +5161,19 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           style: 'destructive',
           onPress: async () => {
             try {
-              if (file.group_id && serverConfig?.deviceId) {
+              const isP2PItem =
+                file.is_p2p ||
+                (typeof file.group_id === 'string' && file.group_id.startsWith('p2p_')) ||
+                (file.share_id != null && String(file.share_id).startsWith('p2p_'));
+
+              if (isP2PItem) {
+                // P2P received posts: remove entirely from local feed storage so
+                // it doesn't reappear after the next p2p-feed-updated refresh.
+                const localId = file.group_id || String(file.share_id ?? '');
+                if (localId) {
+                  await deleteP2PFeedItem(localId);
+                }
+              } else if (file.group_id && serverConfig?.deviceId) {
                 await removeShareTarget(file.group_id, serverConfig.deviceId);
               } else if (file.share_id != null && serverConfig?.deviceId) {
                 await removeShareTarget(String(file.share_id), serverConfig.deviceId);
@@ -4869,16 +5190,18 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   }, [serverConfig]);
 
   useEffect(() => {
-    if (isOffline || isDownloading) return;
+    if (isDownloading) return;
+    if (isOffline && !isFeedMode && !isLocalDriveSelection) return;
     // Feed sources from /api/feed (no shared source needed); shared mode requires selectedSourceId.
     if (!isFeedMode && sourceMode === 'shared' && !selectedSourceId) return;
     queueMicrotask(() => {
       void handleFetch({ quiet: true, preserveSelection: true });
     });
-  }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]);
+  }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch, isLocalDriveSelection]);
 
   useFocusEffect(useCallback(() => {
-    if (isOffline || isDownloading) return;
+    if (isDownloading) return;
+    if (isOffline && !isFeedMode && !isLocalDriveSelection) return;
     if (!isFeedMode && sourceMode === 'shared' && !selectedSourceId) return;
 
     // If a notification tap flagged a forced refresh, bypass any in-flight guard
@@ -4895,16 +5218,41 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     }
 
     void handleFetch({ quiet: true, preserveSelection: true });
-  }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch]));
+  }, [isFeedMode, sourceMode, selectedSourceId, isOffline, isDownloading, handleFetch, isLocalDriveSelection]));
 
-  // Poll reactions/comments every 30 s while Feed tab is in focus (Fix 4).
+  // Poll reactions/comments every 45 s while Feed tab is in focus, app is active, and server is online.
   useFocusEffect(useCallback(() => {
-    if (!isFeedMode) return;
-    const id = setInterval(() => {
-      void handleSilentFeedUpdate();
-    }, 30_000);
-    return () => clearInterval(id);
-  }, [isFeedMode, handleSilentFeedUpdate]));
+    if (!isFeedMode || isOffline) return;
+    let active = AppState.currentState === 'active';
+    let timerId: ReturnType<typeof setInterval> | null = null;
+
+    if (active) {
+      timerId = setInterval(() => {
+        if (!isOffline && !isDownloading && AppState.currentState === 'active') {
+          void handleSilentFeedUpdate();
+        }
+      }, 45_000);
+    }
+
+    const sub = AppState.addEventListener('change', (state) => {
+      active = state === 'active';
+      if (!active && timerId) {
+        clearInterval(timerId);
+        timerId = null;
+      } else if (active && !timerId) {
+        timerId = setInterval(() => {
+          if (!isOffline && !isDownloading && AppState.currentState === 'active') {
+            void handleSilentFeedUpdate();
+          }
+        }, 45_000);
+      }
+    });
+
+    return () => {
+      sub.remove();
+      if (timerId) clearInterval(timerId);
+    };
+  }, [isFeedMode, isOffline, isDownloading, handleSilentFeedUpdate]));
 
   // Live notification tap listener (Fix 1 edge case: user taps notification while already on feed)
   useEffect(() => {
@@ -5260,7 +5608,12 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
   // Download files
   const handleDownloadFiles = useCallback(async (pathSet: Set<string>) => {
     if (pathSet.size === 0 || downloadActiveRef.current) return;
-    if (serverStatus === 'disconnected' || serverStatus === 'unknown') {
+    const hasOnlyLocalFiles = Array.from(pathSet).every(path => {
+      const f = previewableFiles.find(x => x.path === path) || files.find(x => x.path === path);
+      return Boolean((f as any)?.uri);
+    });
+    const isDriveSource = sourceMode === 'shared' && String(selectedSourceId || '').startsWith('local_drive_');
+    if (!hasOnlyLocalFiles && !isDriveSource && (serverStatus === 'disconnected' || serverStatus === 'unknown')) {
       Alert.alert('Offline', 'Connect to a server before downloading files.');
       return;
     }
@@ -5307,6 +5660,27 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         publishProgress(completed, displayName, 0, knownSize);
 
         try {
+          // If file has a local uri already (from P2P received post/reel)
+          const localUri = (fileInfo as any)?.uri;
+          if (localUri) {
+            if (canSaveToGallery) {
+              await MediaLibrary.saveToLibraryAsync(localUri);
+              saved++;
+            } else if (FileSystem.documentDirectory) {
+              const safePath = sanitizeRelativePath(path);
+              const isDriveFile = String(selectedSourceId || '').startsWith('local_drive_') || sharedSources.some(s => s.id === selectedSourceId && s.type === 'google_drive');
+              const localPath = isDriveFile ? safePath.split('/').slice(1).join('/') : safePath;
+              const destUri = FileSystem.documentDirectory + localPath;
+              const folderUri = destUri.substring(0, destUri.lastIndexOf('/'));
+              const folderInfo = await FileSystem.getInfoAsync(folderUri);
+              if (!folderInfo.exists) await FileSystem.makeDirectoryAsync(folderUri, { intermediates: true });
+              await FileSystem.copyAsync({ from: localUri, to: destUri });
+              saved++;
+            }
+            completed++;
+            publishProgress(completed, displayName, 0, 0);
+            continue;
+          }
           if (!FileSystem.cacheDirectory) {
             failed++;
             completed++;
@@ -5314,7 +5688,9 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             continue;
           }
 
-          const localPath = sanitizeRelativePath(path);
+          const safePath = sanitizeRelativePath(path);
+          const isDriveFile = String(selectedSourceId || '').startsWith('local_drive_') || sharedSources.some(s => s.id === selectedSourceId && s.type === 'google_drive');
+          const localPath = isDriveFile ? safePath.split('/').slice(1).join('/') : safePath;
           const ext = localPath.split('.').pop()?.toLowerCase() ?? '';
           const isMedia = isMediaExtension(ext);
 
@@ -5334,7 +5710,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           if (isMedia && canSaveToGallery) {
             const tmpUri = FileSystem.cacheDirectory + 'restore_tmp_' + getCurrentTimestamp() + '_' + displayName;
             if (fileInfo?.share_id != null) {
-              await downloadShareFile(fileInfo.share_id, tmpUri, onFileProgress);
+              await downloadShareFile(fileInfo.share_id as any, tmpUri, onFileProgress);
             } else if (sourceMode === 'shared' && selectedSourceId) {
               await downloadSharedFile(selectedSourceId, path, tmpUri, onFileProgress);
             } else {
@@ -5377,7 +5753,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
           }
 
           if (fileInfo?.share_id != null) {
-            await downloadShareFile(fileInfo.share_id, destUri, onFileProgress);
+            await downloadShareFile(fileInfo.share_id as any, destUri, onFileProgress);
           } else if (sourceMode === 'shared' && selectedSourceId) {
             await downloadSharedFile(selectedSourceId, path, destUri, onFileProgress);
           } else {
@@ -5418,7 +5794,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         setDownloadProgress(null);
       }
     }
-  }, [files, previewableFiles, sourceMode, selectedSourceId, serverStatus]);
+  }, [files, previewableFiles, sourceMode, selectedSourceId, serverStatus, sharedSources]);
 
   const handleDownloadSingle = useCallback(async (file: RemoteFile) => {
     closePreview();
@@ -5436,6 +5812,99 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     [handleDownloadFiles, selectedPaths],
   );
 
+  const selectedVideoFiles = useMemo<RemoteFile[]>(() => {
+    if (selectedPaths.size === 0) return [];
+    const isVideo = (f: RemoteFile) => Boolean(f.is_video || getFileCategory(f.path) === 'video');
+    const matched = previewableFiles.filter(f => selectedPaths.has(f.path) && isVideo(f));
+    const matchedPaths = new Set(matched.map(f => f.path));
+    const extra = files.filter(f => selectedPaths.has(f.path) && !matchedPaths.has(f.path) && isVideo(f));
+    if (extra.length > 0) {
+      extra.sort((a, b) => compareRemoteFiles(a, b, sortField, sortDir));
+      return [...matched, ...extra];
+    }
+    return matched;
+  }, [selectedPaths, previewableFiles, files, sortField, sortDir]);
+
+  const handleOpenInReels = useCallback(async () => {
+    if (selectedVideoFiles.length === 0) return;
+    hapticSelection();
+
+    const cfg = serverConfig || await getConfig().catch(() => null);
+    const isShared = sourceMode === 'shared';
+    const reelsToPlay: ReelItem[] = selectedVideoFiles.map((file, idx) => {
+      const sourceKey = isShared ? (file.source_id ?? selectedSourceId ?? '') : (cfg?.deviceId || '');
+      let previewUri = file.uri
+        ? file.uri
+        : cfg
+          ? buildVideoPreviewUrl(cfg, file.path, sourceMode, file.source_id ?? selectedSourceId)
+          : '';
+      let thumbUri = file.thumb_uri
+        ? file.thumb_uri
+        : file.uri
+          ? file.uri
+          : cfg
+            ? buildThumbnailUrl(cfg, file.path, sourceMode, file.source_id ?? selectedSourceId)
+            : '';
+      let downloadUrl = file.uri
+        ? file.uri
+        : cfg
+          ? (isShared
+              ? `http://:/shared//download?relative_path=&device_id=&token=`
+              : `http://:/files/download?relative_path=&device_id=&token=`)
+          : '';
+
+      if (file.kind === 'share' && file.share_id != null && cfg) {
+        previewUri = file.uri || buildSharePreviewUrl(cfg, file.share_id);
+        thumbUri = file.thumb_uri || file.uri || buildShareThumbnailUrl(cfg, file.share_id);
+        downloadUrl = file.uri || buildShareDownloadUrl(cfg, file.share_id);
+      }
+
+      const filename = file.path.split(/[/\\]/).pop() ?? file.path;
+      const authorName = isShared
+        ? (sharedSources.find(s => s.id === sourceKey)?.label || 'Shared Folder')
+        : (cfg?.deviceId ? 'My Backup' : 'Phone Backup');
+
+      return {
+        reel_id: `custom_selection__`,
+        share_id: typeof file.share_id === 'number' ? file.share_id : (idx + 1),
+        media_id: file.media_id ?? null,
+        path: file.path,
+        shared_by: authorName,
+        shared_by_device_id: cfg?.deviceId || 'device',
+        caption: file.caption || filename,
+        created_at: file.modified_time || file.uploaded_time || Date.now(),
+        reaction_counts: {},
+        user_reactions: [],
+        comment_count: 0,
+        repost_count: 0,
+        view_count: 0,
+        duration: 0,
+        size: file.size,
+        is_own_post: true,
+        is_saved: false,
+        uri: previewUri,
+        thumb_uri: thumbUri,
+        library_source: isShared ? 'reel_shared' : 'reel_backup',
+        source_type: isShared ? 'shared' : 'phone',
+        source_key: sourceKey,
+        is_custom_selection: true,
+        download_url: downloadUrl,
+      } as ReelItem;
+    });
+
+    setCustomReelsSession({
+      reels: reelsToPlay,
+      sourceMode,
+      selectedSourceId,
+      timestamp: Date.now(),
+    });
+
+    router.push({
+      pathname: '/reels',
+      params: { custom: String(Date.now()) },
+    });
+  }, [selectedVideoFiles, sourceMode, selectedSourceId, serverConfig, sharedSources, router]);
+
 
   const warmPreviewUrl = useMemo(() => {
     if (!warmPreviewFile || !serverConfig || getFileCategory(warmPreviewFile.path) !== 'video') {
@@ -5450,7 +5919,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
     return buildVideoPreviewUrl(serverConfig, warmPreviewFile.path, sourceMode, selectedSourceId);
   }, [warmPreviewFile, serverConfig, sourceMode, selectedSourceId]);
 
-  const fetchDisabled = isFetching || isDownloading || isOffline ||
+  const fetchDisabled = isFetching || isDownloading || (isOffline && !isLocalDriveSelection) ||
     (sourceMode === 'shared' && !selectedSourceId);
 
   // Single overall progress: finished files + current file byte fraction.
@@ -5528,7 +5997,11 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
               {isFeedMode
                 ? feedDeviceFilter
                   ? `${baseFeedFiles.length} ${baseFeedFiles.length === 1 ? 'post' : 'posts'} shared by ${feedDeviceFilter.name}`
-                  : 'Your feed'
+                  : isOffline
+                    ? pairedPeers.length > 0
+                      ? `P2P Wi-Fi Active • ${pairedPeers.length} peer${pairedPeers.length === 1 ? '' : 's'} paired`
+                      : 'Standalone P2P Mode • Server offline'
+                    : 'Connected to Desktop Server'
                 : files.length > 0
                   ? isFiltering
                     ? `${filteredFiles.length.toLocaleString()} matching of ${files.length.toLocaleString()} files`
@@ -5540,8 +6013,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
             {isFeedMode && (
               <AnimatedPressable
                 onPress={handleOpenDirectPost}
-                style={[styles.actionBtn, (isOpeningFolder || isOffline) && styles.disabledBtn]}
-                disabled={isOpeningFolder || isOffline}
+                style={[styles.actionBtn, (isOpeningFolder || (isOffline && pairedPeers.length === 0)) && styles.disabledBtn]}
+                disabled={isOpeningFolder || (isOffline && pairedPeers.length === 0)}
                 scaleDown={0.92}
                 haptic
                 accessibilityLabel="Add post from device files"
@@ -5550,8 +6023,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
                   <ActivityIndicator size="small" color={colors.primary} />
                 ) : (
                   <>
-                    <AppIcon androidName="add" iosName="plus" color={isOffline ? colors.textMuted : colors.primary} size={17} fallback="+" />
-                    <Text style={[styles.actionBtnText, { color: isOffline ? colors.textMuted : colors.primary }]}>Post</Text>
+                    <AppIcon androidName="add" iosName="plus" color={(isOffline && pairedPeers.length === 0) ? colors.textMuted : colors.primary} size={17} fallback="+" />
+                    <Text style={[styles.actionBtnText, { color: (isOffline && pairedPeers.length === 0) ? colors.textMuted : colors.primary }]}>Post</Text>
                   </>
                 )}
               </AnimatedPressable>
@@ -5595,6 +6068,8 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
               isOffline={isOffline}
               onModeChange={handleModeChange}
               onSourceSelect={handleSourceSelect}
+              onAddDriveFolder={handleAddDriveFolder}
+              onRemoveDriveFolder={handleRemoveDriveFolder}
               colors={colors}
               showModeSwitch
             />
@@ -5630,20 +6105,16 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
               <Text style={[styles.selectionBarText, { color: colors.primary }]}>
                 {selectedPaths.size} {selectedPaths.size === 1 ? 'file' : 'files'} selected
               </Text>
-              <TouchableOpacity
-                onPress={() => {
-                  if (selectedPaths.size > MAX_SHARE_POST_FILES) {
-                    Alert.alert('Too many files', `You can share up to ${MAX_SHARE_POST_FILES} files in a single post.`);
-                    return;
-                  }
-                  setShareModalVisible(true);
-                }}
-                style={[styles.shareSelBtn, { backgroundColor: colors.primarySoft }, isOffline && styles.disabledBtn]}
-                disabled={isOffline}
-              >
-                <AppIcon androidName="share" iosName="square.and.arrow.up" color={colors.primary} size={15} />
-                <Text style={[styles.shareSelText, { color: colors.primary }]}>Share</Text>
-              </TouchableOpacity>
+              {selectedVideoFiles.length > 0 && (
+                <TouchableOpacity
+                  onPress={handleOpenInReels}
+                  style={[styles.reelsSelBtn, { backgroundColor: colors.primarySoft }]}
+                  activeOpacity={0.75}
+                >
+                  <AppIcon androidName="movie" iosName="play.rectangle" color={colors.primary} size={15} />
+                  <Text style={[styles.reelsSelText, { color: colors.primary }]}>Open in Reels</Text>
+                </TouchableOpacity>
+              )}
               <TouchableOpacity
                 onPress={() => { setSelectedPaths(new Set()); setSelectionMode(false); }}
                 style={styles.clearSelBtn}
@@ -5813,18 +6284,47 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       />
       </View>
 
-      {/* Download FAB */}
-      {selectedPaths.size > 0 && !isDownloading && (
-        <AnimatedPressable
-          style={[styles.fab, { bottom: BottomTabInset + Spacing.four }, isOffline && styles.disabledBtn]}
-          onPress={handleDownload}
-          disabled={isOffline}
-          scaleDown={0.94}
-        >
-          <AppIcon androidName="download" iosName="arrow.down.circle" color={colors.white} size={22} />
-          <Text style={styles.fabText}>Download {selectedPaths.size} {selectedPaths.size === 1 ? 'File' : 'Files'}</Text>
-        </AnimatedPressable>
-      )}
+      {/* Bottom Action Bar (Share & Download) */}
+      {selectedPaths.size > 0 && !isDownloading && (() => {
+        const hasOnlyLocalFiles = Array.from(selectedPaths).every(p => {
+          const f = previewableFiles.find(x => x.path === p) || files.find(x => x.path === p);
+          return Boolean((f as any)?.uri);
+        });
+        const isDownloadDisabled = isOffline && !hasOnlyLocalFiles;
+        const isShareDisabled = isOffline;
+
+        const onSharePress = () => {
+          if (selectedPaths.size > MAX_SHARE_POST_FILES) {
+            Alert.alert('Too many files', `You can share up to ${MAX_SHARE_POST_FILES} files in a single post.`);
+            return;
+          }
+          setShareModalVisible(true);
+        };
+
+        return (
+          <View style={[styles.fabContainer, { bottom: BottomTabInset + Spacing.four }]}>
+            <AnimatedPressable
+              style={[styles.fabBtn, styles.fabShareBtn, isShareDisabled && styles.disabledBtn]}
+              onPress={onSharePress}
+              disabled={isShareDisabled}
+              scaleDown={0.94}
+            >
+              <AppIcon androidName="share" iosName="square.and.arrow.up" color={colors.primary} size={18} />
+              <Text style={[styles.fabShareText, { color: colors.primary }]}>Share</Text>
+            </AnimatedPressable>
+
+            <AnimatedPressable
+              style={[styles.fabBtn, styles.fabDownloadBtn, isDownloadDisabled && styles.disabledBtn]}
+              onPress={handleDownload}
+              disabled={isDownloadDisabled}
+              scaleDown={0.94}
+            >
+              <AppIcon androidName="download" iosName="arrow.down.circle" color={colors.white} size={18} />
+              <Text style={styles.fabDownloadText}>Download</Text>
+            </AnimatedPressable>
+          </View>
+        );
+      })()}
 
       {/* Preview Modal */}
       <VideoPreviewPreloader uri={warmPreviewUrl} />
@@ -5849,6 +6349,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         visible={shareModalVisible}
         count={singleShareFile ? 1 : selectedPaths.size}
         colors={colors}
+        excludeDeviceIds={serverConfig?.deviceId ? [serverConfig.deviceId] : []}
         onClose={() => { setShareModalVisible(false); setSingleShareFile(null); }}
         onSubmit={handleShareSubmit}
       />
@@ -5861,18 +6362,18 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
         colors={colors}
         onClose={() => setManageGroupItem(null)}
         onDeleted={() => {
-          if (manageGroupItem?.group_id) {
-            setFiles(prev => prev.filter(f => f.group_id !== manageGroupItem.group_id));
-          } else if (manageGroupItem?.share_id != null) {
-            setFiles(prev => prev.filter(f => f.share_id !== manageGroupItem.share_id));
+          const targetId = manageGroupItem?.group_id || (manageGroupItem as any)?.id || manageGroupItem?.share_id;
+          if (targetId != null) {
+            setFiles(prev => prev.filter(f => f.group_id !== targetId && (f as any).id !== targetId && f.share_id !== targetId));
           }
           setManageGroupItem(null);
         }}
         onUpdated={({ caption, removedShareId }) => {
           if (!manageGroupItem) return;
           const updateItem = (f: RemoteFile): RemoteFile | null => {
-            const matches = manageGroupItem.group_id
-              ? f.group_id === manageGroupItem.group_id
+            const targetId = manageGroupItem.group_id || (manageGroupItem as any).id;
+            const matches = targetId
+              ? (f.group_id === targetId || (f as any).id === targetId)
               : f.share_id != null && f.share_id === manageGroupItem.share_id;
             if (!matches) return f;
             const updated = { ...f };
@@ -5924,7 +6425,7 @@ export default function RestoreScreen({ variant = 'library' }: { variant?: 'libr
       {/* Reactors list on a feed item */}
       <ReactorsListSheet
         visible={reactorsItem !== null}
-        mediaId={reactorsItem?.media_id}
+        mediaId={reactorsItem?.media_id ?? (reactorsItem as any)?.group_id ?? (reactorsItem as any)?.share_id}
         colors={colors}
         onClose={() => setReactorsItem(null)}
       />
@@ -6043,6 +6544,53 @@ const createStyles = (colors: AppColors) =>
       borderRadius: Radius.full, gap: Spacing.two, ...Shadows.soft,
     },
     fabText: { color: colors.white, fontWeight: '700', fontSize: TextScale.md },
+    fabContainer: {
+      position: 'absolute',
+      alignSelf: 'center',
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: Spacing.three,
+      zIndex: 10,
+    },
+    fabBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: Spacing.two + 4,
+      paddingHorizontal: Spacing.five,
+      borderRadius: Radius.full,
+      gap: Spacing.two,
+      ...Shadows.soft,
+    },
+    fabShareBtn: {
+      backgroundColor: colors.surface,
+      borderWidth: 1.5,
+      borderColor: colors.primary,
+    },
+    fabDownloadBtn: {
+      backgroundColor: colors.primary,
+    },
+    fabShareText: {
+      fontWeight: '700',
+      fontSize: TextScale.sm,
+    },
+    fabDownloadText: {
+      color: colors.white,
+      fontWeight: '700',
+      fontSize: TextScale.sm,
+    },
+    reelsSelBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: Spacing.one,
+      paddingHorizontal: Spacing.three,
+      paddingVertical: Spacing.one,
+      borderRadius: Radius.full,
+    },
+    reelsSelText: {
+      fontSize: TextScale.sm,
+      fontWeight: '700',
+    },
     disabledBtn: { opacity: 0.4 },
 
     emptyContainer: {

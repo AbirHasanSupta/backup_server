@@ -1,0 +1,390 @@
+##############################################################################
+# Phone Backup Server — Docker Compose
+#
+# SHARED STORAGE STRATEGY
+# ════════════════════════
+# All containers (app-api, sync-api, Celery workers) AND the desktop app share
+# the SAME physical directories on the host.  This means:
+#
+#   • Phone backups (actual media files)  → D:\PhoneBackup  (BACKUP_ROOT)
+#   • App data (DB¹, config, posts, reels, memories, caches)
+#                                         → C:\Users\Abir\AppData\Roaming\PhoneBackupServer
+#
+# ¹ Docker uses PostgreSQL; desktop EXE uses SQLite in the same APP_DATA_DIR.
+#   Both can coexist — the .db file is only written by whichever process holds it.
+#   Run the migration script to seed PG from the SQLite file.
+#
+# SERVICE SPLIT
+# ═════════════
+#   api       (SERVICE_ROLE=app)  — feed, reels, library, memories, admin, WS
+#   sync_api  (SERVICE_ROLE=sync) — /upload*, /files/check, /sync/*
+# Nginx path-routes so Android keeps one host:port. Interactive pages only need
+# already-backed-up files; reload the page after sync to see newly uploaded media.
+#
+# HOW TO START:
+#   1. Copy .env.example → .env and fill in secrets
+#   2. docker compose up -d
+#   3. (first time) python scripts/migrate_sqlite_to_postgres.py --merge-both
+#
+# VOLUMES (host-bind-mounts, NOT named Docker volumes):
+#   backup_storage → D:\PhoneBackup                        (phone backup files)
+#   app_data       → %APPDATA%\PhoneBackupServer            (config/db/cache)
+#
+# The web_admin static files are served from the project checkout (read-only).
+##############################################################################
+
+services:
+
+  # ── 1. Reverse Proxy & Ingress ────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: backup_nginx
+    restart: unless-stopped
+    # Keep ingress responsive while media uploads and workers are busy.
+    cpu_shares: 1024
+    ports:
+      # Browser / admin UI
+      - "80:80"
+      # Phone discovery defaults to port 8000 — map it onto nginx so scans find us
+      - "8000:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Serve shared media + generated assets through nginx for zero-copy downloads
+      - ${BACKUP_ROOT:-D:\PhoneBackup}:/backup_storage:ro
+      - ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}:/app_data:ro
+      - ${SHARED_DRIVE_G:-G:\}:/host_g:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      sync_api:
+        condition: service_healthy
+    networks:
+      - backup_net
+
+  # ── 2. Interactive App API (feed / reels / library / memories) ─────────────
+  api:
+    build: .
+    restart: unless-stopped
+    # Higher weight than sync and batch workers when Docker's host CPU is busy.
+    # Remove container_name so Compose can create API replicas for Nginx to balance.
+    cpu_shares: 2048
+    environment:
+      - SERVICE_ROLE=app
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
+      - DATABASE_BACKEND=postgres
+      - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_ENABLED=true
+      - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
+      # All containers write media here — same physical folder the desktop EXE uses
+      - BACKUP_ROOT=/backup_storage
+      # All containers write config/cache/posts/reels/memories here
+      # — same physical folder as the desktop EXE's AppData directory
+      - APP_DATA_DIR=/app_data
+      # Public Drive folder listing and server-side previews/downloads.
+      - GOOGLE_DRIVE_API_KEY=${GOOGLE_DRIVE_API_KEY:-}
+      # Local calendar for On-This-Day / capture-day bucketing.
+      # Default Asia/Dhaka; override via TZ/APP_TZ in .env if needed.
+      - TZ=${TZ:-Asia/Dhaka}
+      - APP_TZ=${APP_TZ:-${TZ:-Asia/Dhaka}}
+      # Host LAN IPs for phone discovery (comma-separated). Required in Docker
+      # because container networking only sees unreachable 172.x bridge addresses.
+      - ADVERTISED_IPS=${ADVERTISED_IPS:-}
+      - ADVERTISED_PORT=${ADVERTISED_PORT:-8000}
+      # Host Tailscale MagicDNS / 100.x addresses (CLI is on the host, not in
+      # the image). Mirrors desktop ``tailscale status`` advertising in /ping.
+      - TAILSCALE_IPS=${TAILSCALE_IPS:-}
+      - TAILSCALE_DNS_NAME=${TAILSCALE_DNS_NAME:-}
+      - ADVERTISED_TAILSCALE_IPS=${ADVERTISED_TAILSCALE_IPS:-}
+      - ADVERTISED_TAILSCALE_DNS=${ADVERTISED_TAILSCALE_DNS:-}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS:-4}
+      # Bounded per-Gunicorn-process pool for blocking filesystem/DB work.
+      - API_THREADPOOL_WORKERS=${API_THREADPOOL_WORKERS:-12}
+      # Per API process: cap cold-gallery thumbnail FFmpeg generation.
+      - THUMBNAIL_WORKERS=${THUMBNAIL_WORKERS:-2}
+      # These pools are per process; conservative defaults keep all Gunicorn
+      # and Celery child processes below PostgreSQL's normal connection cap.
+      - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
+      - PG_POOL_MAX_SIZE=${PG_POOL_MAX_SIZE:-8}
+    volumes:
+      # Phone backup files — bind-mount the same root the desktop app uses
+      - type: bind
+        source: ${BACKUP_ROOT:-D:\PhoneBackup}
+        target: /backup_storage
+      # App data (posts, reels, memories, quiz cards, caches, config)
+      # — bind-mount the same AppData folder the desktop EXE writes to
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
+      # Shared host drives
+      - type: bind
+        source: ${SHARED_DRIVE_G:-G:\}
+        target: /host_g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/ping >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - backup_net
+
+  # ── 2b. Sync / Upload API (isolated Gunicorn pool) ────────────────────────
+  # Owns /files/check, /upload*, /sync/* so bulk phone backups cannot starve
+  # interactive feed/reels/library workers. Shares Postgres + BACKUP_ROOT.
+  sync_api:
+    build: .
+    restart: unless-stopped
+    # Uploads remain concurrent, while interactive requests get CPU priority.
+    # Remove container_name so Compose can scale this service independently.
+    cpu_shares: 512
+    environment:
+      - SERVICE_ROLE=sync
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
+      - DATABASE_BACKEND=postgres
+      - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_ENABLED=true
+      - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
+      - BACKUP_ROOT=/backup_storage
+      - APP_DATA_DIR=/app_data
+      - TZ=${TZ:-Asia/Dhaka}
+      - APP_TZ=${APP_TZ:-${TZ:-Asia/Dhaka}}
+      - ADVERTISED_IPS=${ADVERTISED_IPS:-}
+      - ADVERTISED_PORT=${ADVERTISED_PORT:-8000}
+      - TAILSCALE_IPS=${TAILSCALE_IPS:-}
+      - TAILSCALE_DNS_NAME=${TAILSCALE_DNS_NAME:-}
+      - ADVERTISED_TAILSCALE_IPS=${ADVERTISED_TAILSCALE_IPS:-}
+      - ADVERTISED_TAILSCALE_DNS=${ADVERTISED_TAILSCALE_DNS:-}
+      # I/O-oriented but connection-budget aware: app(4×8) + sync(2×8) +
+      # Celery(5×8) stays under POSTGRES_MAX_CONNECTIONS=96.
+      - GUNICORN_WORKERS=${SYNC_GUNICORN_WORKERS:-2}
+      - API_THREADPOOL_WORKERS=${SYNC_API_THREADPOOL_WORKERS:-16}
+      - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
+      - PG_POOL_MAX_SIZE=${PG_POOL_MAX_SIZE:-8}
+      - GUNICORN_MAX_REQUESTS=${GUNICORN_MAX_REQUESTS:-10000}
+      - GUNICORN_MAX_REQUESTS_JITTER=${GUNICORN_MAX_REQUESTS_JITTER:-1000}
+    volumes:
+      - type: bind
+        source: ${BACKUP_ROOT:-D:\PhoneBackup}
+        target: /backup_storage
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
+      - type: bind
+        source: ${SHARED_DRIVE_G:-G:\}
+        target: /host_g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/ping >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - backup_net
+
+  # ── 3. Video Transcoding Worker (FFmpeg) ──────────────────────────────────
+  celery_worker_video:
+    build: .
+    container_name: backup_celery_video
+    restart: unless-stopped
+    cpu_shares: 512
+    command: ["sh", "-c", "exec celery -A celery_app worker -Q transcode_video -c $${CELERY_VIDEO_CONCURRENCY:-2} -l INFO"]
+    environment:
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
+      - DATABASE_BACKEND=postgres
+      - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
+      - REDIS_URL=redis://redis:6379/0
+      - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
+      - BACKUP_ROOT=/backup_storage
+      - APP_DATA_DIR=/app_data
+      - TZ=${TZ:-Asia/Dhaka}
+      - APP_TZ=${APP_TZ:-${TZ:-Asia/Dhaka}}
+      # Limit threads inside each FFmpeg process; without this, two video
+      # tasks can each consume all host cores and delay API traffic.
+      - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
+      - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
+      - PG_POOL_MAX_SIZE=${PG_POOL_MAX_SIZE:-8}
+    volumes:
+      - type: bind
+        source: ${BACKUP_ROOT:-D:\PhoneBackup}
+        target: /backup_storage
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
+      - type: bind
+        source: ${SHARED_DRIVE_G:-G:\}
+        target: /host_g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backup_net
+
+  # ── 4. Rewind Worker (isolated from indexing latency) ────────────────────
+  celery_worker_rewind:
+    build: .
+    container_name: backup_celery_rewind
+    restart: unless-stopped
+    cpu_shares: 256
+    command: ["sh", "-c", "exec celery -A celery_app worker -Q render_rewind -c $${CELERY_REWIND_CONCURRENCY:-1} -l INFO"]
+    environment:
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
+      - DATABASE_BACKEND=postgres
+      - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
+      - REDIS_URL=redis://redis:6379/0
+      - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
+      - BACKUP_ROOT=/backup_storage
+      - APP_DATA_DIR=/app_data
+      - TZ=${TZ:-Asia/Dhaka}
+      - APP_TZ=${APP_TZ:-${TZ:-Asia/Dhaka}}
+      - FFMPEG_THREADS=${FFMPEG_THREADS:-2}
+      - REWIND_SEGMENT_WORKERS=${REWIND_SEGMENT_WORKERS:-2}
+      - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
+      - PG_POOL_MAX_SIZE=${PG_POOL_MAX_SIZE:-8}
+    volumes:
+      - type: bind
+        source: ${BACKUP_ROOT:-D:\PhoneBackup}
+        target: /backup_storage
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
+      - type: bind
+        source: ${SHARED_DRIVE_G:-G:\}
+        target: /host_g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backup_net
+
+  # ── 5. Indexing Worker (cannot queue behind reel rendering) ──────────────
+  celery_worker_indexing:
+    build: .
+    container_name: backup_celery_indexing
+    restart: unless-stopped
+    cpu_shares: 256
+    command: ["sh", "-c", "exec celery -A celery_app worker -Q indexing_queue -c $${CELERY_INDEXING_CONCURRENCY:-2} -l INFO"]
+    environment:
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
+      - DATABASE_BACKEND=postgres
+      - POSTGRES_URL=${POSTGRES_URL:?Set POSTGRES_URL in .env}
+      - REDIS_URL=redis://redis:6379/0
+      - REQUIRE_APPROVAL=${REQUIRE_APPROVAL:-false}
+      - BACKUP_ROOT=/backup_storage
+      - APP_DATA_DIR=/app_data
+      - TZ=${TZ:-Asia/Dhaka}
+      - APP_TZ=${APP_TZ:-${TZ:-Asia/Dhaka}}
+      - PG_POOL_MIN_SIZE=${PG_POOL_MIN_SIZE:-1}
+      - PG_POOL_MAX_SIZE=${PG_POOL_MAX_SIZE:-8}
+    volumes:
+      - type: bind
+        source: ${BACKUP_ROOT:-D:\PhoneBackup}
+        target: /backup_storage
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
+      - type: bind
+        source: ${SHARED_DRIVE_G:-G:\}
+        target: /host_g
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backup_net
+
+  # ── 6. PostgreSQL ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: backup_postgres
+    restart: unless-stopped
+    cpu_shares: 1024
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      - POSTGRES_DB=backup_db
+    # These defaults fit a Docker Desktop host with roughly 16 GB RAM while
+    # keeping enough memory for the API, Celery and the operating system.
+    # ``effective_cache_size`` is a planner estimate, not allocated memory.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-512MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-3GB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-8MB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-256MB}
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-96}
+    volumes:
+      # PG internal data lives in a named volume inside WSL2
+      - pg_data:/var/lib/postgresql/data
+      # Mount persistent host AppData for automated dumps & recovery across Docker reinstalls
+      - type: bind
+        source: ${APP_DATA_DIR:-C:\Users\Abir\AppData\Roaming\PhoneBackupServer}
+        target: /app_data
+    ports:
+      # Expose to host so the desktop app and migration scripts can connect directly
+      - "5432:5432"
+    networks:
+      - backup_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d backup_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── 7. Redis Broker & Cache ───────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: backup_redis
+    restart: unless-stopped
+    cpu_shares: 512
+    # Keep queue data durable enough for task recovery, and never evict Celery
+    # broker keys to make room for response-cache entries.
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - noeviction
+    volumes:
+      - redis_data:/data
+    networks:
+      - backup_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+# Named volumes — only for PG & Redis internal data (not shared with desktop)
+volumes:
+  pg_data:
+  redis_data:
+
+networks:
+  backup_net:
+    driver: bridge

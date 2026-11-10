@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import platform
 import shutil
@@ -17,6 +18,7 @@ import sys
 import threading
 import time
 import traceback
+import webbrowser
 from datetime import datetime
 from tkinter import filedialog, messagebox
 import tkinter as tk
@@ -31,11 +33,14 @@ import memories
 # None. uvicorn's log formatter calls .isatty() on these streams before we can
 # intercept it, causing a hard crash. Redirect to a silent in-memory sink.
 class _NullStream(io.RawIOBase):
-    """Silent stream: satisfies isatty(), write(), flush(), fileno()."""
+    """Silent stream: satisfies isatty(), write(), flush(), fileno(), read()."""
     def isatty(self)   -> bool: return False
-    def readable(self) -> bool: return False
+    def readable(self) -> bool: return True
     def writable(self) -> bool: return True
     def write(self, b):         return len(b) if isinstance(b, (bytes, bytearray)) else len(b.encode())
+    def read(self, size=-1):    return b""
+    def readinto(self, b):      return 0
+    def readline(self, size=-1): return b""
     def flush(self):            pass
     def fileno(self):           raise io.UnsupportedOperation("fileno")
 
@@ -43,11 +48,11 @@ if sys.stdout is None:
     sys.stdout = io.TextIOWrapper(_NullStream())
 if sys.stderr is None:
     sys.stderr = io.TextIOWrapper(_NullStream())
+if sys.stdin is None:
+    sys.stdin = io.TextIOWrapper(_NullStream())
 
 import customtkinter as ctk
 import uvicorn
-
-_memories_daemon_started = False
 
 # ── Local imports ──────────────────────────────────────────────────────────────
 from state import (
@@ -274,13 +279,19 @@ def get_all_local_ips() -> list[str]:
         try:
             import subprocess
             import re
-            out = subprocess.check_output(
-                ["ipconfig"],
-                text=True,
-                errors="ignore",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                timeout=3,
-            )
+            run_opts: dict[str, object] = {
+                "text": True,
+                "errors": "ignore",
+                "timeout": 3,
+                "stdin": subprocess.DEVNULL,
+            }
+            if os.name == "nt":
+                run_opts["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+                run_opts["startupinfo"] = startupinfo
+            out = subprocess.check_output(["ipconfig"], **run_opts)
             for ip in re.findall(r"IPv4 Address[.\s]+:\s*([\d.]+)", out):
                 if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
                     ips.add(ip)
@@ -318,7 +329,51 @@ def fmt_bytes(n: int | float) -> str:
 def fmt_ts(ts: int | None) -> str:
     if not ts:
         return "Never"
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d  %H:%M:%S")
+    try:
+        from core.timeutil import format_local_ampm
+        formatted = format_local_ampm(ts, with_seconds=True)
+        if formatted:
+            return formatted
+    except Exception:
+        pass
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d  %I:%M:%S %p")
+
+
+def fmt_time_only(ts: int | None) -> str:
+    """Time-only AM/PM in APP_TZ/host local (for live log lines)."""
+    if not ts:
+        return ""
+    try:
+        from core.timeutil import format_time_ampm
+        formatted = format_time_ampm(ts, with_seconds=True)
+        if formatted:
+            return formatted
+    except Exception:
+        pass
+    return datetime.fromtimestamp(ts).strftime("%I:%M:%S %p")
+
+
+def fmt_ts_short(ts: int | None) -> str:
+    """Compact date+time AM/PM (no seconds)."""
+    if not ts:
+        return "never"
+    try:
+        from core.timeutil import format_local_ampm
+        formatted = format_local_ampm(ts, with_seconds=False)
+        if formatted:
+            return formatted
+    except Exception:
+        pass
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %I:%M %p")
+
+
+def fmt_now_time() -> str:
+    """Current wall-clock time in APP_TZ/host local, AM/PM."""
+    try:
+        from core.timeutil import local_now
+        return local_now().strftime("%I:%M:%S %p")
+    except Exception:
+        return datetime.now().strftime("%I:%M:%S %p")
 
 
 def fmt_rel(ts: int | None) -> str:
@@ -1159,7 +1214,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _insert_log_line(self, box: ctk.CTkTextbox, entry: dict):
         box.configure(state="normal")
-        ts = datetime.fromtimestamp(entry["time"]).strftime("%H:%M:%S")
+        ts = fmt_time_only(entry["time"])
         msg: str = entry["message"]
 
         txt: tk.Text = box._textbox
@@ -2009,6 +2064,20 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 except Exception:
                     continue
             result = create_device_share(DESKTOP_SHARE_DEVICE_ID, targets, caption, items) if items else {"ok": False}
+            if result.get("ok"):
+                try:
+                    from services.ws_service import ws_service
+                    from repositories import device_repo
+                    srv_name = device_repo.get_device_display_name(DESKTOP_SHARE_DEVICE_ID)
+                    ws_service.notify_new_share(
+                        target_device_ids=targets,
+                        group_id=result.get("group_id") or result.get("share_group_id") or "",
+                        caption=caption or None,
+                        shared_by=srv_name,
+                        shared_by_device_id=DESKTOP_SHARE_DEVICE_ID,
+                    )
+                except Exception:
+                    pass
 
             def _finish():
                 self._post_btn.configure(state="normal", text="Post to Devices")
@@ -2893,6 +2962,12 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._shared_dirs_filter_var.trace_add("write", lambda *_: self._schedule_shared_dirs_refresh())
 
         ctk.CTkButton(
+            controls, text="+ Add Drive link", width=122, height=34,
+            fg_color=C_SOFT_BLUE, hover_color=C_SOFT_BLUE_HOVER, text_color=C_ACCENT,
+            border_width=1, border_color=C_BORDER, corner_radius=9,
+            font=FONT_SMALL_B, command=self._add_google_drive_folder,
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
             controls, text="+ Add folder", width=110, height=34,
             fg_color=C_ACCENT, hover_color=C_ACCENT2, corner_radius=9,
             font=FONT_SMALL_B, command=self._add_shared_folder,
@@ -3105,11 +3180,14 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                     border_width=1, border_color=C_BORDER, corner_radius=7, font=FONT_CAPTION,
                     command=lambda i=idx: self._open_shared_folder_access_dialog(i),
                 ).pack(pady=(0, 4))
+                is_drive = entry.get("type") == "google_drive" or entry.get("kind") == "google_drive"
                 ctk.CTkButton(
-                    actions, text="Open", width=104, height=26,
+                    actions, text="Open link" if is_drive else "Open", width=104, height=26,
                     fg_color="transparent", hover_color=C_ELEVATED, text_color=C_ACCENT,
                     border_width=1, border_color=C_BORDER, corner_radius=7, font=FONT_CAPTION,
-                    command=lambda p=entry.get("path", ""): self._open_shared_folder_on_disk(str(p)),
+                    command=lambda p=entry.get("path", ""), drive=is_drive: (
+                        webbrowser.open(str(p)) if drive else self._open_shared_folder_on_disk(str(p))
+                    ),
                 ).pack(pady=(0, 4))
                 ctk.CTkButton(
                     actions, text="Remove", width=104, height=26,
@@ -3343,6 +3421,56 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._save_shared_dirs_to_config()
         self._refresh_shared_dirs_list()
 
+    def _add_google_drive_folder(self):
+        link = ctk.CTkInputDialog(
+            text="Paste a Google Drive folder link (set the Drive API key in Settings first):",
+            title="Add Google Drive Folder",
+        ).get_input()
+        link = str(link or "").strip()
+        if not link:
+            return
+
+        def _validate_and_add():
+            try:
+                from core.google_drive import FOLDER_MIME, folder_id_from_link, get_file, list_children
+
+                cfg = load_config()
+                if not str(cfg.get("GOOGLE_DRIVE_API_KEY") or "").strip():
+                    raise ValueError("Add a Google Drive API key in Settings before adding a Drive folder.")
+                folder_id = folder_id_from_link(link)
+                metadata = get_file(folder_id)
+                if metadata.get("mimeType") != FOLDER_MIME:
+                    raise ValueError("That link is not a Google Drive folder link.")
+                list_children(folder_id)
+
+                dirs = list(cfg.get("SHARED_DIRS", []))
+                existing = next((
+                    entry for entry in dirs
+                    if (entry.get("type") == "google_drive" or entry.get("kind") == "google_drive")
+                    and (entry.get("drive_folder_id") == folder_id or entry.get("path") == link)
+                ), None)
+                if existing:
+                    raise ValueError("This Google Drive folder is already shared.")
+
+                entry = {
+                    "id": f"drive_{folder_id}",
+                    "path": link,
+                    "drive_folder_id": folder_id,
+                    "type": "google_drive",
+                    "label": str(metadata.get("name") or "Google Drive Folder").strip(),
+                    "device_ids": ["all"],
+                    "available_in_reels": True,
+                }
+                dirs.append(entry)
+                cfg["SHARED_DIRS"] = dirs
+                save_config(cfg)
+                self._shared_dirs = dirs
+                self.after(0, self._refresh_shared_dirs_list)
+            except Exception as exc:
+                self.after(0, lambda message=str(exc): messagebox.showerror("Google Drive Folder", message))
+
+        threading.Thread(target=_validate_and_add, daemon=True, name="add-google-drive-folder").start()
+
     def _remove_shared_folder(self, idx: int):
         if 0 <= idx < len(self._shared_dirs):
             removed = self._shared_dirs.pop(idx)
@@ -3354,19 +3482,29 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _read_settings_draft(self) -> dict[str, object] | None:
         required_widgets = (
-            "_e_host", "_e_port", "_e_root", "_e_key", "_e_preview_cache_dir", "_e_desktop_name",
+            "_e_host", "_e_port", "_e_root", "_e_key", "_e_drive_key",
+            "_e_preview_cache_dir", "_e_preview_cache_limit_gb", "_e_desktop_name",
             "_sw_approval", "_sw_dark_mode", "_sw_autostart", "_sw_tray",
         )
         if not all(hasattr(self, name) for name in required_widgets):
             return None
         try:
+            try:
+                preview_limit_gb = float(self._e_preview_cache_limit_gb.get().strip() or "8")
+                if not math.isfinite(preview_limit_gb) or preview_limit_gb < 0:
+                    raise ValueError
+                preview_limit_bytes = int(preview_limit_gb * 1024**3)
+            except (TypeError, ValueError, OverflowError):
+                preview_limit_bytes = int(load_config().get("VIDEO_PREVIEW_CACHE_MAX_BYTES", 8 * 1024**3))
             return {
                 "HOST": self._e_host.get(),
                 "PORT": self._e_port.get(),
                 "BACKUP_ROOT": self._e_root.get(),
                 "API_KEY": self._e_key.get(),
+                "GOOGLE_DRIVE_API_KEY": self._e_drive_key.get(),
                 "DESKTOP_NAME": self._e_desktop_name.get(),
                 "VIDEO_PREVIEW_CACHE_DIR": self._e_preview_cache_dir.get(),
+                "VIDEO_PREVIEW_CACHE_MAX_BYTES": preview_limit_bytes,
                 "REQUIRE_APPROVAL": bool(self._sw_approval.get()),
                 "THEME_MODE": "dark" if bool(self._sw_dark_mode.get()) else "light",
                 "START_WITH_WINDOWS": bool(self._sw_autostart.get()),
@@ -3540,6 +3678,30 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._preview_cache_status_var = tk.StringVar(value="Checking cache…")
         self._preview_cache_clear_button = cache_item_row("Optimized Video Previews", self._preview_cache_status_var, "Clean Cache", self._clear_video_preview_cache)
 
+        cache_limit_row = ctk.CTkFrame(cache_card, fg_color="transparent")
+        cache_limit_row.pack(fill="x", padx=16, pady=(2, 10))
+        cache_limit_copy = ctk.CTkFrame(cache_limit_row, fg_color="transparent")
+        cache_limit_copy.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(cache_limit_copy, text="Optimized Preview Cache Limit", font=FONT_BODY_B, text_color=C_TEXT).pack(anchor="w")
+        ctk.CTkLabel(
+            cache_limit_copy,
+            text="Maximum disk space for generated previews. Enter 0 for unlimited.",
+            font=FONT_CAPTION, text_color=C_MUTED,
+        ).pack(anchor="w", pady=(1, 0))
+        self._e_preview_cache_limit_gb = ctk.CTkEntry(
+            cache_limit_row, width=110, height=34, fg_color=C_ELEVATED,
+            border_color=C_BORDER, border_width=1, text_color=C_TEXT,
+            corner_radius=8, font=FONT_BODY,
+        )
+        try:
+            cache_limit_gb = int(cfg.get("VIDEO_PREVIEW_CACHE_MAX_BYTES", 8 * 1024**3)) / (1024**3)
+            cache_limit_text = str(int(cache_limit_gb)) if cache_limit_gb.is_integer() else f"{cache_limit_gb:.2f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            cache_limit_text = "8"
+        self._e_preview_cache_limit_gb.insert(0, cache_limit_text)
+        self._e_preview_cache_limit_gb.pack(side="right", padx=(12, 0))
+        ctk.CTkLabel(cache_limit_row, text="GB", font=FONT_SMALL, text_color=C_MUTED).pack(side="right", padx=(0, 4))
+
         self._rewind_cache_status_var = tk.StringVar(value="Checking cache…")
         self._rewind_cache_clear_button = cache_item_row("Rewind Reel Videos", self._rewind_cache_status_var, "Clean Cache", self._clear_rewind_cache)
 
@@ -3599,6 +3761,42 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         ctk.CTkLabel(sw_row, text="Require approval prompt for new device pairings", font=FONT_BODY, text_color=C_TEXT).pack(side="left", padx=10)
         self._sw_approval.configure(command=self._remember_settings_draft)
 
+        drive_key_row = ctk.CTkFrame(sec_card, fg_color="transparent")
+        drive_key_row.pack(fill="x", padx=16, pady=(0, 12))
+        ctk.CTkLabel(
+            drive_key_row,
+            text="Google Drive API Key (for public shared folders)",
+            font=FONT_BODY_B, text_color=C_TEXT,
+        ).pack(anchor="w")
+        drive_key_input_row = ctk.CTkFrame(drive_key_row, fg_color="transparent")
+        drive_key_input_row.pack(fill="x", pady=(4, 0))
+        self._e_drive_key = ctk.CTkEntry(
+            drive_key_input_row, height=38, fg_color=C_ELEVATED,
+            border_color=C_BORDER, border_width=1, text_color=C_TEXT,
+            corner_radius=9, font=FONT_BODY, show="●",
+        )
+        self._e_drive_key.insert(0, cfg.get("GOOGLE_DRIVE_API_KEY", ""))
+        self._e_drive_key.pack(side="left", fill="x", expand=True)
+        self._drive_key_visible = False
+
+        def toggle_drive_key_vis():
+            self._drive_key_visible = not self._drive_key_visible
+            self._e_drive_key.configure(show="" if self._drive_key_visible else "●")
+            drive_key_vis_btn.configure(text="Hide" if self._drive_key_visible else "Show")
+
+        drive_key_vis_btn = ctk.CTkButton(
+            drive_key_input_row, text="Show", width=64, height=38,
+            fg_color=C_ELEVATED, hover_color=C_BORDER, text_color=C_TEXT,
+            border_width=1, border_color=C_BORDER, corner_radius=9,
+            font=FONT_SMALL_B, command=toggle_drive_key_vis,
+        )
+        drive_key_vis_btn.pack(side="right", padx=(8, 0))
+        ctk.CTkLabel(
+            drive_key_row,
+            text="Restrict this key to the Google Drive API in Google Cloud Console.",
+            font=FONT_CAPTION, text_color=C_MUTED,
+        ).pack(anchor="w", pady=(4, 0))
+
         # ── 6. STARTUP & SYSTEM TRAY ──────────────────────────────────────────
         startup_card = settings_card("Startup & Behavior")
 
@@ -3628,7 +3826,8 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         for entry_widget in (
             self._e_host, self._e_port, self._e_root, self._e_key,
-            self._e_preview_cache_dir, self._e_desktop_name,
+            self._e_drive_key, self._e_preview_cache_dir,
+            self._e_preview_cache_limit_gb, self._e_desktop_name,
         ):
             entry_widget.bind("<KeyRelease>", self._remember_settings_draft, add="+")
 
@@ -3838,7 +4037,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 import memories
                 stats = memories.get_memory_index_stats()
                 last = stats.get("last_indexed_at")
-                last_txt = datetime.fromtimestamp(last).strftime("%Y-%m-%d %H:%M") if last else "never"
+                last_txt = fmt_ts_short(last) if last else "never"
                 text = f"{stats['files']:,} indexed files · last run {last_txt}"
             except Exception:
                 text = "Memory index stats unavailable."
@@ -3891,6 +4090,18 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             messagebox.showerror("Invalid Port", "Port must be between 1 and 65535.")
             return
 
+        try:
+            preview_cache_limit_gb = float(self._e_preview_cache_limit_gb.get().strip() or "8")
+            if not math.isfinite(preview_cache_limit_gb) or preview_cache_limit_gb < 0:
+                raise ValueError
+            preview_cache_limit_bytes = int(preview_cache_limit_gb * 1024**3)
+        except ValueError:
+            messagebox.showerror(
+                "Invalid Preview Cache Limit",
+                "Enter 0 or a positive number of gigabytes.",
+            )
+            return
+
         preview_cache_dir_value = self._e_preview_cache_dir.get().strip()
         if not preview_cache_dir_value:
             messagebox.showerror("Invalid Preview Cache Folder", "Choose a directory for video previews.")
@@ -3907,9 +4118,11 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             "PORT":             port,
             "BACKUP_ROOT":      self._e_root.get().strip(),
             "API_KEY":          self._e_key.get().strip() or "YOUR_SECRET_KEY",
+            "GOOGLE_DRIVE_API_KEY": self._e_drive_key.get().strip(),
             "REQUIRE_APPROVAL": bool(self._sw_approval.get()),
             "THEME_MODE":       "dark" if bool(self._sw_dark_mode.get()) else "light",
             "VIDEO_PREVIEW_CACHE_DIR": preview_cache_dir,
+            "VIDEO_PREVIEW_CACHE_MAX_BYTES": preview_cache_limit_bytes,
             "SHARED_DIRS":      list(self._shared_dirs),
             "START_WITH_WINDOWS": bool(self._sw_autostart.get()),
             "MINIMIZE_TO_TRAY": bool(self._sw_tray.get()),
@@ -4019,7 +4232,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _copy_all_logs(self):
         logs = get_logs()
-        txt = "\n".join(f"[{datetime.fromtimestamp(e['time']).strftime('%Y-%m-%d %H:%M:%S')}] {e['message']}" for e in logs)
+        txt = "\n".join(f"[{fmt_ts(e['time'])}] {e['message']}" for e in logs)
         self.clipboard_clear()
         self.clipboard_append(txt)
         messagebox.showinfo("Logs", "All activity logs copied to clipboard.")
@@ -4344,8 +4557,16 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         }
 
         def _fmt_ts(ts):
-            try:    return datetime.fromtimestamp(ts / 1000).strftime("%b %d, %H:%M")
-            except: return ""
+            try:
+                # Sync session timestamps are milliseconds.
+                from core.timeutil import datetime_from_timestamp
+                dt = datetime_from_timestamp(ts / 1000)
+                return dt.strftime("%b %d, %I:%M %p")
+            except Exception:
+                try:
+                    return datetime.fromtimestamp(ts / 1000).strftime("%b %d, %I:%M %p")
+                except Exception:
+                    return ""
 
         def _fmt_dur(ms):
             secs = max(0, ms // 1000)
@@ -4552,10 +4773,19 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
             (self._e_port, "PORT",        "8000"),
             (self._e_root, "BACKUP_ROOT", ""),
             (self._e_key,  "API_KEY",     "YOUR_SECRET_KEY"),
+            (self._e_drive_key, "GOOGLE_DRIVE_API_KEY", ""),
             (self._e_desktop_name, "DESKTOP_NAME", ""),
         ]:
             entry_widget.delete(0, "end")
             entry_widget.insert(0, str(cfg.get(key, default) or ""))
+
+        try:
+            cache_limit_gb = int(cfg.get("VIDEO_PREVIEW_CACHE_MAX_BYTES", 8 * 1024**3)) / (1024**3)
+            cache_limit_text = str(int(cache_limit_gb)) if cache_limit_gb.is_integer() else f"{cache_limit_gb:.2f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            cache_limit_text = "8"
+        self._e_preview_cache_limit_gb.delete(0, "end")
+        self._e_preview_cache_limit_gb.insert(0, cache_limit_text)
 
         if cfg.get("REQUIRE_APPROVAL", True):
             self._sw_approval.select()
@@ -4649,11 +4879,6 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._server_running = True
         self._server_start_time = time.time()
 
-        global _memories_daemon_started
-        if not _memories_daemon_started:
-            _memories_daemon_started = True
-            threading.Thread(target=memories.startup_scan_loop, daemon=True).start()
-
         local_ips = get_all_local_ips()
         primary_ip = local_ips[0] if local_ips else "127.0.0.1"
         addr = f"http://{primary_ip}:{PORT}"
@@ -4696,7 +4921,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 try:
                     from upload import APP_VERSION as _app_version
                 except Exception:
-                    _app_version = "4.4.1"
+                    _app_version = "0.0.0+unknown"
                 try:
                     from network_info import get_tailscale_network_info
                     _ts_info = get_tailscale_network_info()
@@ -4859,7 +5084,7 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
         for label, val in [
             ("Device Name", device_name),
             ("IP Address",  device_ip),
-            ("Time",        datetime.now().strftime("%H:%M:%S")),
+            ("Time",        fmt_now_time()),
         ]:
             row = ctk.CTkFrame(info, fg_color="transparent")
             row.pack(fill="x", padx=16, pady=5)

@@ -23,6 +23,7 @@ import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { AnimatedListItem } from '@/components/AnimatedListItem';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { hapticLight, hapticMedium, hapticSelection, hapticSuccess, hapticError } from '@/utils/haptics';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
 import { getCurrentSyncState } from '../../backgroundTask';
 import {
   computePendingFiles,
@@ -61,8 +62,7 @@ function getFileCategory(name: string): 'image' | 'video' | 'other' {
 
 function formatDate(ts: number): string {
   if (!ts) return 'Unknown date';
-  const ms = ts > 1e11 ? ts : ts * 1000;
-  return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  return formatCaptureDateTime(ts, ts < 1e12) || 'Unknown date';
 }
 
 function fileKey(file: PendingFile): string {

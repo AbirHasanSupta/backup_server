@@ -11,6 +11,7 @@ import { StatCard } from '@/components/StatCard';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { getYearWrapped } from '../../downloader';
+import { setUIPriorityMode } from '../../backgroundTask';
 
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -52,12 +53,17 @@ export default function WrappedScreen() {
   const shotRef = React.useRef<React.ElementRef<typeof ViewShot>>(null);
 
   useEffect(() => {
+    setUIPriorityMode(true);
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       router.replace('/memories');
       return true;
     });
-    return () => sub.remove();
+    return () => {
+      sub.remove();
+      setUIPriorityMode(false);
+    };
   }, [router]);
+
 
   const fetchWrapped = useCallback(async (targetYear: number) => {
     setLoading(true);

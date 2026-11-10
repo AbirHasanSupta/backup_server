@@ -1,0 +1,57 @@
+"""tasks/indexing_tasks.py — Distributed Media Indexing & Trip Clustering Tasks."""
+
+import logging
+from celery_app import celery_app
+
+logger = logging.getLogger("backup_server.tasks.indexing")
+
+
+@celery_app.task(
+    name="tasks.indexing_tasks.run_trip_clustering",
+    time_limit=300,
+    soft_time_limit=240,
+)
+def run_trip_clustering(source_id: str | None = None):
+    """Run spatial-temporal clustering and reverse-geocoding in the background."""
+    from trips import cluster_source_media, cluster_all_devices
+    try:
+        if source_id:
+            clusters = cluster_source_media(source_id)
+            logger.info("Clustered %s trips for source %s", len(clusters), source_id)
+            return {"source_id": source_id, "clusters_count": len(clusters)}
+        else:
+            cluster_all_devices()
+            return {"status": "all_clustered"}
+    except Exception as exc:
+        logger.error("Trip clustering task failed: %s", exc)
+        return {"status": "failed", "error": str(exc)}
+
+
+def dispatch_trip_clustering(source_id: str | None = None, countdown: int = 0):
+    """Safely dispatch spatial-temporal trip clustering to Celery or async thread pool."""
+    import threading
+    try:
+        from services.redis_service import get_redis_client
+        if get_redis_client():
+            if countdown and countdown > 0:
+                run_trip_clustering.apply_async(args=[source_id], countdown=int(countdown))
+            else:
+                run_trip_clustering.delay(source_id)
+            return "celery"
+    except Exception:
+        pass
+
+    def _fallback_run():
+        try:
+            run_trip_clustering(source_id)
+        except Exception:
+            pass
+
+    if countdown and countdown > 0:
+        timer = threading.Timer(float(countdown), _fallback_run)
+        timer.daemon = True
+        timer.start()
+    else:
+        threading.Thread(target=_fallback_run, daemon=True, name="trip-clustering").start()
+    return "thread"
+

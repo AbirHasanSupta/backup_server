@@ -27,12 +27,20 @@ except Exception:
     pass
 
 from config import load_config
-from database import (
+from core.path_utils import normalize_fs_path
+from core.shared_folders import non_overlapping_shared_folders
+from core.timeutil import (
+    datetime_from_timestamp,
+    naive_local_to_epoch,
+    resolve_local_today,
+    seconds_until_next_local_midnight,
+)
+from repositories.device_repo import get_devices, get_device_display_name
+from repositories.file_repo import get_files_for_device
+from repositories.media_repo import (
     batch_upsert_media_index_rows,
     clear_media_index,
-    get_devices,
     get_distinct_cap_years,
-    get_files_for_device,
     get_geotagged_media,
     get_media_for_day,
     get_media_for_days_multi,
@@ -46,7 +54,6 @@ from database import (
     prune_media_index,
     upsert_media_index_row,
     upsert_scan_dirs,
-    get_device_display_name,
 )
 from state import add_log
 from storage import full_path_in_root, resolve_backup_root
@@ -74,8 +81,26 @@ def _parse_date_str(val: str) -> int | None:
     if not val or not isinstance(val, str):
         return None
     val = val.strip()
+    if not val:
+        return None
 
-    # Common EXIF date formats
+    # Timezone-aware ISO (ffprobe often emits ...Z or ...+00:00). Parse as a
+    # true instant — never reinterpret the wall clock in APP_TZ.
+    try:
+        iso = val.replace("Z", "+00:00").replace("z", "+00:00")
+        # fromisoformat rejects the EXIF-style "YYYY:MM:DD" separator.
+        if "T" in iso or (len(iso) > 10 and iso[10] == " "):
+            iso_norm = iso.replace(" ", "T", 1) if "T" not in iso else iso
+            # Normalize "+06:00" already fine; "+0600" → "+06:00"
+            if len(iso_norm) >= 5 and iso_norm[-5] in "+-" and iso_norm[-3] != ":":
+                iso_norm = iso_norm[:-2] + ":" + iso_norm[-2:]
+            dt = datetime.fromisoformat(iso_norm)
+            if dt.tzinfo is not None:
+                return int(dt.timestamp())
+    except Exception:
+        pass
+
+    # Common EXIF date formats (naive wall-clock → APP_TZ / host local)
     for fmt in (
         "%Y:%m:%d %H:%M:%S",
         "%Y-%m-%d %H:%M:%S",
@@ -84,17 +109,17 @@ def _parse_date_str(val: str) -> int | None:
     ):
         try:
             dt = datetime.strptime(val, fmt)
-            return int(time_module.mktime(dt.timetuple()))
+            return naive_local_to_epoch(dt)
         except Exception:
             pass
 
-    # ISO 8601 format (e.g. 2023-08-14T15:30:00.000000Z)
+    # ISO 8601 without zone (e.g. 2023-08-14T15:30:00.000000)
     try:
-        iso_clean = val.rstrip("Z").split(".")[0].replace("T", " ")
+        iso_clean = val.split(".")[0].replace("T", " ")
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
             try:
                 dt = datetime.strptime(iso_clean, fmt)
-                return int(time_module.mktime(dt.timetuple()))
+                return naive_local_to_epoch(dt)
             except Exception:
                 pass
     except Exception:
@@ -208,7 +233,11 @@ def _extract_video_creation_time_and_gps(full_path: str) -> tuple[int | None, tu
             "stdin": subprocess.DEVNULL,
         }
         if os.name == "nt":
-            run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+            run_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            run_options["startupinfo"] = startupinfo
         proc = subprocess.run(cmd, **run_options)
         if proc.returncode != 0 or not proc.stdout:
             return None, None
@@ -345,7 +374,9 @@ def _extract_media_row_metadata(item: dict) -> dict:
     cap_month, cap_day, cap_year = None, None, None
     if cap_time is not None:
         try:
-            dt = datetime.fromtimestamp(cap_time)
+            # Prefer APP_TZ/TZ (default Asia/Dhaka) so capture days match
+            # the household calendar / phone On-This-Day.
+            dt = datetime_from_timestamp(cap_time)
             cap_month, cap_day, cap_year = dt.month, dt.day, dt.year
         except Exception:
             pass
@@ -371,8 +402,14 @@ def _extract_media_row_metadata(item: dict) -> dict:
 def _resolve_worker_counts() -> tuple[int, int]:
     cfg = load_config()
     cpu = os.cpu_count() or 4
-    default_image = min(32, cpu * 4)
-    default_video = max(2, cpu)
+    # Under Postgres/multi-worker Docker, keep EXIF/ffprobe pools modest so
+    # interactive memories/library queries keep DB + disk headroom during sync.
+    if cfg.get("DATABASE_BACKEND") == "postgres":
+        default_image = min(8, max(2, cpu * 2))
+        default_video = max(1, min(2, cpu))
+    else:
+        default_image = min(32, cpu * 4)
+        default_video = max(2, cpu)
     try:
         image_workers = int(cfg.get("MEMORIES_IMAGE_WORKERS") or default_image)
     except (TypeError, ValueError):
@@ -382,6 +419,36 @@ def _resolve_worker_counts() -> tuple[int, int]:
     except (TypeError, ValueError):
         video_workers = default_video
     return max(2, image_workers), max(1, video_workers)
+
+
+def _extract_and_flush_items(items: list[dict], batch_size: int = 200) -> int:
+    if not items:
+        return 0
+    image_items = [it for it in items if it["ext"] in IMAGE_EXTS]
+    video_items = [it for it in items if it["ext"] not in IMAGE_EXTS]
+    image_workers, video_workers = _resolve_worker_counts()
+
+    total_flushed = 0
+    batch: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=image_workers) as img_ex, \
+         concurrent.futures.ThreadPoolExecutor(max_workers=video_workers) as vid_ex:
+        futures = [img_ex.submit(_extract_media_row_metadata, it) for it in image_items]
+        futures += [vid_ex.submit(_extract_media_row_metadata, it) for it in video_items]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                row = fut.result()
+                if row:
+                    batch.append(row)
+                    if len(batch) >= batch_size:
+                        batch_upsert_media_index_rows(batch)
+                        total_flushed += len(batch)
+                        batch = []
+            except Exception:
+                pass
+        if batch:
+            batch_upsert_media_index_rows(batch)
+            total_flushed += len(batch)
+    return total_flushed
 
 
 def _run_extraction(items: list[dict]) -> list[dict]:
@@ -395,7 +462,12 @@ def _run_extraction(items: list[dict]) -> list[dict]:
         futures = [img_ex.submit(_extract_media_row_metadata, it) for it in image_items]
         futures += [vid_ex.submit(_extract_media_row_metadata, it) for it in video_items]
         for fut in concurrent.futures.as_completed(futures):
-            rows.append(fut.result())
+            try:
+                row = fut.result()
+                if row:
+                    rows.append(row)
+            except Exception:
+                pass
     return rows
 
 
@@ -410,7 +482,8 @@ def reindex_device(device_id: str, trigger_cluster: bool = True) -> None:
     cache = get_media_index_cache("phone", device_id)
     try:
         device_root = resolve_backup_root(device_id)
-    except Exception:
+    except Exception as exc:
+        add_log(f"[Memories] Could not resolve backup root for device {device_id}: {exc}")
         return
 
     seen_paths: set[str] = set()
@@ -454,9 +527,14 @@ def reindex_device(device_id: str, trigger_cluster: bool = True) -> None:
         })
 
     if to_process:
-        _flush_rows(_run_extraction(to_process))
+        _extract_and_flush_items(to_process)
 
     prune_media_index("phone", device_id, seen_paths, existing_paths=set(cache.keys()))
+    try:
+        from services import places_trips_cache
+        places_trips_cache.invalidate_places(device_id)
+    except Exception:
+        pass
     if trigger_cluster:
         trigger_background_clustering(device_id)
 
@@ -467,11 +545,14 @@ def _rel_dirname(rel_path: str) -> str:
 
 
 def _rel_to_abs(root_path: str, rel_path: str) -> str:
-    return os.path.join(root_path, *rel_path.split("/"))
+    norm = normalize_fs_path(root_path) or root_path
+    return os.path.join(norm, *rel_path.split("/"))
 
 
 def reindex_shared(source_id: str, root_path: str) -> None:
-    if not os.path.isdir(root_path):
+    norm_root = normalize_fs_path(root_path)
+    if not norm_root or not os.path.isdir(norm_root):
+        add_log(f"[Memories] Shared folder {source_id} directory not accessible: {root_path} (normalized: {norm_root})")
         return
 
     cache = get_media_index_cache("shared", source_id)
@@ -485,7 +566,7 @@ def reindex_shared(source_id: str, root_path: str) -> None:
     now_ts = int(time_module.time())
     to_process: list[dict] = []
 
-    stack: list[tuple[str, str]] = [("", root_path)]
+    stack: list[tuple[str, str]] = [("", norm_root)]
     while stack:
         rel_dir, abs_dir = stack.pop()
         try:
@@ -506,7 +587,7 @@ def reindex_shared(source_id: str, root_path: str) -> None:
                 missing_gps = ext in IMAGE_EXTS and not cached_entry[4]
                 if not (stale_fallback or missing_gps):
                     continue
-                full_path = _rel_to_abs(root_path, rel_path)
+                full_path = _rel_to_abs(norm_root, rel_path)
                 if not os.path.isfile(full_path):
                     continue
                 to_process.append({
@@ -560,17 +641,92 @@ def reindex_shared(source_id: str, root_path: str) -> None:
                 stack.append((child_rel, entry.path))
 
     if to_process:
-        _flush_rows(_run_extraction(to_process))
+        _extract_and_flush_items(to_process)
 
     prune_media_index("shared", source_id, seen_paths, existing_paths=set(cache.keys()))
     upsert_scan_dirs("shared", source_id, dir_updates)
+    try:
+        from services import places_trips_cache
+        # Shared-folder reindex can change place clusters for any device that can see it.
+        places_trips_cache.invalidate_places()
+    except Exception:
+        pass
 
 
 _reindex_lock = threading.Lock()
+_SCAN_LEADER_KEY = "lock:memory-scan-leader"
+_SCAN_LEADER_TTL_SEC = 15 * 60  # short TTL; refreshed while leader works/sleeps
+_FOLLOWER_RETRY_SEC = 60
+_scan_leader_token: str | None = None
+_scan_leader_lock = threading.Lock()
+
+
+def _redis_client_or_none():
+    try:
+        from services.redis_service import get_redis_client
+        return get_redis_client()
+    except Exception:
+        return None
+
+
+def _try_become_or_refresh_scan_leader() -> bool:
+    """Elect a single memory-scan leader across Gunicorn workers.
+
+    Returns True when this process should run the expensive reindex.
+    Desktop / no-Redis deployments always return True.
+    """
+    global _scan_leader_token
+    client = _redis_client_or_none()
+    if not client:
+        return True
+
+    pid = str(os.getpid())
+    with _scan_leader_lock:
+        token = _scan_leader_token or pid
+        try:
+            held = client.get(_SCAN_LEADER_KEY)
+            if held is None:
+                if client.set(_SCAN_LEADER_KEY, token, nx=True, ex=_SCAN_LEADER_TTL_SEC):
+                    _scan_leader_token = token
+                    return True
+                return False
+            if str(held) == str(token):
+                # Refresh TTL while we remain leader so failover stays timely.
+                client.expire(_SCAN_LEADER_KEY, _SCAN_LEADER_TTL_SEC)
+                _scan_leader_token = token
+                return True
+            return False
+        except Exception as exc:
+            # Redis configured but unreachable: avoid multi-worker stampede.
+            if load_config().get("DATABASE_BACKEND") == "postgres":
+                add_log(f"[Memories] Scan leader election failed ({exc}); skipping on this worker.")
+                return False
+            return True
+
+
+def release_scan_leader_if_held() -> None:
+    """Drop the scan-leader lock on process shutdown so another worker can take over."""
+    global _scan_leader_token
+    client = _redis_client_or_none()
+    if not client:
+        return
+    with _scan_leader_lock:
+        token = _scan_leader_token
+        if not token:
+            return
+        try:
+            held = client.get(_SCAN_LEADER_KEY)
+            if held is not None and str(held) == str(token):
+                client.delete(_SCAN_LEADER_KEY)
+        except Exception:
+            pass
+        _scan_leader_token = None
 
 
 def _do_reindex_all() -> None:
     add_log("[Memories] Starting indexing scan...")
+    # Keep scan leadership alive for the duration of a long indexing run.
+    _try_become_or_refresh_scan_leader()
     try:
         tasks: list[tuple[str, str, str | None]] = []
         for d in get_devices():
@@ -582,6 +738,8 @@ def _do_reindex_all() -> None:
         for s in shared_dirs:
             sid = s.get("id")
             spath = s.get("path")
+            if s.get("type") == "google_drive" or s.get("kind") == "google_drive":
+                continue
             if sid and spath:
                 tasks.append(("shared", sid, spath))
 
@@ -593,12 +751,18 @@ def _do_reindex_all() -> None:
                 else:
                     reindex_shared(key, path)
             except Exception as e:
-                add_log(f"[Memories] Error reindexing {kind} {get_device_display_name(key)}: {e}")
+                name = get_device_display_name(key) if kind == "device" else key
+                add_log(f"[Memories] Error reindexing {kind} {name}: {e}")
 
         max_workers = min(4, max(1, len(tasks)))
         if tasks:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                list(executor.map(_run_task, tasks))
+                # Refresh leadership between tasks so a multi-hour run cannot
+                # expire the Redis TTL and elect a second concurrent leader.
+                futures = [executor.submit(_run_task, t) for t in tasks]
+                for fut in concurrent.futures.as_completed(futures):
+                    _try_become_or_refresh_scan_leader()
+                    fut.result()
 
         add_log("[Memories] Indexing scan completed.")
         trigger_background_clustering()
@@ -607,27 +771,96 @@ def _do_reindex_all() -> None:
 
 
 def reindex_all() -> None:
+    """Run a full media reindex if no other run is already in progress.
+
+    Uses Redis when available so Gunicorn workers do not reindex in parallel.
+    On Redis errors under Postgres we skip rather than stampeding locally.
+    """
+    client = _redis_client_or_none()
+    redis_token = None
+    if client:
+        redis_token = f"{os.getpid()}:{time_module.time_ns()}"
+        try:
+            if not client.set("lock:memories-reindex", redis_token, nx=True, ex=60 * 60):
+                add_log("[Memories] Skipped scan: another indexing run is already in progress.")
+                return
+        except Exception as exc:
+            if load_config().get("DATABASE_BACKEND") == "postgres":
+                add_log(f"[Memories] Skipped scan: distributed lock unavailable ({exc}).")
+                return
+            redis_token = None  # fall through to process-local lock
+
     if not _reindex_lock.acquire(blocking=False):
+        if client and redis_token:
+            try:
+                if client.get("lock:memories-reindex") == redis_token:
+                    client.delete("lock:memories-reindex")
+            except Exception:
+                pass
         add_log("[Memories] Skipped scan: another indexing run is already in progress.")
         return
     try:
         _do_reindex_all()
     finally:
         _reindex_lock.release()
+        if client and redis_token:
+            try:
+                if client.get("lock:memories-reindex") == redis_token:
+                    client.delete("lock:memories-reindex")
+            except Exception:
+                pass
 
 
-def reset_and_reindex_all() -> dict:
+def reset_and_reindex_all(background: bool = False) -> dict:
     """Clear the media_index/scan_dirs cache entirely and rebuild it from scratch."""
+    client = _redis_client_or_none()
+    redis_token = None
+    if client:
+        redis_token = f"admin-reset:{os.getpid()}:{time_module.time_ns()}"
+        try:
+            client.set("lock:memories-reindex", redis_token, ex=60 * 60)
+        except Exception:
+            redis_token = None
+
     if not _reindex_lock.acquire(blocking=True, timeout=10):
+        if client and redis_token:
+            try:
+                client.delete("lock:memories-reindex")
+            except Exception:
+                pass
         add_log("[Memories] Reset skipped: indexing already in progress.")
         return {"ok": False, "error": "Indexing already in progress, try again shortly."}
+
+    def _execute():
+        try:
+            _do_reindex_all()
+        finally:
+            _reindex_lock.release()
+            if client and redis_token:
+                try:
+                    if client.get("lock:memories-reindex") == redis_token:
+                        client.delete("lock:memories-reindex")
+                except Exception:
+                    pass
+
     try:
         cleared = clear_media_index()
         add_log(f"[Memories] Memory index cleared ({cleared} rows). Starting full rescan...")
-        _do_reindex_all()
-        return {"ok": True, "cleared": cleared}
-    finally:
+        if background:
+            threading.Thread(target=_execute, daemon=True, name="memories-reindex-worker").start()
+            return {"ok": True, "cleared": cleared, "status": "started"}
+        else:
+            _execute()
+            return {"ok": True, "cleared": cleared}
+    except Exception as exc:
         _reindex_lock.release()
+        if client and redis_token:
+            try:
+                client.delete("lock:memories-reindex")
+            except Exception:
+                pass
+        add_log(f"[Memories] Reset and reindex failed: {exc}")
+        return {"ok": False, "error": str(exc)}
 
 
 def get_memory_index_stats() -> dict:
@@ -635,14 +868,26 @@ def get_memory_index_stats() -> dict:
 
 
 def startup_scan_loop() -> None:
-    reindex_all()
+    """Supervisor loop: only the elected leader runs reindex; followers retry election."""
     while True:
         try:
-            now = datetime.now()
-            tomorrow = datetime.combine(now.date() + timedelta(days=1), datetime.min.time())
-            sleep_sec = max(10, (tomorrow - now).total_seconds() + 2)
-            time_module.sleep(sleep_sec)
-            reindex_all()
+            is_leader = _try_become_or_refresh_scan_leader()
+            if is_leader:
+                reindex_all()
+                # Sleep until next APP_TZ/local midnight so day buckets refresh
+                # on the operator calendar (Docker often otherwise uses UTC).
+                sleep_sec = seconds_until_next_local_midnight()
+                # Refresh leadership periodically during the long sleep so TTL does not expire.
+                deadline = time_module.monotonic() + sleep_sec
+                while time_module.monotonic() < deadline:
+                    # Refresh at ~1/3 of TTL (and at least every 5 minutes).
+                    chunk = min(max(60.0, _SCAN_LEADER_TTL_SEC / 3), max(5.0, deadline - time_module.monotonic()))
+                    time_module.sleep(chunk)
+                    if not _try_become_or_refresh_scan_leader():
+                        add_log("[Memories] Lost scan leadership; waiting to re-elect.")
+                        break
+            else:
+                time_module.sleep(_FOLLOWER_RETRY_SEC)
         except Exception as e:
             add_log(f"[Memories] Daemon loop error: {e}")
             time_module.sleep(300)
@@ -651,14 +896,12 @@ def startup_scan_loop() -> None:
 def _shared_sources_for_device(device_id: str, shared_dirs: list) -> tuple[list[tuple[str, str]], dict[str, str]]:
     sources = [("phone", device_id)]
     shared_labels = {}
-    for d in shared_dirs:
+    memory_dirs = [d for d in shared_dirs if d.get("id") and d.get("label")]
+    for d in non_overlapping_shared_folders(memory_dirs, device_id):
         sid = d.get("id")
         label = d.get("label")
-        tagged = d.get("device_ids", [])
-        if sid and label:
-            shared_labels[sid] = label
-            if isinstance(tagged, list) and (device_id in tagged or "all" in tagged):
-                sources.append(("shared", sid))
+        shared_labels[sid] = label
+        sources.append(("shared", sid))
     return sources, shared_labels
 
 
@@ -707,20 +950,31 @@ def _build_day_memories(
     }
 
 
-def get_todays_memories(device_id: str) -> dict:
-    today = date.today()
+def get_todays_memories(
+    device_id: str,
+    *,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
+) -> dict:
+    today = resolve_local_today(local_date, tz_offset_minutes)
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
     day_data = _build_day_memories(device_id, today, sources, shared_labels)
 
     return {
-        "today": {"month": today.month, "day": today.day},
+        "today": {"month": today.month, "day": today.day, "year": today.year},
         "groups": day_data["groups"],
     }
 
 
-def get_recent_memories(device_id: str, days: int = 7) -> dict:
-    today = date.today()
+def get_recent_memories(
+    device_id: str,
+    days: int = 7,
+    *,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
+) -> dict:
+    today = resolve_local_today(local_date, tz_offset_minutes)
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
 
@@ -800,10 +1054,15 @@ def _safe_anniversary(year: int, month: int, day: int) -> date:
     return date(year, month, min(day, max_day))
 
 
-def get_random_flashback(device_id: str) -> dict | None:
+def get_random_flashback(
+    device_id: str,
+    *,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
+) -> dict | None:
     """Pick one random media item from roughly 'N years ago this week',
     weighted toward more recent years so flashbacks feel closer to home."""
-    today = date.today()
+    today = resolve_local_today(local_date, tz_offset_minutes)
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, shared_labels = _shared_sources_for_device(device_id, shared_dirs)
 
@@ -825,7 +1084,27 @@ def get_random_flashback(device_id: str) -> dict | None:
             candidates.append((years_ago, weight, rows))
 
     if not candidates:
-        return None
+        row = get_random_media_row(sources, allowed_exts=CLIENT_FLASHBACK_EXTS)
+        if not row:
+            return None
+        ext = os.path.splitext(row["relative_path"])[1].lower()
+        is_video = ext in VIDEO_EXTS
+        s_type = row["source_type"]
+        s_key = row["source_key"]
+        s_label = "Phone Backup" if s_type == "phone" else shared_labels.get(s_key, "Shared Folder")
+        cap_yr = row.get("cap_year")
+        years_ago = (today.year - cap_yr) if cap_yr else 0
+        return {
+            "source_type": s_type,
+            "source_id": s_key,
+            "source_label": s_label,
+            "relative_path": row["relative_path"],
+            "size": row["size"],
+            "capture_time": row["capture_time"],
+            "is_video": is_video,
+            "year": cap_yr,
+            "years_ago": years_ago,
+        }
 
     weights = [c[1] for c in candidates]
     years_ago, _, rows = random.choices(candidates, weights=weights, k=1)[0]
@@ -915,7 +1194,7 @@ def get_quiz_round(device_id: str, count: int = QUIZ_DEFAULT_COUNT) -> dict:
     shared_dirs = load_config().get("SHARED_DIRS", [])
     sources, _ = _shared_sources_for_device(device_id, shared_dirs)
     distinct_years = get_distinct_cap_years(sources)
-    if len(distinct_years) < QUIZ_MIN_DISTINCT_YEARS:
+    if not distinct_years:
         return {"items": []}
 
     pool = get_quiz_photo_pool(sources)
@@ -924,7 +1203,7 @@ def get_quiz_round(device_id: str, count: int = QUIZ_DEFAULT_COUNT) -> dict:
         if os.path.splitext(r["relative_path"])[1].lower() in QUIZ_DISPLAYABLE_EXTS
     ]
 
-    if len(photo_pool) < 2:
+    if not photo_pool:
         return {"items": []}
 
     round_size = min(max(1, count), len(photo_pool))

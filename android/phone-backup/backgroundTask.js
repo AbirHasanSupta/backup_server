@@ -53,6 +53,88 @@ import {
 } from './streak';
 import { setPendingBackupFromSync } from './pendingBackup';
 import { triggerWidgetRefresh } from './widget';
+import { reconcileP2PMediaWithServer } from './p2pServer';
+
+let _isUIPriorityActive = false;
+const UI_PRIORITY_STORAGE_KEY = 'ui_priority_mode_v1';
+let _lastUIPriorityDiskReadAt = 0;
+const UI_PRIORITY_DISK_POLL_MS = 400;
+/** Ignore sticky priority left behind if the UI process was killed mid-focus. */
+const UI_PRIORITY_MAX_AGE_MS = 90_000;
+let _uiPriorityHeartbeat = null;
+
+/**
+ * Dynamically yields background upload concurrency and adds network/flash yields
+ * when the user is actively viewing Reels, Feed, Library, or Memories.
+ *
+ * Persisted to AsyncStorage (with a freshness timestamp) so the background-actions
+ * JS context can observe the flag while the UI context sets it. A heartbeat keeps
+ * the timestamp fresh while focused; a force-killed UI stops heartbeating so sync
+ * can resume after UI_PRIORITY_MAX_AGE_MS instead of hanging forever.
+ */
+export function setUIPriorityMode(active) {
+  _isUIPriorityActive = !!active;
+  try {
+    const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+    const value = active ? `1:${Date.now()}` : '0';
+    AsyncStorage.setItem(UI_PRIORITY_STORAGE_KEY, value).catch(() => {});
+  } catch {
+    /* ignore */
+  }
+
+  if (active) {
+    if (!_uiPriorityHeartbeat) {
+      _uiPriorityHeartbeat = setInterval(() => {
+        if (!_isUIPriorityActive) return;
+        try {
+          const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+          AsyncStorage.setItem(UI_PRIORITY_STORAGE_KEY, `1:${Date.now()}`).catch(() => {});
+        } catch {
+          /* ignore */
+        }
+      }, 20_000);
+    }
+  } else if (_uiPriorityHeartbeat) {
+    clearInterval(_uiPriorityHeartbeat);
+    _uiPriorityHeartbeat = null;
+  }
+}
+
+export function isUIPriorityMode() {
+  return _isUIPriorityActive;
+}
+
+function _parseUIPriorityValue(raw) {
+  if (!raw || raw === '0') return false;
+  // Legacy bare "1" (no timestamp) is treated as stale so a killed UI cannot
+  // permanently block background sync after an app upgrade.
+  if (raw === '1') return false;
+  const colon = raw.indexOf(':');
+  if (colon <= 0) return false;
+  if (raw.slice(0, colon) !== '1') return false;
+  const ts = Number(raw.slice(colon + 1));
+  if (!Number.isFinite(ts)) return false;
+  return Date.now() - ts < UI_PRIORITY_MAX_AGE_MS;
+}
+
+/** Cross-context read used by the upload worker loop. */
+export async function readUIPriorityMode() {
+  const now = Date.now();
+  // Always re-poll AsyncStorage on an interval so clearing priority in the UI
+  // context is visible to the background-actions runtime (and vice versa).
+  if (now - _lastUIPriorityDiskReadAt < UI_PRIORITY_DISK_POLL_MS) {
+    return _isUIPriorityActive;
+  }
+  _lastUIPriorityDiskReadAt = now;
+  try {
+    const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+    const v = await AsyncStorage.getItem(UI_PRIORITY_STORAGE_KEY);
+    _isUIPriorityActive = _parseUIPriorityValue(v);
+  } catch {
+    /* keep in-memory value */
+  }
+  return _isUIPriorityActive;
+}
 
 /**
  * Converts any raw error message to a short, user-readable string.
@@ -143,7 +225,7 @@ const SMALL_FILE_UPLOAD_CONCURRENCY = 3;
 const LARGE_FILE_UPLOAD_CONCURRENCY = 1;
 const SMALL_FILE_THRESHOLD = 25 * 1024 * 1024;
 const LARGE_FILE_THRESHOLD = 150 * 1024 * 1024;
-const SERVICE_LOOP_TICK_MS = 15000;
+const SERVICE_LOOP_TICK_MS = 45000;
 const APP_PRIMARY_COLOR = '#2563EB';
 const BACKUP_FOREGROUND_SERVICE_TYPE = ['dataSync'];
 
@@ -157,6 +239,7 @@ function withBackupForegroundServiceType(options) {
 function emptySyncResult(skippedReason = '') {
   return {
     uploaded: 0,
+    uploadedBytes: 0,
     skipped: 0,
     total: 0,
     errors: 0,
@@ -581,6 +664,7 @@ async function recoverStaleSyncStateOnStartup() {
  * immediately with an 'aborted' error — the native upload continues in the
  * background but JS abandons it, giving a truly instant force-stop.
  */
+/* eslint-disable-next-line no-unused-vars */
 function raceWithAbort(promise) {
   if (!syncAbortController) return promise;
   const { signal } = syncAbortController;
@@ -596,6 +680,53 @@ function raceWithAbort(promise) {
     promise.then(
       (val) => { settled = true; signal.removeEventListener('abort', onAbort); resolve(val); },
       (err) => { settled = true; signal.removeEventListener('abort', onAbort); reject(err); }
+    );
+  });
+}
+
+/**
+ * Like raceWithAbort, but also abandons the JS wait when UI priority flips on
+ * mid-upload so workers re-enter the pause loop instead of holding the radio
+ * slot until a large file finishes. Native FileSystem.uploadAsync cannot be
+ * cancelled; the server skip-if-exists path makes a later retry safe.
+ */
+function raceWithAbortOrUIPriority(promise) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let pollTimer = null;
+    const { signal } = syncAbortController || {};
+
+    const cleanup = () => {
+      if (pollTimer) clearInterval(pollTimer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+    };
+    const settle = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(val);
+    };
+    const onAbort = () => settle(reject, new Error('aborted'));
+
+    if (signal) {
+      if (signal.aborted) {
+        reject(new Error('aborted'));
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    pollTimer = setInterval(() => {
+      Promise.resolve(readUIPriorityMode())
+        .then((active) => {
+          if (active) settle(reject, new Error('ui_priority'));
+        })
+        .catch(() => {});
+    }, 500);
+
+    promise.then(
+      (val) => settle(resolve, val),
+      (err) => settle(reject, err),
     );
   });
 }
@@ -775,6 +906,12 @@ export async function performActualSync(onProgress, runOptions = {}) {
     // Two-way server-side check for Refresh Folder / Refresh All Backups
     for (const batch of chunk(files, CHECK_BATCH_SIZE)) {
       if (await shouldAbortSync()) { stoppedDuringCheck = true; break; }
+      // Yield disk/network to interactive API calls while the user is browsing.
+      while (await readUIPriorityMode()) {
+        if (await shouldAbortSync()) { stoppedDuringCheck = true; break; }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      if (stoppedDuringCheck) break;
       const res = await checkServerFiles(batch, { verifyDisk: true });
       const statuses = res.files;
       serverDeviceTotalFiles = res.deviceTotalFiles;
@@ -812,6 +949,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
     const stoppedPending = files.filter((file) => !present.has(getFileCacheMatchKey(file)));
     return {
       uploaded: 0,
+      uploadedBytes: 0,
       skipped: present.size + snapshotSkipped,
       total: files.length + snapshotSkipped,
       errors: 0,
@@ -826,6 +964,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
   const totalUploads = pending.length;
   let uploaded = 0;
+  let uploadedBytes = 0;
   let skipped = files.length - pending.length + snapshotSkipped;
   let completed = 0;
   let errors = 0;
@@ -836,21 +975,45 @@ export async function performActualSync(onProgress, runOptions = {}) {
   if (onProgress) await onProgress(0, totalUploads, { phase: 'uploading', currentFile: '' });
   reportServerActivity('Uploading files');
 
-  async function worker() {
+  async function worker(workerId = 0) {
     while (nextIndex < pending.length) {
       if (await shouldAbortSync()) break;
+
+      // UI Priority: pause ALL upload workers while the user is on interactive
+      // screens. Uploads use Expo FileSystem (not RN OkHttp), so they otherwise
+      // saturate Wi‑Fi/flash and starve feed/reels/library/memories requests.
+      // Persist the flag so this also works when sync runs in the background
+      // JS context.
+      if (await readUIPriorityMode()) {
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+
       let file = pending[nextIndex++];
       if (!file) break;
+
       if (onProgress) {
         await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
       }
 
+      let countCompleted = true;
       try {
         file = await enrichFileMetadata(file);
 
-        if (await shouldAbortSync()) break;
+        if (await shouldAbortSync()) {
+          countCompleted = false;
+          break;
+        }
 
-        const res = await raceWithAbort(uploadFile(file, () => {}, { verifyDisk: isTwoWay }));
+        // Re-check before starting — priority may have flipped during enrich.
+        if (await readUIPriorityMode()) {
+          countCompleted = false;
+          pending.splice(nextIndex, 0, file);
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+
+        const res = await raceWithAbortOrUIPriority(uploadFile(file, () => {}, { verifyDisk: isTwoWay }));
 
         if (res.success) {
           serverDeviceTotalFiles = res.deviceTotalFiles;
@@ -862,16 +1025,32 @@ export async function performActualSync(onProgress, runOptions = {}) {
           }
           if (res.status === 'skipped') {
             skipped++;
+            if (runOptions.sessionBuilder) {
+              runOptions.sessionBuilder.skippedCount =
+                (runOptions.sessionBuilder.skippedCount || 0) + 1;
+            }
           } else {
             uploaded++;
+            uploadedBytes += Number(file.size) || 0;
+            if (runOptions.sessionBuilder) {
+              runOptions.sessionBuilder.uploadedCount =
+                (runOptions.sessionBuilder.uploadedCount || 0) + 1;
+            }
           }
         } else {
           errors++;
           lastError = 'Server rejected the file. Check server logs.';
         }
       } catch (err) {
+        // Abandoned so interactive screens can reclaim Wi‑Fi — re-queue and pause.
+        if (err?.message === 'ui_priority') {
+          countCompleted = false;
+          pending.splice(nextIndex, 0, file);
+          continue;
+        }
         // Abandoned via force-stop or abort — not a real upload error.
         if (isForceStop() || isAborted()) {
+          countCompleted = false;
           break;
         }
         console.warn('[BackupTask] Upload failed:', file.relativePath, err?.message);
@@ -885,19 +1064,24 @@ export async function performActualSync(onProgress, runOptions = {}) {
           runOptions.sessionBuilder.errorDetails.push(`${file.name || file.relativePath.split('/').pop()}: ${friendlyMsg}`);
         }
       } finally {
-        completed++;
-        if (onProgress && !isForceStop() && !isAborted()) {
-          await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
+        if (countCompleted) {
+          completed++;
+          if (onProgress && !isForceStop() && !isAborted()) {
+            await onProgress(completed, totalUploads, { phase: 'uploading', currentFile: file.relativePath });
+          }
         }
         // Graceful stop: break immediately after the current file completes.
         // Workers will not pick up another file from the shared queue.
-        if (isForceStop() || isAborted() || isStopRequested()) break;
+        if (isForceStop() || isAborted() || isStopRequested()) {
+          // fall through; while-loop checks shouldAbortSync next
+        }
       }
+      if (isForceStop() || isAborted() || isStopRequested()) break;
     }
   }
 
   const uploadConcurrency = getUploadConcurrency(pending);
-  await Promise.all(Array.from({ length: uploadConcurrency }, () => worker()));
+  await Promise.all(Array.from({ length: uploadConcurrency }, (_, i) => worker(i)));
   await markUploadedBatch(uploadedFiles);
 
   // Match on the stable SAF document `uri` (unique per file and preserved by
@@ -921,6 +1105,7 @@ export async function performActualSync(onProgress, runOptions = {}) {
 
   return {
     uploaded,
+    uploadedBytes,
     skipped,
     total: files.length + snapshotSkipped,
     scanned: files.length,
@@ -1002,6 +1187,8 @@ export async function runSync(onProgress, runOptions = {}) {
     startedAt:     Date.now(),
     trigger:       isAuto ? 'auto' : 'manual',
     uploadedFiles: [],
+    uploadedCount: 0,
+    skippedCount:  0,
     errorDetails:  [],
   };
   // Thread through so worker can accumulate files/errors
@@ -1138,6 +1325,8 @@ export async function runSync(onProgress, runOptions = {}) {
       skipped:     result.skipped   ?? 0,
       errors:      result.errors    ?? 0,
       total_files: totalSynced,
+      bytes_uploaded: result.uploadedBytes ?? 0,
+      total_size:     result.uploadedBytes ?? 0,
     }).catch(() => {});
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -1156,6 +1345,7 @@ export async function runSync(onProgress, runOptions = {}) {
     if ((!isBackgroundFetch || result.uploaded > 0) && !result.stopped && !wasForceStopped) {
       await showSyncCompleteNotification(result.uploaded, result.skipped);
     }
+    reconcileP2PMediaWithServer().catch(() => {});
 
     emitSyncCompleted({
       lastSyncTime: wasForceStopped ? undefined : now,
@@ -1185,7 +1375,7 @@ export async function runSync(onProgress, runOptions = {}) {
         endedAt:    failedAt,
         durationMs: failedAt - sessionBuilder.startedAt,
         outcome:    'force_stopped',
-        uploaded:   sessionBuilder.uploadedFiles.length,
+        uploaded:   sessionBuilder.uploadedCount || 0,
         errors:     sessionBuilder.errorDetails.length,
       }).catch(() => {});
       postSyncSession({
@@ -1194,6 +1384,9 @@ export async function runSync(onProgress, runOptions = {}) {
         duration_ms: failedAt - sessionBuilder.startedAt,
         trigger:     sessionBuilder.trigger,
         outcome:     'force_stopped',
+        uploaded:    sessionBuilder.uploadedCount || 0,
+        skipped:     sessionBuilder.skippedCount || 0,
+        errors:      sessionBuilder.errorDetails?.length ?? 0,
       }).catch(() => {});
       return;  // swallow the thrown abort error
     }
@@ -1209,6 +1402,7 @@ export async function runSync(onProgress, runOptions = {}) {
       endedAt:      failedAt,
       durationMs:   failedAt - sessionBuilder.startedAt,
       outcome:      'failed',
+      uploaded:     sessionBuilder.uploadedCount || 0,
       errors:       (sessionBuilder.errorDetails.length || 0) + 1,
       errorDetails: [
         ...sessionBuilder.errorDetails,
@@ -1221,7 +1415,9 @@ export async function runSync(onProgress, runOptions = {}) {
       duration_ms: failedAt - sessionBuilder.startedAt,
       trigger:     sessionBuilder.trigger,
       outcome:     'failed',
-      errors:      1,
+      uploaded:    sessionBuilder.uploadedCount || 0,
+      skipped:     sessionBuilder.skippedCount || 0,
+      errors:      (sessionBuilder.errorDetails?.length || 0) + 1,
     }).catch(() => {});
     await clearSyncRuntimeState().catch(() => {});
     currentSyncState = { active: false, phase: 'idle', stopRequested: false, stopping: false, forceStop: false };
@@ -1240,18 +1436,20 @@ export async function runSync(onProgress, runOptions = {}) {
 
 
 async function persistentSyncLoop(taskDataArguments) {
-  const { delay } = taskDataArguments;
+  const baseDelay = taskDataArguments?.delay || SERVICE_LOOP_TICK_MS;
   await updateIdleNotification(true);
 
   while (BackgroundService.isRunning()) {
+    let nextSleepMs = baseDelay;
     try {
       if (isSyncInProgress) {
-        // Progress notification is updated by reportProgress during sync.
+        nextSleepMs = 5000;
       } else {
         const schedule = await getScheduledSyncState();
 
         if (schedule.paused) {
           await updateIdleNotification();
+          nextSleepMs = Math.max(baseDelay, 60000);
         } else if (schedule.due) {
           const ip = await getServerIp();
           if (ip) {
@@ -1260,16 +1458,22 @@ async function persistentSyncLoop(taskDataArguments) {
             );
           } else {
             await updateIdleNotification();
+            nextSleepMs = Math.max(baseDelay, 60000);
           }
         } else {
           await updateIdleNotification();
+          // Sleep until near the next sync run (bounded between 30s and 2 minutes)
+          const timeUntilDue = (schedule.dueAt || 0) - (schedule.now || Date.now());
+          if (timeUntilDue > 0) {
+            nextSleepMs = Math.min(Math.max(timeUntilDue, 30000), 120000);
+          }
         }
         checkStreakRiskInBackground().catch(() => {});
       }
     } catch (err) {
       console.warn('[BackgroundTask] Persistent loop tick failed:', err?.message);
     }
-    await new Promise((resolve) => setTimeout(resolve, delay));
+    await new Promise((resolve) => setTimeout(resolve, nextSleepMs));
   }
 }
 

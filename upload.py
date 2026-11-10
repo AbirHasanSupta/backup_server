@@ -22,42 +22,44 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from config import load_config, APP_DATA_DIR, SHARED_QUIZ_DIR
-from database import (
-    batch_check_files,
+from core.path_utils import normalize_fs_path
+from repositories.device_repo import (
     find_device_by_name_model,
     format_device_display_name,
     get_device_by_id,
     get_device_display_name,
-    get_stats,
     get_device_stats,
     get_devices,
+    is_device_known,
+    merge_device_id,
+    remove_device,
+    touch_device,
+    touch_device_and_get_stats,
+    upsert_device,
+    set_device_username,
+    ensure_device_token,
+    verify_device_token,
+)
+from repositories.file_repo import (
+    batch_check_files,
+    get_global_stats as get_stats,
     get_files_for_device,
     search_files_for_device,
     insert_file,
     insert_sync_session,
     get_sync_sessions,
     clear_sync_sessions,
-    is_device_known,
     is_uploaded_compatible,
-    merge_device_id,
-    remove_device,
     remove_file_record,
-    touch_device,
-    upsert_device,
-    set_device_username,
-    ensure_device_token,
-    verify_device_token, get_files_browse,
+    get_files_browse,
     get_cleanup_candidates,
     get_upload_cache,
     log_cleanup_deletions,
-    get_trips,
-    get_trip_media,
+)
+from repositories.social_repo import (
     toggle_reaction,
     get_media_reactions,
     get_reactions_for_media_ids,
-    get_or_create_media_id,
-    get_or_create_library_reel_share,
-    bulk_get_or_create_library_reel_shares,
     get_comment_counts_for_media_ids,
     add_comment,
     get_comments_for_media,
@@ -78,6 +80,12 @@ from database import (
     mark_share_notifications_seen,
     add_share_group_targets,
     edit_device_share_group_caption,
+    MAX_COMMENT_LENGTH,
+)
+from repositories.reels_repo import (
+    get_or_create_media_id,
+    get_or_create_library_reel_share,
+    bulk_get_or_create_library_reel_shares,
     save_reel,
     unsave_reel,
     toggle_save_reel,
@@ -93,7 +101,10 @@ from database import (
     get_reel_view_counts,
     get_reel_durations,
     record_reel_telemetry,
-    MAX_COMMENT_LENGTH,
+)
+from repositories.trips_repo import (
+    get_trips,
+    get_trip_media,
 )
 from trips import cluster_source_media, trigger_background_clustering
 from state import add_log, get_current_activity, pending_connections, set_current_activity
@@ -105,24 +116,36 @@ from video_preview import (
     is_video_path,
     preview_request_is_active,
 )
-from network_info import get_tailscale_network_info
+from network_info import get_client_ip, get_tailscale_network_info
+from version import APP_VERSION
 
 router = APIRouter()
-
-APP_VERSION = "4.4.1"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Auth helper
 # ──────────────────────────────────────────────────────────────────────────────
 
-def format_display_name(username: str | None, device_name: str | None, device_model: str | None = None) -> str | None:
-    """Primary: username (device_name). Fallback: device_name only."""
+def format_display_name(username: str | None, device_name: str | None, device_model: str | None = None, device_id: str | None = None) -> str | None:
+    """Primary: username (device_name). Fallback: device_name only or desktop name."""
+    if device_id == "desktop-server":
+        try:
+            from repositories.device_repo import get_device_display_name
+            return get_device_display_name("desktop-server")
+        except Exception:
+            return "Desktop Server"
     res = format_device_display_name(
         username=username,
         device_name=device_name,
         device_model=device_model,
+        device_id=device_id,
         fallback="",
     )
+    if (not res or res == "Unknown device") and device_id:
+        try:
+            from repositories.device_repo import get_device_display_name
+            return get_device_display_name(device_id, fallback=device_id)
+        except Exception:
+            pass
     return res or None
 
 
@@ -208,13 +231,19 @@ def get_all_local_ips() -> list[str]:
     # 3. Windows ipconfig parsing / OS interface scanning
     if platform.system() == "Windows":
         try:
-            out = subprocess.check_output(
-                ["ipconfig"],
-                text=True,
-                errors="ignore",
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                timeout=3,
-            )
+            run_opts: dict[str, object] = {
+                "text": True,
+                "errors": "ignore",
+                "timeout": 3,
+                "stdin": subprocess.DEVNULL,
+            }
+            if os.name == "nt":
+                run_opts["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+                run_opts["startupinfo"] = startupinfo
+            out = subprocess.check_output(["ipconfig"], **run_opts)
             for ip in re.findall(r"IPv4 Address[.\s]+:\s*([\d.]+)", out):
                 if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
                     ips.add(ip)
@@ -249,6 +278,7 @@ async def ping():
     hostname = socket.gethostname()
     cfg = load_config()
     tailscale = await asyncio.to_thread(get_tailscale_network_info)
+    from network_info import get_discovery_port
     return JSONResponse(
         content={
             "status": "ok",
@@ -257,7 +287,7 @@ async def ping():
             "hostname": f"{hostname}.local",
             "version": APP_VERSION,
             "all_ips": local_ips,
-            "port": int(cfg.get("PORT", 8000)),
+            "port": get_discovery_port(),
             "tailscale": tailscale,
         },
         headers={
@@ -307,7 +337,7 @@ async def connect_device(
     """
     verify_connect_auth(authorization)
 
-    device_ip = request.client.host
+    device_ip = get_client_ip(request)
     device_name = body.device_name.strip() or device_ip
     device_id = body.device_id
     device_model = (body.device_model or "").strip() or None
@@ -344,7 +374,8 @@ async def connect_device(
     )
 
     # Already registered — just refresh the record, no dialog needed
-    if is_device_known(device_ip, device_id):
+    device_exists = bool(get_device_by_id(device_id)) if device_id else False
+    if device_exists:
         upsert_device(device_name, device_ip, device_id, device_model, username)
         add_log(f"📱 Re-connected: {dev_name} ({device_ip})")
         return await accepted_response()
@@ -354,7 +385,7 @@ async def connect_device(
     # (same device_name + model).  If so, silently re-link the new ID to the
     # existing device row and migrate all file records — the old backup folder
     # is preserved, and already-uploaded files are not re-uploaded.
-    if device_id:
+    if device_id and not device_exists:
         existing = find_device_by_name_model(device_name, device_model)
         if existing and existing.get("device_id") and existing["device_id"] != device_id:
             old_id = existing["device_id"]
@@ -522,7 +553,7 @@ async def check_files(body: FileCheckRequest, request: Request, authorization: s
     Files deleted from the PC are reported as missing even when an old DB row exists.
     """
     verify_auth(authorization, body.device_id)
-    device_ip = request.client.host
+    device_ip = get_client_ip(request)
     device_id = body.device_id
     verify_known_device(device_ip, device_id)
     return await asyncio.to_thread(_check_files_sync, body, device_ip, device_id)
@@ -601,10 +632,10 @@ def finish_upload_record(
         add_log(f"Error updating DB for {relative_path}: {str(e)}")
         raise
 
-    touch_device(device_ip, device_id=device_id, files_delta=1)
-    device_stats = get_device_stats(device_ip, device_id=device_id)
+    device_stats = touch_device_and_get_stats(device_ip, device_id=device_id, files_delta=1, size_delta=size)
     dev_name = get_device_display_name(device_id or device_ip)
     add_log(f"Uploaded: {relative_path} ({dev_name})")
+    # Debounced (30s) — also triggered at /sync/session end when uploaded > 0.
     if device_id:
         trigger_background_clustering(device_id)
 
@@ -616,8 +647,7 @@ def finish_upload_record(
 
 
 def skipped_upload_response(device_ip: str, device_id: str | None):
-    touch_device(device_ip, device_id=device_id, files_delta=0)
-    device_stats = get_device_stats(device_ip, device_id=device_id)
+    device_stats = touch_device_and_get_stats(device_ip, device_id=device_id, files_delta=0, size_delta=0)
     return {
         "status": "skipped",
         "device_total_files": device_stats["total_files"],
@@ -654,7 +684,7 @@ async def upload_file_raw(
 ):
     verify_auth(authorization, device_id)
 
-    device_ip = request.client.host
+    device_ip = get_client_ip(request)
     verify_known_device(device_ip, device_id)
 
     if await asyncio.to_thread(should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
@@ -698,7 +728,7 @@ async def upload_file(
 ):
     verify_auth(authorization, device_id)
 
-    device_ip = request.client.host
+    device_ip = get_client_ip(request)
     verify_known_device(device_ip, device_id)
 
     if await asyncio.to_thread(should_skip_upload, relative_path, size, modified_time, external_id, device_id, verify_disk):
@@ -857,7 +887,7 @@ async def search_shared_files(
     q = q.strip()
     if not q:
         return {"files": []}
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         return {"files": []}
     files = await asyncio.to_thread(_search_shared_dir, root, q)
@@ -881,7 +911,7 @@ async def browse_shared_files(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     norm_prefix = prefix.strip("/").replace("\\", "/")
     target_dir = os.path.join(root, norm_prefix) if norm_prefix else root
     target_dir = os.path.abspath(target_dir)
@@ -942,7 +972,7 @@ async def get_shared_feed(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         return {"items": [], "source_id": source_id, "label": entry["label"]}
 
@@ -1171,7 +1201,7 @@ async def warm_shared_preview_files(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     armed = False
     scheduled = False
     # Do not loop: all remaining paths are adjacent/list warmups and must never
@@ -1302,6 +1332,11 @@ async def record_sync_session(
 
     if body.device_id and body.uploaded > 0:
         trigger_background_clustering(body.device_id)
+        try:
+            from services.ws_service import ws_service
+            ws_service.flush_coalesced_uploads()
+        except Exception:
+            pass
 
     return {"ok": True, "id": session_id}
 
@@ -1414,7 +1449,7 @@ async def list_shared_files(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         return {"files": [], "warning": "Directory does not exist on server"}
 
@@ -1468,7 +1503,7 @@ async def download_shared_file(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         raise HTTPException(status_code=404, detail="Shared directory not found on server")
 
@@ -1501,7 +1536,7 @@ async def preview_shared_file(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         raise HTTPException(status_code=404, detail="Shared directory not found on server")
 
@@ -1548,7 +1583,7 @@ async def thumbnail_shared_file(
     if not _is_folder_tagged_for_device(entry, device_id, authorization, token):
         raise HTTPException(status_code=403, detail="Shared source not tagged for this device")
 
-    root = os.path.abspath(entry["path"])
+    root = os.path.abspath(normalize_fs_path(entry["path"]))
     if not os.path.isdir(root):
         raise HTTPException(status_code=404, detail="Shared directory not found on server")
 
@@ -1575,24 +1610,39 @@ async def thumbnail_shared_file(
 @router.get("/memories/today")
 async def get_memories_today(
     device_id: str,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return await asyncio.to_thread(memories.get_todays_memories, device_id)
+    return await asyncio.to_thread(
+        memories.get_todays_memories,
+        device_id,
+        local_date=local_date,
+        tz_offset_minutes=tz_offset_minutes,
+    )
 
 
 @router.get("/memories/recent")
 async def get_memories_recent(
     device_id: str,
     days: int = 7,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return await asyncio.to_thread(memories.get_recent_memories, device_id, days)
+    return await asyncio.to_thread(
+        memories.get_recent_memories,
+        device_id,
+        days,
+        local_date=local_date,
+        tz_offset_minutes=tz_offset_minutes,
+    )
 
 
 @router.post("/memories/reindex")
@@ -1610,26 +1660,38 @@ async def reindex_memories(
 @router.get("/memories/flashback")
 async def get_memories_flashback(
     device_id: str,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    return await asyncio.to_thread(memories.get_random_flashback, device_id)
+    return await asyncio.to_thread(
+        memories.get_random_flashback,
+        device_id,
+        local_date=local_date,
+        tz_offset_minutes=tz_offset_minutes,
+    )
 
 
 @router.get("/memories/wrapped")
 async def get_memories_wrapped(
     device_id: str,
-    year: int,
+    year: int | None = None,
+    local_date: str | None = None,
+    tz_offset_minutes: int | None = None,
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
     verify_known_device_by_id(device_id)
-    if year < 1970 or year > 2100:
+    from core.timeutil import resolve_local_today
+
+    target_year = year or resolve_local_today(local_date, tz_offset_minutes).year
+    if target_year < 1970 or target_year > 2100:
         raise HTTPException(status_code=400, detail="Invalid year")
-    return await asyncio.to_thread(memories.get_wrapped, device_id, year)
+    return await asyncio.to_thread(memories.get_wrapped, device_id, target_year)
 
 
 @router.get("/memories/quiz")
@@ -1861,6 +1923,7 @@ async def recluster_trips(
 class ReactRequest(BaseModel):
     source_id: str
     emoji: str
+    scope: str = "post"
 
 
 @router.post("/api/media/{media_id}/react")
@@ -1876,7 +1939,7 @@ async def react_to_media(
     if not emoji:
         raise HTTPException(status_code=400, detail="Emoji cannot be empty")
     try:
-        res = await asyncio.to_thread(toggle_reaction, media_id, body.source_id, emoji)
+        res = await asyncio.to_thread(toggle_reaction, media_id, body.source_id, emoji, body.scope)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return res
@@ -1887,11 +1950,12 @@ async def react_to_media(
 async def get_reactions(
     media_id: int,
     device_id: str | None = None,
+    scope: str = "post",
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
-    result = await asyncio.to_thread(get_media_reactions, media_id)
+    result = await asyncio.to_thread(get_media_reactions, media_id, scope)
     for r in result["reactions"]:
         r["display_name"] = format_display_name(r.get("username"), r.get("device_name")) or r["source_id"]
         r["is_own"] = device_id is not None and r["source_id"] == device_id
@@ -1905,6 +1969,7 @@ async def get_reactions(
 class CommentRequest(BaseModel):
     source_id: str
     text: str
+    scope: str = "post"
 
 
 class CommentDeleteRequest(BaseModel):
@@ -1916,11 +1981,12 @@ class CommentDeleteRequest(BaseModel):
 async def list_media_comments(
     media_id: int,
     device_id: str | None = None,
+    scope: str = "post",
     authorization: str = Header(None),
     token: str = None,
 ):
     verify_auth(authorization or (f"Bearer {token}" if token else None), device_id)
-    comments = await asyncio.to_thread(get_comments_for_media, media_id)
+    comments = await asyncio.to_thread(get_comments_for_media, media_id, scope)
     is_post_creator = False
     if device_id:
         is_post_creator = await asyncio.to_thread(is_media_or_post_creator, media_id, device_id)
@@ -1946,7 +2012,7 @@ async def add_media_comment(
         raise HTTPException(status_code=400, detail="Comment cannot be empty")
     if len(text) > MAX_COMMENT_LENGTH:
         text = text[:MAX_COMMENT_LENGTH]
-    comment = await asyncio.to_thread(add_comment, media_id, body.source_id, text)
+    comment = await asyncio.to_thread(add_comment, media_id, body.source_id, text, body.scope)
     comment["is_own"] = True
     comment["can_delete"] = True
     # Ensure display_name is present (add_comment now returns it, but guard for safety)
@@ -2118,8 +2184,21 @@ async def create_share(
                     _persist_shared_rewind_reel, it.source_key, it.relative_path
                 )
                 persisted_paths.append(persisted)
-                it.relative_path = persisted
+                # Store only the basename so that api/v1/feed.py's basename-first
+                # _resolve_share_path works correctly even when the Docker container
+                # mounts APP_DATA_DIR at a different absolute path than what was
+                # recorded at share-creation time.
+                it.relative_path = os.path.basename(persisted)
                 it.source_type = "rewind_shared"
+                # Populate real file size/mtime from the persisted copy — the phone
+                # client sends size=0 because it does not know the server-generated
+                # video's file size.
+                try:
+                    st = os.stat(persisted)
+                    it.size = st.st_size
+                    it.modified_time = int(st.st_mtime)
+                except OSError:
+                    pass
     except Exception:
         for p in persisted_paths:
             try:
@@ -2142,7 +2221,7 @@ async def create_share(
         create_device_share, body.shared_by_device_id, targets, body.caption, items,
         body.post_kind, body.post_title,
     )
-    if not result.get("ok"):
+    if result.get("ok") is False:
         for p in persisted_paths:
             try:
                 os.remove(p)
@@ -2371,38 +2450,56 @@ async def create_direct_post_share(
     """
     content_type = (request.headers.get("content-type") or "").lower()
     raw_files_data: list[tuple[str, bytes]] = []
+    file_paths: list[str] = []
 
     if "application/json" in content_type:
         body = await request.json()
         shared_by_device_id = str(body.get("shared_by_device_id") or "")
         target_device_ids_raw = body.get("target_device_ids")
         caption = str(body.get("caption") or "").strip()[:2000]
+        for p in (body.get("file_paths") or []):
+            if isinstance(p, str) and p.strip():
+                file_paths.append(p.strip())
         json_files = body.get("files") or []
-        if not isinstance(json_files, list) or not json_files:
-            raise HTTPException(status_code=400, detail="No files provided")
-
         for idx, file_obj in enumerate(json_files):
-            if not isinstance(file_obj, dict):
-                raise HTTPException(status_code=400, detail=f"Invalid file item at index {idx}")
-            fname = str(file_obj.get("name") or f"file_{idx + 1}")
-            b64_str = file_obj.get("base64") or file_obj.get("data") or ""
-            if not isinstance(b64_str, str) or not b64_str.strip():
-                raise HTTPException(status_code=400, detail=f"Empty file at index {idx}")
-            if "," in b64_str:
-                b64_str = b64_str.split(",", 1)[1]
-            try:
-                decoded = base64.b64decode(b64_str)
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=f"Invalid base64 at index {idx}") from exc
-            raw_files_data.append((fname, decoded))
+            if isinstance(file_obj, str) and file_obj.strip():
+                file_paths.append(file_obj.strip())
+                continue
+            if isinstance(file_obj, dict):
+                if file_obj.get("path"):
+                    file_paths.append(str(file_obj["path"]).strip())
+                    continue
+                fname = str(file_obj.get("name") or f"file_{idx + 1}")
+                b64_str = file_obj.get("base64") or file_obj.get("data") or ""
+                if "," in b64_str:
+                    b64_str = b64_str.split(",", 1)[1]
+                if b64_str:
+                    try:
+                        decoded = base64.b64decode(b64_str)
+                        raw_files_data.append((fname, decoded))
+                    except Exception as exc:
+                        raise HTTPException(status_code=400, detail=f"Invalid base64 at index {idx}") from exc
     else:
         form = await request.form()
         shared_by_device_id = str(form.get("shared_by_device_id") or "")
         target_device_ids_raw = form.get("target_device_ids")
         caption = str(form.get("caption") or "").strip()[:2000]
+
+        file_paths_raw = form.get("file_paths")
+        if file_paths_raw:
+            try:
+                parsed_fp = json.loads(file_paths_raw)
+                if isinstance(parsed_fp, list):
+                    file_paths.extend([str(p).strip() for p in parsed_fp if str(p).strip()])
+                elif isinstance(parsed_fp, str) and parsed_fp.strip():
+                    file_paths.append(parsed_fp.strip())
+            except Exception:
+                file_paths.append(str(file_paths_raw).strip())
+        for fp in form.getlist("file_paths"):
+            if isinstance(fp, str) and fp.strip() and fp.strip() not in file_paths:
+                file_paths.append(fp.strip())
+
         uploads = form.getlist("files")
-        if not uploads:
-            raise HTTPException(status_code=400, detail="No files provided")
         for idx, upload in enumerate(uploads):
             if hasattr(upload, "read"):
                 content = await upload.read()
@@ -2411,14 +2508,15 @@ async def create_direct_post_share(
                 content = upload
                 original_name = f"file_{idx + 1}"
             else:
-                raise HTTPException(status_code=400, detail=f"Invalid file at index {idx}")
-            raw_files_data.append((original_name, content))
+                continue
+            if content:
+                raw_files_data.append((original_name, content))
 
     verify_auth(authorization or (f"Bearer {token}" if token else None), shared_by_device_id)
     verify_known_device_by_id(shared_by_device_id)
 
-    if not raw_files_data:
-        raise HTTPException(status_code=400, detail="No files provided")
+    if not raw_files_data and not file_paths:
+        raise HTTPException(status_code=400, detail="No files or file paths provided")
 
     if isinstance(target_device_ids_raw, list):
         targets = target_device_ids_raw
@@ -2435,20 +2533,45 @@ async def create_direct_post_share(
     if not targets:
         raise HTTPException(status_code=400, detail="No target devices")
 
-    if len(raw_files_data) > DIRECT_POST_MAX_FILES:
-        raise HTTPException(status_code=400, detail=f"Too many files (max {DIRECT_POST_MAX_FILES})")
-
-    known_ids = {
-        d["device_id"]
-        for d in await asyncio.to_thread(get_share_target_devices, shared_by_device_id)
-    }
-    valid_targets = [t for t in targets if t in known_ids]
-    if not valid_targets:
-        raise HTTPException(status_code=400, detail="No valid target devices")
-
     persisted_paths: list[str] = []
     share_items: list[dict] = []
     try:
+        from core.path_utils import normalize_fs_path
+        # 1. Server file path references — instant, zero copy
+        for raw_p in file_paths:
+            p_str = str(raw_p).strip()
+            if not p_str:
+                continue
+            norm_p = normalize_fs_path(p_str)
+            if not os.path.exists(norm_p):
+                norm_p = os.path.abspath(p_str)
+            if os.path.isdir(norm_p):
+                with os.scandir(norm_p) as it:
+                    for entry in it:
+                        if entry.is_file(follow_symlinks=False):
+                            try:
+                                st = entry.stat()
+                                share_items.append({
+                                    "source_type": "desktop",
+                                    "source_key": shared_by_device_id or "desktop-server",
+                                    "relative_path": entry.path,
+                                    "size": st.st_size,
+                                    "modified_time": int(st.st_mtime),
+                                })
+                            except (OSError, PermissionError):
+                                continue
+                continue
+            if not os.path.isfile(norm_p):
+                raise HTTPException(status_code=404, detail=f"File not found on server: {p_str}")
+            st = os.stat(norm_p)
+            share_items.append({
+                "source_type": "desktop",
+                "source_key": shared_by_device_id or "desktop-server",
+                "relative_path": p_str,
+                "size": st.st_size,
+                "modified_time": int(st.st_mtime),
+            })
+
         for idx, (original_name, content) in enumerate(raw_files_data):
             if not content:
                 raise HTTPException(status_code=400, detail=f"Empty file at index {idx}")
@@ -2482,6 +2605,20 @@ async def create_direct_post_share(
         )
         if not result.get("ok"):
             raise HTTPException(status_code=500, detail="Failed to create direct post share")
+        try:
+            from services.ws_service import ws_service
+            from repositories import device_repo
+            server_name = device_repo.get_device_display_name(shared_by_device_id)
+            group_id = result.get("group_id") or result.get("share_group_id") or ""
+            ws_service.notify_new_share(
+                target_device_ids=valid_targets,
+                group_id=group_id,
+                caption=(caption or "").strip() or None,
+                shared_by=server_name,
+                shared_by_device_id=shared_by_device_id,
+            )
+        except Exception:
+            pass
         return result
     except HTTPException:
         for p in persisted_paths:
@@ -2553,7 +2690,7 @@ async def get_unified_feed(
                 groups[gid] = {
                     "group_id": gid,
                     "caption": s.get("group_caption") or s.get("caption"),
-                    "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
+                    "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=s.get("shared_by_device_id")) or s["shared_by_device_id"],
                     "shared_by_device_id": s["shared_by_device_id"],
                     "created_at": s["created_at"],
                     "is_own_post": s["is_own_post"],
@@ -2582,8 +2719,8 @@ async def get_unified_feed(
         all_media_ids = [item["media_id"] for g in sorted_groups for item in g["items"]]
 
         # Use first item's media_id as the reaction anchor for the group
-        counts_map, user_map = get_reactions_for_media_ids(all_media_ids, current_source_id=device_id)
-        comment_counts = get_comment_counts_for_media_ids(all_media_ids)
+        counts_map, user_map = get_reactions_for_media_ids(all_media_ids, current_source_id=device_id, scope="post")
+        comment_counts = get_comment_counts_for_media_ids(all_media_ids, scope="post")
 
         # Build final post list with reaction/comment data attached to group
         posts = []
@@ -2734,7 +2871,7 @@ async def get_shared_and_backups_reels(
                     continue
                 if not entry.get("available_in_reels", entry.get("available_in_reel", True)):
                     continue
-                root = os.path.abspath(entry.get("path") or "")
+                root = os.path.abspath(normalize_fs_path(entry.get("path") or ""))
                 if not os.path.isdir(root):
                     continue
                 for f in _collect_shared_media(root):
@@ -2798,6 +2935,8 @@ async def get_shared_and_backups_reels(
                 "is_unseen": False,
                 "group_id": None,
                 "library_source": r["source_type"],
+                "source_type": "phone" if r["source_type"] == "reel_backup" else "shared",
+                "source_key": r["source_key"],
             })
 
         # Each catalogue is ranked server-side before pagination. This prevents
@@ -2897,7 +3036,7 @@ async def get_reels_feed(
                 "share_id": s["share_id"],
                 "media_id": s.get("media_id"),
                 "path": s["relative_path"],
-                "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
+                "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 "shared_by_device_id": s["shared_by_device_id"],
                 "is_repost": is_repost,
                 "user_has_reposted": has_reposted,
@@ -2905,13 +3044,13 @@ async def get_reels_feed(
                     "device_id": orig_id,
                     "name": orig_name,
                     "username": orig_username,
-                    "display_name": format_display_name(orig_username, orig_name) or orig_id,
+                    "display_name": format_display_name(orig_username, orig_name, device_id=orig_id) or orig_id,
                 },
                 "reposted_by": {
                     "device_id": s["shared_by_device_id"],
                     "name": reposter_name,
                     "username": reposter_username,
-                    "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                    "display_name": format_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 } if is_repost else None,
                 "caption": cap_text,
                 "created_at": s["created_at"],
@@ -3166,7 +3305,7 @@ async def get_saved_reels_endpoint(
                 "share_id": s["share_id"],
                 "media_id": s.get("media_id"),
                 "path": s["relative_path"],
-                "shared_by": library_label if is_library_reel else (format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"]),
+                "shared_by": library_label if is_library_reel else (format_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=s["shared_by_device_id"]) or s["shared_by_device_id"]),
                 "shared_by_device_id": orig_id if is_library_reel else s["shared_by_device_id"],
                 "is_repost": is_repost,
                 "user_has_reposted": has_reposted,
@@ -3174,13 +3313,13 @@ async def get_saved_reels_endpoint(
                     "device_id": orig_id,
                     "name": library_label if is_library_reel else orig_name,
                     "username": None if is_library_reel else orig_username,
-                    "display_name": library_label if is_library_reel else (format_display_name(orig_username, orig_name) or orig_id),
+                    "display_name": library_label if is_library_reel else (format_display_name(orig_username, orig_name, device_id=orig_id) or orig_id),
                 },
                 "reposted_by": {
                     "device_id": s["shared_by_device_id"],
                     "name": reposter_name,
                     "username": reposter_username,
-                    "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                    "display_name": format_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 } if is_repost else None,
                 "caption": s.get("group_caption") or s.get("caption"),
                 "created_at": s["created_at"],
@@ -3225,12 +3364,13 @@ async def get_liked_reels_endpoint(
         media_ids = [s["media_id"] for s in video_rows if s.get("media_id")]
 
         saved_ids = get_saved_reel_ids(device_id)
-        counts_map, user_map = get_reactions_for_media_ids(media_ids, current_source_id=device_id)
-        comment_counts = get_comment_counts_for_media_ids(media_ids)
+        counts_map, user_map = get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
+        comment_counts = get_comment_counts_for_media_ids(media_ids, scope="reel")
         repost_counts = get_repost_counts_for_media_ids(media_ids)
         user_reposted_media, user_reposted_shares = get_user_reposted_info(device_id)
 
         reels = []
+        seen_reel_keys = set()
         for s in video_rows:
             is_library_reel = bool(s.get("is_library_reel"))
             library_label = _library_reel_label_for_device(
@@ -3248,6 +3388,11 @@ async def get_liked_reels_endpoint(
                 f"library:{s['source_type']}:{s['source_key']}:{s['share_id']}"
                 if is_library_reel else str(s["share_id"])
             )
+            dedup_key = reel_id or str(s.get("media_id"))
+            if dedup_key in seen_reel_keys:
+                continue
+            seen_reel_keys.add(dedup_key)
+
             if is_library_reel:
                 orig_id = f"library:{s['source_type']}:{s['source_key']}"
 
@@ -3268,7 +3413,7 @@ async def get_liked_reels_endpoint(
                 "share_id": s["share_id"],
                 "media_id": s.get("media_id"),
                 "path": s["relative_path"],
-                "shared_by": library_label if is_library_reel else (format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"]),
+                "shared_by": library_label if is_library_reel else (format_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=s["shared_by_device_id"]) or s["shared_by_device_id"]),
                 "shared_by_device_id": orig_id if is_library_reel else s["shared_by_device_id"],
                 "is_repost": is_repost,
                 "user_has_reposted": has_reposted,
@@ -3276,18 +3421,18 @@ async def get_liked_reels_endpoint(
                     "device_id": orig_id,
                     "name": library_label if is_library_reel else orig_name,
                     "username": None if is_library_reel else orig_username,
-                    "display_name": library_label if is_library_reel else (format_display_name(orig_username, orig_name) or orig_id),
+                    "display_name": library_label if is_library_reel else (format_display_name(orig_username, orig_name, device_id=orig_id) or orig_id),
                 },
                 "reposted_by": {
                     "device_id": s["shared_by_device_id"],
                     "name": reposter_name,
                     "username": reposter_username,
-                    "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                    "display_name": format_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 } if is_repost else None,
                 "caption": s.get("group_caption") or s.get("caption"),
                 "created_at": s["created_at"],
                 "liked_at": s.get("liked_at"),
-                "liked_emoji": s.get("liked_emoji"),
+                "liked_emoji": s.get("liked_emoji") or "❤️",
                 "reaction_counts": counts_map.get(s["media_id"], {}) if s.get("media_id") else {},
                 "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
                 "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
@@ -3351,7 +3496,7 @@ async def get_reposted_reels_endpoint(
                 "share_id": s["share_id"],
                 "media_id": s.get("media_id"),
                 "path": s["relative_path"],
-                "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name")) or s["shared_by_device_id"],
+                "shared_by": format_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 "shared_by_device_id": s["shared_by_device_id"],
                 "is_repost": True,
                 "user_has_reposted": True,
@@ -3359,13 +3504,13 @@ async def get_reposted_reels_endpoint(
                     "device_id": orig_id,
                     "name": orig_name,
                     "username": orig_username,
-                    "display_name": format_display_name(orig_username, orig_name) or orig_id,
+                    "display_name": format_display_name(orig_username, orig_name, device_id=orig_id) or orig_id,
                 },
                 "reposted_by": {
                     "device_id": s["shared_by_device_id"],
                     "name": reposter_name,
                     "username": reposter_username,
-                    "display_name": format_display_name(reposter_username, reposter_name) or s["shared_by_device_id"],
+                    "display_name": format_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"]) or s["shared_by_device_id"],
                 },
                 "caption": s.get("group_caption") or s.get("caption"),
                 "created_at": s["created_at"],
@@ -3398,7 +3543,20 @@ async def get_pending_share_notifications(
     verify_known_device_by_id(device_id)
     posts = await asyncio.to_thread(get_unseen_share_notifications, device_id)
     for p in posts:
-        p["shared_by"] = format_display_name(p.get("shared_by_username"), p.get("shared_by_name")) or p["shared_by_device_id"]
+        sharer_id = p.get("shared_by_device_id")
+        if sharer_id == "desktop-server":
+            server_name = format_display_name(None, None, device_id="desktop-server") or "Desktop Server"
+            p["shared_by"] = server_name
+            p["shared_by_name"] = server_name
+            p["shared_by_device_name"] = server_name
+            p["device_name"] = server_name
+        else:
+            disp = format_display_name(p.get("shared_by_username"), p.get("shared_by_name"), device_id=sharer_id)
+            name_val = disp if disp and disp != "Unknown device" else (sharer_id or "Nearby Device")
+            p["shared_by"] = name_val
+            p["shared_by_name"] = p.get("shared_by_name") or name_val
+            p["shared_by_device_name"] = p.get("shared_by_device_name") or name_val
+            p["device_name"] = p.get("device_name") or name_val
     return {"posts": posts}
 
 
@@ -3621,7 +3779,7 @@ def _resolve_share_path(share: dict) -> str:
         entry = _find_shared_dir(source_key)
         if not entry:
             raise HTTPException(status_code=404, detail="Shared source not found")
-        root = os.path.abspath(entry["path"])
+        root = os.path.abspath(normalize_fs_path(entry["path"]))
         if not os.path.isdir(root):
             raise HTTPException(status_code=404, detail="Shared directory not found on server")
         safe_rel = os.path.normpath(relative_path.replace("\\", "/"))
@@ -3636,10 +3794,18 @@ def _resolve_share_path(share: dict) -> str:
             raise HTTPException(status_code=404, detail="Reel not ready")
         return path
     if source_type == "rewind_shared":
+        # Prefer basename-first resolution so paths stored as bare filenames
+        # (new shares) work correctly, and fall back to the full stored path
+        # for legacy rows that recorded the absolute path before this fix.
+        fname = os.path.basename(relative_path.replace("\\", "/"))
+        candidate = os.path.join(SHARED_REWIND_DIR, fname)
+        if os.path.isfile(candidate):
+            return candidate
+        # Legacy fallback: relative_path was an absolute path
         full_path = os.path.abspath(relative_path)
-        if os.path.commonpath([SHARED_REWIND_DIR, full_path]) != SHARED_REWIND_DIR:
-            raise HTTPException(status_code=400, detail="Invalid path")
-        return full_path
+        if os.path.isfile(full_path):
+            return full_path
+        raise HTTPException(status_code=404, detail="Rewind reel file not found")
     if source_type == "quiz_shared":
         full_path = os.path.abspath(relative_path)
         if os.path.commonpath([SHARED_QUIZ_DIR, full_path]) != SHARED_QUIZ_DIR:
@@ -3688,6 +3854,8 @@ async def preview_device_share(
         raise HTTPException(status_code=404, detail="File not found")
     if not is_video_path(path):
         raise HTTPException(status_code=400, detail="Preview is only available for video files")
+    if share.get("source_type") in ("rewind", "rewind_shared"):
+        return _file_range_response(path, request, cache_control="public, max-age=604800, immutable")
     try:
         preview_path = get_video_preview_path(
             path,

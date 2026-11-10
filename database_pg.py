@@ -1,0 +1,586 @@
+"""database_pg.py — High-Concurrency PostgreSQL Database Layer for Multi-User Deployments.
+
+Designed for multi-worker FastAPI instances and distributed worker nodes:
+- Multi-Version Concurrency Control (MVCC): Non-blocking concurrent reads and writes
+- Thread-safe connection pool with automatic health check and reconnect
+- Atomic O(1) device counter increments
+- Hash-partitioned files table for fast indexed lookups across millions of files
+- GIN indexed JSONB metadata for smart queries
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import logging
+import os
+import secrets
+import time as _time
+from typing import Any, Generator
+
+from config import load_config
+
+logger = logging.getLogger("backup_server.database_pg")
+
+_pg_pool = None
+_pool_lock = None
+
+try:
+    import threading
+    _pool_lock = threading.Lock()
+except Exception:
+    pass
+
+
+def _pool_size_from_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """Read bounded per-process pool sizes for multi-worker deployments."""
+    try:
+        value = int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _get_pg_url() -> str:
+    cfg = load_config()
+    return os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL") or cfg.get("POSTGRES_URL") or "postgresql://postgres:postgres@localhost:5432/backup_db"
+
+
+def _init_pool():
+    global _pg_pool
+    if _pg_pool is not None:
+        return _pg_pool
+
+    url = _get_pg_url()
+    # Pools are process-local.  With four Gunicorn and several prefork Celery
+    # children, a 4/32 pool in each process can exceed PostgreSQL's default
+    # connection limit and turn ordinary requests into 30-second pool waits.
+    min_size = _pool_size_from_env("PG_POOL_MIN_SIZE", 1, minimum=1, maximum=8)
+    max_size = _pool_size_from_env("PG_POOL_MAX_SIZE", 8, minimum=min_size, maximum=32)
+    try:
+        # Try psycopg (v3) first
+        from psycopg_pool import ConnectionPool
+        _pg_pool = ConnectionPool(
+            conninfo=url,
+            min_size=min_size,
+            max_size=max_size,
+            timeout=30.0,
+            max_idle=300.0,
+            reconnect_timeout=5.0,
+        )
+        return _pg_pool
+    except ImportError:
+        pass
+
+    try:
+        # Fallback to psycopg2 ThreadedConnectionPool
+        from psycopg2.pool import ThreadedConnectionPool
+        _pg_pool = ThreadedConnectionPool(
+            minconn=min_size,
+            maxconn=max_size,
+            dsn=url,
+        )
+        return _pg_pool
+    except ImportError:
+        pass
+
+    return None
+
+
+@contextlib.contextmanager
+def get_pg_connection():
+    """Context manager for acquiring and releasing PostgreSQL connections from pool."""
+    pool = _init_pool()
+    if pool is None:
+        raise RuntimeError("PostgreSQL driver not available. Install psycopg or psycopg2-binary.")
+
+    # Psycopg 3 ConnectionPool vs Psycopg 2 ThreadedConnectionPool
+    if hasattr(pool, "connection"):
+        with pool.connection() as conn:
+            yield conn
+    else:
+        conn = pool.getconn()
+        try:
+            yield conn
+        finally:
+            pool.putconn(conn)
+
+
+def init_pg_db():
+    """Create all required tables, partitions, and indexes in PostgreSQL if not exist.
+
+    Multiple Gunicorn workers can enter application startup simultaneously.  The
+    advisory transaction lock prevents their otherwise-racy first-time DDL from
+    causing a worker to incorrectly fall back to SQLite.
+    """
+    with get_pg_connection() as conn:
+        with conn.cursor() as cur:
+            # This stable, application-specific lock is released automatically
+            # when the schema-initialization transaction commits or rolls back.
+            cur.execute("SELECT pg_advisory_xact_lock(486795553)")
+
+            # 1. Devices table
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS devices (
+                id SERIAL PRIMARY KEY,
+                device_id VARCHAR(64) UNIQUE,
+                device_name VARCHAR(255) NOT NULL,
+                device_ip VARCHAR(45) NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'accepted',
+                first_seen BIGINT NOT NULL,
+                last_seen BIGINT NOT NULL,
+                files_backed_up BIGINT NOT NULL DEFAULT 0,
+                total_bytes BIGINT NOT NULL DEFAULT 0,
+                folder_name VARCHAR(255),
+                device_model VARCHAR(255),
+                username VARCHAR(100),
+                token VARCHAR(128)
+            );
+            CREATE INDEX IF NOT EXISTS idx_devices_id ON devices(device_id);
+            CREATE INDEX IF NOT EXISTS idx_devices_status ON devices(status);
+            """)
+
+            # 2. Files table (Partitioned by HASH on device_id)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS files (
+                id BIGSERIAL,
+                device_id VARCHAR(64),
+                external_id TEXT,
+                path TEXT NOT NULL,
+                size BIGINT NOT NULL,
+                modified_time BIGINT NOT NULL,
+                sha256 VARCHAR(64),
+                uploaded_time BIGINT NOT NULL,
+                device_ip VARCHAR(45),
+                storage_key TEXT,
+                PRIMARY KEY (id, device_id)
+            ) PARTITION BY HASH (device_id);
+            """)
+
+            # Upgrade existing databases once. Reissuing ALTER TABLE on every
+            # worker startup would take an avoidable lock on the files table.
+            cur.execute("""
+                SELECT data_type
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'files'
+                  AND column_name = 'external_id'
+            """)
+            external_id_type = cur.fetchone()
+            if external_id_type and external_id_type[0] != "text":
+                # Android SAF content URIs are used as IDs and may exceed 255 chars.
+                cur.execute("ALTER TABLE files ALTER COLUMN external_id TYPE TEXT")
+
+            # Create 8 default partitions for files table if they don't exist
+            for i in range(8):
+                cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS files_part_{i} 
+                PARTITION OF files FOR VALUES WITH (MODULUS 8, REMAINDER {i});
+                """)
+
+            cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_files_dev_path ON files(device_id, path);
+            CREATE INDEX IF NOT EXISTS idx_files_hash ON files(sha256);
+            CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(device_id, modified_time DESC);
+            """)
+
+            # 3. Sync sessions
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS sync_sessions (
+                id BIGSERIAL PRIMARY KEY,
+                device_id VARCHAR(64) NOT NULL,
+                device_name TEXT,
+                started_at BIGINT NOT NULL,
+                finished_at BIGINT NOT NULL,
+                duration_sec DOUBLE PRECISION NOT NULL,
+                duration_ms BIGINT DEFAULT 0,
+                files_uploaded INT NOT NULL DEFAULT 0,
+                bytes_uploaded BIGINT NOT NULL DEFAULT 0,
+                files_skipped INT NOT NULL DEFAULT 0,
+                files_failed INT NOT NULL DEFAULT 0,
+                status VARCHAR(32) NOT NULL DEFAULT 'success',
+                total_files INT NOT NULL DEFAULT 0,
+                device_ip VARCHAR(45),
+                uploaded_files_summary TEXT,
+                error_details TEXT
+            );
+            ALTER TABLE sync_sessions ADD COLUMN IF NOT EXISTS device_name TEXT;
+            ALTER TABLE sync_sessions ADD COLUMN IF NOT EXISTS duration_ms BIGINT DEFAULT 0;
+            ALTER TABLE sync_sessions ADD COLUMN IF NOT EXISTS total_files INT DEFAULT 0;
+            CREATE INDEX IF NOT EXISTS idx_sync_sessions_dev ON sync_sessions(device_id, started_at DESC);
+            """)
+
+            # 4. Media index table (EXIF, GPS, timestamps)
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS media_index (
+                id BIGSERIAL PRIMARY KEY,
+                source_type VARCHAR(32) NOT NULL,
+                source_key VARCHAR(64) NOT NULL,
+                relative_path TEXT NOT NULL,
+                size BIGINT NOT NULL,
+                modified_time BIGINT NOT NULL,
+                cap_time BIGINT,
+                cap_year INT,
+                cap_month INT,
+                cap_day INT,
+                has_gps BOOLEAN NOT NULL DEFAULT FALSE,
+                lat DOUBLE PRECISION,
+                lon DOUBLE PRECISION,
+                duration DOUBLE PRECISION,
+                media_metadata JSONB DEFAULT '{}'::jsonb,
+                indexed_at BIGINT NOT NULL,
+                UNIQUE (source_type, source_key, relative_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_media_calendar ON media_index(source_key, cap_month, cap_day);
+            CREATE INDEX IF NOT EXISTS idx_media_gps ON media_index(lat, lon) WHERE has_gps = TRUE;
+            CREATE INDEX IF NOT EXISTS idx_media_year ON media_index(source_key, cap_year, cap_month);
+
+            CREATE TABLE IF NOT EXISTS scan_dirs (
+                source_type VARCHAR(32) NOT NULL,
+                source_key VARCHAR(64) NOT NULL,
+                dir_relpath TEXT NOT NULL,
+                dir_mtime_ns BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL,
+                PRIMARY KEY (source_type, source_key, dir_relpath)
+            );
+
+            CREATE TABLE IF NOT EXISTS geocode_cache (
+                lat_round DOUBLE PRECISION NOT NULL,
+                lon_round DOUBLE PRECISION NOT NULL,
+                place_name TEXT NOT NULL,
+                PRIMARY KEY (lat_round, lon_round)
+            );
+            """)
+
+            # 5. Trips and Trip Media
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS trips (
+                id BIGSERIAL PRIMARY KEY,
+                source_id VARCHAR(64) NOT NULL,
+                title VARCHAR(255) NOT NULL,
+                start_date VARCHAR(32) NOT NULL,
+                end_date VARCHAR(32) NOT NULL,
+                start_time BIGINT NOT NULL,
+                end_time BIGINT NOT NULL,
+                place_name TEXT,
+                center_lat DOUBLE PRECISION,
+                center_lon DOUBLE PRECISION,
+                media_count INT NOT NULL DEFAULT 0,
+                cover_media_id BIGINT,
+                created_at BIGINT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_trips_source ON trips(source_id, start_time DESC);
+
+            CREATE TABLE IF NOT EXISTS trip_media (
+                id BIGSERIAL PRIMARY KEY,
+                trip_id BIGINT NOT NULL REFERENCES trips(id) ON DELETE CASCADE,
+                media_id BIGINT NOT NULL,
+                source_type VARCHAR(32) NOT NULL,
+                source_key VARCHAR(64) NOT NULL,
+                relative_path TEXT NOT NULL,
+                cap_time BIGINT NOT NULL,
+                UNIQUE (trip_id, source_type, source_key, relative_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_trip_media_trip ON trip_media(trip_id);
+            """)
+
+            # 6. Reactions and Comments
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS reactions (
+                id BIGSERIAL PRIMARY KEY,
+                media_id BIGINT NOT NULL,
+                source_id VARCHAR(64) NOT NULL,
+                emoji VARCHAR(16) NOT NULL,
+                created_at BIGINT NOT NULL,
+                scope VARCHAR(16) NOT NULL DEFAULT 'post'
+            );
+            ALTER TABLE reactions ADD COLUMN IF NOT EXISTS scope VARCHAR(16) NOT NULL DEFAULT 'post';
+            ALTER TABLE reactions DROP CONSTRAINT IF EXISTS reactions_media_id_source_id_emoji_key;
+            CREATE INDEX IF NOT EXISTS idx_reactions_media ON reactions(media_id);
+            CREATE INDEX IF NOT EXISTS idx_reactions_media_scope ON reactions(media_id, scope);
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_reactions_media_source_emoji_scope ON reactions(media_id, source_id, emoji, scope);
+
+            CREATE TABLE IF NOT EXISTS comments (
+                id BIGSERIAL PRIMARY KEY,
+                media_id BIGINT NOT NULL,
+                source_id VARCHAR(64) NOT NULL,
+                text TEXT NOT NULL,
+                created_at BIGINT NOT NULL,
+                scope VARCHAR(16) NOT NULL DEFAULT 'post'
+            );
+            ALTER TABLE comments ADD COLUMN IF NOT EXISTS scope VARCHAR(16) NOT NULL DEFAULT 'post';
+            CREATE INDEX IF NOT EXISTS idx_comments_media ON comments(media_id, created_at ASC);
+            CREATE INDEX IF NOT EXISTS idx_comments_media_scope ON comments(media_id, scope);
+            """)
+
+            # 7. Device Shares & Share Groups
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS device_share_groups (
+                group_id VARCHAR(64) PRIMARY KEY,
+                shared_by_device_id VARCHAR(64) NOT NULL,
+                caption TEXT,
+                created_at BIGINT NOT NULL,
+                post_kind VARCHAR(32),
+                post_title VARCHAR(255)
+            );
+            CREATE INDEX IF NOT EXISTS idx_share_groups_sharer ON device_share_groups(shared_by_device_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS device_shares (
+                share_id BIGSERIAL PRIMARY KEY,
+                shared_by_device_id VARCHAR(64) NOT NULL,
+                source_type VARCHAR(32) NOT NULL,
+                source_key VARCHAR(64) NOT NULL,
+                relative_path TEXT NOT NULL,
+                size BIGINT NOT NULL DEFAULT 0,
+                modified_time BIGINT NOT NULL DEFAULT 0,
+                caption TEXT,
+                share_group_id VARCHAR(64) REFERENCES device_share_groups(group_id) ON DELETE CASCADE,
+                original_shared_by_device_id VARCHAR(64),
+                repost_of_share_id BIGINT,
+                is_library_reel INT NOT NULL DEFAULT 0,
+                media_id BIGINT,
+                created_at BIGINT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_device_shares_group ON device_shares(share_group_id);
+            CREATE INDEX IF NOT EXISTS idx_device_shares_sharer ON device_shares(shared_by_device_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS device_share_targets (
+                id BIGSERIAL PRIMARY KEY,
+                share_id BIGINT NOT NULL REFERENCES device_shares(share_id) ON DELETE CASCADE,
+                target_device_id VARCHAR(64) NOT NULL,
+                seen INT NOT NULL DEFAULT 0,
+                notified INT NOT NULL DEFAULT 0,
+                UNIQUE (share_id, target_device_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_share_targets_device ON device_share_targets(target_device_id, seen);
+
+            CREATE TABLE IF NOT EXISTS saved_reels (
+                id BIGSERIAL PRIMARY KEY,
+                device_id VARCHAR(64) NOT NULL,
+                reel_id VARCHAR(128) NOT NULL,
+                share_id BIGINT NOT NULL,
+                media_id BIGINT,
+                created_at BIGINT NOT NULL,
+                UNIQUE (device_id, reel_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_saved_reels_device ON saved_reels(device_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS reel_telemetry (
+                id BIGSERIAL PRIMARY KEY,
+                device_id VARCHAR(64) NOT NULL,
+                share_id BIGINT NOT NULL,
+                media_id BIGINT,
+                watch_time_sec DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                duration_sec DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                completion_rate DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                loops INT NOT NULL DEFAULT 0,
+                skipped INT NOT NULL DEFAULT 0,
+                created_at BIGINT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_reel_telem_share ON reel_telemetry(share_id);
+            CREATE INDEX IF NOT EXISTS idx_reel_telem_device_recent ON reel_telemetry(device_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS reel_watch_history (
+                id BIGSERIAL PRIMARY KEY,
+                device_id VARCHAR(64) NOT NULL,
+                reel_id VARCHAR(128) NOT NULL,
+                share_id BIGINT NOT NULL,
+                media_id BIGINT,
+                watched_at BIGINT NOT NULL,
+                watch_time_sec DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                duration_sec DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                UNIQUE (device_id, reel_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_watch_history_device ON reel_watch_history(device_id, watched_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_watch_history_share ON reel_watch_history(share_id);
+            CREATE INDEX IF NOT EXISTS idx_watch_history_reel ON reel_watch_history(reel_id);
+            """)
+
+            conn.commit()
+
+            # ── Post-migration safety: reset BIGSERIAL sequences ──────────────
+            # After a SQLite-to-PostgreSQL migration BIGSERIAL sequences may
+            # still be at 1 while the tables already contain rows with large IDs.
+            # Resetting here is a no-op on empty tables and prevents duplicate-key
+            # failures that would otherwise appear on the first write after migration.
+            _sequence_map = [
+                ("devices_id_seq",                "devices",              "id"),
+                ("files_id_seq",                  "files",                "id"),
+                ("device_shares_share_id_seq",  "device_shares",        "share_id"),
+                ("sync_sessions_id_seq",         "sync_sessions",        "id"),
+                ("media_index_id_seq",            "media_index",          "id"),
+                ("reactions_id_seq",              "reactions",            "id"),
+                ("comments_id_seq",               "comments",             "id"),
+                ("trips_id_seq",                  "trips",                "id"),
+                ("trip_media_id_seq",             "trip_media",           "id"),
+                ("saved_reels_id_seq",            "saved_reels",          "id"),
+                ("reel_telemetry_id_seq",         "reel_telemetry",       "id"),
+                ("reel_watch_history_id_seq",     "reel_watch_history",   "id"),
+                ("device_share_targets_id_seq",   "device_share_targets", "id"),
+            ]
+            with conn.cursor() as seq_cur:
+                for seq_name, tbl, col in _sequence_map:
+                    try:
+                        seq_cur.execute(
+                            f"SELECT setval('{seq_name}', COALESCE(MAX({col}), 1)) FROM {tbl};"
+                        )
+                    except Exception:
+                        pass
+            conn.commit()
+
+            logger.info("PostgreSQL database initialized successfully with partitioned tables.")
+            try:
+                from repositories.device_repo import ensure_desktop_device
+                ensure_desktop_device()
+            except Exception:
+                pass
+
+
+def autoseed_pg_if_empty() -> bool:
+    """Check if PostgreSQL is empty (0 devices) and auto-seed from host backup.db or backup dumps.
+
+    This ensures that when Docker Desktop is reinstalled, WSL is reset, or containers/volumes
+    are recreated, the database is seamlessly restored from the persistent host storage
+    (%APPDATA%/PhoneBackupServer/backup.db) without losing any posts, devices, or shares.
+    """
+    from config import APP_DATA_DIR
+    try:
+        with get_pg_connection() as conn:
+            with conn.cursor() as cur:
+                # Check advisory lock so only one worker process runs the auto-seed
+                cur.execute("SELECT pg_try_advisory_lock(987654321);")
+                locked = cur.fetchone()[0]
+                if not locked:
+                    return False
+
+                try:
+                    cur.execute("SELECT COUNT(*) FROM devices;")
+                    count = cur.fetchone()[0]
+                    if count > 0:
+                        return False
+
+                    # Search for candidate SQLite databases in host APP_DATA_DIR
+                    candidates = [
+                        os.path.join(APP_DATA_DIR, "backup.db"),
+                        os.path.join(os.environ.get("APPDATA", ""), "PhoneBackupServer", "backup.db"),
+                    ]
+                    found = None
+                    for cand in candidates:
+                        if cand and os.path.isfile(cand) and os.path.getsize(cand) > 0:
+                            found = cand
+                            break
+
+                    if not found:
+                        logger.info("PostgreSQL is empty, and no host SQLite database was found to seed from.")
+                        return False
+
+                    logger.warning(
+                        "PostgreSQL is empty (0 devices), but host database was detected at %s (%s bytes). "
+                        "Auto-restoring database to PostgreSQL...",
+                        found,
+                        os.path.getsize(found),
+                    )
+
+                    from scripts.migrate_sqlite_to_postgres import migrate
+                    migrate([found], _get_pg_url())
+                    logger.info("PostgreSQL auto-seed completed successfully.")
+                    return True
+                finally:
+                    cur.execute("SELECT pg_advisory_unlock(987654321);")
+    except Exception as exc:
+        logger.warning("PostgreSQL auto-seed check encountered an error: %s", exc)
+        return False
+
+
+def backup_pg_to_host() -> dict:
+    """Export PostgreSQL data to host APP_DATA_DIR/db_backups.
+
+    Creates a standalone JSON dump in the persistent host directory
+    so that data survives any Docker reinstalls or volume prunes.
+    """
+    from config import APP_DATA_DIR
+    backups_dir = os.path.join(APP_DATA_DIR, "db_backups")
+    os.makedirs(backups_dir, exist_ok=True)
+
+    ts = _time.strftime("%Y%m%d_%H%M%S")
+    backup_file = os.path.join(backups_dir, f"backup_db_{ts}.json")
+    latest_file = os.path.join(backups_dir, "backup_db_latest.json")
+
+    tables = [
+        "devices", "files", "sync_sessions", "media_index", "trips",
+        "trip_media", "reactions", "comments", "device_share_groups",
+        "device_shares", "device_share_targets", "saved_reels", "reel_telemetry",
+        "reel_watch_history", "geocode_cache"
+    ]
+
+    dump_data: dict[str, Any] = {
+        "timestamp": int(_time.time()),
+        "datetime": ts,
+        "tables": {},
+    }
+
+    with get_pg_connection() as conn:
+        with conn.cursor() as cur:
+            for tbl in tables:
+                try:
+                    cur.execute(f"SELECT * FROM {tbl};")
+                    cols = [desc[0] for desc in cur.description]
+                    rows = cur.fetchall()
+                    tbl_rows = []
+                    for row in rows:
+                        row_dict = {}
+                        for col, val in zip(cols, row):
+                            if isinstance(val, (int, float, str, bool)) or val is None:
+                                row_dict[col] = val
+                            else:
+                                row_dict[col] = str(val)
+                        tbl_rows.append(row_dict)
+                    dump_data["tables"][tbl] = tbl_rows
+                except Exception as e:
+                    logger.warning("Failed to dump table %s: %s", tbl, e)
+
+    with open(backup_file, "w", encoding="utf-8") as f:
+        json.dump(dump_data, f)
+    with open(latest_file, "w", encoding="utf-8") as f:
+        json.dump(dump_data, f)
+
+    # Rotate: keep last 10 backups
+    all_backups = sorted([
+        os.path.join(backups_dir, f) for f in os.listdir(backups_dir)
+        if f.startswith("backup_db_") and f.endswith(".json") and f != "backup_db_latest.json"
+    ])
+    while len(all_backups) > 10:
+        oldest = all_backups.pop(0)
+        try:
+            os.remove(oldest)
+        except OSError:
+            pass
+
+    return {
+        "ok": True,
+        "file": backup_file,
+        "latest": latest_file,
+        "timestamp": ts,
+        "total_tables": len(dump_data["tables"]),
+    }
+
+
+def get_pg_backup_status() -> dict:
+    """Check the status of database backups on the host."""
+    from config import APP_DATA_DIR
+    backups_dir = os.path.join(APP_DATA_DIR, "db_backups")
+    latest_file = os.path.join(backups_dir, "backup_db_latest.json")
+    host_sqlite = os.path.join(APP_DATA_DIR, "backup.db")
+
+    has_latest = os.path.isfile(latest_file)
+    has_sqlite = os.path.isfile(host_sqlite)
+
+    return {
+        "has_backup": has_latest or has_sqlite,
+        "latest_backup_path": latest_file if has_latest else None,
+        "latest_backup_size": os.path.getsize(latest_file) if has_latest else None,
+        "latest_backup_mtime": int(os.path.getmtime(latest_file)) if has_latest else None,
+        "host_sqlite_path": host_sqlite if has_sqlite else None,
+        "host_sqlite_size": os.path.getsize(host_sqlite) if has_sqlite else None,
+        "host_sqlite_mtime": int(os.path.getmtime(host_sqlite)) if has_sqlite else None,
+    }

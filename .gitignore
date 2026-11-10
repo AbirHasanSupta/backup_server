@@ -1,11 +1,14 @@
 .idea
 .venv
+.env
 __pycache__/
 build/
 dist/
 
 # Server data & config
 backup.db
+backup_server.db
+*.db
 server_config.json
 
 # TLS certificates (generated at runtime, contain private key)
@@ -16,3 +19,6 @@ key.pem
 # PyInstaller build artifacts
 *.exe
 *.spec
+
+# Generated from the current semantic Git tag by scripts/sync_version.py.
+VERSION

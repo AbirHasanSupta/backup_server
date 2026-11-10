@@ -16,7 +16,7 @@ import {
   getServerIp,
   resolveReachableServer,
 } from '../../settings';
-import { runSync, getCurrentSyncState } from '../../backgroundTask';
+import { runSync, getCurrentSyncState, setUIPriorityMode } from '../../backgroundTask';
 import { AppColors, Spacing, Radius, TextScale, BottomTabInset, Shadows } from '@/constants/theme';
 import { FolderCard, Folder } from '@/components/FolderCard';
 import { FileTypeSelector } from '@/components/FileTypeSelector';
@@ -109,6 +109,7 @@ export default function FoldersScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      setUIPriorityMode(true);
       let alive = true;
       (async () => {
         await loadData();
@@ -116,10 +117,12 @@ export default function FoldersScreen() {
         await checkServer();
       })();
       return () => {
+        setUIPriorityMode(false);
         alive = false;
       };
     }, [loadData, checkServer])
   );
+
 
   useFocusEffect(
     useCallback(() => {

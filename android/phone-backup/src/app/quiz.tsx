@@ -17,6 +17,9 @@ import {
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { getQuizRound, getConfig, buildPreviewUrl, createQuizShare } from '../../downloader';
+import { setUIPriorityMode } from '../../backgroundTask';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
+
 
 interface QuizItem {
   source_type: string;
@@ -37,13 +40,7 @@ interface ServerConfig {
 type AnswerState = 'unanswered' | 'correct' | 'wrong';
 
 function formatCaptureDate(captureTime: number | null | undefined): string {
-  if (!captureTime) return '';
-  try {
-    const d = new Date(captureTime * 1000);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  } catch {
-    return '';
-  }
+  return formatCaptureDateTime(captureTime);
 }
 
 function getScoreMessage(score: number, total: number): string {
@@ -71,16 +68,19 @@ export default function QuizScreen() {
   const [feedShareVisible, setFeedShareVisible] = useState(false);
   const [sharing, setSharing] = useState(false);
 
-  const { shotRef, spec: captureSpec, captureCards, cancelCapture, onQuestionImageLoad } = useQuizCardCapture();
+  const { shotRef, spec: captureSpec, captureCards, cancelCapture, onQuestionImageLoad, onQuestionImageError } = useQuizCardCapture();
   const skipNextFocusLoadRef = useRef(false);
   const mountedRef = useRef(true);
 
   useEffect(() => {
     mountedRef.current = true;
+    setUIPriorityMode(true);
     return () => {
       mountedRef.current = false;
+      setUIPriorityMode(false);
     };
   }, []);
+
 
   const loadRound = useCallback(async () => {
     cancelCapture();
@@ -137,6 +137,7 @@ export default function QuizScreen() {
   }, [router, sharing]);
 
   const currentItem = items[roundIdx] ?? null;
+  // Full download URL — thumbnails are too soft for Guess-the-Year gameplay.
   const imageUrl = currentItem && serverConfig
     ? buildPreviewUrl(serverConfig, currentItem.relative_path, currentItem.source_type, currentItem.source_id)
     : '';
@@ -276,6 +277,7 @@ export default function QuizScreen() {
         scoreMessage={scoreMessage}
         primaryColor={colors.primary}
         onQuestionImageLoad={onQuestionImageLoad}
+        onQuestionImageError={onQuestionImageError}
       />
 
       <View style={styles.header}>
@@ -409,6 +411,7 @@ export default function QuizScreen() {
         visible={feedShareVisible}
         count={items.length + 1}
         colors={colors}
+        excludeDeviceIds={serverConfig?.deviceId ? [serverConfig.deviceId] : []}
         onClose={() => { if (!sharing) setFeedShareVisible(false); }}
         onSubmit={handleFeedShareSubmit}
       />

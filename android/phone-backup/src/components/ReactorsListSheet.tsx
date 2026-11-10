@@ -14,12 +14,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
 import { getMediaReactions } from '../../downloader';
+import { formatRelativeOrLocal } from '@/utils/dateFormat';
 
 const { height: SCREEN_H } = Dimensions.get('window');
 
 type Reactor = {
-  id: number;
-  media_id: number;
+  id: number | string;
+  media_id: number | string;
   source_id: string;
   emoji: string;
   created_at: number;
@@ -28,13 +29,7 @@ type Reactor = {
 };
 
 function formatTimeAgo(ts: number | undefined): string {
-  if (!ts) return '';
-  const diff = Math.floor(Date.now() / 1000) - ts;
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
-  return new Date(ts * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  return formatRelativeOrLocal(ts);
 }
 
 export function ReactorsListSheet({
@@ -42,11 +37,13 @@ export function ReactorsListSheet({
   mediaId,
   colors,
   onClose,
+  scope = 'post',
 }: {
   visible: boolean;
-  mediaId?: number | null;
+  mediaId?: number | string | null;
   colors: AppColors;
   onClose: () => void;
+  scope?: string;
 }) {
   const insets = useSafeAreaInsets();
   const [loading, setLoading] = useState(false);
@@ -61,7 +58,7 @@ export function ReactorsListSheet({
     setLoading(true);
     setFilter('all');
      
-    getMediaReactions(mediaId)
+    getMediaReactions(mediaId, scope)
       .then((res) => {
         if (!active) return;
         setReactions(Array.isArray(res?.reactions) ? res.reactions : []);
@@ -70,7 +67,7 @@ export function ReactorsListSheet({
       .catch(() => { if (active) { setReactions([]); setCounts({}); } })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [visible, mediaId]);
+  }, [visible, mediaId, scope]);
 
   const emojiTabs = useMemo(() => Object.keys(counts).filter((e) => counts[e] > 0), [counts]);
   const total = useMemo(() => Object.values(counts).reduce((a, b) => a + b, 0), [counts]);

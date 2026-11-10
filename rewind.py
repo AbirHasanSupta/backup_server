@@ -22,10 +22,13 @@ import time
 import urllib.request
 
 from config import APP_DATA_DIR, load_config
-from database import get_device_display_name, get_media_for_year_month
-from ffmpeg_utils import resolve_ffmpeg_path
+from core.path_utils import normalize_fs_path
+from repositories.device_repo import get_device_display_name
+from repositories.media_repo import get_media_for_year_month
+from ffmpeg_utils import configured_ffmpeg_threads, configured_rewind_segment_workers, resolve_ffmpeg_path
 from memories import VIDEO_EXTS, _shared_sources_for_device
 from state import add_log
+from version import APP_VERSION
 
 DEFAULT_REWIND_CACHE_DIR = os.path.join(APP_DATA_DIR, "rewind_cache")
 DEFAULT_MUSIC_CACHE_DIR = os.path.join(APP_DATA_DIR, "music_cache")
@@ -177,7 +180,11 @@ def _run_options() -> dict:
         "stderr": subprocess.PIPE,
     }
     if os.name == "nt":
-        opts["creationflags"] = subprocess.CREATE_NO_WINDOW
+        opts["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        opts["startupinfo"] = startupinfo
     return opts
 
 
@@ -279,17 +286,39 @@ def _shared_full_path(item: dict) -> str | None:
         if s.get("id") == item["source_key"]:
             root = s.get("path")
             if root:
-                return os.path.join(root, item["relative_path"])
+                norm_root = normalize_fs_path(root)
+                rel = item["relative_path"].replace("\\", "/").lstrip("/")
+                full = os.path.abspath(os.path.join(norm_root, rel))
+                if os.path.isfile(full):
+                    return full
+    # Fallback if relative_path is already an absolute path
+    norm_p = normalize_fs_path(item["relative_path"])
+    if os.path.isfile(norm_p):
+        return norm_p
     return None
 
 
 def _source_full_path(item: dict) -> str | None:
-    if item["source_type"] == "phone":
-        from storage import full_path_for
+    st = item.get("source_type")
+    if st in ("phone", "reel_backup"):
         try:
-            return full_path_for(item["relative_path"], device_id=item["source_key"])
+            from storage.manager import get_storage
+            p = get_storage().get_file_path(item["relative_path"], device_id=item["source_key"])
+            if os.path.isfile(p):
+                return p
         except Exception:
-            return None
+            pass
+        try:
+            from storage import full_path_for
+            p = full_path_for(item["relative_path"], device_id=item["source_key"])
+            if os.path.isfile(p):
+                return p
+        except Exception:
+            pass
+    if st == "desktop":
+        norm_p = normalize_fs_path(item["relative_path"])
+        if os.path.isfile(norm_p):
+            return norm_p
     return _shared_full_path(item)
 
 
@@ -341,13 +370,16 @@ def get_reel_items(device_id: str, year: int, month: int | None, randomize: bool
 def get_rewind_status(device_id: str, year: int, month: int | None) -> dict:
     job_key = _job_key(device_id, year, month)
 
+    latest_path = _get_latest_reel_path(device_id, year, month)
+    if latest_path and os.path.isfile(latest_path) and os.path.getsize(latest_path) > 0:
+        with _generation_lock:
+            _active_jobs.discard(job_key)
+            _failed_jobs.discard(job_key)
+        return {"status": "ready", "ready": True}
+
     with _generation_lock:
         if job_key in _active_jobs:
             return {"status": "generating", "ready": False}
-
-    latest_path = _get_latest_reel_path(device_id, year, month)
-    if latest_path and os.path.isfile(latest_path) and os.path.getsize(latest_path) > 0:
-        return {"status": "ready", "ready": True}
 
     with _generation_lock:
         if job_key in _failed_jobs:
@@ -392,7 +424,7 @@ def _build_segment(ffmpeg: str, src_path: str, seg_path: str, is_video: bool) ->
             "-t", str(VIDEO_CLIP_SEC),
             "-vf", vf,
             "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-            "-r", "30", "-threads", "2", "-an", "-movflags", "+faststart",
+            "-r", "30", "-threads", str(configured_ffmpeg_threads()), "-an", "-movflags", "+faststart",
             "-f", "mp4",
             seg_path,
         ]
@@ -403,7 +435,7 @@ def _build_segment(ffmpeg: str, src_path: str, seg_path: str, is_video: bool) ->
             "-t", str(PHOTO_DURATION_SEC),
             "-vf", vf,
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage", "-g", "30", "-pix_fmt", "yuv420p",
-            "-r", "30", "-threads", "2", "-an", "-movflags", "+faststart",
+            "-r", "30", "-threads", str(configured_ffmpeg_threads()), "-an", "-movflags", "+faststart",
             "-f", "mp4",
             seg_path,
         ]
@@ -446,7 +478,7 @@ def _get_or_fetch_background_music(ffmpeg: str, chosen_index: int | None = None)
             try:
                 req = urllib.request.Request(
                     track["url"],
-                    headers={"User-Agent": "PhoneBackupServer/4.4.1 (https://github.com/AbirHasanSupta/backup_server; supta@local.net)"},
+                    headers={"User-Agent": f"PhoneBackupServer/{APP_VERSION} (https://github.com/AbirHasanSupta/backup_server; supta@local.net)"},
                 )
                 with urllib.request.urlopen(req, timeout=15) as response:
                     if response.status == 200:
@@ -546,7 +578,10 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
                     return
 
                 # Build segments in parallel across CPU cores using ultrafast presets
-                max_workers = max(2, min(8, os.cpu_count() or 4))
+                # A reel is already a CPU- and disk-intensive Celery task.
+                # Keep its inner FFmpeg fan-out bounded so two queued reels do
+                # not starve API workers or saturate the mounted backup disk.
+                max_workers = configured_rewind_segment_workers()
                 segment_results: dict[int, str] = {}
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     future_to_idx = {
@@ -649,6 +684,12 @@ def _build_reel_sync(device_id: str, year: int, month: int | None) -> None:
 
 
 
+def build_rewind_reel(device_id: str, year: int, month: int | None = None, music_id: str | None = None) -> str | None:
+    """Synchronously build rewind reel and return output path."""
+    _build_reel_sync(device_id, year, month)
+    return get_rewind_path(device_id, year, month)
+
+
 def start_rewind_build(device_id: str, year: int, month: int | None) -> dict:
     job_key = _job_key(device_id, year, month)
 
@@ -663,6 +704,13 @@ def start_rewind_build(device_id: str, year: int, month: int | None) -> dict:
             return {"ok": True, "status": "generating"}
         _failed_jobs.discard(job_key)
         _active_jobs.add(job_key)
+
+    try:
+        from tasks.rewind_tasks import dispatch_rewind_render
+        dispatch_rewind_render(device_id, year, month)
+        return {"ok": True, "status": "generating"}
+    except Exception:
+        pass
 
     threading.Thread(
         target=_build_reel_sync,

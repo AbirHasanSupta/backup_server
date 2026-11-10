@@ -19,6 +19,7 @@ import {
   Alert,
   BackHandler,
   DeviceEventEmitter,
+  Switch,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useEvent } from 'expo';
@@ -27,6 +28,7 @@ import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppColors, Spacing, Radius, TextScale, Shadows } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
+import { formatRelativeOrLocal } from '@/utils/dateFormat';
 import { ShareModal } from '@/components/ShareModal';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
@@ -44,8 +46,14 @@ import {
   repostReel,
   cancelRepostReel,
   toggleSaveReel,
+  saveReelToDevice,
+  getWatchHistory,
+  recordWatchHistory,
+  deleteWatchHistoryItem,
 } from '../../downloader';
+import { setUIPriorityMode } from '../../backgroundTask';
 import { hapticLight, hapticSuccess, hapticError, hapticLongPress, hapticSelection } from '@/utils/haptics';
+
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 // Saved reels are shown in a full-screen modal, so unlike the feed there is no
@@ -92,6 +100,9 @@ export type SavedReelItem = {
   liked_at?: number;
   liked_emoji?: string;
   reposted_at?: number;
+  watched_at?: number;
+  watch_time_sec?: number;
+  duration_sec?: number;
   reaction_counts: Record<string, number>;
   user_reactions: string[];
   comment_count: number;
@@ -99,18 +110,22 @@ export type SavedReelItem = {
   is_own_post: boolean;
   is_saved?: boolean;
   group_id?: string | null;
+  uri?: string | null;
+  thumb_uri?: string | null;
+  is_p2p?: boolean;
 };
 
-export type LibrarySegment = 'saved' | 'liked' | 'reposts';
+export type LibrarySegment = 'saved' | 'liked' | 'reposts' | 'history';
 
 const SEGMENTS: { id: LibrarySegment; label: string; androidIcon: string; iosIcon: string }[] = [
   { id: 'saved', label: 'Saved', androidIcon: 'bookmark', iosIcon: 'bookmark.fill' },
   { id: 'liked', label: 'Liked', androidIcon: 'favorite', iosIcon: 'heart.fill' },
   { id: 'reposts', label: 'Reposts', androidIcon: 'repeat', iosIcon: 'arrow.2.squarepath' },
+  { id: 'history', label: 'History', androidIcon: 'history', iosIcon: 'clock.arrow.circlepath' },
 ];
 
 type Comment = {
-  id: number;
+  id: number | string;
   text: string;
   source_id: string;
   display_name?: string;
@@ -119,7 +134,7 @@ type Comment = {
 };
 
 const MUTED_KEY = 'reels_muted_v1';
-const REACTION_EMOJIS = ['❤️', '😂', '😮', '👍'] as const;
+const AUTO_SCROLL_KEY = 'reels_auto_scroll_v1';
 
 function formatMediaTime(sec: number): string {
   const s = Math.max(0, Math.floor(sec || 0));
@@ -128,11 +143,7 @@ function formatMediaTime(sec: number): string {
 }
 
 function formatTimeAgo(ts: number): string {
-  const d = Math.floor(Date.now() / 1000) - ts;
-  if (d < 60) return 'just now';
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  return `${Math.floor(d / 86400)}d ago`;
+  return formatRelativeOrLocal(ts);
 }
 
 // ─── Progress bar styles ──────────────────────────────────────────────────────
@@ -181,12 +192,25 @@ type VideoPlayerProps = {
   isPlaying: boolean;
   speed: number;
   muted: boolean;
+  autoScroll?: boolean;
+  onPlaybackComplete?: () => void;
   onProgress: (current: number, total: number) => void;
   onReady: () => void;
   playerRef?: React.RefObject<any>;
 };
 
-function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onReady, playerRef }: VideoPlayerProps) {
+function VideoPlayer({
+  uri,
+  isActive,
+  isPlaying,
+  speed,
+  muted,
+  autoScroll = false,
+  onPlaybackComplete,
+  onProgress,
+  onReady,
+  playerRef,
+}: VideoPlayerProps) {
   const mod = expoVideoModule!;
 
   const source = useMemo<VideoSource>(() => ({
@@ -196,11 +220,11 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
   }), [uri]);
 
   const player = mod.useVideoPlayer(source, (p) => {
-    p.loop = true;
+    p.loop = !autoScroll;
     p.muted = muted;
     p.preservesPitch = true;
     p.bufferOptions = {
-      preferredForwardBufferDuration: 15,
+      preferredForwardBufferDuration: 25,
       minBufferForPlayback: 0.25,
       prioritizeTimeOverSizeThreshold: true,
     };
@@ -210,6 +234,9 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
   const readyFiredRef = useRef(false);
   const onReadyRef = useRef(onReady);
   const onProgressRef = useRef(onProgress);
+  const onPlaybackCompleteRef = useRef(onPlaybackComplete);
+  const completionFiredRef = useRef(false);
+  const hasFinishedRef = useRef(false);
 
   useEffect(() => {
     if (playerRef) playerRef.current = player;
@@ -218,7 +245,33 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
   useEffect(() => {
     onReadyRef.current = onReady;
     onProgressRef.current = onProgress;
-  }, [onReady, onProgress]);
+    onPlaybackCompleteRef.current = onPlaybackComplete;
+  }, [onReady, onProgress, onPlaybackComplete]);
+
+  useEffect(() => {
+    try {
+      player.loop = !autoScroll;
+    } catch {}
+  }, [autoScroll, player]);
+
+  useEffect(() => {
+    completionFiredRef.current = false;
+    hasFinishedRef.current = false;
+  }, [uri]);
+
+  useEffect(() => {
+    if (!autoScroll || !isActive) return;
+    const sub = (player as any)?.addListener?.('playToEnd', () => {
+      hasFinishedRef.current = true;
+      if (!completionFiredRef.current) {
+        completionFiredRef.current = true;
+        onPlaybackCompleteRef.current?.();
+      }
+    });
+    return () => {
+      sub?.remove?.();
+    };
+  }, [player, autoScroll, isActive]);
 
   useEffect(() => {
     if (status === 'readyToPlay') {
@@ -226,33 +279,78 @@ function VideoPlayer({ uri, isActive, isPlaying, speed, muted, onProgress, onRea
         readyFiredRef.current = true;
         onReadyRef.current();
       }
-      if (isActive && isPlaying) {
-        try { player.play(); } catch {}
-      }
+    }
+    if (isActive && isPlaying && status === 'readyToPlay') {
+      try {
+        const dur = player.duration || 0;
+        const cur = player.currentTime || 0;
+        if (hasFinishedRef.current || (dur > 0 && cur >= dur - 0.5)) {
+          player.currentTime = 0;
+          hasFinishedRef.current = false;
+        }
+        player.play();
+      } catch {}
+    } else {
+      try { player.pause(); } catch {}
     }
   }, [status, isActive, isPlaying, player]);
+
+  // Unmount cleanup: always pause to prevent ghost audio
+  useEffect(() => {
+    return () => {
+      try { player.pause(); } catch {}
+    };
+  }, [player]);
 
   useEffect(() => {
     readyFiredRef.current = false;
   }, [uri]);
 
   useEffect(() => {
+    if (!isActive || !isPlaying) return;
     const interval = setInterval(() => {
-      if (!isActive) return;
       try {
         const dur = player.duration || 0;
-        if (dur > 0) onProgressRef.current(player.currentTime || 0, dur);
+        const cur = player.currentTime || 0;
+        if (dur > 0) {
+          onProgressRef.current(cur, dur);
+          if (autoScroll && dur > 1.0 && cur >= dur - 0.25) {
+            hasFinishedRef.current = true;
+            if (!completionFiredRef.current) {
+              completionFiredRef.current = true;
+              onPlaybackCompleteRef.current?.();
+            }
+          }
+          if (cur < dur - 1.0) {
+            completionFiredRef.current = false;
+            hasFinishedRef.current = false;
+          }
+        }
       } catch {}
-    }, 150);
+    }, 200);
     return () => clearInterval(interval);
-  }, [player, isActive]);
+  }, [player, isActive, isPlaying, autoScroll]);
 
   useEffect(() => {
     try {
       player.preservesPitch = true;
       player.playbackRate = speed;
       if (isActive && isPlaying) {
+        completionFiredRef.current = false;
+        const dur = player.duration || 0;
+        const cur = player.currentTime || 0;
+        if (hasFinishedRef.current || (dur > 0 && cur >= dur - 0.5)) {
+          player.currentTime = 0;
+          hasFinishedRef.current = false;
+        }
         player.play();
+      } else {
+        player.pause();
+        const dur = player.duration || 0;
+        const cur = player.currentTime || 0;
+        if (dur > 0 && cur >= dur - 0.5) {
+          hasFinishedRef.current = true;
+        }
       }
     } catch {}
   }, [speed, player, isActive, isPlaying]);
@@ -279,13 +377,17 @@ type SavedReelCardProps = {
   isMounted?: boolean;
   serverConfig: ServerConfig;
   muted: boolean;
+  autoScroll: boolean;
+  isHistorySegment?: boolean;
+  onPlaybackComplete: () => void;
+  onOpenSettings: (item: SavedReelItem) => void;
   segmentTitle?: string;
   segmentIndexText?: string;
-  onToggleMute: () => void;
   onReact: (item: SavedReelItem, emoji: string) => void;
   onOpenComments: (item: SavedReelItem) => void;
   onOpenRepost: (item: SavedReelItem) => void;
   onToggleSave: (item: SavedReelItem) => void;
+  onRemoveFromHistory?: (item: SavedReelItem) => void;
   onCloseViewer: () => void;
 };
 
@@ -295,13 +397,17 @@ function SavedReelCardBase({
   isMounted = true,
   serverConfig,
   muted,
+  autoScroll,
+  isHistorySegment = false,
+  onPlaybackComplete,
+  onOpenSettings,
   segmentTitle,
   segmentIndexText,
-  onToggleMute,
   onReact,
   onOpenComments,
   onOpenRepost,
   onToggleSave,
+  onRemoveFromHistory,
   onCloseViewer,
 }: SavedReelCardProps) {
   const insets = useSafeAreaInsets();
@@ -313,7 +419,6 @@ function SavedReelCardBase({
   const [isLoading, setIsLoading] = useState(true);
   const [showControls, setShowControls] = useState(false);
   const [show2x, setShow2x] = useState(false);
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showHeart, setShowHeart] = useState(false);
   const heartScale = useMemo(() => new Animated.Value(0), []);
   const controlsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -322,6 +427,33 @@ function SavedReelCardBase({
   const isLongPressingRef = useRef(false);
   const lastLongPressEndRef = useRef(0);
   const readyOnceRef = useRef(false);
+  const hasRecordedWatchRef = useRef(false);
+  const activeStartRef = useRef(0);
+  const totalWatchMsRef = useRef(0);
+
+  const checkAndRecordWatchHistory = useCallback((currentWatchSec: number, videoDur: number) => {
+    if (hasRecordedWatchRef.current || (item as any)?.is_custom_selection) return;
+    const dur = videoDur || durationRef.current || 0;
+    if (dur <= 0) return;
+
+    // Watch history qualification rules
+    const isQualified =
+      (dur > 20 && currentWatchSec >= 10) ||
+      (dur < 5 && currentWatchSec > 0) ||
+      (dur >= 5 && dur <= 20 && currentWatchSec >= 5);
+
+    if (isQualified) {
+      hasRecordedWatchRef.current = true;
+      void recordWatchHistory({
+        ...item,
+        reel_id: item.reel_id,
+        share_id: item.share_id,
+        media_id: item.media_id,
+        watch_time_sec: currentWatchSec,
+        duration_sec: dur,
+      });
+    }
+  }, [item]);
 
   const playerRef = useRef<any>(null);
   const [isSeeking, setIsSeeking] = useState(false);
@@ -338,8 +470,8 @@ function SavedReelCardBase({
   useEffect(() => { durationRef.current = duration; }, [duration]);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
-  const videoUrl = serverConfig ? buildSharePreviewUrl(serverConfig, item.share_id) : '';
-  const thumbUrl = serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
+  const videoUrl = item.uri ? item.uri : serverConfig ? buildSharePreviewUrl(serverConfig, item.share_id) : '';
+  const thumbUrl = item.thumb_uri ? item.thumb_uri : item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
   const totalReactions = Object.values(item.reaction_counts || {}).reduce((a, b) => a + b, 0);
   const myReaction = item.user_reactions?.[0];
   const isLiked = !!myReaction;
@@ -355,7 +487,6 @@ function SavedReelCardBase({
     if (isLongPressingRef.current || (Date.now() - lastLongPressEndRef.current < 400)) {
       return;
     }
-    if (showEmojiPicker) { setShowEmojiPicker(false); return; }
     const now = Date.now();
     const isDouble = now - lastTapRef.current < 300;
     lastTapRef.current = now;
@@ -376,8 +507,16 @@ function SavedReelCardBase({
           const pl = playerRef.current;
           if (pl) {
             try {
-              if (next) pl.play();
-              else pl.pause();
+              if (next) {
+                activeStartRef.current = Date.now();
+                pl.play();
+              } else {
+                if (activeStartRef.current > 0) {
+                  totalWatchMsRef.current += Date.now() - activeStartRef.current;
+                  activeStartRef.current = 0;
+                }
+                pl.pause();
+              }
             } catch {}
           }
           return next;
@@ -385,7 +524,7 @@ function SavedReelCardBase({
         flashControls();
       }, 300);
     }
-  }, [showEmojiPicker, item, onReact, heartScale, flashControls]);
+  }, [item, onReact, heartScale, flashControls]);
 
   const handleLongPress = useCallback(() => {
     if (singleTapTimerRef.current) {
@@ -395,7 +534,6 @@ function SavedReelCardBase({
     isLongPressingRef.current = true;
     hapticLongPress();
     setShowControls(false);
-    setShowEmojiPicker(false);
     setSpeed(2.0);
     setShow2x(true);
   }, []);
@@ -418,10 +556,17 @@ function SavedReelCardBase({
       setIsSeeking(false);
       isSeekingRef.current = false;
       seekProgressRef.current = 0;
+      activeStartRef.current = Date.now();
+      totalWatchMsRef.current = 0;
+      hasRecordedWatchRef.current = false;
       if (!readyOnceRef.current) setIsLoading(true);
     } else {
+      if (activeStartRef.current > 0) {
+        totalWatchMsRef.current += Date.now() - activeStartRef.current;
+        activeStartRef.current = 0;
+        checkAndRecordWatchHistory(totalWatchMsRef.current / 1000, durationRef.current);
+      }
       setIsPlaying(false);
-      setShowEmojiPicker(false);
       setShow2x(false);
       setSpeed(1.0);
       setIsSeeking(false);
@@ -430,20 +575,26 @@ function SavedReelCardBase({
       if (controlsTimer.current) clearTimeout(controlsTimer.current);
       setShowControls(false);
     }
-  }, [isActive]);
+  }, [isActive, checkAndRecordWatchHistory]);
 
   useEffect(() => () => {
     if (controlsTimer.current) clearTimeout(controlsTimer.current);
     if (singleTapTimerRef.current) clearTimeout(singleTapTimerRef.current);
-  }, []);
+    if (activeStartRef.current > 0) {
+      const watchSec = (totalWatchMsRef.current + (Date.now() - activeStartRef.current)) / 1000;
+      checkAndRecordWatchHistory(watchSec, durationRef.current);
+    }
+  }, [checkAndRecordWatchHistory]);
 
   const handleProgress = useCallback((cur: number, dur: number) => {
     if (!isSeekingRef.current) {
       setCurrentTime(cur);
       setDuration(dur);
       setProgress(dur > 0 ? cur / dur : 0);
+      const curSession = (isPlayingRef.current && activeStartRef.current > 0) ? (Date.now() - activeStartRef.current) : 0;
+      checkAndRecordWatchHistory((totalWatchMsRef.current + curSession) / 1000, dur);
     }
-  }, []);
+  }, [checkAndRecordWatchHistory]);
 
   const handleReady = useCallback(() => {
     readyOnceRef.current = true;
@@ -452,8 +603,8 @@ function SavedReelCardBase({
 
   const toggleHeartLike = useCallback(() => {
     hapticLight();
-    onReact(item, myReaction || '❤️');
-  }, [myReaction, item, onReact]);
+    onReact(item, '❤️');
+  }, [item, onReact]);
 
   const seekPanResponder = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
@@ -545,6 +696,8 @@ function SavedReelCardBase({
           isPlaying={isPlaying && isActive}
           speed={speed}
           muted={muted}
+          autoScroll={autoScroll}
+          onPlaybackComplete={onPlaybackComplete}
           onProgress={handleProgress}
           onReady={handleReady}
           playerRef={playerRef}
@@ -621,20 +774,15 @@ function SavedReelCardBase({
         <TouchableOpacity
           style={s.actionBtn}
           onPress={toggleHeartLike}
-          onLongPress={() => { hapticLongPress(); setShowEmojiPicker(p => !p); }}
           activeOpacity={0.75}
         >
           <View style={s.actionIconWrap}>
-            {myReaction && myReaction !== '❤️' ? (
-              <Text style={s.actionEmojiText}>{myReaction}</Text>
-            ) : (
-              <AppIcon
-                androidName={isLiked ? 'favorite' : 'favorite_border'}
-                iosName={isLiked ? 'heart.fill' : 'heart'}
-                color={isLiked ? '#FF2D55' : '#FFFFFF'}
-                size={24}
-              />
-            )}
+            <AppIcon
+              androidName={isLiked ? 'favorite' : 'favorite_border'}
+              iosName={isLiked ? 'heart.fill' : 'heart'}
+              color={isLiked ? '#FF2D55' : '#FFFFFF'}
+              size={24}
+            />
           </View>
           <Text style={s.actionCount}>{totalReactions > 0 ? totalReactions : 'Like'}</Text>
         </TouchableOpacity>
@@ -682,41 +830,46 @@ function SavedReelCardBase({
           <Text style={s.actionCount}>{item.is_saved ? 'Saved' : 'Save'}</Text>
         </TouchableOpacity>
 
+        {/* Settings / Options Button (More) */}
         <TouchableOpacity
           style={s.actionBtn}
-          onPress={() => { hapticSelection(); onToggleMute(); }}
+          onPress={() => { hapticLight(); onOpenSettings(item); }}
           activeOpacity={0.75}
         >
           <View style={s.actionIconWrap}>
             <AppIcon
-              androidName={muted ? 'volume_off' : 'volume_up'}
-              iosName={muted ? 'speaker.slash.fill' : 'speaker.wave.2.fill'}
+              androidName="more_vert"
+              iosName="ellipsis"
               color="#FFFFFF"
-              size={21}
+              size={22}
             />
           </View>
-          <Text style={s.actionCount}>{muted ? 'Muted' : 'Sound'}</Text>
+          <Text style={s.actionCount}>More</Text>
         </TouchableOpacity>
-      </View>
 
-      {/* Floating Emoji Picker */}
-      {showEmojiPicker && !show2x && (
-        <View style={[s.emojiPicker, { bottom: lowerContentBottom + 101 }]}>
-          {REACTION_EMOJIS.map(emoji => {
-            const active = item.user_reactions?.includes(emoji);
-            return (
-              <TouchableOpacity
-                key={emoji}
-                onPress={() => { hapticSuccess(); onReact(item, emoji); setShowEmojiPicker(false); }}
-                style={[s.emojiBtn, active && s.emojiBtnActive]}
-                activeOpacity={0.75}
-              >
-                <Text style={s.emojiText}>{emoji}</Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      )}
+        {/* Remove from History Button (available in History segment) */}
+        {Boolean(isHistorySegment && onRemoveFromHistory) && (
+          <TouchableOpacity
+            style={s.actionBtn}
+            onPress={() => {
+              hapticLight();
+              onRemoveFromHistory?.(item);
+            }}
+            activeOpacity={0.75}
+            accessibilityLabel="Remove from watch history"
+          >
+            <View style={[s.actionIconWrap, { backgroundColor: 'rgba(239, 68, 68, 0.25)' }]}>
+              <AppIcon
+                androidName="delete_outline"
+                iosName="trash"
+                color="#EF4444"
+                size={22}
+              />
+            </View>
+            <Text style={[s.actionCount, { color: '#EF4444' }]}>Remove</Text>
+          </TouchableOpacity>
+        )}
+      </View>
 
       <View
         style={[s.authorInfo, { bottom: lowerContentBottom }, show2x && s.fastForwardHidden]}
@@ -800,13 +953,15 @@ function CommentsSheet({
   onClose,
   onCommentAdded,
   onCommentDeleted,
+  isOwnReel,
 }: {
   visible: boolean;
-  mediaId?: number | null;
+  mediaId?: number | string | null;
   colors: AppColors;
   onClose: () => void;
   onCommentAdded: (count: number) => void;
   onCommentDeleted: (count: number) => void;
+  isOwnReel?: boolean;
 }) {
   const insets = useSafeAreaInsets();
   const { keyboardHeight } = useModalKeyboardHeight();
@@ -820,7 +975,7 @@ function CommentsSheet({
     let active = true;
     setLoading(true);
     setComments([]);
-    getComments(mediaId)
+    getComments(mediaId, 'reel')
       .then(res => { if (active) setComments(Array.isArray(res?.comments) ? res.comments : []); })
       .catch(() => { if (active) setComments([]); })
       .finally(() => { if (active) setLoading(false); });
@@ -831,9 +986,9 @@ function CommentsSheet({
     if (!text.trim() || mediaId == null) return;
     setSubmitting(true);
     try {
-      await addComment(mediaId, text.trim());
+      await addComment(mediaId, text.trim(), 'reel');
       setText('');
-      const res = await getComments(mediaId);
+      const res = await getComments(mediaId, 'reel');
       const nextComments = Array.isArray(res?.comments) ? res.comments : [];
       setComments(nextComments);
       onCommentAdded(nextComments.length);
@@ -842,7 +997,7 @@ function CommentsSheet({
     finally { setSubmitting(false); }
   };
 
-  const handleDelete = async (id: number) => {
+  const handleDelete = async (id: number | string) => {
     try {
       await deleteComment(id);
       const nextComments = comments.filter(c => c.id !== id);
@@ -898,7 +1053,7 @@ function CommentsSheet({
                     <Text style={[cs.cText, { color: colors.text }]}>{c.text}</Text>
                     <Text style={[cs.cTime, { color: colors.textMuted }]}>{formatTimeAgo(c.created_at)}</Text>
                   </View>
-                  {c.is_own && (
+                  {(c.is_own || isOwnReel) && (
                     <TouchableOpacity onPress={() => handleDelete(c.id)} hitSlop={10}>
                       <AppIcon androidName="delete" iosName="trash" color={colors.error} size={16} />
                     </TouchableOpacity>
@@ -931,6 +1086,250 @@ function CommentsSheet({
   );
 }
 
+// ─── Reels Settings Modal ───────────────────────────────────────────────────
+
+type ReelsSettingsModalProps = {
+  visible: boolean;
+  item: SavedReelItem | null;
+  autoScroll: boolean;
+  onToggleAutoScroll: (val: boolean) => void;
+  muted: boolean;
+  onToggleMute: () => void;
+  colors: AppColors;
+  isHistorySegment?: boolean;
+  onRemoveFromHistory?: (item: SavedReelItem) => void;
+  onClose: () => void;
+};
+
+function ReelsSettingsModal({
+  visible,
+  item,
+  autoScroll,
+  onToggleAutoScroll,
+  muted,
+  onToggleMute,
+  colors,
+  isHistorySegment = false,
+  onRemoveFromHistory,
+  onClose,
+}: ReelsSettingsModalProps) {
+  const insets = useSafeAreaInsets();
+  const [saving, setSaving] = useState(false);
+  const [saveProgress, setSaveProgress] = useState(0);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  useEffect(() => {
+    if (!visible) {
+      setSaving(false);
+      setSaveProgress(0);
+      setSaveSuccess(false);
+    }
+  }, [visible]);
+
+  const handleSaveToDevice = async () => {
+    if (!item || saving) return;
+    setSaving(true);
+    setSaveProgress(0);
+    setSaveSuccess(false);
+    try {
+      await saveReelToDevice(item.share_id, item.path, (p) => {
+        setSaveProgress(p);
+      });
+      setSaveSuccess(true);
+      hapticSuccess();
+      Alert.alert('Saved to device', 'This reel video has been saved to your photo gallery.');
+    } catch (err: any) {
+      hapticError();
+      Alert.alert('Save failed', err?.message || 'Could not save video to device.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={sm.backdrop} onPress={onClose} />
+      <View
+        style={[
+          sm.sheet,
+          {
+            backgroundColor: colors.surface,
+            paddingBottom: Math.max(insets.bottom, Spacing.four) + Spacing.two,
+          },
+        ]}
+      >
+        <View style={sm.handle} />
+        <View style={[sm.header, { borderBottomColor: colors.surfaceBorder }]}>
+          <Text style={[sm.title, { color: colors.text }]}>Reel Options</Text>
+          <TouchableOpacity onPress={onClose} hitSlop={12}>
+            <AppIcon androidName="close" iosName="xmark" color={colors.textSecondary} size={20} />
+          </TouchableOpacity>
+        </View>
+
+        <View style={sm.optionsList}>
+          {/* Save to Device */}
+          <TouchableOpacity
+            style={[sm.optionRow, { borderBottomColor: colors.surfaceBorder }]}
+            onPress={handleSaveToDevice}
+            disabled={saving}
+            activeOpacity={0.7}
+          >
+            <View style={[sm.iconCircle, { backgroundColor: colors.surfaceSoft }]}>
+              {saving ? (
+                <ActivityIndicator size="small" color={colors.primary} />
+              ) : saveSuccess ? (
+                <AppIcon androidName="check" iosName="checkmark" color="#10B981" size={20} />
+              ) : (
+                <AppIcon androidName="file_download" iosName="arrow.down.to.line" color={colors.text} size={20} />
+              )}
+            </View>
+            <View style={sm.optionTextWrap}>
+              <Text style={[sm.optionTitle, { color: colors.text }]}>Save to device</Text>
+              <Text style={[sm.optionSubtitle, { color: colors.textMuted }]}>
+                {saving
+                  ? `Downloading… ${Math.round(saveProgress * 100)}%`
+                  : saveSuccess
+                    ? 'Saved to gallery'
+                    : 'Download reel to device gallery'}
+              </Text>
+            </View>
+            {!saving && !saveSuccess && (
+              <AppIcon androidName="chevron_right" iosName="chevron.right" color={colors.textMuted} size={18} />
+            )}
+          </TouchableOpacity>
+
+          {/* Auto Scroll */}
+          <View style={[sm.optionRow, { borderBottomColor: colors.surfaceBorder }]}>
+            <View style={[sm.iconCircle, { backgroundColor: colors.surfaceSoft }]}>
+              <AppIcon androidName="swipe_vertical" iosName="arrow.up.and.down" color={colors.text} size={20} />
+            </View>
+            <View style={sm.optionTextWrap}>
+              <Text style={[sm.optionTitle, { color: colors.text }]}>Auto-scroll</Text>
+              <Text style={[sm.optionSubtitle, { color: colors.textMuted }]}>
+                Play next reel when finished
+              </Text>
+            </View>
+            <Switch
+              value={autoScroll}
+              onValueChange={(val) => {
+                hapticSelection();
+                onToggleAutoScroll(val);
+              }}
+              trackColor={{ false: colors.surfaceBorder, true: colors.primary }}
+              thumbColor="#FFFFFF"
+            />
+          </View>
+
+          {/* Volume / Sound */}
+          <View style={sm.optionRow}>
+            <View style={[sm.iconCircle, { backgroundColor: colors.surfaceSoft }]}>
+              <AppIcon
+                androidName={muted ? 'volume_off' : 'volume_up'}
+                iosName={muted ? 'speaker.slash.fill' : 'speaker.wave.2.fill'}
+                color={colors.text}
+                size={20}
+              />
+            </View>
+            <View style={sm.optionTextWrap}>
+              <Text style={[sm.optionTitle, { color: colors.text }]}>Sound</Text>
+              <Text style={[sm.optionSubtitle, { color: colors.textMuted }]}>
+                {muted ? 'Audio is muted' : 'Playing with sound'}
+              </Text>
+            </View>
+            <Switch
+              value={!muted}
+              onValueChange={() => {
+                hapticSelection();
+                onToggleMute();
+              }}
+              trackColor={{ false: colors.surfaceBorder, true: colors.primary }}
+              thumbColor="#FFFFFF"
+            />
+          </View>
+
+          {/* Remove from Watch History */}
+          {Boolean(isHistorySegment && onRemoveFromHistory) && (
+            <TouchableOpacity
+              style={[sm.optionRow, { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.surfaceBorder }]}
+              onPress={() => {
+                if (item) onRemoveFromHistory?.(item);
+                onClose();
+              }}
+              activeOpacity={0.7}
+              accessibilityLabel="Remove from watch history"
+            >
+              <View style={[sm.iconCircle, { backgroundColor: 'rgba(239, 68, 68, 0.15)' }]}>
+                <AppIcon androidName="delete_outline" iosName="trash" color="#EF4444" size={20} />
+              </View>
+              <View style={sm.optionTextWrap}>
+                <Text style={[sm.optionTitle, { color: '#EF4444' }]}>Remove from history</Text>
+                <Text style={[sm.optionSubtitle, { color: colors.textMuted }]}>
+                  Remove this reel from your watch history
+                </Text>
+              </View>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const sm = StyleSheet.create({
+  backdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.5)' },
+  sheet: {
+    borderTopLeftRadius: Radius.xl,
+    borderTopRightRadius: Radius.xl,
+    marginTop: 'auto',
+  },
+  handle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(128,128,128,0.35)',
+    marginVertical: Spacing.two,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: Spacing.four,
+    paddingBottom: Spacing.three,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  title: { fontSize: TextScale.base, fontWeight: '700' },
+  optionsList: {
+    paddingHorizontal: Spacing.four,
+    paddingTop: Spacing.two,
+  },
+  optionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: Spacing.three,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: Spacing.three,
+  },
+  iconCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  optionTextWrap: {
+    flex: 1,
+    gap: 2,
+  },
+  optionTitle: {
+    fontSize: TextScale.sm,
+    fontWeight: '600',
+  },
+  optionSubtitle: {
+    fontSize: TextScale.xs,
+  },
+});
+
 // ─── Main Reels Library Screen (Saved, Liked, Reposts) ────────────────────────
 
 export default function SavedReelsScreen() {
@@ -943,6 +1342,7 @@ export default function SavedReelsScreen() {
   const [savedReels, setSavedReels] = useState<SavedReelItem[]>([]);
   const [likedReels, setLikedReels] = useState<SavedReelItem[]>([]);
   const [repostedReels, setRepostedReels] = useState<SavedReelItem[]>([]);
+  const [historyReels, setHistoryReels] = useState<SavedReelItem[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -954,7 +1354,9 @@ export default function SavedReelsScreen() {
   const [activeViewerIndex, setActiveViewerIndex] = useState(0);
   const [commentsTarget, setCommentsTarget] = useState<SavedReelItem | null>(null);
   const [repostTarget, setRepostTarget] = useState<SavedReelItem | null>(null);
+  const [settingsTarget, setSettingsTarget] = useState<SavedReelItem | null>(null);
   const [muted, setMuted] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(false);
 
   const viewerListRef = useRef<FlatList<SavedReelItem>>(null);
 
@@ -974,10 +1376,11 @@ export default function SavedReelsScreen() {
       const config = await getConfig();
       setServerConfig(config);
 
-      const [savedRes, likedRes, repostedRes] = await Promise.allSettled([
+      const [savedRes, likedRes, repostedRes, historyRes] = await Promise.allSettled([
         getSavedReels(0, 100),
         getLikedReels(0, 100),
         getRepostedReels(0, 100),
+        getWatchHistory(0, 100),
       ]);
 
       if (savedRes.status === 'fulfilled') {
@@ -986,15 +1389,45 @@ export default function SavedReelsScreen() {
       }
       if (likedRes.status === 'fulfilled') {
         const list = Array.isArray(likedRes.value?.reels) ? likedRes.value.reels : [];
-        setLikedReels(list.filter(r => isNotOwnReel(r, config?.deviceId)));
+        const notOwn = list.filter(r => isNotOwnReel(r, config?.deviceId));
+        const seen = new Set<string>();
+        const deduped: SavedReelItem[] = [];
+        for (const r of notOwn) {
+          const key = r.reel_id || String(r.share_id) || String(r.media_id);
+          if (!seen.has(key)) {
+            seen.add(key);
+            deduped.push(r);
+          }
+        }
+        setLikedReels(deduped);
       }
       if (repostedRes.status === 'fulfilled') {
         const list = Array.isArray(repostedRes.value?.reels) ? repostedRes.value.reels : [];
         setRepostedReels(list.filter(r => isNotOwnReel(r, config?.deviceId) && Boolean(r.is_repost)));
       }
+      if (historyRes.status === 'fulfilled') {
+        const list = Array.isArray(historyRes.value?.reels) ? historyRes.value.reels : [];
+        const seen = new Set<string>();
+        const deduped: SavedReelItem[] = [];
+        for (const r of list) {
+          const key = r.reel_id || String(r.share_id);
+          if (!seen.has(key)) {
+            seen.add(key);
+            deduped.push(r);
+          }
+        }
+        setHistoryReels(deduped);
+      }
 
       const seg = targetSegment || activeSegment;
-      const currentRes = seg === 'saved' ? savedRes : seg === 'liked' ? likedRes : repostedRes;
+      const currentRes =
+        seg === 'saved'
+          ? savedRes
+          : seg === 'liked'
+          ? likedRes
+          : seg === 'reposts'
+          ? repostedRes
+          : historyRes;
       if (currentRes.status === 'rejected') {
         setError(currentRes.reason?.message || 'Failed to load reels');
       }
@@ -1007,12 +1440,18 @@ export default function SavedReelsScreen() {
   }, [activeSegment, isNotOwnReel]);
 
   useEffect(() => {
+    setUIPriorityMode(true);
     void loadData();
+    return () => {
+      setUIPriorityMode(false);
+    };
   }, [loadData]);
+
 
   useEffect(() => {
     AsyncStorage.getItem(MUTED_KEY).then(v => { if (v != null) setMuted(v === '1'); }).catch(() => {});
-  }, []);
+    AsyncStorage.getItem(AUTO_SCROLL_KEY).then(v => { if (v != null) setAutoScroll(v === '1'); }).catch(() => {});
+  }, [viewerIndex]);
 
   // Sync state changes across screens (e.g. actions done on the main reels feed)
   useEffect(() => {
@@ -1037,6 +1476,11 @@ export default function SavedReelsScreen() {
           ? { ...r, is_saved: data.isSaved }
           : r
       ));
+      setHistoryReels(prev => prev.map(r =>
+        (r.reel_id === data.reelId || (data.shareId != null && r.share_id === data.shareId))
+          ? { ...r, is_saved: data.isSaved }
+          : r
+      ));
     });
 
     const reactionSub = DeviceEventEmitter.addListener('reel-reaction-changed', (data: { mediaId?: number | null; reelId?: string; counts?: Record<string, number>; userReactions?: string[] }) => {
@@ -1052,6 +1496,7 @@ export default function SavedReelsScreen() {
       );
       setSavedReels(updater);
       setRepostedReels(updater);
+      setHistoryReels(updater);
       setLikedReels(prev => {
         if (!isNowReacted) {
           return prev.filter(r => r.reel_id !== data.reelId && (data.mediaId == null || r.media_id !== data.mediaId));
@@ -1074,6 +1519,7 @@ export default function SavedReelsScreen() {
       );
       setSavedReels(updater);
       setLikedReels(updater);
+      setHistoryReels(updater);
       setRepostedReels(prev => {
         if (!data.userHasReposted) {
           return prev.filter(r => r.share_id !== data.shareId && r.reel_id !== data.reelId && (data.mediaId == null || r.media_id !== data.mediaId));
@@ -1094,6 +1540,14 @@ export default function SavedReelsScreen() {
       setSavedReels(updater);
       setLikedReels(updater);
       setRepostedReels(updater);
+      setHistoryReels(updater);
+    });
+
+    const modeSub = DeviceEventEmitter.addListener('app_mode_changed', () => {
+      void loadData();
+    });
+    const p2pFeedSub = DeviceEventEmitter.addListener('p2p-feed-updated', () => {
+      void loadData();
     });
 
     return () => {
@@ -1101,8 +1555,10 @@ export default function SavedReelsScreen() {
       reactionSub.remove();
       repostSub.remove();
       commentSub.remove();
+      modeSub.remove();
+      p2pFeedSub.remove();
     };
-  }, []);
+  }, [loadData]);
 
   const handleToggleMute = useCallback(() => {
     setMuted(prev => {
@@ -1112,16 +1568,53 @@ export default function SavedReelsScreen() {
     });
   }, []);
 
+  const handleToggleAutoScroll = useCallback((val: boolean) => {
+    setAutoScroll(val);
+    AsyncStorage.setItem(AUTO_SCROLL_KEY, val ? '1' : '0').catch(() => {});
+  }, []);
+
+  const currentReels = useMemo(() => {
+    if (activeSegment === 'saved') return savedReels;
+    if (activeSegment === 'liked') return likedReels;
+    if (activeSegment === 'reposts') return repostedReels;
+    return historyReels;
+  }, [activeSegment, savedReels, likedReels, repostedReels, historyReels]);
+
+  const handlePlaybackComplete = useCallback((itemIndex: number) => {
+    if (!autoScroll) return;
+    const nextIndex = itemIndex + 1;
+    if (nextIndex < currentReels.length) {
+      viewerListRef.current?.scrollToIndex({
+        index: nextIndex,
+        animated: true,
+      });
+    }
+  }, [autoScroll, currentReels.length]);
+
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     void loadData();
   }, [loadData]);
 
-  const currentReels = useMemo(() => {
-    if (activeSegment === 'saved') return savedReels;
-    if (activeSegment === 'liked') return likedReels;
-    return repostedReels;
-  }, [activeSegment, savedReels, likedReels, repostedReels]);
+  const handleRemoveFromHistory = useCallback(async (item: SavedReelItem) => {
+    if (!item) return;
+    hapticLight();
+    const reelId = item.reel_id || String(item.share_id);
+    const shareId = item.share_id;
+    setHistoryReels(prev => prev.filter(r => r.reel_id !== reelId && r.share_id !== shareId));
+    try {
+      await deleteWatchHistoryItem(shareId, reelId);
+    } catch (e) {
+      console.warn('[SavedReels] Failed to remove from watch history:', e);
+    }
+  }, []);
+
+  const handleViewerRemoveFromHistory = useCallback(async (item: SavedReelItem) => {
+    await handleRemoveFromHistory(item);
+    if (activeSegment === 'history') {
+      setViewerIndex(null);
+    }
+  }, [handleRemoveFromHistory, activeSegment]);
 
   const handleToggleSave = useCallback(async (item: SavedReelItem) => {
     hapticSelection();
@@ -1144,6 +1637,10 @@ export default function SavedReelsScreen() {
     ));
 
     setRepostedReels(prev => prev.map(r =>
+      (r.reel_id === item.reel_id || r.share_id === item.share_id) ? { ...r, is_saved: willBeSaved } : r
+    ));
+
+    setHistoryReels(prev => prev.map(r =>
       (r.reel_id === item.reel_id || r.share_id === item.share_id) ? { ...r, is_saved: willBeSaved } : r
     ));
 
@@ -1173,7 +1670,7 @@ export default function SavedReelsScreen() {
   }, [activeSegment]);
 
   const handleCommentAdded = useCallback((reelId: string, count?: number) => {
-    const targetItem = [...savedReels, ...likedReels, ...repostedReels].find(r => r.reel_id === reelId);
+    const targetItem = [...savedReels, ...likedReels, ...repostedReels, ...historyReels].find(r => r.reel_id === reelId);
     const nextCount = count !== undefined ? count : (targetItem ? targetItem.comment_count + 1 : 1);
     const updater = (prev: SavedReelItem[]) => prev.map(r =>
       (r.reel_id === reelId || (targetItem?.media_id != null && r.media_id === targetItem.media_id))
@@ -1183,15 +1680,16 @@ export default function SavedReelsScreen() {
     setSavedReels(updater);
     setLikedReels(updater);
     setRepostedReels(updater);
+    setHistoryReels(updater);
     DeviceEventEmitter.emit('reel-comment-changed', {
       reelId,
       mediaId: targetItem?.media_id,
       count: nextCount,
     });
-  }, [savedReels, likedReels, repostedReels]);
+  }, [savedReels, likedReels, repostedReels, historyReels]);
 
   const handleCommentDeleted = useCallback((reelId: string, count?: number) => {
-    const targetItem = [...savedReels, ...likedReels, ...repostedReels].find(r => r.reel_id === reelId);
+    const targetItem = [...savedReels, ...likedReels, ...repostedReels, ...historyReels].find(r => r.reel_id === reelId);
     const nextCount = count !== undefined ? count : Math.max(0, (targetItem ? targetItem.comment_count - 1 : 0));
     const updater = (prev: SavedReelItem[]) => prev.map(r =>
       (r.reel_id === reelId || (targetItem?.media_id != null && r.media_id === targetItem.media_id))
@@ -1201,17 +1699,19 @@ export default function SavedReelsScreen() {
     setSavedReels(updater);
     setLikedReels(updater);
     setRepostedReels(updater);
+    setHistoryReels(updater);
     DeviceEventEmitter.emit('reel-comment-changed', {
       reelId,
       mediaId: targetItem?.media_id,
       count: nextCount,
     });
-  }, [savedReels, likedReels, repostedReels]);
+  }, [savedReels, likedReels, repostedReels, historyReels]);
 
   const handleReact = useCallback(async (item: SavedReelItem, emoji: string) => {
-    if (item.media_id == null) return;
+    const targetMediaId = item.media_id ?? item.share_id ?? item.reel_id;
+    if (targetMediaId == null) return;
     try {
-      const res = await reactToMedia(item.media_id, emoji);
+      const res = await reactToMedia(targetMediaId, emoji, 'reel');
       const isNowReacted = (res.user_reactions?.length ?? 0) > 0;
       const nextCounts = res.counts ?? item.reaction_counts;
       const nextUserReactions = res.user_reactions ?? item.user_reactions;
@@ -1224,6 +1724,7 @@ export default function SavedReelsScreen() {
 
       setSavedReels(updater);
       setRepostedReels(updater);
+      setHistoryReels(updater);
 
       setLikedReels(prev => {
         if (!isNowReacted) {
@@ -1255,6 +1756,7 @@ export default function SavedReelsScreen() {
       const prevSaved = savedReels;
       const prevLiked = likedReels;
       const prevReposted = repostedReels;
+      const prevHistory = historyReels;
       const nextCount = Math.max(0, (item.repost_count || 1) - 1);
 
       const updater = (prev: SavedReelItem[]) => prev.map(r =>
@@ -1268,6 +1770,7 @@ export default function SavedReelsScreen() {
       );
       setSavedReels(updater);
       setLikedReels(updater);
+      setHistoryReels(updater);
 
       setRepostedReels(prev => {
         const filtered = prev.filter(r => r.reel_id !== item.reel_id && r.share_id !== item.share_id);
@@ -1292,6 +1795,7 @@ export default function SavedReelsScreen() {
         setSavedReels(prevSaved);
         setLikedReels(prevLiked);
         setRepostedReels(prevReposted);
+        setHistoryReels(prevHistory);
         DeviceEventEmitter.emit('reel-repost-changed', {
           shareId: item.share_id,
           reelId: item.reel_id,
@@ -1305,13 +1809,13 @@ export default function SavedReelsScreen() {
     } else {
       setRepostTarget(item);
     }
-  }, [activeSegment, savedReels, likedReels, repostedReels]);
+  }, [activeSegment, savedReels, likedReels, repostedReels, historyReels]);
 
   const handleRepostSubmit = useCallback(async (targetDeviceIds: string[], caption: string) => {
     if (!repostTarget) return;
     const nextCount = (repostTarget.repost_count || 0) + 1;
     try {
-      await repostReel(repostTarget.share_id, targetDeviceIds, caption);
+      await repostReel(repostTarget.share_id ?? (repostTarget as any)?.reel_id, targetDeviceIds, caption);
       const updater = (prev: SavedReelItem[]) => prev.map(r =>
         r.reel_id === repostTarget.reel_id || r.share_id === repostTarget.share_id
           ? {
@@ -1323,6 +1827,7 @@ export default function SavedReelsScreen() {
       );
       setSavedReels(updater);
       setLikedReels(updater);
+      setHistoryReels(updater);
       setRepostedReels(prev => [{ ...repostTarget, user_has_reposted: true, is_repost: true, repost_count: nextCount }, ...prev]);
       DeviceEventEmitter.emit('reel-repost-changed', {
         shareId: repostTarget.share_id,
@@ -1373,7 +1878,7 @@ export default function SavedReelsScreen() {
   }, []);
 
   const renderGridItem = useCallback(({ item, index }: { item: SavedReelItem; index: number }) => {
-    const thumbUrl = serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
+    const thumbUrl = item.thumb_uri ? item.thumb_uri : item.uri ? item.uri : serverConfig ? buildShareThumbnailUrl(serverConfig, item.share_id) : '';
     const authorName = item.is_repost
       ? (item.original_author?.display_name || item.shared_by)
       : item.shared_by;
@@ -1394,10 +1899,14 @@ export default function SavedReelsScreen() {
         )}
 
         {/* Top Badges per active segment */}
-        <View style={s.gridTopRow} pointerEvents="none">
+        <View style={s.gridTopRow} pointerEvents="box-none">
           {item.is_repost ? (
             <View style={s.gridPillBadge}>
               <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color="#38BDF8" size={12} />
+            </View>
+          ) : activeSegment === 'history' ? (
+            <View style={s.gridHistoryBadge}>
+              <AppIcon androidName="history" iosName="clock.arrow.circlepath" color="#A78BFA" size={13} />
             </View>
           ) : <View />}
 
@@ -1409,10 +1918,22 @@ export default function SavedReelsScreen() {
             <View style={s.gridLikedBadge}>
               <AppIcon androidName="favorite" iosName="heart.fill" color="#FF2D55" size={13} />
             </View>
-          ) : (
+          ) : activeSegment === 'reposts' ? (
             <View style={s.gridRepostBadge}>
               <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color="#38BDF8" size={13} />
             </View>
+          ) : (
+            <TouchableOpacity
+              style={s.gridRemoveBtn}
+              onPress={(e) => {
+                e?.stopPropagation?.();
+                handleRemoveFromHistory(item);
+              }}
+              hitSlop={8}
+              accessibilityLabel="Remove from watch history"
+            >
+              <AppIcon androidName="close" iosName="xmark" color="#FFFFFF" size={13} />
+            </TouchableOpacity>
           )}
         </View>
 
@@ -1430,18 +1951,23 @@ export default function SavedReelsScreen() {
               {authorName}
             </Text>
           </View>
-          {!!item.caption && (
+          {activeSegment === 'history' && item.watched_at ? (
+            <Text style={s.gridWatchedAt} numberOfLines={1}>
+              Watched {formatTimeAgo(item.watched_at)}
+            </Text>
+          ) : !!item.caption ? (
             <Text style={s.gridCaption} numberOfLines={1}>{item.caption}</Text>
-          )}
+          ) : null}
         </View>
       </TouchableOpacity>
     );
-  }, [serverConfig, activeSegment, openViewerAt]);
+  }, [serverConfig, activeSegment, openViewerAt, handleRemoveFromHistory]);
 
   const segmentTitle = useMemo(() => {
     if (activeSegment === 'saved') return 'Saved Reels';
     if (activeSegment === 'liked') return 'Liked Reels';
-    return 'Reposted Reels';
+    if (activeSegment === 'reposts') return 'Reposted Reels';
+    return 'Watch History';
   }, [activeSegment]);
 
   return (
@@ -1481,7 +2007,9 @@ export default function SavedReelsScreen() {
                 ? savedReels.length
                 : seg.id === 'liked'
                 ? likedReels.length
-                : repostedReels.length;
+                : seg.id === 'reposts'
+                ? repostedReels.length
+                : historyReels.length;
 
             return (
               <TouchableOpacity
@@ -1562,8 +2090,10 @@ export default function SavedReelsScreen() {
               <AppIcon androidName="bookmark_border" iosName="bookmark" color={colors.textMuted} size={52} />
             ) : activeSegment === 'liked' ? (
               <AppIcon androidName="favorite_border" iosName="heart" color={colors.textMuted} size={52} />
-            ) : (
+            ) : activeSegment === 'reposts' ? (
               <AppIcon androidName="repeat" iosName="arrow.2.squarepath" color={colors.textMuted} size={52} />
+            ) : (
+              <AppIcon androidName="history" iosName="clock.arrow.circlepath" color={colors.textMuted} size={52} />
             )}
           </View>
           <Text style={[s.emptyTitle, { color: colors.text }]}>
@@ -1571,14 +2101,18 @@ export default function SavedReelsScreen() {
               ? 'No Saved Reels Yet'
               : activeSegment === 'liked'
               ? 'No Liked Reels Yet'
-              : 'No Reposts Yet'}
+              : activeSegment === 'reposts'
+              ? 'No Reposts Yet'
+              : 'No Watch History Yet'}
           </Text>
           <Text style={[s.emptyBody, { color: colors.textSecondary }]}>
             {activeSegment === 'saved'
               ? 'Tap the bookmark icon on any reel in the Reels tab to save it here for easy access.'
               : activeSegment === 'liked'
               ? 'Double tap or tap the heart icon on any reel in the Reels tab to add it to your likes.'
-              : 'Share reels to other devices on your network to feature them in your reposts.'}
+              : activeSegment === 'reposts'
+              ? 'Share reels to other devices on your network to feature them in your reposts.'
+              : 'Reels you watch for a few seconds will automatically show up here so you can revisit them anytime.'}
           </Text>
           <TouchableOpacity
             style={[s.exploreBtn, { backgroundColor: colors.primary }]}
@@ -1628,6 +2162,7 @@ export default function SavedReelsScreen() {
               maxToRenderPerBatch={2}
               onViewableItemsChanged={onViewerItemsChanged}
               viewabilityConfig={{ itemVisiblePercentThreshold: 60 }}
+              extraData={{ activeViewerIndex, muted, autoScroll }}
               onScrollToIndexFailed={info => {
                 setTimeout(() => {
                   viewerListRef.current?.scrollToIndex({ index: Math.min(info.index, currentReels.length - 1), animated: false });
@@ -1641,13 +2176,17 @@ export default function SavedReelsScreen() {
                   isMounted={Math.abs(index - activeViewerIndex) <= 1}
                   serverConfig={serverConfig}
                   muted={muted}
+                  autoScroll={autoScroll}
+                  onPlaybackComplete={() => handlePlaybackComplete(index)}
+                  onOpenSettings={setSettingsTarget}
                   segmentTitle={segmentTitle}
                   segmentIndexText={`${index + 1} / ${currentReels.length}`}
-                  onToggleMute={handleToggleMute}
                   onReact={handleReact}
                   onOpenComments={setCommentsTarget}
                   onOpenRepost={handleOpenRepost}
                   onToggleSave={handleToggleSave}
+                  isHistorySegment={activeSegment === 'history'}
+                  onRemoveFromHistory={handleViewerRemoveFromHistory}
                   onCloseViewer={() => setViewerIndex(null)}
                 />
               )}
@@ -1659,11 +2198,12 @@ export default function SavedReelsScreen() {
       {/* Comments Sheet */}
       <CommentsSheet
         visible={commentsTarget != null}
-        mediaId={commentsTarget?.media_id}
+        mediaId={commentsTarget?.media_id ?? (commentsTarget as any)?.share_id ?? commentsTarget?.reel_id}
         colors={colors}
         onClose={() => setCommentsTarget(null)}
         onCommentAdded={(count) => commentsTarget && handleCommentAdded(commentsTarget.reel_id, count)}
         onCommentDeleted={(count) => commentsTarget && handleCommentDeleted(commentsTarget.reel_id, count)}
+        isOwnReel={commentsTarget?.is_own_post === true}
       />
 
       {/* Repost Modal */}
@@ -1682,6 +2222,20 @@ export default function SavedReelsScreen() {
         }
         onClose={() => setRepostTarget(null)}
         onSubmit={handleRepostSubmit}
+      />
+
+      {/* Reels Settings Modal */}
+      <ReelsSettingsModal
+        visible={settingsTarget != null}
+        item={settingsTarget}
+        isHistorySegment={activeSegment === 'history'}
+        onRemoveFromHistory={handleViewerRemoveFromHistory}
+        autoScroll={autoScroll}
+        onToggleAutoScroll={handleToggleAutoScroll}
+        muted={muted}
+        onToggleMute={handleToggleMute}
+        colors={colors}
+        onClose={() => setSettingsTarget(null)}
       />
     </View>
   );
@@ -1730,44 +2284,45 @@ const s = StyleSheet.create({
 
   // ─── Segment Switcher ───
   segmentBarWrap: {
-    paddingHorizontal: Spacing.four,
+    paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two + 2,
   },
   segmentBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 4,
+    padding: 3,
     borderRadius: Radius.full,
     borderWidth: 1,
-    gap: 4,
+    gap: 3,
   },
   segmentTab: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 8,
+    paddingVertical: 7,
+    paddingHorizontal: 2,
     borderRadius: Radius.full,
-    gap: 5,
+    gap: 3,
   },
   segmentTabActive: {
     ...Shadows.card,
   },
   segmentTabText: {
-    fontSize: TextScale.xs,
+    fontSize: 11,
     fontWeight: '600',
   },
   segmentTabTextActive: {
     fontWeight: '800',
   },
   segmentCountBadge: {
-    paddingHorizontal: 6,
+    paddingHorizontal: 5,
     paddingVertical: 1,
     borderRadius: Radius.full,
-    marginLeft: 2,
+    marginLeft: 1,
   },
   segmentCountText: {
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '800',
   },
 
@@ -1877,6 +2432,28 @@ const s = StyleSheet.create({
     paddingHorizontal: 6,
     paddingVertical: 3,
     borderRadius: Radius.full,
+  },
+  gridHistoryBadge: {
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: Radius.full,
+  },
+  gridRemoveBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  gridWatchedAt: {
+    color: 'rgba(255, 255, 255, 0.75)',
+    fontSize: 10,
+    fontWeight: '500',
+    marginTop: 2,
   },
   gridBottomOverlay: {
     position: 'absolute',

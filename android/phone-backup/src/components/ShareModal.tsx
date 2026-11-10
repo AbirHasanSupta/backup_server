@@ -17,7 +17,13 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppColors, Spacing, Radius, TextScale } from '@/constants/theme';
 import { AppIcon } from '@/components/AppIcon';
-import { listShareTargetDevices, MAX_SHARE_POST_FILES } from '../../downloader';
+import {
+  listShareTargetDevices,
+  MAX_SHARE_POST_FILES,
+  DESKTOP_SHARE_DEVICE_ID,
+  resolveExcludedShareRecipientIds,
+  filterShareRecipientDevices,
+} from '../../downloader';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 const { height: SCREEN_H } = Dimensions.get('window');
@@ -28,6 +34,9 @@ export type ShareTargetDevice = {
   device_model?: string;
   username?: string;
   display_name?: string;
+  is_p2p?: boolean;
+  ip?: string;
+  port?: number;
 };
 
 export function ShareModal({
@@ -59,12 +68,17 @@ export function ShareModal({
     setLoading(true);
     setSelected(new Set());
     setCaption('');
-    const excludedSet = new Set(excludeDeviceIds || []);
-    listShareTargetDevices()
-      .then((res) => {
+    Promise.all([
+      listShareTargetDevices(),
+      resolveExcludedShareRecipientIds(excludeDeviceIds),
+    ])
+      .then(([res, excluded]) => {
         if (!active) return;
         const list = Array.isArray(res?.devices) ? res.devices : [];
-        setDevices(list.filter((d) => d.device_id !== 'desktop-server' && !excludedSet.has(d.device_id)));
+        excluded.add(DESKTOP_SHARE_DEVICE_ID);
+        const filtered = filterShareRecipientDevices(list, excluded);
+        setDevices(filtered);
+        setSelected(new Set(filtered.map((d) => d.device_id)));
       })
       .catch(() => { if (active) setDevices([]); })
       .finally(() => { if (active) setLoading(false); });
@@ -97,13 +111,17 @@ export function ShareModal({
       );
       return;
     }
+    const targetIds = Array.from(selected).filter(
+      (id) => id !== DESKTOP_SHARE_DEVICE_ID && devices.some((d) => d.device_id === id),
+    );
+    if (targetIds.length === 0) return;
     setSending(true);
     try {
-      await onSubmit(Array.from(selected), caption.trim());
+      await onSubmit(targetIds, caption.trim());
     } finally {
       setSending(false);
     }
-  }, [count, selected, sending, caption, onSubmit]);
+  }, [count, selected, sending, caption, onSubmit, devices]);
 
   // On Android, Modal windows are not subject to windowSoftInputMode="adjustResize",
   // so we manually shift the sheet up by the keyboard height.
@@ -196,9 +214,16 @@ export function ShareModal({
                     activeOpacity={0.8}
                   >
                     <View style={styles.deviceInfo}>
-                      <Text style={[styles.deviceName, { color: colors.text }]} numberOfLines={1}>
-                        {d.display_name || d.device_name || 'Unknown device'}
-                      </Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Text style={[styles.deviceName, { color: colors.text, flexShrink: 1 }]} numberOfLines={1}>
+                          {d.display_name || d.device_name || 'Unknown device'}
+                        </Text>
+                        {Boolean(d.is_p2p) && (
+                          <View style={styles.p2pBadge}>
+                            <Text style={styles.p2pBadgeText}>P2P Wi-Fi</Text>
+                          </View>
+                        )}
+                      </View>
                       {!!d.device_model && (
                         <Text style={[styles.deviceModel, { color: colors.textMuted }]} numberOfLines={1}>
                           {d.device_model}
@@ -327,6 +352,17 @@ const styles = StyleSheet.create({
   deviceModel: {
     fontSize: TextScale.xs,
     marginTop: 1,
+  },
+  p2pBadge: {
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: Radius.full,
+  },
+  p2pBadgeText: {
+    color: '#10B981',
+    fontSize: 10,
+    fontWeight: '800',
   },
   primaryBtn: {
     marginTop: Spacing.three,

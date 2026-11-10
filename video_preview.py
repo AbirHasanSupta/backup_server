@@ -25,7 +25,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from config import APP_DATA_DIR, load_config
-from ffmpeg_utils import resolve_ffmpeg_path, resolve_ffprobe_path
+from ffmpeg_utils import configured_ffmpeg_threads, resolve_ffmpeg_path, resolve_ffprobe_path
 from state import add_log
 
 
@@ -394,7 +394,11 @@ def _run_ffmpeg(command: list[str]) -> None:
     }
     # A windowed desktop build must not flash a console when it launches FFmpeg.
     if os.name == "nt":
-        run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+        run_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+        run_options["startupinfo"] = startupinfo
     process = subprocess.Popen(command, **run_options)
     with _ffmpeg_process_guard:
         _active_ffmpeg_process = process
@@ -462,7 +466,11 @@ def _probe_streams(source_path: str) -> list[dict[str, object]] | None:
             "timeout": 10,
         }
         if os.name == "nt":
-            run_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+            run_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            run_options["startupinfo"] = startupinfo
         result = subprocess.run(
             [
                 ffprobe_path,
@@ -522,7 +530,7 @@ def _transcode_preview(source_path: str, output_path: str) -> None:
     # Leave capacity for HTTP requests and the desktop app while the single
     # background job is encoding.  One job prevents preload fan-out from
     # multiplying disk reads and CPU contention.
-    threads = str(max(1, min(6, (os.cpu_count() or 2) - 1)))
+    threads = str(configured_ffmpeg_threads())
     try:
         _run_ffmpeg([
             ffmpeg_path, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",

@@ -14,10 +14,9 @@ import urllib.request
 import urllib.error
 
 from config import load_config
-from database import (
-    get_conn,
-    get_devices,
-    get_device_display_name,
+from repositories.base import execute_read_query, is_postgres
+from repositories.device_repo import get_devices, get_device_display_name
+from repositories.trips_repo import (
     get_trips,
     get_trip_media,
     save_trip_clusters,
@@ -165,33 +164,59 @@ def cluster_source_media(source_id: str) -> list[dict]:
     for stype, skey in sources:
         params.extend((stype, skey))
 
-    conn = get_conn()
-    rows = conn.execute(
-        f"""
-        SELECT id, source_type, source_key, relative_path, size, modified_time,
-               capture_time, cap_lat, cap_lon
-        FROM media_index
-        WHERE ({where_clause})
-          AND cap_lat IS NOT NULL
-          AND cap_lon IS NOT NULL
-          AND capture_time IS NOT NULL
-        ORDER BY capture_time ASC
-        """,
-        params,
-    ).fetchall()
-
-    all_source_rows = conn.execute(
-        f"""
-        SELECT id, source_type, source_key, relative_path, size, modified_time,
-               capture_time, cap_lat, cap_lon
-        FROM media_index
-        WHERE ({where_clause})
-          AND capture_time IS NOT NULL
-        ORDER BY capture_time ASC
-        """,
-        params,
-    ).fetchall()
-    conn.close()
+    if is_postgres():
+        rows = execute_read_query(
+            f"""
+            SELECT id, source_type, source_key, relative_path, size, modified_time,
+                   cap_time AS capture_time, lat AS cap_lat, lon AS cap_lon
+            FROM media_index
+            WHERE ({where_clause})
+              AND lat IS NOT NULL
+              AND lon IS NOT NULL
+              AND cap_time IS NOT NULL
+            ORDER BY cap_time ASC
+            """,
+            params,
+        )
+        all_source_rows = execute_read_query(
+            f"""
+            SELECT id, source_type, source_key, relative_path, size, modified_time,
+                   cap_time AS capture_time, lat AS cap_lat, lon AS cap_lon
+            FROM media_index
+            WHERE ({where_clause})
+              AND cap_time IS NOT NULL
+            ORDER BY cap_time ASC
+            """,
+            params,
+        )
+    else:
+        from database import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            f"""
+            SELECT id, source_type, source_key, relative_path, size, modified_time,
+                   capture_time, cap_lat, cap_lon
+            FROM media_index
+            WHERE ({where_clause})
+              AND cap_lat IS NOT NULL
+              AND cap_lon IS NOT NULL
+              AND capture_time IS NOT NULL
+            ORDER BY capture_time ASC
+            """,
+            params,
+        ).fetchall()
+        all_source_rows = conn.execute(
+            f"""
+            SELECT id, source_type, source_key, relative_path, size, modified_time,
+                   capture_time, cap_lat, cap_lon
+            FROM media_index
+            WHERE ({where_clause})
+              AND capture_time IS NOT NULL
+            ORDER BY capture_time ASC
+            """,
+            params,
+        ).fetchall()
+        conn.close()
 
     if not rows:
         # No geotagged media: clear existing trips for this source
@@ -291,6 +316,11 @@ def cluster_source_media(source_id: str) -> list[dict]:
 
     # Save to database idempotently
     save_trip_clusters(source_id, qualifying_clusters)
+    try:
+        from services import places_trips_cache
+        places_trips_cache.invalidate_trips(source_id)
+    except Exception:
+        pass
     if qualifying_clusters:
         dev_name = get_device_display_name(source_id)
         add_log(f"[Trips] Generated {len(qualifying_clusters)} trip album(s) for {dev_name}")
@@ -315,10 +345,51 @@ _timer_lock = threading.Lock()
 
 
 def trigger_background_clustering(source_id: str | None = None) -> None:
-    """Trigger background clustering with a 3-second debounce window."""
+    """Trigger background clustering with a debounce window.
+
+    Prefer Celery when enabled so Gunicorn API workers stay free for interactive
+    memories/library requests during sync. Fall back to an in-process timer.
+    """
+    use_celery = False
+    try:
+        use_celery = bool(load_config().get("CELERY_ENABLED"))
+    except Exception:
+        use_celery = False
+
+    if use_celery:
+        try:
+            from services.redis_service import get_redis_client
+            from tasks.indexing_tasks import dispatch_trip_clustering
+
+            client = get_redis_client()
+            if client:
+                all_key = "debounce:trip-cluster:__all__"
+                debounce_key = f"debounce:trip-cluster:{source_id or '__all__'}"
+                # A pending full-cluster covers every per-device request.
+                if source_id is not None and client.get(all_key):
+                    return
+                if not client.set(debounce_key, "1", nx=True, ex=30):
+                    return
+                if source_id is None:
+                    # Full cluster wins: suppress per-device dispatches during the window.
+                    client.set(all_key, "1", nx=True, ex=30)
+                dispatch_trip_clustering(source_id, countdown=30)
+                return
+        except Exception:
+            # Redis/Celery path failed — fall through to the local timer, which
+            # will still dispatch to Celery when enabled (debounced per process).
+            pass
+
     def _run():
         with _timer_lock:
             _debounce_timers.pop(key, None)
+        if use_celery:
+            try:
+                from tasks.indexing_tasks import dispatch_trip_clustering
+                dispatch_trip_clustering(source_id, countdown=0)
+                return
+            except Exception:
+                pass
         if source_id:
             try:
                 cluster_source_media(source_id)
@@ -341,9 +412,9 @@ def trigger_background_clustering(source_id: str | None = None) -> None:
             key = source_id
 
         if key in _debounce_timers:
-            _debounce_timers[key].cancel()
+            return  # Already scheduled to cluster when sync settles
 
-        timer = threading.Timer(3.0, _run)
+        timer = threading.Timer(30.0, _run)
         timer.daemon = True
         _debounce_timers[key] = timer
         timer.start()

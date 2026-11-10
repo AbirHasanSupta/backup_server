@@ -28,9 +28,12 @@ import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { hapticLight, hapticMedium, hapticSelection, hapticSuccess, hapticError } from '@/utils/haptics';
+import { todayStr as localTodayStr } from '../../streak';
 import { ShareModal } from '@/components/ShareModal';
 import {
   getRecentMemories,
+  getCachedRecentMemories,
+  invalidateMemoriesCache,
   getConfig,
   buildPreviewUrl,
   buildVideoPreviewUrl,
@@ -44,7 +47,9 @@ import {
   downloadRewindReel,
   createDeviceShare,
 } from '../../downloader';
+import { setUIPriorityMode } from '../../backgroundTask';
 import { consumePendingFlashbackItem } from '../../notificationService';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
 
 const DAY_CARD_W = 132;
 const DAY_CARD_H = 208;
@@ -123,15 +128,7 @@ function dayItemCount(day: DayMemory): number {
  * is provided, or an empty string when capture_time is null/undefined.
  */
 function formatCaptureDate(captureTime: number | null | undefined): string {
-  if (!captureTime) return '';
-  try {
-    const d = new Date(captureTime * 1000);
-    const datePart = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-    const timePart = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-    return `${datePart} · ${timePart}`;
-  } catch {
-    return '';
-  }
+  return formatCaptureDateTime(captureTime);
 }
 
 function flattenGroupItems(group: YearGroup): StoryItem[] {
@@ -166,12 +163,21 @@ export default function MemoriesScreen() {
   const { colors, isDark } = useAppTheme();
   const styles = useMemo(() => createStyles(colors, insets), [colors, insets]);
 
-  const [loading, setLoading] = useState(true);
+  const cachedData = getCachedRecentMemories(7);
+  const [loading, setLoading] = useState(!cachedData);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [data, setData] = useState<MemoriesResponse | null>(null);
+  const [data, setData] = useState<MemoriesResponse | null>(cachedData);
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const serverConfigRef = useRef<ServerConfig | null>(null);
+  // Ignore stale responses when focus/AppState/pull-to-refresh overlap.
+  const fetchGenRef = useRef(0);
+  const dataRef = useRef<MemoriesResponse | null>(cachedData);
+  dataRef.current = data;
+  const [todayDateStr, setTodayDateStr] = useState(() =>
+    new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' }),
+  );
+  const [calendarDayKey, setCalendarDayKey] = useState(() => localTodayStr());
 
   // Story Viewer state
   const [activeDayIdx, setActiveDayIdx] = useState<number | null>(null);
@@ -242,53 +248,89 @@ export default function MemoriesScreen() {
     setRewindPickerVisible(true);
   }, []);
 
-  const fetchMemories = useCallback(async (opts?: { silent?: boolean }) => {
+  const syncHeaderDate = useCallback(() => {
+    const now = new Date();
+    setTodayDateStr(now.toLocaleDateString('en-US', { month: 'long', day: 'numeric' }));
+    setCalendarDayKey(localTodayStr(now));
+  }, []);
+
+  const fetchMemories = useCallback(async (opts?: { silent?: boolean; force?: boolean }) => {
+    const gen = ++fetchGenRef.current;
     if (!opts?.silent) {
       setLoading(true);
       setError(null);
     }
     try {
+      if (opts?.force) invalidateMemoriesCache();
       const [cfg, res] = await Promise.all([getConfig(), getRecentMemories(7)]);
+      if (gen !== fetchGenRef.current) return;
       setServerConfig(cfg);
+      serverConfigRef.current = cfg;
       setData(res);
       setError(null);
+      syncHeaderDate();
     } catch (err: any) {
-      if (!opts?.silent) {
+      if (gen !== fetchGenRef.current) return;
+      // Surface errors whenever the list is empty so a silent focus refresh
+      // that supersedes the mount load cannot leave a blank forever-spinner.
+      if (!opts?.silent || !dataRef.current) {
         setError(sanitizeErrorMessage(err, 'Could not load your memories right now.'));
       }
     } finally {
-      if (!opts?.silent) setLoading(false);
+      // Always clear loading for the latest generation. A silent focus/AppState
+      // refresh that supersedes a non-silent mount fetch must not leave
+      // loading===true forever (games cards / rewind would stay unreachable).
+      if (gen === fetchGenRef.current) setLoading(false);
     }
-  }, []);
+  }, [syncHeaderDate]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await fetchMemories({ silent: true });
+      await fetchMemories({ silent: true, force: true });
     } finally {
       setRefreshing(false);
     }
   }, [fetchMemories]);
 
+  // While Memories stays focused overnight, force a rollover refresh at local midnight.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (timer) clearTimeout(timer);
+      const now = new Date();
+      const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 2, 0);
+      timer = setTimeout(() => {
+        // Drop yesterday's React state immediately so we never present it as "Today".
+        setData(null);
+        setLoading(true);
+        setError(null);
+        syncHeaderDate();
+        invalidateMemoriesCache();
+        void fetchMemories({ force: true });
+        schedule();
+      }, Math.max(1000, next.getTime() - now.getTime()));
+    };
+    schedule();
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [fetchMemories, syncHeaderDate]);
+
   useEffect(() => {
     let active = true;
-    Promise.all([getConfig(), getRecentMemories(7)])
-      .then(([cfg, res]) => {
-        if (active) {
-          setServerConfig(cfg);
-          setData(res);
-          setLoading(false);
-        }
-      })
-      .catch((err: any) => {
-        if (active) {
-          setError(sanitizeErrorMessage(err, 'Could not load your memories right now.'));
-          setLoading(false);
-        }
-      });
+    getConfig().then((cfg) => {
+      if (active) {
+        setServerConfig(cfg);
+        serverConfigRef.current = cfg;
+      }
+    }).catch(() => {});
+    fetchMemories({ silent: !!cachedData });
     return () => {
       active = false;
     };
+    // Mount-only seed; focus effect handles subsequent refreshes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional
   }, []);
 
   const todayDay = data?.days && data.days.length > 0 ? data.days[0] : null;
@@ -357,7 +399,7 @@ export default function MemoriesScreen() {
 
     let elapsed = 0;
     const duration = 4000;
-    const interval = 80;
+    const interval = 100;
 
     photoTimerRef.current = setInterval(() => {
       elapsed += interval;
@@ -637,10 +679,15 @@ export default function MemoriesScreen() {
   // opens or closes (which would instantly dismiss the just-opened modal).
   useFocusEffect(
     useCallback(() => {
+      setUIPriorityMode(true);
+      // Silent SWR refresh. Cache is date-keyed in downloader; force only on
+      // pull-to-refresh / manual refresh so focus does not thrash the network.
+      void fetchMemories({ silent: true });
       return () => {
+        setUIPriorityMode(false);
         stopAllPlaybackRef.current();
       };
-    }, []),
+    }, [fetchMemories]),
   );
 
   // Hardware back-button: dismiss modals in order of priority.
@@ -684,10 +731,32 @@ export default function MemoriesScreen() {
     const sub = AppState.addEventListener('change', (state) => {
       if (state !== 'active') {
         stopAllPlayback();
+        return;
+      }
+      const today = localTodayStr();
+      // Calendar day rolled over while backgrounded — clear stale "Today" and refetch.
+      if (today !== calendarDayKey) {
+        setData(null);
+        setLoading(true);
+        setError(null);
+        syncHeaderDate();
+        invalidateMemoriesCache();
+        void fetchMemories({ force: true });
+        return;
+      }
+      // In-memory cache was cleared for today; refresh without blanking existing rows.
+      // If we have nothing on screen, use a non-silent fetch so the list spinner shows
+      // instead of a false "No Memories Yet" flash.
+      if (!getCachedRecentMemories(7)) {
+        if (dataRef.current) {
+          void fetchMemories({ silent: true, force: true });
+        } else {
+          void fetchMemories({ force: true });
+        }
       }
     });
     return () => sub.remove();
-  }, [stopAllPlayback]);
+  }, [stopAllPlayback, fetchMemories, calendarDayKey, syncHeaderDate]);
 
   const handleSaveRewind = async () => {
     if (!rewindYear || rewindSaving) return;
@@ -852,16 +921,11 @@ export default function MemoriesScreen() {
   const getCoverUrl = (items: MemoryItem[]) => {
     if (!serverConfig || !items?.length) return '';
     const photo = items.find(i => !i.is_video && /\.(jpe?g|png|webp|gif|bmp)$/i.test(i.relative_path));
-    if (photo) return buildPreviewUrl(serverConfig, photo.relative_path, photo.source_type, photo.source_id);
+    if (photo) return buildThumbnailUrl(serverConfig, photo.relative_path, photo.source_type, photo.source_id);
     const video = items.find(i => i.is_video);
     if (video) return buildThumbnailUrl(serverConfig, video.relative_path, video.source_type, video.source_id);
     return '';
   };
-
-  const todayDateStr = useMemo(() => {
-    const d = new Date();
-    return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
-  }, []);
 
   return (
     <View style={styles.root}>
@@ -883,50 +947,25 @@ export default function MemoriesScreen() {
           <TouchableOpacity style={styles.surpriseBtn} onPress={() => router.push('/wrapped')}>
             <AppIcon androidName="insights" iosName="chart.bar.fill" color={colors.primary} size={18} />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.refreshBtn} onPress={() => fetchMemories()} disabled={loading}>
+          <TouchableOpacity style={styles.refreshBtn} onPress={() => fetchMemories({ force: true })} disabled={loading}>
             <AppIcon androidName="refresh" iosName="arrow.clockwise" color={colors.primary} size={20} />
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* Body Content */}
-      {loading ? (
-        <View style={styles.centered}>
-          <ActivityIndicator size="large" color={colors.primary} />
-          <Text style={styles.loadingText}>Finding your memories…</Text>
-        </View>
-      ) : error ? (
-        <ScrollView
-          contentContainerStyle={[styles.centered, { flexGrow: 1 }]}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={colors.primary}
-              colors={[colors.primary]}
-            />
-          }
-        >
-          <AppIcon androidName="cloud_off" iosName="wifi.slash" color={colors.error} size={48} />
-          <Text style={styles.errorText}>Server Unreachable</Text>
-          <Text style={styles.errorSubtext}>{error}</Text>
-          <TouchableOpacity style={styles.retryBtn} onPress={() => fetchMemories()}>
-            <Text style={styles.retryBtnText}>Retry</Text>
-          </TouchableOpacity>
-        </ScrollView>
-      ) : !data || !data.days || data.days.length === 0 || totalItemsAcrossAllDays === 0 ? (
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={colors.primary}
-              colors={[colors.primary]}
-            />
-          }
-        >
+      {/* Body: games always available; memories list loads independently */}
+      <ScrollView
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={styles.scrollContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor={colors.primary}
+            colors={[colors.primary]}
+          />
+        }
+      >
           <View style={styles.gamesRow}>
             <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/roulette')} activeOpacity={0.85}>
               <View style={[styles.gameIconWrap, { backgroundColor: '#F59E0B22' }]}>
@@ -957,6 +996,22 @@ export default function MemoriesScreen() {
               <Text style={styles.gameCardText}>Places</Text>
             </TouchableOpacity>
           </View>
+
+        {loading && !data ? (
+          <View style={styles.listLoadingBlock}>
+            <ActivityIndicator size="large" color={colors.primary} />
+            <Text style={styles.loadingText}>Finding your memories…</Text>
+          </View>
+        ) : error && !data ? (
+          <View style={styles.listLoadingBlock}>
+            <AppIcon androidName="cloud_off" iosName="wifi.slash" color={colors.error} size={48} />
+            <Text style={styles.errorText}>Server Unreachable</Text>
+            <Text style={styles.errorSubtext}>{error}</Text>
+            <TouchableOpacity style={styles.retryBtn} onPress={() => fetchMemories()}>
+              <Text style={styles.retryBtnText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        ) : !data || !data.days || data.days.length === 0 || totalItemsAcrossAllDays === 0 ? (
           <View style={styles.centeredEmpty}>
             <View style={styles.emptyIconBg}>
               <AppIcon androidName="auto_awesome" iosName="sparkles" color={colors.primary} size={40} />
@@ -964,52 +1019,8 @@ export default function MemoriesScreen() {
             <Text style={styles.emptyTitle}>No Memories Yet</Text>
             <Text style={styles.emptySubtitle}>Check back over the next few days to relive photos and videos from past years — or try Roulette, Guess the Year, Rewind, and Places above.</Text>
           </View>
-        </ScrollView>
-      ) : (
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scrollContent}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor={colors.primary}
-              colors={[colors.primary]}
-            />
-          }
-        >
-          {/* Games Shelf */}
-          <View style={styles.gamesRow}>
-            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/roulette')} activeOpacity={0.85}>
-              <View style={[styles.gameIconWrap, { backgroundColor: '#F59E0B22' }]}>
-                <AppIcon androidName="casino" iosName="die.face.5.fill" color="#F59E0B" size={20} />
-              </View>
-              <Text style={styles.gameCardText}>Photo Roulette</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/quiz')} activeOpacity={0.85}>
-              <View style={[styles.gameIconWrap, { backgroundColor: '#8B5CF622' }]}>
-                <AppIcon androidName="psychology" iosName="brain" color="#8B5CF6" size={20} />
-              </View>
-              <Text style={styles.gameCardText}>Guess the Year</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.gameCard}
-              onPress={() => openRewindPicker()}
-              activeOpacity={0.85}
-            >
-              <View style={[styles.gameIconWrap, { backgroundColor: '#06B6D422' }]}>
-                <AppIcon androidName="movie" iosName="film" color="#06B6D4" size={20} />
-              </View>
-              <Text style={styles.gameCardText}>Rewind Reel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.gameCard} onPress={() => router.push('/places')} activeOpacity={0.85}>
-              <View style={[styles.gameIconWrap, { backgroundColor: '#10B98122' }]}>
-                <AppIcon androidName="place" iosName="mappin.and.ellipse" color="#10B981" size={20} />
-              </View>
-              <Text style={styles.gameCardText}>Places</Text>
-            </TouchableOpacity>
-          </View>
-
+        ) : (
+          <>
           {/* Today Section — highlighted and featured at the top */}
           <View style={styles.sectionHeaderRow}>
             <View style={styles.todayBadge}>
@@ -1163,8 +1174,9 @@ export default function MemoriesScreen() {
               </ScrollView>
             </>
           )}
-        </ScrollView>
-      )}
+          </>
+        )}
+      </ScrollView>
 
       {/* Full-Screen Story Viewer Modal */}
       {activeDay && currentItem && (
@@ -1725,6 +1737,7 @@ export default function MemoriesScreen() {
         visible={shareVisible}
         count={shareItems.length > 0 ? shareItems.length : 1}
         colors={colors}
+        excludeDeviceIds={serverConfig?.deviceId ? [serverConfig.deviceId] : []}
         onClose={() => { setShareVisible(false); setShareItem(null); setShareItems([]); setShareKind(null); setShareTitle(null); }}
         onSubmit={handleShareSubmit}
       />
@@ -1823,14 +1836,15 @@ function NativeStoryVideoPlayer({
   }, [player, onEnded, onProgressRatio]);
 
   useEffect(() => {
+    if (isPaused) return;
     const interval = setInterval(() => {
       if (player.duration > 0) {
         const ratio = Math.min(player.currentTime / player.duration, 1);
         onProgressRatio(ratio);
       }
-    }, 100);
+    }, 200);
     return () => clearInterval(interval);
-  }, [player, onProgressRatio]);
+  }, [player, isPaused, onProgressRatio]);
 
   // Belt-and-suspenders: explicitly pause before the player is released so
   // audio never keeps running behind a transition (next story item, modal
@@ -1939,6 +1953,7 @@ const createStyles = (colors: AppColors, insets: any) =>
 
     centered: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.five },
     centeredEmpty: { alignItems: 'center', justifyContent: 'center', padding: Spacing.five, paddingTop: Spacing.eight },
+    listLoadingBlock: { alignItems: 'center', justifyContent: 'center', paddingVertical: Spacing.eight, paddingHorizontal: Spacing.five },
     loadingText: { marginTop: Spacing.three, fontSize: TextScale.sm, color: colors.textSecondary, fontWeight: '600' },
     errorText: { fontSize: TextScale.lg, fontWeight: '800', color: colors.error, marginTop: Spacing.two },
     errorSubtext: { fontSize: TextScale.xs, color: colors.textSecondary, textAlign: 'center', marginTop: 4 },

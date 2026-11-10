@@ -139,6 +139,20 @@ export async function uploadPendingFiles(files, options = {}) {
   async function worker() {
     while (nextIndex < files.length) {
       if (shouldStop?.()) break;
+
+      // Lazy require avoids a circular import with backgroundTask.js.
+      // Pending uploads also use Expo FileSystem and starve interactive APIs.
+      try {
+        const { readUIPriorityMode } = require('./backgroundTask');
+        while (await readUIPriorityMode()) {
+          if (shouldStop?.()) break;
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+      } catch {
+        /* ignore — proceed without priority gating */
+      }
+      if (shouldStop?.()) break;
+
       const index = nextIndex++;
       const file = files[index];
       if (!file) break;

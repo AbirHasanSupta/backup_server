@@ -6,6 +6,7 @@ import * as FileSystem from 'expo-file-system';
 
 import { AppIcon } from '@/components/AppIcon';
 import { Radius, Spacing, TextScale } from '@/constants/theme';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
 
 export const QUIZ_CARD_WIDTH = 360;
 export const QUIZ_CARD_HEIGHT = 640;
@@ -47,16 +48,11 @@ interface QuizShareCardsProps {
   spec: QuizCaptureSpec | null;
   shotRef: React.RefObject<React.ElementRef<typeof ViewShot> | null>;
   onQuestionImageLoad?: () => void;
+  onQuestionImageError?: () => void;
 }
 
 function formatCaptureDate(captureTime: number | null | undefined): string {
-  if (!captureTime) return '';
-  try {
-    const d = new Date(captureTime * 1000);
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  } catch {
-    return '';
-  }
+  return formatCaptureDateTime(captureTime);
 }
 
 function QuizScoreShareCard({
@@ -150,6 +146,7 @@ export function QuizShareCaptureView({
   spec,
   shotRef,
   onQuestionImageLoad,
+  onQuestionImageError,
 }: QuizShareCardsProps) {
   return (
     <View style={captureStyles.offscreen} pointerEvents="none" collapsable={false}>
@@ -165,7 +162,7 @@ export function QuizShareCaptureView({
             chosenYear={spec.chosenYear}
             imageUrl={spec.imageUrl}
             onImageLoad={onQuestionImageLoad}
-            onImageError={onQuestionImageLoad}
+            onImageError={onQuestionImageError}
           />
         ) : null}
       </ViewShot>
@@ -209,13 +206,18 @@ export function useQuizCardCapture() {
     setImageReady(true);
   }, []);
 
+  const onQuestionImageError = useCallback(() => {
+    void rejectPending(new Error('Quiz share image failed to load.'));
+  }, [rejectPending]);
+
   useEffect(() => {
     if (!spec || spec.kind !== 'question' || imageReady) return;
+    // Slow mesh/full-res loads: fail the card rather than capture a blank tile.
     const timeout = setTimeout(() => {
-      setImageReady(true);
-    }, 8000);
+      void rejectPending(new Error('Quiz share image timed out.'));
+    }, 15000);
     return () => clearTimeout(timeout);
-  }, [spec, imageReady]);
+  }, [spec, imageReady, rejectPending]);
 
   useEffect(() => {
     if (!spec || !pendingRef.current || !imageReady) return;
@@ -287,7 +289,7 @@ export function useQuizCardCapture() {
     void rejectPending(new QuizCaptureCancelledError());
   }, [rejectPending]);
 
-  return { shotRef, spec, captureCards, cancelCapture, onQuestionImageLoad };
+  return { shotRef, spec, captureCards, cancelCapture, onQuestionImageLoad, onQuestionImageError };
 }
 
 const captureStyles = StyleSheet.create({

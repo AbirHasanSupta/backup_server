@@ -231,6 +231,17 @@ def init_db():
         conn.execute("ALTER TABLE devices ADD COLUMN token TEXT")
     if 'username' not in existing_cols:
         conn.execute("ALTER TABLE devices ADD COLUMN username TEXT")
+    if 'total_bytes' not in existing_cols:
+        conn.execute("ALTER TABLE devices ADD COLUMN total_bytes INTEGER NOT NULL DEFAULT 0")
+        try:
+            conn.execute("""
+                UPDATE devices
+                SET total_bytes = COALESCE((
+                    SELECT SUM(size) FROM files WHERE files.device_id = devices.device_id
+                ), 0)
+            """)
+        except Exception:
+            pass
 
     # 2c. Back-fill folder_name for any pre-existing devices that have NULL there.
     #     We derive it the same way _make_folder_name() does so existing uploads
@@ -634,7 +645,8 @@ def init_db():
             source_id   TEXT    NOT NULL,
             emoji       TEXT    NOT NULL,
             created_at  INTEGER NOT NULL,
-            UNIQUE (media_id, source_id, emoji)
+            scope       TEXT    NOT NULL DEFAULT 'post',
+            UNIQUE (media_id, source_id, emoji, scope)
         )
         """
     )
@@ -670,7 +682,8 @@ def init_db():
             media_id    INTEGER NOT NULL,
             source_id   TEXT    NOT NULL,
             text        TEXT    NOT NULL,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            scope       TEXT    NOT NULL DEFAULT 'post'
         )
         """
     )
@@ -785,6 +798,57 @@ def init_db():
     if "post_title" not in existing_group_cols:
         conn.execute("ALTER TABLE device_share_groups ADD COLUMN post_title TEXT")
 
+    # Migration: upgrade reactions table schema to include scope in UNIQUE constraint
+    reactions_sql_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='reactions'"
+    ).fetchone()
+    reactions_sql = (reactions_sql_row[0] if reactions_sql_row else "") or ""
+    if reactions_sql and "UNIQUE" in reactions_sql.upper() and ", SCOPE)" not in reactions_sql.upper() and ",SCOPE)" not in reactions_sql.upper():
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("ALTER TABLE reactions RENAME TO reactions_old")
+        conn.execute("""
+            CREATE TABLE reactions
+            (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                media_id    INTEGER NOT NULL,
+                source_id   TEXT    NOT NULL,
+                emoji       TEXT    NOT NULL,
+                created_at  INTEGER NOT NULL,
+                scope       TEXT    NOT NULL DEFAULT 'post',
+                UNIQUE (media_id, source_id, emoji, scope)
+            )
+        """)
+        old_cols = {row['name'] for row in conn.execute("PRAGMA table_info(reactions_old)").fetchall()}
+        if "scope" in old_cols:
+            conn.execute("""
+                INSERT OR IGNORE INTO reactions (id, media_id, source_id, emoji, created_at, scope)
+                SELECT id, media_id, source_id, emoji, created_at, COALESCE(scope, 'post')
+                FROM reactions_old
+            """)
+        else:
+            conn.execute("""
+                INSERT OR IGNORE INTO reactions (id, media_id, source_id, emoji, created_at, scope)
+                SELECT id, media_id, source_id, emoji, created_at, 'post'
+                FROM reactions_old
+            """)
+        conn.execute("DROP TABLE reactions_old")
+        conn.execute("PRAGMA foreign_keys=ON")
+    else:
+        existing_reaction_cols = {row[1] for row in conn.execute("PRAGMA table_info(reactions)").fetchall()}
+        if "scope" not in existing_reaction_cols:
+            conn.execute("ALTER TABLE reactions ADD COLUMN scope TEXT NOT NULL DEFAULT 'post'")
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reactions_media ON reactions(media_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reactions_source ON reactions(source_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reactions_lookup ON reactions(media_id, source_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reactions_media_scope ON reactions(media_id, scope)")
+
+    # Migration: add scope to comments if not present
+    existing_comment_cols = {row[1] for row in conn.execute("PRAGMA table_info(comments)").fetchall()}
+    if "scope" not in existing_comment_cols:
+        conn.execute("ALTER TABLE comments ADD COLUMN scope TEXT NOT NULL DEFAULT 'post'")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_media_scope ON comments(media_id, scope)")
+
     # 17. saved_reels table for bookmarked reels
     conn.execute(
         """
@@ -823,6 +887,28 @@ def init_db():
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_reel_telem_share ON reel_telemetry(share_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_reel_telem_device ON reel_telemetry(device_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_reel_telem_device_recent ON reel_telemetry(device_id, created_at DESC)")
+
+    # 19. reel_watch_history table for reel view history
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reel_watch_history
+        (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id       TEXT    NOT NULL,
+            reel_id         TEXT    NOT NULL,
+            share_id        INTEGER NOT NULL,
+            media_id        INTEGER,
+            watched_at      INTEGER NOT NULL,
+            watch_time_sec  REAL    NOT NULL DEFAULT 0.0,
+            duration_sec    REAL    NOT NULL DEFAULT 0.0,
+            UNIQUE (device_id, reel_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watch_history_device ON reel_watch_history(device_id, watched_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watch_history_share ON reel_watch_history(share_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watch_history_reel ON reel_watch_history(reel_id)")
 
     conn.commit()
     conn.close()
@@ -992,6 +1078,76 @@ def insert_file(path, size, modified_time, uploaded_time, device_ip=None, extern
     conn.close()
 
 
+def insert_file_and_touch_device(
+    path: str,
+    size: int,
+    modified_time: int,
+    uploaded_time: int,
+    device_ip: str | None = None,
+    external_id: str | None = None,
+    sha256: str | None = None,
+    device_id: str | None = None,
+) -> dict:
+    """Atomically insert file record, touch device timestamp, and increment counters in 1 transaction."""
+    conn = get_conn()
+    path = (path or "").replace("\\", "/")
+    now = uploaded_time or int(_time.time())
+
+    if device_id:
+        if device_ip:
+            conn.execute(
+                "DELETE FROM files WHERE path = ? AND device_ip = ? AND device_id != ?",
+                (path, device_ip, device_id),
+            )
+        conn.execute(
+            "INSERT INTO files (device_id, path, size, modified_time, uploaded_time, device_ip, external_id, sha256)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(device_id, path) DO UPDATE SET"
+            "   size = excluded.size,"
+            "   modified_time = excluded.modified_time,"
+            "   uploaded_time = excluded.uploaded_time,"
+            "   device_ip = excluded.device_ip,"
+            "   external_id = excluded.external_id,"
+            "   sha256 = excluded.sha256",
+            (device_id, path, size, modified_time, uploaded_time, device_ip, external_id, sha256),
+        )
+        conn.execute(
+            """
+            UPDATE devices 
+            SET last_seen = ?, 
+                device_ip = ?, 
+                files_backed_up = files_backed_up + 1, 
+                total_bytes = total_bytes + ? 
+            WHERE device_id = ?
+            """,
+            (now, device_ip or "", max(0, size), device_id),
+        )
+        row = conn.execute(
+            "SELECT files_backed_up, COALESCE(total_bytes, 0) as total_bytes FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        conn.commit()
+        conn.close()
+        return {
+            "total_files": row["files_backed_up"] if row else 0,
+            "total_size": row["total_bytes"] if row else 0,
+        }
+    else:
+        conn.execute(
+            "INSERT OR REPLACE INTO files (path, size, modified_time, uploaded_time, device_ip, external_id, sha256)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (path, size, modified_time, uploaded_time, device_ip, external_id, sha256),
+        )
+        if device_ip:
+            conn.execute(
+                "UPDATE devices SET last_seen = ? WHERE device_ip = ?",
+                (now, device_ip),
+            )
+        conn.commit()
+        conn.close()
+        return get_device_stats(device_ip or "", device_id)
+
+
 def remove_file_record(path, size, modified_time, device_id=None):
     conn = get_conn()
     if device_id:
@@ -1031,6 +1187,16 @@ def get_device_stats(device_ip: str, device_id: str | None = None) -> dict:
     conn = get_read_conn()
     if device_id:
         row = conn.execute(
+            "SELECT files_backed_up as total_files, COALESCE(total_bytes, 0) as total_size FROM devices WHERE device_id = ?",
+            (device_id,)
+        ).fetchone()
+        if row and (row["total_files"] > 0 or row["total_size"] > 0):
+            conn.close()
+            return {
+                "total_files": row["total_files"] or 0,
+                "total_size": row["total_size"] or 0,
+            }
+        row = conn.execute(
             "SELECT COUNT(*) as total_files, COALESCE(SUM(size), 0) as total_size"
             " FROM files WHERE device_id = ?",
             (device_id,)
@@ -1043,15 +1209,77 @@ def get_device_stats(device_ip: str, device_id: str | None = None) -> dict:
             ).fetchone()
     else:
         row = conn.execute(
-            "SELECT COUNT(*) as total_files, COALESCE(SUM(size), 0) as total_size"
-            " FROM files WHERE device_ip = ?",
+            "SELECT files_backed_up as total_files, COALESCE(total_bytes, 0) as total_size FROM devices WHERE device_ip = ?",
             (device_ip,)
         ).fetchone()
+        if not row or (row["total_files"] == 0 and row["total_size"] == 0):
+            row = conn.execute(
+                "SELECT COUNT(*) as total_files, COALESCE(SUM(size), 0) as total_size"
+                " FROM files WHERE device_ip = ?",
+                (device_ip,)
+            ).fetchone()
     conn.close()
     return {
         "total_files": row["total_files"] if row else 0,
         "total_size": row["total_size"] if row else 0,
     }
+
+
+def touch_device_and_get_stats(
+    device_ip: str,
+    device_id: str | None = None,
+    files_delta: int = 0,
+    size_delta: int = 0,
+) -> dict:
+    """Atomically touch device last_seen, increment counters, and return updated stats in O(1) time."""
+    now = int(_time.time())
+    conn = get_conn()
+
+    if not device_id:
+        row = conn.execute(
+            "SELECT device_id FROM devices WHERE device_ip = ? AND device_id IS NOT NULL LIMIT 1",
+            (device_ip,),
+        ).fetchone()
+        if row:
+            device_id = row["device_id"]
+
+    if device_id:
+        if files_delta > 0 or size_delta > 0:
+            conn.execute(
+                """
+                UPDATE devices 
+                SET last_seen = ?, 
+                    device_ip = ?, 
+                    files_backed_up = files_backed_up + ?, 
+                    total_bytes = total_bytes + ? 
+                WHERE device_id = ?
+                """,
+                (now, device_ip, max(0, files_delta), max(0, size_delta), device_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE devices SET last_seen = ?, device_ip = ? WHERE device_id = ?",
+                (now, device_ip, device_id),
+            )
+
+        row = conn.execute(
+            "SELECT files_backed_up, COALESCE(total_bytes, 0) as total_bytes FROM devices WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        conn.commit()
+        conn.close()
+
+        if row:
+            return {
+                "total_files": row["files_backed_up"] or 0,
+                "total_size": row["total_bytes"] or 0,
+            }
+    else:
+        conn.execute("UPDATE devices SET last_seen = ? WHERE device_ip = ?", (now, device_ip))
+        conn.commit()
+        conn.close()
+
+    return get_device_stats(device_ip, device_id)
 
 
 # ─── Device helpers ────────────────────────────────────────────────────────────
@@ -1127,8 +1355,8 @@ def upsert_device(
     if device_id:
         ensure_device_token(device_id)
 
-    # Recalculate file count immediately
-    touch_device(device_ip, device_id)
+    # Recalculate file count accurately
+    touch_device(device_ip, device_id, files_delta=None)
 
     try:
         from state import update_device_display_name_cache
@@ -1313,6 +1541,20 @@ def format_device_display_name(
     did = (device_id or "").strip()
     fb = (fallback or "").strip()
 
+    if did == "desktop-server" or fb == "desktop-server":
+        srv_name = d or m
+        if not srv_name:
+            try:
+                import platform
+                from config import load_config
+                cfg = load_config()
+                srv_name = (cfg.get("DESKTOP_NAME") or "").strip() or platform.node() or "Desktop Server"
+            except Exception:
+                srv_name = "Desktop Server"
+        if u:
+            return f"{u} ({srv_name})"
+        return srv_name
+
     name = d or m
     if u and name:
         return f"{u} ({name})"
@@ -1368,6 +1610,25 @@ def get_device_display_name(identifier: str | None, fallback: str | None = None)
         pass
 
     return fallback or identifier_str
+
+
+def ensure_desktop_device(name: str | None = None) -> None:
+    """Register or update the desktop server row in the devices table so that
+    SQL queries joining `devices d ON d.device_id = ds.shared_by_device_id`
+    will always resolve `shared_by_name` to the server's configured DESKTOP_NAME."""
+    try:
+        import platform
+        from config import load_config
+        cfg = load_config()
+        display_name = (name or cfg.get("DESKTOP_NAME") or "").strip() or platform.node() or "Desktop Server"
+        upsert_device(
+            device_name=display_name,
+            device_ip="127.0.0.1",
+            device_id="desktop-server",
+            device_model="Desktop Server",
+        )
+    except Exception:
+        pass
 
 
 
@@ -1505,6 +1766,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
             conn.execute("DELETE FROM reactions WHERE media_id = ?", (new_id,))
             conn.execute("UPDATE comments SET media_id = ? WHERE media_id = ?", (old_id, new_id))
             conn.execute("UPDATE saved_reels SET media_id = ? WHERE media_id = ?", (old_id, new_id))
+            conn.execute("UPDATE reel_watch_history SET media_id = ? WHERE media_id = ?", (old_id, new_id))
             conn.execute("UPDATE reel_telemetry SET media_id = ? WHERE media_id = ?", (old_id, new_id))
             conn.execute("DELETE FROM media_index WHERE id = ?", (new_id,))
 
@@ -1633,6 +1895,23 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
             (new_device_id, old_device_id),
         )
 
+        # Migrate reel_watch_history
+        conn.execute(
+            """
+            DELETE FROM reel_watch_history AS new_hist
+            WHERE new_hist.device_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM reel_watch_history AS old_hist
+                  WHERE old_hist.device_id = ? AND old_hist.reel_id = new_hist.reel_id
+              )
+            """,
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "UPDATE reel_watch_history SET device_id = ? WHERE device_id = ?",
+            (new_device_id, old_device_id),
+        )
+
         # Avoid collision if new_device_id already has a device entry
         conn.execute(
             "DELETE FROM devices WHERE device_id = ? AND device_id != ?",
@@ -1663,7 +1942,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
     }
 
 
-def touch_device(device_ip: str, device_id: str | None = None, files_delta: int | None = 1) -> None:
+def touch_device(device_ip: str, device_id: str | None = None, files_delta: int | None = 0) -> None:
     """Update last_seen timestamp and file counter for a device efficiently."""
     now = int(_time.time())
     conn = get_conn()
@@ -1790,21 +2069,32 @@ def insert_sync_session(
     return row_id
 
 
-def get_sync_sessions(device_id: str | None = None, limit: int = 100) -> list[dict]:
-    """Return sync sessions newest-first, optionally filtered by device."""
+def get_sync_sessions(device_id: str | None = None, limit: int = 100, offset: int = 0) -> list[dict]:
+    """Return sync sessions newest-first, optionally filtered by device with pagination."""
     conn = get_read_conn()
     if device_id:
         rows = conn.execute(
-            "SELECT * FROM sync_sessions WHERE device_id=? ORDER BY started_at DESC LIMIT ?",
-            (device_id, limit),
+            "SELECT * FROM sync_sessions WHERE device_id=? ORDER BY started_at DESC LIMIT ? OFFSET ?",
+            (device_id, limit, offset),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM sync_sessions ORDER BY started_at DESC LIMIT ?",
-            (limit,),
+            "SELECT * FROM sync_sessions ORDER BY started_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_sync_sessions_count(device_id: str | None = None) -> int:
+    """Return total count of recorded sync sessions, optionally filtered by device."""
+    conn = get_read_conn()
+    if device_id:
+        row = conn.execute("SELECT COUNT(*) AS c FROM sync_sessions WHERE device_id=?", (device_id,)).fetchone()
+    else:
+        row = conn.execute("SELECT COUNT(*) AS c FROM sync_sessions").fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
 
 
 def clear_sync_sessions(device_id: str | None = None) -> None:
@@ -2203,7 +2493,7 @@ def get_quiz_photo_pool(
 
     # Cap the pool so huge libraries don't load the entire index into RAM.
     sql = f"""
-        SELECT source_type, source_key, relative_path, cap_year
+        SELECT source_type, source_key, relative_path, cap_year, capture_time AS cap_time
         FROM media_index
         WHERE ({where_source}) AND cap_year IS NOT NULL
         ORDER BY RANDOM()
@@ -2758,61 +3048,78 @@ def _normalize_reaction_emoji(emoji: str) -> str:
     return cleaned
 
 
-def toggle_reaction(media_id: int, source_id: str, emoji: str) -> dict:
+def toggle_reaction(media_id: int, source_id: str, emoji: str, scope: str = "post") -> dict:
     """Toggle a reaction on/off. Return status ('added'|'removed'), counts and user reactions."""
-    emoji = _normalize_reaction_emoji(emoji)
-    if emoji not in ALLOWED_REACTION_EMOJIS:
-        raise ValueError("Unsupported reaction emoji")
+    scope = (scope or "post").strip().lower()
+    if scope not in ("post", "reel"):
+        scope = "post"
+
+    if scope == "reel":
+        emoji = "❤️"
+    else:
+        emoji = _normalize_reaction_emoji(emoji)
+        if emoji not in ALLOWED_REACTION_EMOJIS:
+            raise ValueError("Unsupported reaction emoji")
+
     conn = get_conn()
     now_ts = int(_time.time())
 
     # Check if already exists
     existing = conn.execute(
-        "SELECT id FROM reactions WHERE media_id = ? AND source_id = ? AND emoji = ?",
-        (media_id, source_id, emoji),
+        "SELECT id FROM reactions WHERE media_id = ? AND source_id = ? AND emoji = ? AND scope = ?",
+        (media_id, source_id, emoji, scope),
     ).fetchone()
 
     if existing:
         conn.execute(
-            "DELETE FROM reactions WHERE media_id = ? AND source_id = ? AND emoji = ?",
-            (media_id, source_id, emoji),
+            "DELETE FROM reactions WHERE id = ?",
+            (existing["id"],),
         )
         status = "removed"
     else:
+        # If reel, remove any previous reaction by this user on this reel so user only has 1 react
+        if scope == "reel":
+            conn.execute(
+                "DELETE FROM reactions WHERE media_id = ? AND source_id = ? AND scope = 'reel'",
+                (media_id, source_id),
+            )
         conn.execute(
-            "INSERT OR IGNORE INTO reactions (media_id, source_id, emoji, created_at) VALUES (?, ?, ?, ?)",
-            (media_id, source_id, emoji, now_ts),
+            "INSERT OR IGNORE INTO reactions (media_id, source_id, emoji, created_at, scope) VALUES (?, ?, ?, ?, ?)",
+            (media_id, source_id, emoji, now_ts, scope),
         )
         status = "added"
 
     conn.commit()
 
-    # Get updated counts for media_id
+    # Get updated counts for media_id in this scope
     counts_rows = conn.execute(
-        "SELECT emoji, COUNT(*) AS c FROM reactions WHERE media_id = ? GROUP BY emoji",
-        (media_id,),
+        "SELECT emoji, COUNT(*) AS c FROM reactions WHERE media_id = ? AND scope = ? GROUP BY emoji",
+        (media_id, scope),
     ).fetchall()
     counts = {r["emoji"]: r["c"] for r in counts_rows}
 
-    # Get user reactions
+    # Get user reactions in this scope
     user_rows = conn.execute(
-        "SELECT emoji FROM reactions WHERE media_id = ? AND source_id = ?",
-        (media_id, source_id),
+        "SELECT emoji FROM reactions WHERE media_id = ? AND source_id = ? AND scope = ?",
+        (media_id, source_id, scope),
     ).fetchall()
     user_reactions = [r["emoji"] for r in user_rows]
 
     conn.close()
     return {
         "status": status,
+        "action": status,
         "media_id": media_id,
         "emoji": emoji,
+        "scope": scope,
         "counts": counts,
         "user_reactions": user_reactions,
     }
 
 
-def get_media_reactions(media_id: int) -> dict:
+def get_media_reactions(media_id: int, scope: str = "post") -> dict:
     """Return full reaction list and counts for a media item, with reactor display names."""
+    scope = (scope or "post").strip().lower()
     conn = get_read_conn()
     rows = conn.execute(
         """
@@ -2820,10 +3127,10 @@ def get_media_reactions(media_id: int) -> dict:
                d.device_name AS device_name, d.username AS username
         FROM reactions r
         LEFT JOIN devices d ON d.device_id = r.source_id
-        WHERE r.media_id = ?
+        WHERE r.media_id = ? AND r.scope = ?
         ORDER BY r.created_at ASC
         """,
-        (media_id,),
+        (media_id, scope),
     ).fetchall()
     conn.close()
 
@@ -2840,12 +3147,13 @@ def get_media_reactions(media_id: int) -> dict:
 
 
 def get_reactions_for_media_ids(
-    media_ids: list[int], current_source_id: str | None = None
+    media_ids: list[int], current_source_id: str | None = None, scope: str = "post"
 ) -> tuple[dict[int, dict[str, int]], dict[int, list[str]]]:
     """Bulk fetch reaction counts and current user reactions for a list of media IDs."""
     if not media_ids:
         return {}, {}
 
+    scope = (scope or "post").strip().lower()
     conn = get_read_conn()
     counts_map: dict[int, dict[str, int]] = {}
     user_map: dict[int, list[str]] = {}
@@ -2857,8 +3165,8 @@ def get_reactions_for_media_ids(
 
         # Fetch counts
         rows = conn.execute(
-            f"SELECT media_id, emoji, COUNT(*) AS c FROM reactions WHERE media_id IN ({placeholders}) GROUP BY media_id, emoji",
-            chunk,
+            f"SELECT media_id, emoji, COUNT(*) AS c FROM reactions WHERE media_id IN ({placeholders}) AND scope = ? GROUP BY media_id, emoji",
+            chunk + [scope],
         ).fetchall()
         for r in rows:
             mid = r["media_id"]
@@ -2867,8 +3175,8 @@ def get_reactions_for_media_ids(
         # Fetch current user reactions if source_id provided
         if current_source_id:
             u_rows = conn.execute(
-                f"SELECT media_id, emoji FROM reactions WHERE media_id IN ({placeholders}) AND source_id = ?",
-                chunk + [current_source_id],
+                f"SELECT media_id, emoji FROM reactions WHERE media_id IN ({placeholders}) AND source_id = ? AND scope = ?",
+                chunk + [current_source_id, scope],
             ).fetchall()
             for r in u_rows:
                 mid = r["media_id"]
@@ -2950,13 +3258,14 @@ def save_cached_geocode(lat: float, lon: float, place_name: str) -> None:
 MAX_COMMENT_LENGTH = 2000
 
 
-def add_comment(media_id: int, source_id: str, text: str) -> dict:
+def add_comment(media_id: int, source_id: str, text: str, scope: str = "post") -> dict:
     """Insert a comment on a media item and return it with the commenter's device_name and display_name."""
+    scope = (scope or "post").strip().lower()
     now_ts = int(_time.time())
     conn = get_conn()
     cur = conn.execute(
-        "INSERT INTO comments (media_id, source_id, text, created_at) VALUES (?, ?, ?, ?)",
-        (media_id, source_id, text, now_ts),
+        "INSERT INTO comments (media_id, source_id, text, created_at, scope) VALUES (?, ?, ?, ?, ?)",
+        (media_id, source_id, text, now_ts, scope),
     )
     conn.commit()
     cid = cur.lastrowid
@@ -2982,11 +3291,13 @@ def add_comment(media_id: int, source_id: str, text: str) -> dict:
         "display_name": display_name,
         "text": text,
         "created_at": now_ts,
+        "scope": scope,
     }
 
 
-def get_comments_for_media(media_id: int) -> list[dict]:
+def get_comments_for_media(media_id: int, scope: str = "post") -> list[dict]:
     """Return all comments for a media item, oldest first, with commenter device_name."""
+    scope = (scope or "post").strip().lower()
     conn = get_read_conn()
     rows = conn.execute(
         """
@@ -2994,19 +3305,20 @@ def get_comments_for_media(media_id: int) -> list[dict]:
                d.device_name AS device_name, d.username AS username
         FROM comments c
         LEFT JOIN devices d ON d.device_id = c.source_id
-        WHERE c.media_id = ?
+        WHERE c.media_id = ? AND c.scope = ?
         ORDER BY c.created_at ASC, c.id ASC
         """,
-        (media_id,),
+        (media_id, scope),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def get_comment_counts_for_media_ids(media_ids: list[int]) -> dict[int, int]:
+def get_comment_counts_for_media_ids(media_ids: list[int], scope: str = "post") -> dict[int, int]:
     """Bulk fetch comment counts for a list of media IDs (chunked to stay under SQLite's param cap)."""
     if not media_ids:
         return {}
+    scope = (scope or "post").strip().lower()
     conn = get_read_conn()
     counts: dict[int, int] = {}
     chunk_size = 500
@@ -3014,8 +3326,8 @@ def get_comment_counts_for_media_ids(media_ids: list[int]) -> dict[int, int]:
         chunk = media_ids[i:i + chunk_size]
         placeholders = ",".join(["?"] * len(chunk))
         rows = conn.execute(
-            f"SELECT media_id, COUNT(*) AS c FROM comments WHERE media_id IN ({placeholders}) GROUP BY media_id",
-            chunk,
+            f"SELECT media_id, COUNT(*) AS c FROM comments WHERE media_id IN ({placeholders}) AND scope = ? GROUP BY media_id",
+            chunk + [scope],
         ).fetchall()
         for r in rows:
             counts[r["media_id"]] = r["c"]
@@ -3481,6 +3793,47 @@ def get_device_shares_by_sharer(sharer_device_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_all_device_shares() -> list[dict]:
+    """Return every shared post item, newest first, with its author and group metadata."""
+    conn = get_read_conn()
+    rows = conn.execute(
+        """
+        SELECT ds.id AS share_id, ds.media_id, ds.source_type, ds.source_key,
+               ds.relative_path, ds.size, ds.modified_time, ds.caption,
+               ds.shared_by_device_id, ds.created_at, ds.share_group_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id,
+               d.device_name AS shared_by_name, d.username AS shared_by_username,
+               d.device_model AS shared_by_model,
+               COALESCE(dsg.caption, ds.caption) AS group_caption,
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title
+        FROM device_shares ds
+        LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        WHERE COALESCE(ds.is_library_reel, 0) = 0
+        ORDER BY ds.created_at DESC, ds.id ASC
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_all_share_targets_for_admin() -> list[dict]:
+    """Return recipient device names for all shared-post groups."""
+    conn = get_read_conn()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT ds.share_group_id, dst.target_device_id,
+               d.device_name, d.device_model, d.username
+        FROM device_shares ds
+        JOIN device_share_targets dst ON dst.share_id = ds.id
+        LEFT JOIN devices d ON d.device_id = dst.target_device_id
+        WHERE ds.share_group_id IS NOT NULL
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
 def get_all_share_targets_for_sharer(sharer_device_id: str) -> dict[str, list[dict]]:
     """Return all target devices for every group owned by sharer_device_id in one query.
 
@@ -3536,7 +3889,31 @@ def get_unseen_share_notifications(target_device_id: str) -> list[dict]:
         (target_device_id,),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+
+    enriched: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        sharer_id = d.get("shared_by_device_id")
+        if sharer_id == "desktop-server":
+            server_name = get_device_display_name("desktop-server")
+            d["shared_by"] = server_name
+            d["shared_by_name"] = server_name
+            d["shared_by_device_name"] = server_name
+            d["device_name"] = server_name
+        else:
+            disp = format_device_display_name(
+                username=d.get("shared_by_username"),
+                device_name=d.get("shared_by_name"),
+                device_id=sharer_id,
+                fallback=sharer_id or "Nearby Device",
+            )
+            name_val = disp if disp and disp != "Unknown device" else (d.get("shared_by_name") or get_device_display_name(sharer_id, fallback=sharer_id or "Nearby Device"))
+            d["shared_by"] = name_val
+            d["shared_by_name"] = d.get("shared_by_name") or name_val
+            d["shared_by_device_name"] = d.get("shared_by_device_name") or name_val
+            d["device_name"] = d.get("device_name") or name_val
+        enriched.append(d)
+    return enriched
 
 
 def mark_share_notifications_seen(target_device_id: str, group_ids: list[str]) -> None:
@@ -3617,6 +3994,7 @@ def delete_device_share_group(group_id: str, requesting_device_id: str) -> bool:
         placeholders = ",".join("?" * len(share_ids))
         conn.execute(f"DELETE FROM device_share_targets WHERE share_id IN ({placeholders})", share_ids)
         conn.execute(f"DELETE FROM saved_reels WHERE share_id IN ({placeholders})", share_ids)
+        conn.execute(f"DELETE FROM reel_watch_history WHERE share_id IN ({placeholders})", share_ids)
     _cleanup_persisted_share_files(share_ids)
     conn.execute("DELETE FROM device_shares WHERE share_group_id = ?", (group_id,))
     conn.execute("DELETE FROM device_share_groups WHERE id = ?", (group_id,))
@@ -3650,6 +4028,7 @@ def delete_device_share(share_id: int, requesting_device_id: str) -> bool:
             return delete_device_share_group(group_id, requesting_device_id)
     conn.execute("DELETE FROM device_share_targets WHERE share_id = ?", (share_id,))
     conn.execute("DELETE FROM saved_reels WHERE share_id = ?", (share_id,))
+    conn.execute("DELETE FROM reel_watch_history WHERE share_id = ?", (share_id,))
     _cleanup_persisted_share_files([share_id])
     conn.execute("DELETE FROM device_shares WHERE id = ?", (share_id,))
     conn.commit()
@@ -3975,6 +4354,87 @@ def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
     return [dict(r) for r in rows]
 
 
+def record_watch_history(
+    device_id: str,
+    reel_id: str,
+    share_id: int,
+    media_id: int | None = None,
+    watch_time_sec: float = 0.0,
+    duration_sec: float = 0.0,
+) -> bool:
+    """Record or update a watched reel entry. Keeps only the latest view per reel."""
+    if not device_id or not reel_id:
+        return False
+    conn = get_conn()
+    now_ts = int(_time.time())
+    conn.execute(
+        """
+        INSERT INTO reel_watch_history (device_id, reel_id, share_id, media_id, watched_at, watch_time_sec, duration_sec)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(device_id, reel_id) DO UPDATE SET
+            share_id = excluded.share_id,
+            media_id = COALESCE(excluded.media_id, reel_watch_history.media_id),
+            watched_at = excluded.watched_at,
+            watch_time_sec = excluded.watch_time_sec,
+            duration_sec = excluded.duration_sec
+        """,
+        (device_id, str(reel_id), int(share_id), media_id, now_ts, float(watch_time_sec), float(duration_sec)),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_watch_history_item(device_id: str, reel_id: str, share_id: int | None = None) -> bool:
+    """Remove a reel from a device's watch history by reel_id or share_id."""
+    if not device_id:
+        return False
+    conn = get_conn()
+    if share_id is not None:
+        cur = conn.execute(
+            "DELETE FROM reel_watch_history WHERE device_id = ? AND (reel_id = ? OR share_id = ?)",
+            (device_id, str(reel_id), int(share_id)),
+        )
+    else:
+        cur = conn.execute(
+            "DELETE FROM reel_watch_history WHERE device_id = ? AND reel_id = ?",
+            (device_id, str(reel_id)),
+        )
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def get_watch_history(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
+    """Return watched reels for a device, newest watched first."""
+    conn = get_read_conn()
+    rows = conn.execute(
+        """
+        SELECT rwh.reel_id, rwh.share_id, rwh.watched_at, rwh.watch_time_sec, rwh.duration_sec,
+               ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
+               ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
+               ds.created_at, ds.share_group_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id, ds.is_library_reel,
+               d.device_name AS shared_by_name, d.username AS shared_by_username,
+               orig_d.device_name AS orig_shared_by_name, orig_d.username AS orig_shared_by_username,
+               COALESCE(dsg.caption, ds.caption) AS group_caption,
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title
+        FROM reel_watch_history rwh
+        JOIN device_shares ds ON ds.id = rwh.share_id
+        LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
+        LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        WHERE rwh.device_id = ?
+        ORDER BY rwh.watched_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (device_id, limit, offset),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def repost_reel(shared_by_device_id: str, share_id: int, target_device_ids: list[str], caption: str | None = None) -> dict:
     """
     Repost an existing reel to specified target devices with post_kind='reel_repost'.
@@ -4175,7 +4635,7 @@ def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
     conn = get_read_conn()
     rows = conn.execute(
         """
-        SELECT ds.id AS share_id, ds.id AS reel_id, MAX(r.created_at) AS liked_at, r.emoji AS liked_emoji,
+        SELECT ds.id AS share_id, ds.id AS reel_id, MAX(r.created_at) AS liked_at, '❤️' AS liked_emoji,
                ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
                ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
                ds.created_at, ds.share_group_id,
@@ -4190,6 +4650,7 @@ def get_liked_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
         LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
         LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
         WHERE r.source_id = ?
+          AND r.scope = 'reel'
           AND (
             ds.is_library_reel = 1
             OR (

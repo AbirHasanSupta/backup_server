@@ -1,0 +1,5 @@
+# Keep source checkout line endings deterministic across Windows and Linux.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.ico binary

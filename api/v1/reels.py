@@ -1,0 +1,1197 @@
+"""api/v1/reels.py — HyperPulse Short Video Reels, Saved, Liked, Reposts & Telemetry Router."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import os
+import threading
+import time
+from pydantic import BaseModel, Field
+from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+
+from core.config import get_shared_dirs
+from core.google_drive import GoogleDriveError, all_files as drive_all_files, folder_id_from_link
+from core.path_utils import normalize_fs_path
+from core.security import verify_api_key_or_device_token
+from repositories import device_repo, reels_repo, social_repo, file_repo
+from repositories.base import is_postgres
+from services.reels_service import reels_service
+from storage.manager import get_storage
+
+router = APIRouter(tags=["Reels"])
+
+_REEL_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".m4v", ".wmv"}
+_DRIVE_REEL_CACHE_TTL = 60
+_drive_reel_cache: dict[str, tuple[list[dict], float]] = {}
+_drive_reel_cache_lock = threading.Lock()
+
+
+def _drive_reel_cache_key(source_key: str) -> str:
+    return f"google_drive:reel_candidates:{source_key}"
+
+
+def _get_cached_drive_videos(source_key: str, now: float) -> list[dict] | None:
+    with _drive_reel_cache_lock:
+        for key, (_, expires_at) in list(_drive_reel_cache.items()):
+            if expires_at <= now:
+                _drive_reel_cache.pop(key, None)
+        cached = _drive_reel_cache.get(source_key)
+        if cached and cached[1] > now:
+            return cached[0]
+
+    try:
+        from services.redis_service import get_redis_client
+
+        client = get_redis_client()
+        payload = client.get(_drive_reel_cache_key(source_key)) if client else None
+        if payload:
+            videos = json.loads(payload)
+            if isinstance(videos, list):
+                with _drive_reel_cache_lock:
+                    _drive_reel_cache[source_key] = (videos, now + _DRIVE_REEL_CACHE_TTL)
+                return videos
+    except Exception:
+        pass
+    return None
+
+
+def _store_cached_drive_videos(source_key: str, videos: list[dict], now: float) -> None:
+    with _drive_reel_cache_lock:
+        _drive_reel_cache[source_key] = (videos, now + _DRIVE_REEL_CACHE_TTL)
+    try:
+        from services.redis_service import get_redis_client
+
+        client = get_redis_client()
+        if client:
+            client.setex(_drive_reel_cache_key(source_key), _DRIVE_REEL_CACHE_TTL, json.dumps(videos))
+    except Exception:
+        pass
+
+
+def _drive_video_candidates(entry: dict) -> list[dict]:
+    """Read and briefly cache video files in a shared Google Drive tree."""
+    source_key = str(entry.get("id") or "")
+    now = time.monotonic()
+    cached = _get_cached_drive_videos(source_key, now)
+    if cached is not None:
+        return cached
+
+    try:
+        folder_id = str(entry.get("drive_folder_id") or folder_id_from_link(entry.get("path") or ""))
+        files = drive_all_files(folder_id)
+    except (GoogleDriveError, ValueError):
+        return []
+
+    videos = []
+    for item in files:
+        mime_type = str(item.get("mime_type") or "").lower()
+        extension = os.path.splitext(str(item.get("name") or item.get("path") or ""))[1].lower()
+        is_video = mime_type.startswith("video/") or (
+            mime_type in ("", "application/octet-stream", "binary/octet-stream")
+            and extension in _REEL_VIDEO_EXTS
+        )
+        if not is_video:
+            continue
+        videos.append({
+            "source_type": "reel_shared",
+            "source_key": source_key,
+            "path": item["path"],
+            "size": item.get("size", 0),
+            "modified_time": item.get("modified_time", 0),
+        })
+    _store_cached_drive_videos(source_key, videos, now)
+    return videos
+
+
+def _visible_drive_sources(entries: list[dict], device_id: str) -> list[dict]:
+    """Drive folders available to this device for offline browsing.
+
+    ``available_in_reels`` is intentionally ignored here: offline mode always
+    shows locally saved Drive folders, while the online Reels catalog applies
+    that setting separately.
+    """
+    visible = []
+    for entry in entries:
+        if entry.get("type") != "google_drive" and entry.get("kind") != "google_drive":
+            continue
+        tags = entry.get("device_ids", ["all"])
+        if tags and "all" not in tags and device_id not in tags:
+            continue
+        folder_id = str(entry.get("drive_folder_id") or "")
+        if not folder_id:
+            try:
+                folder_id = folder_id_from_link(entry.get("path") or "")
+            except GoogleDriveError:
+                continue
+        visible.append({
+            "id": entry.get("id"),
+            "label": entry.get("label") or "Shared folder",
+            "type": "google_drive",
+            "drive_folder_id": folder_id,
+            "drive_link": entry.get("path") or folder_id,
+        })
+    return visible
+
+
+def _online_shared_reel_entries(entries: list[dict], device_id: str) -> list[dict]:
+    return [
+        entry for entry in entries
+        if entry.get("id")
+        and (not entry.get("device_ids", ["all"]) or "all" in entry.get("device_ids", ["all"]) or device_id in entry.get("device_ids", ["all"]))
+        and entry.get("available_in_reels", entry.get("available_in_reel", True))
+    ]
+
+
+def _collect_shared_videos_from_dir(root: str) -> list[dict]:
+    items = []
+    if not os.path.isdir(root):
+        return items
+    for dirpath, _, filenames in os.walk(root):
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in _REEL_VIDEO_EXTS:
+                full = os.path.join(dirpath, fname)
+                try:
+                    st = os.stat(full)
+                    rel = os.path.relpath(full, root).replace("\\", "/")
+                    items.append({
+                        "path": rel,
+                        "size": st.st_size,
+                        "modified_time": int(st.st_mtime),
+                    })
+                except OSError:
+                    pass
+    return items
+
+_reel_warm_lock = threading.Lock()
+_reel_warm_active = False
+
+
+def _schedule_reel_thumbnail_warm(items: list[dict], *, offset: int = 0, limit: int = 12) -> None:
+    """Prefetch first-page reel thumbnails (Postgres/Docker only).
+
+    Desktop/SQLite keeps prior behavior: no background ffmpeg on list endpoints.
+    """
+    global _reel_warm_active
+    if offset != 0 or not items or not is_postgres():
+        return
+
+    sample = list(items[:limit])
+    with _reel_warm_lock:
+        if _reel_warm_active:
+            return
+        _reel_warm_active = True
+
+    def _run() -> None:
+        global _reel_warm_active
+        try:
+            from thumbnail import warm_thumbnails
+
+            storage = get_storage()
+            shared_roots: dict[str, str] = {}
+            for entry in get_shared_dirs():
+                eid = entry.get("id")
+                if not eid:
+                    continue
+                root = os.path.abspath(normalize_fs_path(entry.get("path") or ""))
+                if os.path.isdir(root):
+                    shared_roots[str(eid)] = root
+
+            paths: list[str] = []
+            for item in sample:
+                st = item.get("source_type") or ""
+                sk = item.get("source_key") or ""
+                rel = item.get("path") or item.get("relative_path") or ""
+                if not rel:
+                    continue
+                try:
+                    if st in ("reel_backup", "phone"):
+                        full = storage.get_file_path(rel, device_id=sk)
+                        if full and os.path.isfile(full):
+                            paths.append(full)
+                    elif st in ("reel_shared", "shared"):
+                        root = shared_roots.get(str(sk))
+                        if not root:
+                            continue
+                        safe_rel = os.path.normpath(str(rel).replace("\\", "/")).lstrip("/\\")
+                        full_p = os.path.abspath(os.path.join(root, safe_rel))
+                        try:
+                            if os.path.commonpath([root, full_p]) != root:
+                                continue
+                        except ValueError:
+                            continue
+                        if os.path.isfile(full_p):
+                            paths.append(full_p)
+                except Exception:
+                    continue
+            warm_thumbnails(paths, limit=limit)
+        except Exception:
+            pass
+        finally:
+            with _reel_warm_lock:
+                _reel_warm_active = False
+
+    threading.Thread(target=_run, daemon=True, name="reel-thumb-warm").start()
+
+
+class RepostRequest(BaseModel):
+    device_id: str | None = None
+    shared_by_device_id: str | None = None
+    share_id: int
+    target_device_ids: list[str]
+    caption: str | None = None
+
+
+class CancelRepostRequest(BaseModel):
+    device_id: str
+    share_id: int
+
+
+class SaveReelRequest(BaseModel):
+    device_id: str
+    reel_id: str
+    share_id: int
+    media_id: int | None = None
+
+
+class TelemetryEvent(BaseModel):
+    share_id: int
+    media_id: int | None = None
+    watch_time_ms: int = 0
+    duration_ms: int = 0
+    completed: bool = False
+    loop_count: int = 0
+
+
+class TelemetryRequest(BaseModel):
+    device_id: str
+    events: list[dict] = Field(max_length=100)
+
+
+class WatchHistoryEvent(BaseModel):
+    reel_id: str
+    share_id: int
+    media_id: int | None = None
+    watch_time_sec: float = 0.0
+    duration_sec: float = 0.0
+
+
+class WatchHistoryRequest(BaseModel):
+    device_id: str
+    reel_id: str | None = None
+    share_id: int | None = None
+    media_id: int | None = None
+    watch_time_sec: float = 0.0
+    duration_sec: float = 0.0
+    events: list[WatchHistoryEvent] | None = None
+
+
+def is_qualified_reel_watch(watch_sec: float, dur: float) -> bool:
+    """Videos > 20s need 10s play, < 5s any play (watch_sec > 0), otherwise 5s play."""
+    watch_sec = float(watch_sec or 0.0)
+    dur = float(dur or 0.0)
+    if dur > 20.0:
+        return watch_sec >= 10.0
+    if dur < 5.0:
+        return watch_sec > 0.0
+    return watch_sec >= 5.0
+
+
+def _is_video(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in _REEL_VIDEO_EXTS
+
+
+def _authorize_share_access(share_id: int, device_id: str) -> dict:
+    share = social_repo.get_device_share_by_id(share_id)
+    if not share:
+        raise HTTPException(status_code=404, detail="Share not found")
+    if share.get("is_library_reel"):
+        if share["source_type"] == "reel_backup" and share["source_key"] == device_id:
+            return share
+        if share["source_type"] == "reel_shared":
+            for entry in get_shared_dirs():
+                if entry.get("id") == share["source_key"]:
+                    tags = entry.get("device_ids", ["all"])
+                    if not tags or "all" in tags or device_id in tags:
+                        return share
+    if not (share["shared_by_device_id"] == device_id or social_repo.is_share_target(share_id, device_id)):
+        raise HTTPException(status_code=403, detail="Share not available for this device")
+    return share
+
+
+def _library_reel_label_for_device(source_type: str, source_key: str, device_id: str) -> str | None:
+    if source_type == "reel_backup":
+        return "My backup" if source_key == device_id else None
+    if source_type == "reel_shared":
+        for entry in get_shared_dirs():
+            if entry.get("id") == source_key:
+                tags = entry.get("device_ids", ["all"])
+                if (not tags or "all" in tags or device_id in tags) and entry.get("available_in_reels", entry.get("available_in_reel", True)):
+                    return entry.get("label") or "Shared folder"
+    return None
+
+
+@router.get("/api/reels")
+@router.get("/reels")
+async def get_reels_feed(
+    device_id: str,
+    offset: int = 0,
+    limit: int = 30,
+    seed: int = 0,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    # The service uses the synchronous repository layer.  Never execute its
+    # PostgreSQL work in Uvicorn's event-loop thread: one slow feed query used
+    # to delay unrelated uploads and video streams handled by that worker.
+    reels, has_more, total = await asyncio.to_thread(reels_service.build_reels_feed, device_id, offset, limit, seed)
+    return {"reels": reels, "has_more": has_more, "total": total}
+
+
+@router.get("/api/reels/shared-backups")
+@router.get("/reels/shared-backups")
+async def get_shared_and_backups_reels(
+    device_id: str,
+    source: str | None = None,
+    offset: int = 0,
+    limit: int = 50,
+    seed: int = 0,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    device_id = (device_id or "").strip()
+    source = (source or "").strip().lower()
+    if source not in ("", "backups", "shared"):
+        raise HTTPException(status_code=400, detail="source must be 'backups' or 'shared'")
+    offset = max(0, offset)
+    limit = max(1, min(100, limit))
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+
+    # Shared folders are indexed by the leader-elected memory scanner.
+    # Recursive os.walk() calls against a Windows bind mount are extremely
+    # slow and were repeated for every client page/scroll.  Read the durable
+    # PostgreSQL index instead; its scanner handles filesystem changes off the
+    # interactive request path.
+    all_shared_entries = get_shared_dirs()
+    visible_drive_sources = _visible_drive_sources(all_shared_entries, device_id)
+    shared_entries = _online_shared_reel_entries(all_shared_entries, device_id)
+    shared_labels = {
+        str(entry["id"]): entry.get("label") or "Shared folder"
+        for entry in shared_entries
+    }
+    drive_entries = [
+        entry for entry in shared_entries
+        if entry.get("type") == "google_drive" or entry.get("kind") == "google_drive"
+    ]
+    filesystem_shared_keys = [
+        str(entry["id"]) for entry in shared_entries
+        if str(entry["id"]) in shared_labels and entry not in drive_entries
+    ]
+
+    async def _catalog_page(page_offset: int, page_limit: int) -> list[dict]:
+        """Load only one catalog page; never materialize a whole library to scroll."""
+        async def _backups(page_offset: int = page_offset, page_limit: int = page_limit) -> list[dict]:
+            rows = await asyncio.to_thread(
+                file_repo.get_video_files_for_device, device_id, page_limit, page_offset
+            )
+            return [{
+                "source_type": "reel_backup", "source_key": device_id,
+                "path": row["path"], "size": row.get("size", 0),
+                "modified_time": row.get("modified_time", 0), "label": "My backup",
+            } for row in rows]
+
+        async def _shared(page_offset: int = page_offset, page_limit: int = page_limit) -> list[dict]:
+            fetch_to = page_offset + page_limit
+            rows = await asyncio.to_thread(
+                reels_repo.get_indexed_shared_video_candidates,
+                filesystem_shared_keys, fetch_to, 0,
+            )
+            filesystem_candidates = [{
+                "source_type": "reel_shared", "source_key": row["source_key"],
+                "path": row["path"], "size": row.get("size", 0),
+                "modified_time": row.get("modified_time", 0),
+                "label": shared_labels.get(str(row["source_key"]), "Shared folder"),
+            } for row in rows]
+            if not filesystem_candidates:
+                disk_candidates = []
+                for entry in shared_entries:
+                    if entry in drive_entries:
+                        continue
+                    sid = str(entry.get("id"))
+                    root = os.path.abspath(normalize_fs_path(entry.get("path") or ""))
+                    if not root or not os.path.isdir(root):
+                        continue
+                    collected = await asyncio.to_thread(_collect_shared_videos_from_dir, root)
+                    for f in collected:
+                        disk_candidates.append({
+                            "source_type": "reel_shared",
+                            "source_key": sid,
+                            "path": f["path"],
+                            "size": f.get("size", 0),
+                            "modified_time": f.get("modified_time", 0),
+                            "label": shared_labels.get(sid, "Shared folder"),
+                        })
+                if disk_candidates:
+                    try:
+                        await asyncio.to_thread(
+                            reels_repo.bulk_get_or_create_library_reel_shares, disk_candidates
+                        )
+                    except Exception:
+                        pass
+                    filesystem_candidates = disk_candidates
+
+            drive_lists = await asyncio.gather(*(
+                asyncio.to_thread(_drive_video_candidates, entry) for entry in drive_entries
+            ))
+            drive_candidates = [{
+                **candidate,
+                "label": shared_labels.get(str(candidate["source_key"]), "Shared folder"),
+            } for candidates in drive_lists for candidate in candidates]
+            candidates = [*filesystem_candidates, *drive_candidates]
+            candidates.sort(key=lambda row: (
+                -int(row.get("modified_time") or 0),
+                str(row.get("source_key") or ""),
+                str(row.get("path") or ""),
+            ))
+            return candidates[page_offset:page_offset + page_limit]
+
+        if source == "backups":
+            return await _backups()
+        if source == "shared":
+            return await _shared()
+
+        # Legacy callers without a source receive a stable merged page.  Read
+        # only enough from each catalog to form that page, in parallel.
+        fetch_to = page_offset + page_limit
+        backup_rows, shared_rows = await asyncio.gather(
+            _backups(0, fetch_to),
+            _shared(0, fetch_to),
+        )
+        merged = [*backup_rows, *shared_rows]
+        merged.sort(key=lambda row: (-int(row.get("modified_time") or 0), str(row["source_type"]), str(row["path"])))
+        return merged[page_offset:page_offset + page_limit]
+
+    # Mirror the main personalized feed's no-repeat guarantee in the private
+    # backup/shared shelves.  These remain independently personalized by the
+    # phone, but an already watched underlying media item is not recycled.
+    watched_share_ids, watched_media_ids = await asyncio.to_thread(
+        reels_repo.get_recently_watched_reel_ids,
+        device_id,
+    )
+    materialized: list[dict] = []
+    scan_offset = offset
+    has_more_candidates = False
+    while len(materialized) < limit:
+        remaining = limit - len(materialized)
+        candidate_page = await _catalog_page(scan_offset, remaining + 1)
+        has_more_candidates = len(candidate_page) > remaining
+        candidates = candidate_page[:remaining]
+        if not candidates:
+            break
+        scan_offset += len(candidates)
+        catalog_rows = await asyncio.to_thread(
+            reels_repo.bulk_get_or_create_library_reel_shares, candidates
+        )
+        materialized.extend(catalog_rows)
+        if len(materialized) >= limit or not has_more_candidates:
+            break
+
+    materialized = materialized[:limit]
+    _schedule_reel_thumbnail_warm(materialized, offset=offset)
+    media_ids = [r["media_id"] for r in materialized]
+    share_ids = [r["share_id"] for r in materialized]
+    (
+        reactions_result, comment_counts, repost_counts, reposted_result,
+        saved_ids, view_counts, durations_map,
+    ) = await asyncio.gather(
+        asyncio.to_thread(social_repo.get_reactions_for_media_ids, media_ids, device_id, "reel"),
+        asyncio.to_thread(social_repo.get_comment_counts_for_media_ids, media_ids, "reel"),
+        asyncio.to_thread(reels_repo.get_repost_counts_for_media_ids, media_ids),
+        asyncio.to_thread(reels_repo.get_user_reposted_info, device_id),
+        asyncio.to_thread(reels_repo.get_saved_reel_ids, device_id),
+        asyncio.to_thread(reels_repo.get_reel_view_counts, share_ids),
+        asyncio.to_thread(reels_repo.get_reel_durations, share_ids),
+    )
+    counts_map, user_map = reactions_result
+    user_reposted_media, user_reposted_shares = reposted_result
+    now_ts = int(time.time())
+
+    reels = []
+    for r in materialized:
+        catalog_key = f"library:{r['source_type']}:{r['source_key']}:{r['share_id']}"
+        author_id = f"library:{r['source_type']}:{r['source_key']}"
+        reels.append({
+            "reel_id": catalog_key,
+            "share_id": r["share_id"],
+            "media_id": r["media_id"],
+            "path": r["path"],
+            "shared_by": r["label"],
+            "shared_by_device_id": author_id,
+            "is_repost": False,
+            "user_has_reposted": r["media_id"] in user_reposted_media or r["share_id"] in user_reposted_shares,
+            "original_author": {"device_id": author_id, "name": r["label"], "username": None, "display_name": r["label"]},
+            "reposted_by": None,
+            "caption": None,
+            "created_at": r["modified_time"] or r["created_at"],
+            "reaction_counts": counts_map.get(r["media_id"], {}),
+            "user_reactions": user_map.get(r["media_id"], []),
+            "comment_count": comment_counts.get(r["media_id"], 0),
+            "repost_count": repost_counts.get(r["media_id"], 0),
+            "view_count": view_counts.get(r["share_id"], 0),
+            "duration": durations_map.get(r["share_id"], 0.0),
+            "quality_score": round(reels_service.calculate_bayesian_quality(
+                sum(counts_map.get(r["media_id"], {}).values()),
+                comment_counts.get(r["media_id"], 0),
+                repost_counts.get(r["media_id"], 0),
+                view_counts.get(r["share_id"], 0),
+            ), 4),
+            "tokens": [],
+            "size": r["size"],
+            "is_own_post": False,
+            "is_saved": catalog_key in saved_ids,
+            "is_unseen": False,
+            "group_id": None,
+            "library_source": r["source_type"],
+            "source_type": "phone" if r["source_type"] == "reel_backup" else "shared",
+            "source_key": r["source_key"],
+        })
+
+    def _catalog_rank(reel: dict) -> float:
+        created_at = reel.get("created_at") or now_ts
+        age_days = max(0.0, (now_ts - created_at) / 86400.0)
+        recency = math.exp(-age_days / 30.0)
+        quality = reel.get("quality_score") or 0.0
+        source_jitter = reels_service.deterministic_seed_jitter(f"catalog:{reel['reel_id']}", seed) * 0.30
+        source_boost = 0.03 if reel.get("library_source") == "reel_shared" else 0.0
+        is_watched = reel["share_id"] in watched_share_ids or (reel.get("media_id") and reel["media_id"] in watched_media_ids)
+        watch_penalty = -2.0 if is_watched else 0.5
+        return recency * 0.50 + quality * 0.25 + source_boost + watch_penalty + source_jitter
+
+    reels.sort(key=_catalog_rank, reverse=True)
+    return {
+        "reels": reels,
+        "has_more": has_more_candidates,
+        "total": len(reels),
+        # These device-authorized folder links let the Android client keep its
+        # offline Drive shelf in sync without an additional list request.
+        "drive_sources": visible_drive_sources,
+        # The client must advance past filtered watched rows as well as the
+        # visible page, otherwise they are fetched again after every scroll.
+        "next_offset": scan_offset,
+    }
+
+
+@router.post("/api/reels/telemetry")
+@router.post("/reels/telemetry")
+async def record_telemetry(
+    body: TelemetryRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
+    inserted = await asyncio.to_thread(reels_repo.record_reel_telemetry, body.device_id, body.events)
+    return {"ok": True, "recorded": inserted}
+
+
+@router.post("/api/reels/repost")
+@router.post("/reels/repost")
+async def repost_reel(
+    body: RepostRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    device_id = body.device_id or body.shared_by_device_id
+    if not device_id:
+        raise HTTPException(status_code=400, detail="device_id is required")
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    _authorize_share_access(body.share_id, device_id)
+    res = reels_repo.repost_reel(device_id, body.share_id, body.target_device_ids, body.caption)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to repost reel"))
+    return res
+
+
+@router.post("/api/reels/repost/cancel")
+@router.post("/reels/repost/cancel")
+async def cancel_repost(
+    body: CancelRepostRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
+    res = reels_repo.cancel_repost(body.device_id, body.share_id)
+    if not res.get("ok"):
+        raise HTTPException(status_code=400, detail=res.get("error", "Failed to cancel repost"))
+    return res
+
+
+@router.post("/api/reels/save")
+@router.post("/reels/save")
+async def toggle_save_reel(
+    body: SaveReelRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
+    _authorize_share_access(body.share_id, body.device_id)
+    try:
+        saved = reels_repo.toggle_save_reel(body.device_id, body.reel_id, body.share_id, body.media_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return {"ok": True, "saved": saved, "reel_id": body.reel_id}
+
+
+@router.get("/api/reels/saved")
+@router.get("/reels/saved")
+async def get_saved_reels(
+    device_id: str,
+    offset: int = 0,
+    limit: int = 50,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    saved_rows = reels_repo.get_saved_reels(device_id, offset, limit)
+    media_ids = [s["media_id"] for s in saved_rows if s.get("media_id")]
+
+    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
+    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids, scope="reel")
+    repost_counts = reels_repo.get_repost_counts_for_media_ids(media_ids)
+    user_reposted_media, user_reposted_shares = reels_repo.get_user_reposted_info(device_id)
+
+    reels = []
+    for s in saved_rows:
+        is_library_reel = bool(s.get("is_library_reel"))
+        library_label = _library_reel_label_for_device(
+            s.get("source_type") or "", s.get("source_key") or "", device_id
+        ) if is_library_reel else None
+        if is_library_reel and not library_label:
+            continue
+        if not is_library_reel and s["shared_by_device_id"] == device_id:
+            continue
+        orig_id = s.get("original_shared_by_device_id") or s["shared_by_device_id"]
+        if not is_library_reel and orig_id == device_id:
+            continue
+        if is_library_reel:
+            orig_id = f"library:{s['source_type']}:{s['source_key']}"
+
+        is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id"))
+        orig_name = s.get("orig_shared_by_name") if s.get("original_shared_by_device_id") else s.get("shared_by_name")
+        orig_username = s.get("orig_shared_by_username") if s.get("original_shared_by_device_id") else s.get("shared_by_username")
+        reposter_name = s.get("shared_by_name")
+        reposter_username = s.get("shared_by_username")
+
+        has_reposted = (
+            (s.get("media_id") in user_reposted_media if s.get("media_id") else False)
+            or (s["share_id"] in user_reposted_shares)
+            or (s.get("post_kind") == "reel_repost" and s.get("shared_by_device_id") == device_id)
+        )
+
+        sharer_dev_id = s["shared_by_device_id"]
+        if is_library_reel:
+            display_name = library_label
+        elif sharer_dev_id == "desktop-server":
+            display_name = device_repo.get_device_display_name("desktop-server")
+        else:
+            formatted = device_repo.format_device_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=sharer_dev_id)
+            display_name = formatted if formatted != "Unknown device" else device_repo.get_device_display_name(sharer_dev_id, fallback=sharer_dev_id)
+
+        if is_library_reel:
+            orig_disp = library_label
+            orig_author_name = library_label
+        elif orig_id == "desktop-server":
+            orig_disp = device_repo.get_device_display_name("desktop-server")
+            orig_author_name = orig_name or orig_disp
+        else:
+            formatted_orig = device_repo.format_device_display_name(orig_username, orig_name, device_id=orig_id)
+            orig_disp = formatted_orig if formatted_orig != "Unknown device" else (orig_name or device_repo.get_device_display_name(orig_id, fallback=orig_id))
+            orig_author_name = orig_name
+
+        if reposter_name or reposter_username or s["shared_by_device_id"] == "desktop-server":
+            if s["shared_by_device_id"] == "desktop-server":
+                reposter_disp = device_repo.get_device_display_name("desktop-server")
+            else:
+                formatted_rep = device_repo.format_device_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"])
+                reposter_disp = formatted_rep if formatted_rep != "Unknown device" else (reposter_name or device_repo.get_device_display_name(s["shared_by_device_id"], fallback=s["shared_by_device_id"]))
+        else:
+            reposter_disp = s["shared_by_device_id"]
+
+        reels.append({
+            "reel_id": str(s["reel_id"]),
+            "share_id": s["share_id"],
+            "media_id": s.get("media_id"),
+            "path": s["relative_path"],
+            "shared_by": display_name,
+            "shared_by_device_id": orig_id if is_library_reel else s["shared_by_device_id"],
+            "is_repost": is_repost,
+            "user_has_reposted": has_reposted,
+            "original_author": {
+                "device_id": orig_id,
+                "name": orig_author_name,
+                "username": None if is_library_reel else orig_username,
+                "display_name": orig_disp,
+            },
+            "reposted_by": {
+                "device_id": s["shared_by_device_id"],
+                "name": reposter_name,
+                "username": reposter_username,
+                "display_name": reposter_disp,
+            } if is_repost else None,
+            "caption": s.get("group_caption") or s.get("caption"),
+            "created_at": s["created_at"],
+            "saved_at": s.get("saved_at"),
+            "reaction_counts": counts_map.get(s["media_id"], {}) if s.get("media_id") else {},
+            "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
+            "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+            "repost_count": repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+            "is_own_post": False,
+            "is_saved": True,
+            "group_id": s.get("share_group_id"),
+        })
+
+    total = len(reels)
+    _schedule_reel_thumbnail_warm(
+        [
+            {
+                "source_type": s.get("source_type"),
+                "source_key": s.get("source_key"),
+                "path": s.get("relative_path"),
+            }
+            for s in saved_rows
+        ],
+        offset=offset,
+    )
+    return {"reels": reels, "has_more": (offset + limit) < total or len(saved_rows) == limit, "total": total}
+
+
+@router.get("/api/reels/liked")
+@router.get("/reels/liked")
+async def get_liked_reels(
+    device_id: str,
+    offset: int = 0,
+    limit: int = 50,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    liked_rows = reels_repo.get_liked_reels(device_id, offset, limit)
+    video_rows = [s for s in liked_rows if _is_video(s.get("relative_path", ""))]
+    media_ids = [s["media_id"] for s in video_rows if s.get("media_id")]
+
+    saved_ids = reels_repo.get_saved_reel_ids(device_id)
+    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
+    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids, scope="reel")
+    repost_counts = reels_repo.get_repost_counts_for_media_ids(media_ids)
+    user_reposted_media, user_reposted_shares = reels_repo.get_user_reposted_info(device_id)
+
+    reels = []
+    seen_reel_keys = set()
+    for s in video_rows:
+        is_library_reel = bool(s.get("is_library_reel"))
+        library_label = _library_reel_label_for_device(
+            s.get("source_type") or "", s.get("source_key") or "", device_id
+        ) if is_library_reel else None
+        if is_library_reel and not library_label:
+            continue
+        if not is_library_reel and s["shared_by_device_id"] == device_id:
+            continue
+        orig_id = s.get("original_shared_by_device_id") or s["shared_by_device_id"]
+        if not is_library_reel and orig_id == device_id:
+            continue
+
+        reel_id = f"library:{s['source_type']}:{s['source_key']}:{s['share_id']}" if is_library_reel else str(s["share_id"])
+        dedup_key = reel_id or str(s.get("media_id"))
+        if dedup_key in seen_reel_keys:
+            continue
+        seen_reel_keys.add(dedup_key)
+
+        if is_library_reel:
+            orig_id = f"library:{s['source_type']}:{s['source_key']}"
+
+        is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id"))
+        orig_name = s.get("orig_shared_by_name") if s.get("original_shared_by_device_id") else s.get("shared_by_name")
+        orig_username = s.get("orig_shared_by_username") if s.get("original_shared_by_device_id") else s.get("shared_by_username")
+        reposter_name = s.get("shared_by_name")
+        reposter_username = s.get("shared_by_username")
+
+        has_reposted = (
+            (s.get("media_id") in user_reposted_media if s.get("media_id") else False)
+            or (s["share_id"] in user_reposted_shares)
+            or (s.get("post_kind") == "reel_repost" and s.get("shared_by_device_id") == device_id)
+        )
+
+        sharer_dev_id = s["shared_by_device_id"]
+        if is_library_reel:
+            display_name = library_label
+        elif sharer_dev_id == "desktop-server":
+            display_name = device_repo.get_device_display_name("desktop-server")
+        else:
+            formatted = device_repo.format_device_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=sharer_dev_id)
+            display_name = formatted if formatted != "Unknown device" else device_repo.get_device_display_name(sharer_dev_id, fallback=sharer_dev_id)
+
+        if is_library_reel:
+            orig_disp = library_label
+            orig_author_name = library_label
+        elif orig_id == "desktop-server":
+            orig_disp = device_repo.get_device_display_name("desktop-server")
+            orig_author_name = orig_name or orig_disp
+        else:
+            formatted_orig = device_repo.format_device_display_name(orig_username, orig_name, device_id=orig_id)
+            orig_disp = formatted_orig if formatted_orig != "Unknown device" else (orig_name or device_repo.get_device_display_name(orig_id, fallback=orig_id))
+            orig_author_name = orig_name
+
+        if reposter_name or reposter_username or s["shared_by_device_id"] == "desktop-server":
+            if s["shared_by_device_id"] == "desktop-server":
+                reposter_disp = device_repo.get_device_display_name("desktop-server")
+            else:
+                formatted_rep = device_repo.format_device_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"])
+                reposter_disp = formatted_rep if formatted_rep != "Unknown device" else (reposter_name or device_repo.get_device_display_name(s["shared_by_device_id"], fallback=s["shared_by_device_id"]))
+        else:
+            reposter_disp = s["shared_by_device_id"]
+
+        reels.append({
+            "reel_id": reel_id,
+            "share_id": s["share_id"],
+            "media_id": s.get("media_id"),
+            "path": s["relative_path"],
+            "shared_by": display_name,
+            "shared_by_device_id": orig_id if is_library_reel else s["shared_by_device_id"],
+            "is_repost": is_repost,
+            "user_has_reposted": has_reposted,
+            "original_author": {
+                "device_id": orig_id,
+                "name": orig_author_name,
+                "username": None if is_library_reel else orig_username,
+                "display_name": orig_disp,
+            },
+            "reposted_by": {
+                "device_id": s["shared_by_device_id"],
+                "name": reposter_name,
+                "username": reposter_username,
+                "display_name": reposter_disp,
+            } if is_repost else None,
+            "caption": s.get("group_caption") or s.get("caption"),
+            "created_at": s["created_at"],
+            "liked_at": s.get("liked_at"),
+            "liked_emoji": s.get("liked_emoji") or "❤️",
+            "reaction_counts": counts_map.get(s["media_id"], {}) if s.get("media_id") else {},
+            "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
+            "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+            "repost_count": repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+            "is_own_post": False,
+            "is_saved": reel_id in saved_ids,
+            "group_id": s.get("share_group_id"),
+        })
+
+    total = len(reels)
+    _schedule_reel_thumbnail_warm(
+        [
+            {
+                "source_type": s.get("source_type"),
+                "source_key": s.get("source_key"),
+                "path": s.get("relative_path"),
+            }
+            for s in video_rows
+        ],
+        offset=offset,
+    )
+    return {"reels": reels, "has_more": (offset + limit) < total or len(liked_rows) == limit, "total": total}
+
+
+@router.get("/api/reels/reposted")
+@router.get("/reels/reposted")
+async def get_reposted_reels(
+    device_id: str,
+    offset: int = 0,
+    limit: int = 50,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    reposted_rows = reels_repo.get_reposted_reels(device_id, offset, limit)
+    video_rows = [s for s in reposted_rows if _is_video(s.get("relative_path", ""))]
+    media_ids = [s["media_id"] for s in video_rows if s.get("media_id")]
+
+    saved_ids = reels_repo.get_saved_reel_ids(device_id)
+    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
+    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids, scope="reel")
+    repost_counts = reels_repo.get_repost_counts_for_media_ids(media_ids)
+
+    reels = []
+    for s in video_rows:
+        orig_id = s.get("original_shared_by_device_id") or s["shared_by_device_id"]
+        if orig_id == device_id:
+            continue
+        is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id")) or bool(s.get("repost_of_share_id"))
+        if not is_repost:
+            continue
+
+        orig_name = s.get("orig_shared_by_name") if s.get("original_shared_by_device_id") else s.get("shared_by_name")
+        orig_username = s.get("orig_shared_by_username") if s.get("original_shared_by_device_id") else s.get("shared_by_username")
+        reposter_name = s.get("shared_by_name")
+        reposter_username = s.get("shared_by_username")
+
+        sharer_dev_id = s["shared_by_device_id"]
+        if sharer_dev_id == "desktop-server":
+            display_name = device_repo.get_device_display_name("desktop-server")
+        else:
+            formatted = device_repo.format_device_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=sharer_dev_id)
+            display_name = formatted if formatted != "Unknown device" else device_repo.get_device_display_name(sharer_dev_id, fallback=sharer_dev_id)
+
+        if orig_id == "desktop-server":
+            orig_disp = device_repo.get_device_display_name("desktop-server")
+            orig_author_name = orig_name or orig_disp
+        else:
+            formatted_orig = device_repo.format_device_display_name(orig_username, orig_name, device_id=orig_id)
+            orig_disp = formatted_orig if formatted_orig != "Unknown device" else (orig_name or device_repo.get_device_display_name(orig_id, fallback=orig_id))
+            orig_author_name = orig_name
+
+        if reposter_name or reposter_username or s["shared_by_device_id"] == "desktop-server":
+            if s["shared_by_device_id"] == "desktop-server":
+                reposter_disp = device_repo.get_device_display_name("desktop-server")
+            else:
+                formatted_rep = device_repo.format_device_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"])
+                reposter_disp = formatted_rep if formatted_rep != "Unknown device" else (reposter_name or device_repo.get_device_display_name(s["shared_by_device_id"], fallback=s["shared_by_device_id"]))
+        else:
+            reposter_disp = s["shared_by_device_id"]
+
+        reels.append({
+            "reel_id": str(s["share_id"]),
+            "share_id": s["share_id"],
+            "media_id": s.get("media_id"),
+            "path": s["relative_path"],
+            "shared_by": display_name,
+            "shared_by_device_id": s["shared_by_device_id"],
+            "is_repost": True,
+            "user_has_reposted": True,
+            "original_author": {
+                "device_id": orig_id,
+                "name": orig_author_name,
+                "username": orig_username,
+                "display_name": orig_disp,
+            },
+            "reposted_by": {
+                "device_id": s["shared_by_device_id"],
+                "name": reposter_name,
+                "username": reposter_username,
+                "display_name": reposter_disp,
+            },
+            "caption": s.get("group_caption") or s.get("caption"),
+            "created_at": s["created_at"],
+            "reposted_at": s.get("reposted_at"),
+            "reaction_counts": counts_map.get(s["media_id"], {}) if s.get("media_id") else {},
+            "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
+            "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+            "repost_count": repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+            "is_own_post": False,
+            "is_saved": str(s["share_id"]) in saved_ids,
+            "group_id": s.get("share_group_id"),
+        })
+
+    total = len(reels)
+    return {"reels": reels, "has_more": (offset + limit) < total or len(reposted_rows) == limit, "total": total}
+
+
+@router.post("/api/reels/history")
+@router.post("/reels/history")
+async def record_watch_history(
+    body: WatchHistoryRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
+    items_to_record: list[tuple[str, int, int | None, float, float]] = []
+
+    if body.events:
+        for ev in body.events:
+            w_sec = float(ev.watch_time_sec or 0.0)
+            d_sec = float(ev.duration_sec or 0.0)
+            if is_qualified_reel_watch(w_sec, d_sec):
+                r_id = str(ev.reel_id or ev.share_id or "")
+                try:
+                    s_id = int(ev.share_id) if ev.share_id is not None else int(r_id)
+                except (ValueError, TypeError):
+                    s_id = 0
+                if s_id > 0:
+                    m_id = int(ev.media_id) if ev.media_id is not None else None
+                    items_to_record.append((r_id, s_id, m_id, w_sec, d_sec))
+    elif body.share_id is not None or body.reel_id:
+        w_sec = float(body.watch_time_sec or 0.0)
+        d_sec = float(body.duration_sec or 0.0)
+        if is_qualified_reel_watch(w_sec, d_sec):
+            r_id = str(body.reel_id or body.share_id or "")
+            try:
+                s_id = int(body.share_id) if body.share_id is not None else int(r_id)
+            except (ValueError, TypeError):
+                s_id = 0
+            if s_id > 0:
+                m_id = int(body.media_id) if body.media_id is not None else None
+                items_to_record.append((r_id, s_id, m_id, w_sec, d_sec))
+
+    recorded_count = 0
+    for r_id, s_id, m_id, w_sec, d_sec in items_to_record:
+        ok = reels_repo.record_watch_history(
+            device_id=body.device_id,
+            reel_id=r_id,
+            share_id=s_id,
+            media_id=m_id,
+            watch_time_sec=w_sec,
+            duration_sec=d_sec,
+        )
+        if ok:
+            recorded_count += 1
+    return {"ok": True, "recorded": recorded_count}
+
+
+@router.get("/api/reels/history")
+@router.get("/reels/history")
+async def get_watch_history(
+    device_id: str,
+    offset: int = 0,
+    limit: int = 50,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    history_rows = reels_repo.get_watch_history(device_id, offset, limit)
+    video_rows = [s for s in history_rows if _is_video(s.get("relative_path", ""))]
+    media_ids = [s["media_id"] for s in video_rows if s.get("media_id")]
+
+    saved_ids = reels_repo.get_saved_reel_ids(device_id)
+    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
+    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids, scope="reel")
+    repost_counts = reels_repo.get_repost_counts_for_media_ids(media_ids)
+    user_reposted_media, user_reposted_shares = reels_repo.get_user_reposted_info(device_id)
+
+    reels = []
+    seen_reel_keys = set()
+    for s in video_rows:
+        is_library_reel = bool(s.get("is_library_reel"))
+        library_label = _library_reel_label_for_device(
+            s.get("source_type") or "", s.get("source_key") or "", device_id
+        ) if is_library_reel else None
+        if is_library_reel and not library_label:
+            continue
+
+        reel_id = str(s["reel_id"])
+        dedup_key = reel_id or str(s.get("share_id")) or str(s.get("media_id"))
+        if dedup_key in seen_reel_keys:
+            continue
+        seen_reel_keys.add(dedup_key)
+
+        orig_id = s.get("original_shared_by_device_id") or s["shared_by_device_id"]
+        if is_library_reel:
+            orig_id = f"library:{s['source_type']}:{s['source_key']}"
+
+        is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id"))
+        orig_name = s.get("orig_shared_by_name") if s.get("original_shared_by_device_id") else s.get("shared_by_name")
+        orig_username = s.get("orig_shared_by_username") if s.get("original_shared_by_device_id") else s.get("shared_by_username")
+        reposter_name = s.get("shared_by_name")
+        reposter_username = s.get("shared_by_username")
+
+        has_reposted = (
+            (s.get("media_id") in user_reposted_media if s.get("media_id") else False)
+            or (s["share_id"] in user_reposted_shares)
+            or (s.get("post_kind") == "reel_repost" and s.get("shared_by_device_id") == device_id)
+        )
+
+        sharer_dev_id = s["shared_by_device_id"]
+        if is_library_reel:
+            display_name = library_label
+        elif sharer_dev_id == "desktop-server":
+            display_name = device_repo.get_device_display_name("desktop-server")
+        else:
+            formatted = device_repo.format_device_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=sharer_dev_id)
+            display_name = formatted if formatted != "Unknown device" else device_repo.get_device_display_name(sharer_dev_id, fallback=sharer_dev_id)
+
+        if is_library_reel:
+            orig_disp = library_label
+            orig_author_name = library_label
+        elif orig_id == "desktop-server":
+            orig_disp = device_repo.get_device_display_name("desktop-server")
+            orig_author_name = orig_name or orig_disp
+        else:
+            formatted_orig = device_repo.format_device_display_name(orig_username, orig_name, device_id=orig_id)
+            orig_disp = formatted_orig if formatted_orig != "Unknown device" else (orig_name or device_repo.get_device_display_name(orig_id, fallback=orig_id))
+            orig_author_name = orig_name
+
+        if reposter_name or reposter_username or s["shared_by_device_id"] == "desktop-server":
+            if s["shared_by_device_id"] == "desktop-server":
+                reposter_disp = device_repo.get_device_display_name("desktop-server")
+            else:
+                formatted_rep = device_repo.format_device_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"])
+                reposter_disp = formatted_rep if formatted_rep != "Unknown device" else (reposter_name or device_repo.get_device_display_name(s["shared_by_device_id"], fallback=s["shared_by_device_id"]))
+        else:
+            reposter_disp = s["shared_by_device_id"]
+
+        reels.append({
+            "reel_id": reel_id,
+            "share_id": s["share_id"],
+            "media_id": s.get("media_id"),
+            "path": s["relative_path"],
+            "shared_by": display_name,
+            "shared_by_device_id": orig_id if is_library_reel else s["shared_by_device_id"],
+            "is_repost": is_repost,
+            "user_has_reposted": has_reposted,
+            "original_author": {
+                "device_id": orig_id,
+                "name": orig_author_name,
+                "username": None if is_library_reel else orig_username,
+                "display_name": orig_disp,
+            },
+            "reposted_by": {
+                "device_id": s["shared_by_device_id"],
+                "name": reposter_name,
+                "username": reposter_username,
+                "display_name": reposter_disp,
+            } if is_repost else None,
+            "caption": s.get("group_caption") or s.get("caption"),
+            "created_at": s["created_at"],
+            "watched_at": s.get("watched_at"),
+            "watch_time_sec": s.get("watch_time_sec", 0.0),
+            "duration_sec": s.get("duration_sec", 0.0),
+            "is_saved": reel_id in saved_ids or str(s["share_id"]) in saved_ids,
+            "reaction_counts": counts_map.get(s["media_id"], {}) if s.get("media_id") else {},
+            "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
+            "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+            "repost_count": repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+            "is_own_post": s["shared_by_device_id"] == device_id and not is_library_reel,
+            "group_id": s.get("share_group_id"),
+        })
+
+    total = len(reels)
+    return {"reels": reels, "has_more": (offset + limit) < total or len(video_rows) == limit, "total": total}
+
+
+@router.delete("/api/reels/history/{reel_id:path}")
+@router.delete("/reels/history/{reel_id:path}")
+async def delete_watch_history(
+    reel_id: str,
+    device_id: str = Query(...),
+    share_id: int | None = Query(None),
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    deleted = reels_repo.delete_watch_history_item(device_id, reel_id, share_id)
+    return {"ok": True, "deleted": deleted, "reel_id": reel_id}
+
+
+@router.delete("/api/reels/history")
+@router.delete("/reels/history")
+async def delete_watch_history_query(
+    device_id: str = Query(...),
+    reel_id: str | None = Query(None),
+    share_id: int | None = Query(None),
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    target_reel_id = reel_id or (str(share_id) if share_id is not None else "")
+    if not target_reel_id:
+        raise HTTPException(status_code=400, detail="reel_id or share_id required")
+    deleted = reels_repo.delete_watch_history_item(device_id, target_reel_id, share_id)
+    return {"ok": True, "deleted": deleted, "reel_id": target_reel_id}

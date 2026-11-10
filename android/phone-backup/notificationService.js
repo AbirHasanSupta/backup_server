@@ -369,11 +369,35 @@ function sharedPostNotificationTrigger() {
   return Platform.OS === 'android' ? { channelId: SHARED_POST_CHANNEL_ID } : null;
 }
 
+export async function showDevicePairedNotification(deviceName) {
+  if (!N) return;
+  try {
+    const name = (deviceName || '').trim() || 'Nearby Device';
+    await N.scheduleNotificationAsync({
+      content: {
+        title: `🔗 Device Paired: ${name}`,
+        body: `"${name}" is now paired for direct Wi-Fi transfers.`,
+        data: { type: 'p2p_paired', device_name: name },
+      },
+      trigger: sharedPostNotificationTrigger(),
+    });
+  } catch (e) {
+    console.warn('[Notifications] showDevicePairedNotification failed:', e?.message);
+  }
+}
+
 export async function showNewSharePostNotification(post) {
   if (!N || !post) return;
   try {
-    const sharer = post.shared_by || 'Someone';
-    const count = post.item_count || 1;
+    const sharer = (
+      post.shared_by ||
+      post.shared_by_name ||
+      post.shared_by_device_name ||
+      post.shared_by_username ||
+      post.device_name ||
+      'Nearby Device'
+    ).trim() || 'Nearby Device';
+    const count = post.files_count || post.item_count || 1;
     let body = post.caption || null;
     if (!body && post.post_kind === 'quiz' && post.post_title) {
       body = `Guess the Year · ${post.post_title}`;
@@ -385,7 +409,7 @@ export async function showNewSharePostNotification(post) {
       content: {
         title: `📸 New post from ${sharer}`,
         body,
-        data: { type: 'shared_post', group_id: post.group_id },
+        data: { type: 'shared_post', group_id: post.group_id || post.id },
       },
       trigger: sharedPostNotificationTrigger(),
     });

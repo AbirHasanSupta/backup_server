@@ -12,8 +12,11 @@ import { AppIcon } from '@/components/AppIcon';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
 import { ShareModal } from '@/components/ShareModal';
+import { setUIPriorityMode } from '../../backgroundTask';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
 import {
   getRouletteItem,
+
   getConfig,
   buildPreviewUrl,
   buildVideoPreviewUrl,
@@ -50,15 +53,7 @@ const SHAKE_DEBOUNCE_MS = 3000;
  * Returns the source label fallback string when capture_time is absent.
  */
 function formatCaptureDate(captureTime: number | null | undefined, fallback: string): string {
-  if (!captureTime) return fallback;
-  try {
-    const d = new Date(captureTime * 1000);
-    const datePart = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-    const timePart = d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-    return `${datePart} · ${timePart}`;
-  } catch {
-    return fallback;
-  }
+  return formatCaptureDateTime(captureTime) || fallback;
 }
 
 interface ServerConfig {
@@ -192,7 +187,9 @@ export default function RouletteScreen() {
   // playing video/animation and reset to a fresh state when it loses focus.
   useFocusEffect(
     useCallback(() => {
+      setUIPriorityMode(true);
       return () => {
+        setUIPriorityMode(false);
         stopSpinAnimation();
         setPhase('idle');
         setItem(null);
@@ -200,6 +197,7 @@ export default function RouletteScreen() {
       };
     }, [stopSpinAnimation]),
   );
+
 
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -398,6 +396,7 @@ export default function RouletteScreen() {
         visible={feedShareVisible}
         count={1}
         colors={colors}
+        excludeDeviceIds={serverConfig?.deviceId ? [serverConfig.deviceId] : []}
         onClose={() => setFeedShareVisible(false)}
         onSubmit={handleFeedShareSubmit}
       />

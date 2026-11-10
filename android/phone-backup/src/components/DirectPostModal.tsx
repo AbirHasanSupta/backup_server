@@ -23,6 +23,9 @@ import {
   listShareTargetDevices,
   DIRECT_POST_MAX_FILES,
   DIRECT_POST_MAX_FILE_BYTES,
+  DESKTOP_SHARE_DEVICE_ID,
+  resolveExcludedShareRecipientIds,
+  filterShareRecipientDevices,
 } from '../../downloader';
 import { useModalKeyboardHeight } from '@/hooks/useKeyboardHeight';
 import { sanitizeErrorMessage } from '@/utils/errorUtils';
@@ -109,11 +112,15 @@ export function DirectPostModal({
 
     let active = true;
     setLoadingDevices(true);
-    listShareTargetDevices()
-      .then((res) => {
+    Promise.all([
+      listShareTargetDevices(),
+      resolveExcludedShareRecipientIds(),
+    ])
+      .then(([res, excluded]) => {
         if (!active) return;
         const list = Array.isArray(res?.devices) ? res.devices : [];
-        const filtered = list.filter((d) => d.device_id !== 'desktop-server');
+        excluded.add(DESKTOP_SHARE_DEVICE_ID);
+        const filtered = filterShareRecipientDevices(list, excluded);
         setDevices(filtered);
         setSelectedDevices(new Set(filtered.map((d) => d.device_id)));
       })
@@ -226,12 +233,20 @@ export function DirectPostModal({
       return;
     }
 
+    const targetIds = Array.from(selectedDevices).filter(
+      (id) => id !== DESKTOP_SHARE_DEVICE_ID && devices.some((d) => d.device_id === id),
+    );
+    if (targetIds.length === 0) {
+      Alert.alert('No devices selected', 'Please select at least one target device to share with.');
+      return;
+    }
+
     setPosting(true);
     setPostProgressText(`Uploading ${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'}…`);
     try {
       await onSubmit(
         selectedFiles,
-        Array.from(selectedDevices),
+        targetIds,
         caption.trim(),
         (statusText) => setPostProgressText(statusText),
       );
@@ -244,9 +259,9 @@ export function DirectPostModal({
   }, [
     loadingDevices,
     devicesError,
-    devices.length,
     selectedFiles,
     selectedDevices,
+    devices,
     caption,
     onSubmit,
     onClose,
@@ -434,9 +449,9 @@ export function DirectPostModal({
                       ]}
                     >
                       <AppIcon
-                        androidName={active ? 'check' : 'phone_android'}
-                        iosName={active ? 'checkmark' : 'iphone'}
-                        color={active ? colors.primary : colors.textSecondary}
+                        androidName={active ? 'check' : ((d as any).is_p2p ? 'wifi' : 'phone_android')}
+                        iosName={active ? 'checkmark' : ((d as any).is_p2p ? 'wifi' : 'iphone')}
+                        color={active ? colors.primary : ((d as any).is_p2p ? '#10B981' : colors.textSecondary)}
                         size={14}
                       />
                       <Text
@@ -448,6 +463,11 @@ export function DirectPostModal({
                       >
                         {d.display_name || d.device_name || d.device_id}
                       </Text>
+                      {Boolean((d as any).is_p2p) && (
+                        <View style={styles.p2pBadge}>
+                          <Text style={styles.p2pBadgeText}>P2P</Text>
+                        </View>
+                      )}
                     </TouchableOpacity>
                   );
                 })}
@@ -670,6 +690,18 @@ const styles = StyleSheet.create({
   deviceChipText: {
     fontSize: TextScale.xs,
     fontWeight: '700',
+  },
+  p2pBadge: {
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: Radius.full,
+    marginLeft: 3,
+  },
+  p2pBadgeText: {
+    color: '#10B981',
+    fontSize: 9,
+    fontWeight: '800',
   },
   submitBtn: {
     borderRadius: Radius.full,

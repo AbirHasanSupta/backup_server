@@ -133,8 +133,15 @@ export async function connectToServer(serverIp, serverPort, apiKey) {
         hostname: result.hostname || '',
         connectionMode,
       });
+
+      // Warm real-time WebSocket event connection
+      try {
+        const { connectWebSocket } = require('./websocketClient');
+        void connectWebSocket();
+      } catch {}
     }
     return result;
+
   } catch (err) {
     clearTimeout(timer);
     if (err?.name === 'AbortError') {

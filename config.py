@@ -14,6 +14,12 @@ _EXE_DIR = os.path.dirname(os.path.abspath(sys.executable)) if _IS_FROZEN else _
 
 
 def _get_app_data_dir() -> str:
+    # Headless/container deployments need an explicit persistent data location.
+    # Keep the historic source-directory default for local development, while
+    # allowing Docker/Kubernetes to mount a durable application-data volume.
+    configured_dir = os.environ.get("APP_DATA_DIR")
+    if configured_dir:
+        return os.path.abspath(configured_dir)
     if not _IS_FROZEN:
         return _MODULE_DIR
 
@@ -31,6 +37,10 @@ os.makedirs(APP_DATA_DIR, exist_ok=True)
 # Persisted quiz-result cards shared to the device feed (deleted with the post).
 SHARED_QUIZ_DIR = os.path.join(APP_DATA_DIR, "shared_quiz_cards")
 os.makedirs(SHARED_QUIZ_DIR, exist_ok=True)
+SHARED_REWIND_DIR = os.path.join(APP_DATA_DIR, "shared_rewind_reels")
+SHARED_DIRECT_POST_DIR = os.path.join(APP_DATA_DIR, "shared_direct_posts")
+os.makedirs(SHARED_REWIND_DIR, exist_ok=True)
+os.makedirs(SHARED_DIRECT_POST_DIR, exist_ok=True)
 
 CONFIG_FILE = os.path.join(APP_DATA_DIR, "server_config.json")
 DB_PATH = os.path.join(APP_DATA_DIR, "backup.db")
@@ -39,12 +49,12 @@ _PORTABLE_CONFIG_FILE = os.path.join(_EXE_DIR, "server_config.json")
 _PORTABLE_DB_PATH = os.path.join(_EXE_DIR, "backup.db")
 
 _DEFAULTS = {
-    "API_KEY": "YOUR_SECRET_KEY",
-    "BACKUP_ROOT": os.path.join("D:\\", "PhoneBackup"),
-    "HOST": "0.0.0.0",
-    "PORT": 8000,
+    "API_KEY": os.environ.get("API_KEY", "YOUR_SECRET_KEY"),
+    "BACKUP_ROOT": os.environ.get("BACKUP_ROOT") or os.path.join("D:\\", "PhoneBackup"),
+    "HOST": os.environ.get("HOST", "0.0.0.0"),
+    "PORT": int(os.environ.get("PORT", 8000)),
     "DB_PATH": DB_PATH,
-    "REQUIRE_APPROVAL": True,
+    "REQUIRE_APPROVAL": os.environ.get("REQUIRE_APPROVAL", "true").lower() in ("1", "true", "yes") if "REQUIRE_APPROVAL" in os.environ else True,
     "THEME_MODE": "light",
     "SSL_CERT": os.path.join(APP_DATA_DIR, "cert.pem"),
     "SSL_KEY": os.path.join(APP_DATA_DIR, "key.pem"),
@@ -58,12 +68,117 @@ _DEFAULTS = {
     # List of dicts: [{id: str, label: str, path: str}, ...]
     # IDs are stable slugs like "shared_0", "shared_1", etc.
     "SHARED_DIRS": [],
+    # Public Google Drive folders are listed/downloaded through Drive API v3.
+    # The key should be restricted to the Drive API in Google Cloud Console.
+    "GOOGLE_DRIVE_API_KEY": os.environ.get("GOOGLE_DRIVE_API_KEY", ""),
     "START_WITH_WINDOWS": False,
     "MINIMIZE_TO_TRAY": True,
     # Display name shown on feed cards for posts sent from this desktop server.
     # Defaults to the machine's hostname; can be changed in Settings.
     "DESKTOP_NAME": platform.node() or "Desktop Server",
+    # Database Backend: "sqlite" for standalone desktop, "postgres" for multi-user/server
+    "DATABASE_BACKEND": os.environ.get("DATABASE_BACKEND", "sqlite"),
+    "POSTGRES_URL": os.environ.get("POSTGRES_URL") or os.environ.get("DATABASE_URL") or "postgresql://postgres:postgres@localhost:5432/backup_db",
+    "REDIS_URL": os.environ.get("REDIS_URL") or "redis://localhost:6379/0",
+    "CELERY_ENABLED": os.environ.get("CELERY_ENABLED", "0").lower() in ("1", "true", "yes"),
+    "STORAGE_BACKEND": os.environ.get("STORAGE_BACKEND", "local"),
+    # Resumable uploads are intentionally bounded.  The mobile client sends
+    # 8 MiB chunks, which keeps JS/native bridge memory stable on large videos.
+    "MAX_UPLOAD_CHUNK_BYTES": int(os.environ.get("MAX_UPLOAD_CHUNK_BYTES", 8 * 1024 * 1024)),
+    "MAX_UPLOAD_CHUNKS": int(os.environ.get("MAX_UPLOAD_CHUNKS", 131072)),
+    "UPLOAD_SESSION_TTL_SECONDS": int(os.environ.get("UPLOAD_SESSION_TTL_SECONDS", 24 * 60 * 60)),
+    # Native Android requests are not subject to browser CORS.  Browser
+    # origins must be explicitly allowlisted by a web deployment.
+    "CORS_ORIGINS": os.environ.get("CORS_ORIGINS", ""),
+    "CORS_ALLOW_CREDENTIALS": os.environ.get("CORS_ALLOW_CREDENTIALS", "0").lower() in ("1", "true", "yes"),
+    # Comma-separated host LAN IPs advertised in /ping for Docker discovery.
+    # Container-local probes often only see unreachable 172.x bridge addresses.
+    "ADVERTISED_IPS": os.environ.get("ADVERTISED_IPS") or os.environ.get("HOST_LAN_IPS") or "",
+    # Optional published/proxy port for phone discovery. None → use listen PORT
+    # so desktop custom ports keep working unchanged.
+    "ADVERTISED_PORT": None,
+    # Tailscale endpoints for Docker (CLI is on the host, not in the image).
+    # Same structured ``tailscale`` field desktop gets from ``tailscale status``.
+    # Values come from env via _apply_environment_overrides (blank env ignored).
+    "TAILSCALE_IPS": "",
+    "TAILSCALE_DNS_NAME": "",
 }
+
+# Environment values are deployment-owned secrets/runtime settings.  They take
+# precedence over a persisted desktop configuration when the process runs in a
+# container or service manager, preventing an old volume from silently
+# reverting a rotated API/database credential.
+_ENV_CONFIG_KEYS = {
+    "API_KEY": str,
+    "BACKUP_ROOT": str,
+    "HOST": str,
+    "PORT": int,
+    "DATABASE_BACKEND": str,
+    "POSTGRES_URL": str,
+    "REDIS_URL": str,
+    "STORAGE_BACKEND": str,
+    "MAX_UPLOAD_CHUNK_BYTES": int,
+    "MAX_UPLOAD_CHUNKS": int,
+    "UPLOAD_SESSION_TTL_SECONDS": int,
+    "CORS_ORIGINS": str,
+    "ADVERTISED_IPS": str,
+    "ADVERTISED_PORT": int,
+    "TAILSCALE_IPS": str,
+    "TAILSCALE_DNS_NAME": str,
+    "GOOGLE_DRIVE_API_KEY": str,
+}
+
+
+def _apply_environment_overrides(cfg: dict) -> dict:
+    for key, converter in _ENV_CONFIG_KEYS.items():
+        value = os.environ.get(key)
+        if value is None:
+            continue
+        # Blank compose-injected env (TAILSCALE_IPS=) must not wipe values from
+        # server_config.json.  Same for optional string discovery knobs.
+        if converter is str and not str(value).strip() and key in (
+            "TAILSCALE_IPS",
+            "TAILSCALE_DNS_NAME",
+            "ADVERTISED_IPS",
+            "GOOGLE_DRIVE_API_KEY",
+        ):
+            continue
+        try:
+            cfg[key] = converter(value)
+        except (TypeError, ValueError):
+            # Invalid values remain visible in the persisted configuration
+            # rather than preventing the server from starting unexpectedly.
+            pass
+    # Alias env keys used in docs / older templates.
+    if not str(cfg.get("TAILSCALE_IPS") or "").strip():
+        alias_ips = os.environ.get("ADVERTISED_TAILSCALE_IPS")
+        if alias_ips is not None and str(alias_ips).strip():
+            cfg["TAILSCALE_IPS"] = str(alias_ips).strip()
+    if not str(cfg.get("TAILSCALE_DNS_NAME") or "").strip():
+        alias_dns = os.environ.get("ADVERTISED_TAILSCALE_DNS")
+        if alias_dns is not None and str(alias_dns).strip():
+            cfg["TAILSCALE_DNS_NAME"] = str(alias_dns).strip()
+    if "CELERY_ENABLED" in os.environ:
+        cfg["CELERY_ENABLED"] = os.environ["CELERY_ENABLED"].lower() in ("1", "true", "yes")
+    if "REQUIRE_APPROVAL" in os.environ:
+        cfg["REQUIRE_APPROVAL"] = os.environ["REQUIRE_APPROVAL"].lower() in ("1", "true", "yes")
+    if "CORS_ALLOW_CREDENTIALS" in os.environ:
+        cfg["CORS_ALLOW_CREDENTIALS"] = os.environ["CORS_ALLOW_CREDENTIALS"].lower() in ("1", "true", "yes")
+    # Prefer explicit ADVERTISED_PORT; fall back to PORT. Never crash on bad values.
+    for port_key in ("ADVERTISED_PORT", "PORT"):
+        raw = os.environ.get(port_key)
+        if raw is None or not str(raw).strip():
+            continue
+        try:
+            cfg[port_key] = int(str(raw).strip())
+        except (TypeError, ValueError):
+            pass
+    if not cfg.get("ADVERTISED_PORT"):
+        try:
+            cfg["ADVERTISED_PORT"] = int(cfg.get("PORT") or 8000)
+        except (TypeError, ValueError):
+            cfg["ADVERTISED_PORT"] = 8000
+    return cfg
 
 _AUTOSTART_KEY_NAME = APP_NAME
 _AUTOSTART_REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -176,7 +291,7 @@ def load_config() -> dict:
         if data is None and _IS_FROZEN:
             data = _load_json(_PORTABLE_CONFIG_FILE)
 
-        cfg = {**_DEFAULTS, **(data or {})}
+        cfg = _apply_environment_overrides({**_DEFAULTS, **(data or {})})
         if _IS_FROZEN:
             cfg["DB_PATH"] = DB_PATH
 
@@ -199,10 +314,18 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> None:
     global _config_cache, _config_cache_mtime
     with _config_lock:
-        existing_server_id = (_config_cache or {}).get("SERVER_ID")
+        existing = _config_cache if isinstance(_config_cache, dict) else {}
+        if not existing:
+            existing = _load_json(CONFIG_FILE) or {}
+        existing_server_id = existing.get("SERVER_ID")
         merged = {**_DEFAULTS, **cfg}
         if existing_server_id and not merged.get("SERVER_ID"):
             merged["SERVER_ID"] = existing_server_id
+        # Desktop settings save is a partial dict. Preserve Docker Tailscale
+        # overrides that were set in the shared config file / prior load.
+        for key in ("TAILSCALE_IPS", "TAILSCALE_DNS_NAME"):
+            if key not in cfg and existing.get(key):
+                merged[key] = existing[key]
         if _IS_FROZEN:
             merged["DB_PATH"] = DB_PATH
 
@@ -264,7 +387,23 @@ REQUIRE_APPROVAL = bool(_cfg.get("REQUIRE_APPROVAL", True))
 
 def get_shared_dirs() -> list:
     """Always read from the live config so access changes take effect without restart."""
-    return load_config().get("SHARED_DIRS", [])
+    dirs = load_config().get("SHARED_DIRS", [])
+    if not isinstance(dirs, list):
+        return []
+    try:
+        from core.path_utils import normalize_fs_path
+        res = []
+        for d in dirs:
+            if isinstance(d, dict):
+                entry = dict(d)
+                if "path" in entry and entry.get("type") != "google_drive" and entry.get("kind") != "google_drive":
+                    entry["path"] = normalize_fs_path(entry["path"])
+                res.append(entry)
+            else:
+                res.append(d)
+        return res
+    except Exception:
+        return dirs
 
 
 # Backward-compat shim: behaves like a list at import time but warns callers

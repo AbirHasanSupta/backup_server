@@ -1,0 +1,274 @@
+"""api/v1/memories.py — On-This-Day, Flashbacks, Quiz, Wrapped, Places & Rewind Video Router."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from datetime import date
+from pydantic import BaseModel
+from fastapi import APIRouter, Header, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse, JSONResponse
+
+from core.security import verify_api_key_or_device_token
+from core.timeutil import resolve_local_today
+from repositories import device_repo
+from services.preview_service import preview_service
+from services import places_trips_cache
+import memories
+import rewind
+
+router = APIRouter(tags=["Memories & Rewind"])
+
+# Date-keyed calendars must never be cached by browsers/proxies across midnight.
+_NO_STORE_HEADERS = {"Cache-Control": "private, no-store"}
+
+
+class RewindGenerateRequest(BaseModel):
+    device_id: str | None = None
+    year: int | None = None
+    month: int | None = None
+
+
+def _client_calendar_kwargs(
+    local_date: str | None,
+    tz_offset_minutes: int | None,
+) -> dict:
+    return {
+        "local_date": local_date,
+        "tz_offset_minutes": tz_offset_minutes,
+    }
+
+
+def _no_store_json(payload):
+    return JSONResponse(content=payload, headers=_NO_STORE_HEADERS)
+
+
+@router.get("/memories/today")
+@router.get("/api/memories/today")
+async def get_memories_today(
+    device_id: str,
+    local_date: str | None = Query(None, description="Client local calendar day YYYY-MM-DD"),
+    tz_offset_minutes: int | None = Query(
+        None,
+        description="JS Date.getTimezoneOffset() — minutes behind UTC",
+    ),
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    res = await asyncio.to_thread(
+        memories.get_todays_memories,
+        device_id,
+        **_client_calendar_kwargs(local_date, tz_offset_minutes),
+    )
+    return _no_store_json(res)
+
+
+@router.get("/memories/recent")
+@router.get("/api/memories/recent")
+async def get_memories_recent(
+    device_id: str,
+    days: int = 7,
+    local_date: str | None = Query(None, description="Client local calendar day YYYY-MM-DD"),
+    tz_offset_minutes: int | None = Query(
+        None,
+        description="JS Date.getTimezoneOffset() — minutes behind UTC",
+    ),
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    res = await asyncio.to_thread(
+        memories.get_recent_memories,
+        device_id,
+        days,
+        **_client_calendar_kwargs(local_date, tz_offset_minutes),
+    )
+    return _no_store_json(res)
+
+
+@router.post("/memories/reindex")
+@router.post("/api/memories/reindex")
+async def trigger_reindex(
+    device_id: str | None = None,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    if device_id:
+        await asyncio.to_thread(memories.reindex_device, device_id)
+        places_trips_cache.invalidate_all_for_device(device_id)
+    else:
+        await asyncio.to_thread(memories.reindex_all)
+        places_trips_cache.invalidate_places()
+        places_trips_cache.invalidate_trips()
+    return {"ok": True, "message": "Reindex triggered"}
+
+
+@router.get("/memories/flashback")
+@router.get("/api/memories/flashback")
+async def get_flashback(
+    device_id: str,
+    local_date: str | None = Query(None, description="Client local calendar day YYYY-MM-DD"),
+    tz_offset_minutes: int | None = Query(
+        None,
+        description="JS Date.getTimezoneOffset() — minutes behind UTC",
+    ),
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    res = await asyncio.to_thread(
+        memories.get_random_flashback,
+        device_id,
+        **_client_calendar_kwargs(local_date, tz_offset_minutes),
+    )
+    return _no_store_json(res)
+
+
+@router.get("/memories/wrapped")
+@router.get("/api/memories/wrapped")
+async def get_wrapped(
+    device_id: str,
+    year: int | None = None,
+    local_date: str | None = Query(None),
+    tz_offset_minutes: int | None = Query(None),
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    target_year = year or resolve_local_today(local_date, tz_offset_minutes).year
+    res = await asyncio.to_thread(memories.get_wrapped, device_id, target_year)
+    return res
+
+
+@router.get("/memories/quiz")
+@router.get("/api/memories/quiz")
+async def get_quiz(
+    device_id: str,
+    count: int = 10,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    res = await asyncio.to_thread(memories.get_quiz_round, device_id, count)
+    return res
+
+
+@router.get("/memories/roulette")
+@router.get("/api/memories/roulette")
+async def get_roulette(
+    device_id: str,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    res = await asyncio.to_thread(memories.get_roulette_item, device_id)
+    return res
+
+
+@router.get("/memories/places")
+@router.get("/api/memories/places")
+async def get_places(
+    device_id: str,
+    refresh: int = Query(0),
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    cache_key = places_trips_cache.places_clusters_key(device_id)
+    if not refresh:
+        cached = await asyncio.to_thread(places_trips_cache.get_cached, cache_key)
+        if cached is not None:
+            return cached
+    res = await asyncio.to_thread(memories.get_place_clusters, device_id)
+    await asyncio.to_thread(places_trips_cache.set_cached, cache_key, res)
+    return res
+
+
+@router.get("/memories/places/{cluster_key}")
+@router.get("/api/memories/places/{cluster_key}")
+async def get_place_details(
+    cluster_key: str,
+    device_id: str,
+    refresh: int = Query(0),
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    cache_key = places_trips_cache.places_items_key(device_id, cluster_key)
+    if not refresh:
+        cached = await asyncio.to_thread(places_trips_cache.get_cached, cache_key)
+        if cached is not None:
+            return cached
+    res = await asyncio.to_thread(memories.get_place_items, device_id, cluster_key)
+    await asyncio.to_thread(places_trips_cache.set_cached, cache_key, res)
+    return res
+
+
+@router.post("/memories/rewind/generate")
+@router.post("/api/memories/rewind/generate")
+async def generate_rewind(
+    device_id: str | None = Query(None),
+    year: int | None = Query(None),
+    month: int | None = Query(None),
+    body: RewindGenerateRequest | None = None,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    dev_id = (body.device_id if body and body.device_id else device_id)
+    target_year = (body.year if body and body.year is not None else year)
+    target_month = (body.month if body and body.month is not None else month)
+    if not dev_id or target_year is None:
+        raise HTTPException(status_code=400, detail="device_id and year are required")
+    verify_api_key_or_device_token(authorization, token, dev_id, device_repo.verify_device_token)
+    res = await asyncio.to_thread(rewind.start_rewind_build, dev_id, target_year, target_month)
+    return res
+
+
+@router.get("/memories/rewind/status")
+@router.get("/api/memories/rewind/status")
+async def get_rewind_status(
+    device_id: str,
+    year: int,
+    month: int | None = None,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    res = await asyncio.to_thread(rewind.get_rewind_status, device_id, year, month)
+    return res
+
+
+@router.get("/memories/rewind/stream")
+@router.get("/api/memories/rewind/stream")
+async def stream_rewind(
+    device_id: str,
+    year: int,
+    request: Request,
+    month: int | None = None,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    reel_path = await asyncio.to_thread(rewind.get_rewind_path, device_id, year, month)
+    if not reel_path or not os.path.isfile(reel_path):
+        raise HTTPException(status_code=404, detail="Rewind reel not found or not ready yet")
+    return preview_service.stream_file_range(reel_path, request, cache_control="public, max-age=604800, immutable")
+
+
+@router.get("/memories/rewind/download")
+@router.get("/api/memories/rewind/download")
+async def download_rewind(
+    device_id: str,
+    year: int,
+    month: int | None = None,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    reel_path = await asyncio.to_thread(rewind.get_rewind_path, device_id, year, month)
+    if not reel_path or not os.path.isfile(reel_path):
+        raise HTTPException(status_code=404, detail="Rewind reel not found or not ready yet")
+    filename = f"rewind_{device_id}_{year}" + (f"_{month:02d}" if month else "") + ".mp4"
+    return FileResponse(reel_path, media_type="video/mp4", filename=filename)

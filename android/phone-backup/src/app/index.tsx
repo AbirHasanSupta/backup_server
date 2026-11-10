@@ -10,6 +10,7 @@ import {
   RefreshControl,
   Modal,
   TouchableOpacity,
+  AppState,
 } from 'react-native';
 import Animated, {
   FadeIn,
@@ -24,6 +25,8 @@ import {
   runSync,
 } from '../../backgroundTask';
 import { checkDeviceConnection } from '../../uploader';
+import { getPairedPeers } from '../../p2pSettings';
+import { setServerAvailable } from '../../connectionMode';
 import {
   getServerIp,
   getServerName,
@@ -36,7 +39,6 @@ import {
   getFolders,
   formatSyncIntervalLabel,
   saveServerProfile,
-  resolveReachableServer,
   getConnectionMode,
   formatHostForUrl,
 } from '../../settings';
@@ -52,17 +54,15 @@ import { StreakBadge } from '@/components/StreakBadge';
 import { getPendingBackupSummary, invalidatePendingBackupCache } from '../../pendingBackup';
 import { getCleanupSummary, invalidateCleanupCache, formatFreeUpBytes } from '../../freeUpStorage';
 import { hapticMedium, hapticWarning, hapticError } from '@/utils/haptics';
+import { formatRelativeOrLocal } from '@/utils/dateFormat';
 
 function formatRelativeTime(ts: number | null): string {
-  if (!ts) return 'Never';
-  const seconds = Math.floor((Date.now() - ts) / 1000);
-  if (seconds < 60) return 'Just now';
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  // After 24h show absolute local AM/PM so "Last sync" isn't forever "Nd ago".
+  return formatRelativeOrLocal(ts, {
+    assumeSeconds: false,
+    maxRelativeSeconds: 86400,
+    neverLabel: 'Never',
+  });
 }
 
 function applyProgressUpdate(
@@ -183,7 +183,6 @@ export default function HomeScreen() {
   const [syncPaused, setSyncPausedState] = useState(false);
   const [stopRequested, setStopRequested] = useState(false);
   const [forceStopPressedAt, setForceStopPressedAt] = useState<number | null>(null);
-  const [, setRelativeTimeTick] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [streakData, setStreakData] = useState<{
     currentStreak: number;
@@ -204,6 +203,24 @@ export default function HomeScreen() {
 
   const [serverStatus, setServerStatus] = useState<ServerStatus>('unknown');
   const [serverLabel, setServerLabel] = useState('No server');
+  const [pairedPeers, setPairedPeersState] = useState<any[]>([]);
+
+  useEffect(() => {
+    const sub1 = DeviceEventEmitter.addListener('p2p-peers-updated', (updated?: any[]) => {
+      if (Array.isArray(updated)) {
+        setPairedPeersState(updated);
+      } else {
+        getPairedPeers().then((peers) => setPairedPeersState(peers || [])).catch(() => {});
+      }
+    });
+    const sub2 = DeviceEventEmitter.addListener('p2p-peer-paired', () => {
+      getPairedPeers().then((peers) => setPairedPeersState(peers || [])).catch(() => {});
+    });
+    return () => {
+      sub1.remove();
+      sub2.remove();
+    };
+  }, []);
 
   const {
     onScroll,
@@ -220,14 +237,18 @@ export default function HomeScreen() {
     topInset: insets.top,
   });
 
+  const failureCountRef = useRef(0);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const loadAll = useCallback(async () => {
-    const [lt, ts, si, paused, ip, name] = await Promise.all([
+    const [lt, ts, si, paused, ip, name, peers] = await Promise.all([
       getLastSyncTime(),
       getTotalSynced(),
       getSyncInterval(),
       getSyncPaused(),
       getServerIp(),
       getServerName(),
+      getPairedPeers().catch(() => []),
     ]);
 
     setLastSyncTimeState(lt);
@@ -235,9 +256,11 @@ export default function HomeScreen() {
     setSyncIntervalState(si);
     setSyncPausedState(paused);
     setServerLabel(name || ip || 'No server');
+    setPairedPeersState(Array.isArray(peers) ? peers : []);
 
     if (!ip) {
       setServerStatus('unknown');
+      failureCountRef.current = 0;
       return;
     }
 
@@ -279,27 +302,29 @@ export default function HomeScreen() {
 
     if (syncingRef.current) {
       setServerStatus('connected');
+      void setServerAvailable(true);
+      failureCountRef.current = 0;
       return;
     }
 
     setServerStatus(prev => (prev === 'connected' ? prev : 'checking'));
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
+    const timeout = setTimeout(() => controller.abort(), 5000);
     try {
       const result = await checkDeviceConnection({ signal: controller.signal });
       clearTimeout(timeout);
       setServerStatus(result.connected ? 'connected' : 'removed');
+      void setServerAvailable(result.connected);
+      if (result.connected) {
+        failureCountRef.current = 0;
+      } else {
+        failureCountRef.current += 1;
+      }
     } catch {
       clearTimeout(timeout);
-      const resolved = await resolveReachableServer().catch(() => ({ ok: false }));
-      if (resolved.ok && resolved.reconnected) {
-        try {
-          const result = await checkDeviceConnection();
-          setServerStatus(result.connected ? 'connected' : 'removed');
-          return;
-        } catch {}
-      }
+      failureCountRef.current += 1;
       setServerStatus('disconnected');
+      void setServerAvailable(false);
     }
   }, []);
 
@@ -366,8 +391,8 @@ export default function HomeScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      // Skip the heavy loadAll() (5 parallel AsyncStorage reads + server probe)
-      // if a sync is actively running. The sync events keep the UI up to date.
+      // Reset backoff so screen immediately refreshes on open
+      failureCountRef.current = 0;
       if (!syncingRef.current) {
         loadAll();
       }
@@ -378,33 +403,47 @@ export default function HomeScreen() {
     }, [applySyncSnapshot, loadAll, loadStreak, loadPendingSummary, loadCleanupSummary])
   );
 
+  // Adaptive health-check polling with exponential backoff and AppState lifecycle awareness
   useEffect(() => {
-    const id = setInterval(() => setRelativeTimeTick((t) => t + 1), 30000);
-    return () => clearInterval(id);
-  }, []);
+    let appActive = AppState.currentState === 'active';
 
-  useEffect(() => {
-    // Do not poll loadAll() while sync is active — it fires 5 parallel AsyncStorage
-    // reads every 15 s and competes with the sync engine's own throttled writes.
-    // The sync-completed / sync-failed events call loadAll() explicitly when needed.
-    if (syncing) return;
-    const id = setInterval(() => {
-      loadAll();
-    }, 15000);
-    return () => clearInterval(id);
-  }, [loadAll, syncing]);
+    const schedulePoll = () => {
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+      if (syncing || !appActive) return;
 
-  useEffect(() => {
-    // During active sync the UI is driven by DeviceEventEmitter events
-    // (sync-started / sync-progress / sync-state / sync-completed).
-    // We only keep a 5 s safety-net poll so cross-context syncs (background
-    // service in a separate JS context) still surface their state without
-    // flooding AsyncStorage on every second.
-    const id = setInterval(() => {
-      getCurrentSyncState().then(applySyncSnapshot).catch(() => {});
-    }, syncing ? 5000 : 3000);
-    return () => clearInterval(id);
-  }, [applySyncSnapshot, syncing]);
+      const step = Math.min(failureCountRef.current, 4);
+      const delay = (serverStatus === 'disconnected' || serverStatus === 'unknown')
+        ? [15000, 30000, 60000, 120000, 180000][step]
+        : 30000;
+
+      pollTimerRef.current = setTimeout(() => {
+        if (appActive && !syncingRef.current) {
+          void loadAll();
+        }
+      }, delay);
+    };
+
+    schedulePoll();
+
+    const sub = AppState.addEventListener('change', (nextState) => {
+      const wasActive = appActive;
+      appActive = nextState === 'active';
+      if (!appActive) {
+        if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+      } else if (!wasActive) {
+        failureCountRef.current = 0;
+        if (!syncingRef.current) {
+          void loadAll();
+        }
+        schedulePoll();
+      }
+    });
+
+    return () => {
+      sub.remove();
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    };
+  }, [loadAll, syncing, serverStatus]);
 
   useEffect(() => {
     const onStarted = () => {
@@ -657,9 +696,21 @@ export default function HomeScreen() {
 
   const intervalLabel = formatSyncIntervalLabel(syncInterval);
 
-  const serverColor = statusColors[serverStatus];
+  const isP2PDeviceAvailable = serverStatus !== 'connected' && pairedPeers.length > 0;
 
-  const isOffline = serverStatus === 'disconnected' || serverStatus === 'unknown' || serverStatus === 'removed';
+  const serverColor = isP2PDeviceAvailable ? '#10B981' : statusColors[serverStatus];
+
+  let displayStatusLabel = statusLabels[serverStatus];
+  if (isP2PDeviceAvailable) {
+    if (pairedPeers.length === 1) {
+      const p = pairedPeers[0];
+      displayStatusLabel = `P2P Active • ${p.deviceName || p.username || '1 Peer'}`;
+    } else {
+      displayStatusLabel = `P2P Active • ${pairedPeers.length} Peers`;
+    }
+  }
+
+  const isOffline = (serverStatus === 'disconnected' || serverStatus === 'unknown' || serverStatus === 'removed') && !isP2PDeviceAvailable;
 
   return (
     <View style={styles.screen}>
@@ -689,7 +740,7 @@ export default function HomeScreen() {
         <AnimatedPressable style={[styles.serverPill, { borderColor: serverColor }]} onPress={loadAll}>
           <View style={[styles.statusDot, { backgroundColor: serverColor }]} />
           <Text style={[styles.serverPillText, { color: serverColor }]} numberOfLines={1}>
-            {statusLabels[serverStatus]}
+            {displayStatusLabel}
           </Text>
         </AnimatedPressable>
       </Animated.View>

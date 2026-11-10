@@ -24,6 +24,7 @@ import { AnimatedPressable } from '@/components/AnimatedPressable';
 import { AnimatedListItem } from '@/components/AnimatedListItem';
 import { useAppTheme } from '@/hooks/use-app-theme';
 import { hapticLight, hapticMedium, hapticSuccess, hapticError, hapticSelection } from '@/utils/haptics';
+import { formatCaptureDateTime } from '@/utils/dateFormat';
 import {
   computeCleanupCandidates,
   getCleanupCandidateFiles,
@@ -64,8 +65,8 @@ const THIRTY_DAYS_SEC = 30 * 24 * 60 * 60;
 
 function formatDate(ts: number): string {
   if (!ts) return '';
-  const ms = ts > 1e11 ? ts : ts * 1000;
-  return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  // modifiedTime may be ms (MediaStore) or seconds — dateFormat auto-detects.
+  return formatCaptureDateTime(ts, ts < 1e12);
 }
 
 function getDisplayName(file: CandidateFile): string {

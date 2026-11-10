@@ -51,8 +51,19 @@ export type ReelItem = {
   is_saved?: boolean;
   is_unseen?: boolean;
   group_id?: string | null;
+  uri?: string | null;
+  thumb_uri?: string | null;
+  is_p2p?: boolean;
   /** Present only for private backup/shared-folder catalogue reels. */
   library_source?: 'reel_backup' | 'reel_shared';
+  source_type?: 'phone' | 'shared';
+  source_key?: string;
+  /** Local Drive shelf reels have no server-side share/reaction identity. */
+  is_local_drive?: boolean;
+  /** Custom selection opened from library for playback. */
+  is_custom_selection?: boolean;
+  /** Download URL for saving directly to device. */
+  download_url?: string;
 };
 
 export type PlaybackTelemetryEvent = {
@@ -73,6 +84,7 @@ export type PlaybackTelemetryEvent = {
   tokens?: string[];
   group_id?: string | null;
   timestamp: number;
+  is_local_drive?: boolean;
 };
 
 export type CreatorAffinity = {
@@ -620,53 +632,35 @@ export function scoreReelCandidate(
  * - Direct unseen reels placed at the very top.
  * - Minimum author spacing of 2 slots (no 2 consecutive reels from the same creator).
  * - Minimum share group de-clustering of 3 slots (no bursting of 10 videos from one album).
- * - Multi-tiered pool fallback: Unseen -> Fresh Unwatched -> Bandit -> Nostalgia Replay -> Interacted.
+ * - Only unseen/unwatched candidates are eligible; watched reels live in
+ *   Saved/Reposted history rather than silently returning to discovery.
  */
 export function buildDiverseReelSlate(
   items: ReelItem[],
   state: HyperPulseState,
   sessionSeed: number,
 ): ReelItem[] {
-  const scored = [...items].map(item => {
-    const watchRecord = state.watched[item.reel_id];
-    const isWatched = Boolean(watchRecord);
-    const hasInteracted = Boolean(
-      (item.user_reactions && item.user_reactions.length > 0) ||
-      item.user_has_reposted ||
-      item.is_saved
-    );
-    return {
-      item,
-      score: scoreReelCandidate(item, state, sessionSeed),
-      isWatched,
-      hasInteracted,
-      utility: watchRecord ? watchRecord.utility : 0,
-    };
-  });
+  const scored = items.map(item => ({
+    item,
+    score: scoreReelCandidate(item, state, sessionSeed),
+  }));
 
   scored.sort((a, b) => b.score - a.score);
 
-  // Multi-tiered pool separation
+  // Keep direct, unread shares prominent
   const unseenDirect: ReelItem[] = [];
-  const freshUnwatched: ReelItem[] = [];
-  const nostalgiaReplay: ReelItem[] = [];
-  const alreadyInteracted: ReelItem[] = [];
+  const candidatePool: ReelItem[] = [];
 
   for (const entry of scored) {
-    const { item, isWatched, hasInteracted, utility } = entry;
-    if (!isWatched && item.is_unseen) {
+    const { item } = entry;
+    if (item.is_unseen) {
       unseenDirect.push(item);
-    } else if (!isWatched && !hasInteracted) {
-      freshUnwatched.push(item);
-    } else if (isWatched && utility >= 0.5 && !hasInteracted) {
-      nostalgiaReplay.push(item);
     } else {
-      alreadyInteracted.push(item);
+      candidatePool.push(item);
     }
   }
 
   const result: ReelItem[] = [...unseenDirect];
-  const candidatePool = [...freshUnwatched, ...nostalgiaReplay, ...alreadyInteracted];
 
   // Slate diversification trackers
   const recentAuthors: string[] = result.map(

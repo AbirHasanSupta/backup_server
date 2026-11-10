@@ -62,6 +62,10 @@ def main() -> None:
     python = resolve_python()
     print(f"      Using: {python}")
 
+    # Frozen executables cannot inspect the source checkout at runtime, so
+    # embed a file generated from the current Git tag before packaging.
+    run(python, str(ROOT / "scripts" / "sync_version.py"))
+
     # ── 2. Ensure PyInstaller is installed ───────────────────────────────────
     step(2, 5, "Checking PyInstaller...")
     rc = run(python, "-m", "PyInstaller", "--version", check=False)
@@ -136,6 +140,52 @@ def main() -> None:
         "ffmpeg_utils",
         "trips",
         "network_info",
+        "api",
+        "api.deps",
+        "api.v1",
+        "api.v1.auth",
+        "api.v1.sync",
+        "api.v1.files",
+        "api.v1.feed",
+        "api.v1.reels",
+        "api.v1.memories",
+        "api.v1.trips",
+        "api.v1.cleanup",
+        "api.v1.websockets",
+        "core",
+        "core.config",
+        "core.security",
+        "core.locks",
+        "core.exceptions",
+        "repositories",
+        "repositories.base",
+        "repositories.device_repo",
+        "repositories.file_repo",
+        "repositories.media_repo",
+        "repositories.social_repo",
+        "repositories.reels_repo",
+        "repositories.trips_repo",
+        "routers",
+        "routers.websocket_hub",
+        "services",
+        "services.sync_service",
+        "services.feed_service",
+        "services.reels_service",
+        "services.media_service",
+        "services.preview_service",
+        "services.thumbnail_service",
+        "services.trips_service",
+        "services.ws_service",
+        "services.lock_service",
+        "services.redis_service",
+        "storage.base",
+        "storage.local",
+        "storage.s3",
+        "storage.manager",
+        "tasks",
+        "tasks.video_tasks",
+        "tasks.rewind_tasks",
+        "tasks.indexing_tasks",
     ]
 
     add_data_files = [
@@ -163,9 +213,17 @@ def main() -> None:
         "--windowed",
         "--name", "Phone Backup Server",
         "--icon", str(ROOT / "assets" / "icon.ico"),
+        "--add-data", f"{ROOT / 'VERSION'}{sep}.",
         "--add-data", f"{ROOT / 'assets'}{sep}assets",
         "--collect-all", "customtkinter",
         "--collect-all", "tkinterdnd2",
+        "--collect-all", "api",
+        "--collect-all", "core",
+        "--collect-all", "repositories",
+        "--collect-all", "routers",
+        "--collect-all", "services",
+        "--collect-all", "storage",
+        "--collect-all", "tasks",
     ]
 
     for imp in hidden_imports:
