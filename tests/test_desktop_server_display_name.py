@@ -68,6 +68,8 @@ def _request(app, method: str, path: str, body=None, headers=None):
 class DesktopServerDisplayNameTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        from database import init_db
+        init_db()
         cls.app = create_app("all")
         cfg = load_config()
         cls.api_key = cfg.get("API_KEY", "")

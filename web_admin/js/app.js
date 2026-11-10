@@ -900,7 +900,6 @@ function initDropZone() {
   const input = el('post-file-input');
   if (!zone || !input) return;
 
-  zone.addEventListener('click', () => input.click());
   zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('border-blue-500', 'bg-blue-500/5'); });
   zone.addEventListener('dragleave', () => zone.classList.remove('border-blue-500', 'bg-blue-500/5'));
   zone.addEventListener('drop', e => {
@@ -910,6 +909,7 @@ function initDropZone() {
   });
   input.addEventListener('change', e => {
     if (e.target.files.length) handlePostFiles([...e.target.files]);
+    input.value = '';
   });
 }
 
