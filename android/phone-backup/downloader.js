@@ -2807,6 +2807,163 @@ export async function getRepostedReels(offset = 0, limit = 50) {
   }
 }
 
+const REELS_WATCH_HISTORY_STORAGE_KEY = 'reels_watch_history_cache_v1';
+
+/**
+ * Record a watched reel into watch history.
+ * Non-blocking, fails silently on error to prevent any UI or playback lag.
+ * @param {{reel_id: string, share_id: number, media_id?: number|null, watch_time_sec: number, duration_sec: number}} data
+ * @returns {Promise<{ok: boolean}>}
+ */
+export async function recordWatchHistory(data) {
+  if (!data || (!data.share_id && !data.reel_id)) return { ok: false };
+  const shareId = Number(data.share_id) || 0;
+  const reelId = String(data.reel_id || data.share_id || '');
+  if (!reelId && !shareId) return { ok: false };
+
+  try {
+    const isServer = await isServerMode();
+    if (isServer) {
+      const { ip, port, key, deviceId } = await getConfig();
+      if (ip && port && deviceId) {
+        // Fire-and-forget background fetch
+        fetch(`http://${ip}:${port}/api/reels/history`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${key}`,
+          },
+          body: JSON.stringify({
+            device_id: deviceId,
+            reel_id: reelId,
+            share_id: shareId,
+            media_id: data.media_id != null ? Number(data.media_id) : null,
+            watch_time_sec: Number(data.watch_time_sec || 0),
+            duration_sec: Number(data.duration_sec || 0),
+          }),
+        }).catch(() => {});
+      }
+    }
+
+    // Also update local cache for instant offline and P2P access
+    try {
+      const cached = await AsyncStorage.getItem(REELS_WATCH_HISTORY_STORAGE_KEY);
+      let list = cached ? JSON.parse(cached) : [];
+      if (!Array.isArray(list)) list = [];
+      list = list.filter(item => {
+        const matchReel = reelId && String(item.reel_id) === reelId;
+        const matchShare = shareId > 0 && Number(item.share_id) === shareId;
+        return !matchReel && !matchShare;
+      });
+      list.unshift({
+        ...data,
+        reel_id: reelId,
+        share_id: shareId,
+        watched_at: Math.floor(Date.now() / 1000),
+      });
+      if (list.length > 200) list = list.slice(0, 200);
+      await AsyncStorage.setItem(REELS_WATCH_HISTORY_STORAGE_KEY, JSON.stringify(list));
+    } catch {}
+
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Fetch watch history for this device.
+ * @param {number} [offset=0]
+ * @param {number} [limit=50]
+ * @returns {Promise<{reels: Array<any>, has_more: boolean, total: number}>}
+ */
+export async function getWatchHistory(offset = 0, limit = 50) {
+  const isServer = await isServerMode();
+  if (!isServer) {
+    try {
+      const cached = await AsyncStorage.getItem(REELS_WATCH_HISTORY_STORAGE_KEY);
+      const list = cached ? JSON.parse(cached) : [];
+      const slice = list.slice(offset, offset + limit);
+      return { reels: slice, has_more: offset + limit < list.length, total: list.length };
+    } catch {
+      return { reels: [], has_more: false, total: 0 };
+    }
+  }
+
+  try {
+    const { ip, port, key, deviceId } = await getConfig();
+    if (!ip || !port) return { reels: [], has_more: false, total: 0 };
+    const res = await fetchJsonWithTimeout(
+      `http://${ip}:${port}/api/reels/history?device_id=${encodeURIComponent(deviceId)}&offset=${offset}&limit=${limit}`,
+      { headers: { Authorization: `Bearer ${key}` } },
+      3500
+    );
+    if (res && Array.isArray(res.reels)) {
+      try {
+        if (offset === 0) {
+          await AsyncStorage.setItem(REELS_WATCH_HISTORY_STORAGE_KEY, JSON.stringify(res.reels));
+        }
+      } catch {}
+      return res;
+    }
+    return { reels: [], has_more: false, total: 0 };
+  } catch (err) {
+    if (isNetworkFailure(err)) {
+      await setServerAvailable(false);
+      try {
+        const cached = await AsyncStorage.getItem(REELS_WATCH_HISTORY_STORAGE_KEY);
+        const list = cached ? JSON.parse(cached) : [];
+        const slice = list.slice(offset, offset + limit);
+        return { reels: slice, has_more: offset + limit < list.length, total: list.length };
+      } catch {
+        return { reels: [], has_more: false, total: 0 };
+      }
+    }
+    return { reels: [], has_more: false, total: 0 };
+  }
+}
+
+/**
+ * Remove an item from watch history.
+ * @param {number|string} shareId
+ * @param {string} [reelId]
+ * @returns {Promise<{ok: boolean}>}
+ */
+export async function deleteWatchHistoryItem(shareId, reelId = null) {
+  const targetReelId = reelId ? String(reelId) : String(shareId);
+  const targetShareId = shareId != null ? String(shareId) : '';
+  try {
+    const cached = await AsyncStorage.getItem(REELS_WATCH_HISTORY_STORAGE_KEY);
+    if (cached) {
+      let list = JSON.parse(cached);
+      if (Array.isArray(list)) {
+        list = list.filter(item => {
+          const matchReel = targetReelId && String(item.reel_id) === targetReelId;
+          const matchShare = targetShareId && String(item.share_id) === targetShareId;
+          return !matchReel && !matchShare;
+        });
+        await AsyncStorage.setItem(REELS_WATCH_HISTORY_STORAGE_KEY, JSON.stringify(list));
+      }
+    }
+  } catch {}
+
+  const isServer = await isServerMode();
+  if (isServer) {
+    try {
+      const { ip, port, key, deviceId } = await getConfig();
+      if (ip && port && deviceId) {
+        const queryParams = new URLSearchParams({ device_id: deviceId });
+        if (shareId != null) queryParams.append('share_id', String(shareId));
+        await fetch(`http://${ip}:${port}/api/reels/history/${encodeURIComponent(targetReelId)}?${queryParams.toString()}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${key}` },
+        });
+      }
+    } catch {}
+  }
+  return { ok: true };
+}
+
 /**
  * Post groups shared to this device that it hasn't been notified about yet.
  * @returns {Promise<{posts: Array<{group_id: string, shared_by: string, caption?: string, post_title?: string, item_count: number, created_at: number}>}>}

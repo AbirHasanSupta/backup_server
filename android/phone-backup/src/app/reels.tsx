@@ -54,6 +54,7 @@ import {
   createDeviceShare,
   toggleSaveReel,
   saveReelToDevice,
+  recordWatchHistory,
   markShareNotificationsSeen,
 } from '../../downloader';
 import { setUIPriorityMode } from '../../backgroundTask';
@@ -468,8 +469,36 @@ function ReelCardBase({
   const loopCountRef = useRef<number>(0);
   const unmutedDuringRef = useRef<boolean>(false);
   const prevMutedRef = useRef<boolean>(muted);
+  const hasRecordedWatchRef = useRef<boolean>(false);
   const onPlaybackTelemetryRef = useRef(onPlaybackTelemetry);
   useEffect(() => { onPlaybackTelemetryRef.current = onPlaybackTelemetry; }, [onPlaybackTelemetry]);
+
+  const checkAndRecordWatchHistory = useCallback((currentWatchSec: number, videoDur: number) => {
+    if (hasRecordedWatchRef.current || item.is_custom_selection) return;
+    const dur = videoDur || durationRef.current || item.duration || 0;
+    if (dur <= 0) return;
+
+    // Watch history qualification rules:
+    // 1. duration > 20s: requires at least 10s of play time
+    // 2. duration < 5s: any play time qualifies (currentWatchSec > 0)
+    // 3. otherwise (5s <= duration <= 20s): requires at least 5s of play time
+    const isQualified =
+      (dur > 20 && currentWatchSec >= 10) ||
+      (dur < 5 && currentWatchSec > 0) ||
+      (dur >= 5 && dur <= 20 && currentWatchSec >= 5);
+
+    if (isQualified) {
+      hasRecordedWatchRef.current = true;
+      void recordWatchHistory({
+        ...item,
+        reel_id: item.reel_id,
+        share_id: item.share_id,
+        media_id: item.media_id,
+        watch_time_sec: currentWatchSec,
+        duration_sec: dur,
+      });
+    }
+  }, [item]);
 
   // Track unmuting during active watch
   useEffect(() => {
@@ -487,6 +516,7 @@ function ReelCardBase({
       loopCountRef.current = 0;
       lastCurTimeRef.current = 0;
       unmutedDuringRef.current = false;
+      hasRecordedWatchRef.current = false;
     } else if (activeStartRef.current > 0) {
       const sessionMs = Date.now() - activeStartRef.current;
       activeStartRef.current = 0;
@@ -495,6 +525,8 @@ function ReelCardBase({
       const dur = durationRef.current || item.duration || 1;
       const completion = dur > 0 ? watchSec / dur : 0;
       const isFastSkip = watchSec < 1.8 && completion < 0.25;
+
+      checkAndRecordWatchHistory(watchSec, dur);
 
       if (item.is_custom_selection) return;
       const authorKey = item.original_author?.device_id || item.shared_by_device_id || item.shared_by;
@@ -518,7 +550,7 @@ function ReelCardBase({
         is_local_drive: item.is_local_drive,
       });
     }
-  }, [isActive, item]);
+  }, [isActive, item, checkAndRecordWatchHistory]);
 
   // When unmounting while active, record final telemetry
   useEffect(() => {
@@ -529,6 +561,11 @@ function ReelCardBase({
         const dur = durationRef.current || item.duration || 1;
         const completion = dur > 0 ? watchSec / dur : 0;
         const isFastSkip = watchSec < 1.8 && completion < 0.25;
+
+        checkAndRecordWatchHistory(watchSec, dur);
+
+        if (item.is_custom_selection) return;
+
         const authorKey = item.original_author?.device_id || item.shared_by_device_id || item.shared_by;
         onPlaybackTelemetryRef.current?.({
           share_id: item.share_id,
@@ -551,7 +588,7 @@ function ReelCardBase({
         });
       }
     };
-  }, [item]);
+  }, [item, checkAndRecordWatchHistory]);
 
 
   // Draggable seek state
@@ -624,8 +661,16 @@ function ReelCardBase({
           const pl = playerRef.current;
           if (pl) {
             try {
-              if (next) pl.play();
-              else pl.pause();
+              if (next) {
+                activeStartRef.current = Date.now();
+                pl.play();
+              } else {
+                if (activeStartRef.current > 0) {
+                  totalWatchMsRef.current += Date.now() - activeStartRef.current;
+                  activeStartRef.current = 0;
+                }
+                pl.pause();
+              }
             } catch {}
           }
           return next;
@@ -698,8 +743,13 @@ function ReelCardBase({
         loopCountRef.current += 1;
       }
       lastCurTimeRef.current = cur;
+
+      // Real-time watch history qualification check
+      const curSession = (isPlayingRef.current && activeStartRef.current > 0) ? (Date.now() - activeStartRef.current) : 0;
+      const currentWatchSec = (totalWatchMsRef.current + curSession) / 1000;
+      checkAndRecordWatchHistory(currentWatchSec, dur);
     }
-  }, []);
+  }, [checkAndRecordWatchHistory]);
 
   const handleReady = useCallback(() => {
     readyOnceRef.current = true;

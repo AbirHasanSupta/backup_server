@@ -24,6 +24,9 @@ from database import (
     get_reel_view_counts as db_get_reel_view_counts,
     get_reel_durations as db_get_reel_durations,
     record_reel_telemetry as db_record_reel_telemetry,
+    record_watch_history as db_record_watch_history,
+    delete_watch_history_item as db_delete_watch_history_item,
+    get_watch_history as db_get_watch_history,
 )
 
 
@@ -619,3 +622,73 @@ def record_reel_telemetry(device_id: str, events: List[Dict[str, Any]]) -> int:
             conn.commit()
         return len(values)
     return db_record_reel_telemetry(device_id, events)
+
+
+def record_watch_history(
+    device_id: str,
+    reel_id: str,
+    share_id: int,
+    media_id: int | None = None,
+    watch_time_sec: float = 0.0,
+    duration_sec: float = 0.0,
+) -> bool:
+    if not device_id or not reel_id:
+        return False
+    if is_postgres():
+        now_ts = int(time.time())
+        sql = """
+        INSERT INTO reel_watch_history (device_id, reel_id, share_id, media_id, watched_at, watch_time_sec, duration_sec)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (device_id, reel_id) DO UPDATE SET
+            share_id = EXCLUDED.share_id,
+            media_id = COALESCE(EXCLUDED.media_id, reel_watch_history.media_id),
+            watched_at = EXCLUDED.watched_at,
+            watch_time_sec = EXCLUDED.watch_time_sec,
+            duration_sec = EXCLUDED.duration_sec
+        """
+        execute_write(sql, (device_id, str(reel_id), int(share_id), media_id, now_ts, float(watch_time_sec), float(duration_sec)))
+        return True
+    return db_record_watch_history(device_id, reel_id, share_id, media_id, watch_time_sec, duration_sec)
+
+
+def delete_watch_history_item(device_id: str, reel_id: str, share_id: int | None = None) -> bool:
+    if not device_id:
+        return False
+    if is_postgres():
+        if share_id is not None:
+            n = execute_write(
+                "DELETE FROM reel_watch_history WHERE device_id = ? AND (reel_id = ? OR share_id = ?)",
+                (device_id, str(reel_id), int(share_id)),
+            )
+        else:
+            n = execute_write(
+                "DELETE FROM reel_watch_history WHERE device_id = ? AND reel_id = ?",
+                (device_id, str(reel_id)),
+            )
+        return n > 0
+    return db_delete_watch_history_item(device_id, reel_id, share_id)
+
+
+def get_watch_history(device_id: str, offset: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
+    if is_postgres():
+        sql = """
+        SELECT rwh.reel_id, rwh.watched_at, rwh.watch_time_sec, rwh.duration_sec,
+               ds.share_id, ds.media_id, ds.source_type, ds.source_key,
+               ds.relative_path, ds.size, ds.modified_time, ds.caption,
+               ds.shared_by_device_id, ds.created_at, ds.share_group_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id, ds.is_library_reel,
+               d.device_name AS shared_by_name, d.username AS shared_by_username,
+               orig_d.device_name AS orig_shared_by_name, orig_d.username AS orig_shared_by_username,
+               COALESCE(dsg.caption, ds.caption) AS group_caption,
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title
+        FROM reel_watch_history rwh
+        JOIN device_shares ds ON ds.share_id = rwh.share_id
+        LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
+        LEFT JOIN device_share_groups dsg ON dsg.group_id = ds.share_group_id
+        WHERE rwh.device_id = ?
+        ORDER BY rwh.watched_at DESC
+        LIMIT ? OFFSET ?
+        """
+        return execute_read_query(sql, (device_id, limit, offset))
+    return db_get_watch_history(device_id, offset, limit)

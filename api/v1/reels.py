@@ -270,6 +270,35 @@ class TelemetryRequest(BaseModel):
     events: list[dict] = Field(max_length=100)
 
 
+class WatchHistoryEvent(BaseModel):
+    reel_id: str
+    share_id: int
+    media_id: int | None = None
+    watch_time_sec: float = 0.0
+    duration_sec: float = 0.0
+
+
+class WatchHistoryRequest(BaseModel):
+    device_id: str
+    reel_id: str | None = None
+    share_id: int | None = None
+    media_id: int | None = None
+    watch_time_sec: float = 0.0
+    duration_sec: float = 0.0
+    events: list[WatchHistoryEvent] | None = None
+
+
+def is_qualified_reel_watch(watch_sec: float, dur: float) -> bool:
+    """Videos > 20s need 10s play, < 5s any play (watch_sec > 0), otherwise 5s play."""
+    watch_sec = float(watch_sec or 0.0)
+    dur = float(dur or 0.0)
+    if dur > 20.0:
+        return watch_sec >= 10.0
+    if dur < 5.0:
+        return watch_sec > 0.0
+    return watch_sec >= 5.0
+
+
 def _is_video(path: str) -> bool:
     return os.path.splitext(path)[1].lower() in _REEL_VIDEO_EXTS
 
@@ -964,3 +993,205 @@ async def get_reposted_reels(
 
     total = len(reels)
     return {"reels": reels, "has_more": (offset + limit) < total or len(reposted_rows) == limit, "total": total}
+
+
+@router.post("/api/reels/history")
+@router.post("/reels/history")
+async def record_watch_history(
+    body: WatchHistoryRequest,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, body.device_id, device_repo.verify_device_token)
+    items_to_record: list[tuple[str, int, int | None, float, float]] = []
+
+    if body.events:
+        for ev in body.events:
+            w_sec = float(ev.watch_time_sec or 0.0)
+            d_sec = float(ev.duration_sec or 0.0)
+            if is_qualified_reel_watch(w_sec, d_sec):
+                r_id = str(ev.reel_id or ev.share_id or "")
+                try:
+                    s_id = int(ev.share_id) if ev.share_id is not None else int(r_id)
+                except (ValueError, TypeError):
+                    s_id = 0
+                if s_id > 0:
+                    m_id = int(ev.media_id) if ev.media_id is not None else None
+                    items_to_record.append((r_id, s_id, m_id, w_sec, d_sec))
+    elif body.share_id is not None or body.reel_id:
+        w_sec = float(body.watch_time_sec or 0.0)
+        d_sec = float(body.duration_sec or 0.0)
+        if is_qualified_reel_watch(w_sec, d_sec):
+            r_id = str(body.reel_id or body.share_id or "")
+            try:
+                s_id = int(body.share_id) if body.share_id is not None else int(r_id)
+            except (ValueError, TypeError):
+                s_id = 0
+            if s_id > 0:
+                m_id = int(body.media_id) if body.media_id is not None else None
+                items_to_record.append((r_id, s_id, m_id, w_sec, d_sec))
+
+    recorded_count = 0
+    for r_id, s_id, m_id, w_sec, d_sec in items_to_record:
+        ok = reels_repo.record_watch_history(
+            device_id=body.device_id,
+            reel_id=r_id,
+            share_id=s_id,
+            media_id=m_id,
+            watch_time_sec=w_sec,
+            duration_sec=d_sec,
+        )
+        if ok:
+            recorded_count += 1
+    return {"ok": True, "recorded": recorded_count}
+
+
+@router.get("/api/reels/history")
+@router.get("/reels/history")
+async def get_watch_history(
+    device_id: str,
+    offset: int = 0,
+    limit: int = 50,
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    history_rows = reels_repo.get_watch_history(device_id, offset, limit)
+    video_rows = [s for s in history_rows if _is_video(s.get("relative_path", ""))]
+    media_ids = [s["media_id"] for s in video_rows if s.get("media_id")]
+
+    saved_ids = reels_repo.get_saved_reel_ids(device_id)
+    counts_map, user_map = social_repo.get_reactions_for_media_ids(media_ids, current_source_id=device_id, scope="reel")
+    comment_counts = social_repo.get_comment_counts_for_media_ids(media_ids, scope="reel")
+    repost_counts = reels_repo.get_repost_counts_for_media_ids(media_ids)
+    user_reposted_media, user_reposted_shares = reels_repo.get_user_reposted_info(device_id)
+
+    reels = []
+    seen_reel_keys = set()
+    for s in video_rows:
+        is_library_reel = bool(s.get("is_library_reel"))
+        library_label = _library_reel_label_for_device(
+            s.get("source_type") or "", s.get("source_key") or "", device_id
+        ) if is_library_reel else None
+        if is_library_reel and not library_label:
+            continue
+
+        reel_id = str(s["reel_id"])
+        dedup_key = reel_id or str(s.get("share_id")) or str(s.get("media_id"))
+        if dedup_key in seen_reel_keys:
+            continue
+        seen_reel_keys.add(dedup_key)
+
+        orig_id = s.get("original_shared_by_device_id") or s["shared_by_device_id"]
+        if is_library_reel:
+            orig_id = f"library:{s['source_type']}:{s['source_key']}"
+
+        is_repost = s.get("post_kind") == "reel_repost" or bool(s.get("original_shared_by_device_id"))
+        orig_name = s.get("orig_shared_by_name") if s.get("original_shared_by_device_id") else s.get("shared_by_name")
+        orig_username = s.get("orig_shared_by_username") if s.get("original_shared_by_device_id") else s.get("shared_by_username")
+        reposter_name = s.get("shared_by_name")
+        reposter_username = s.get("shared_by_username")
+
+        has_reposted = (
+            (s.get("media_id") in user_reposted_media if s.get("media_id") else False)
+            or (s["share_id"] in user_reposted_shares)
+            or (s.get("post_kind") == "reel_repost" and s.get("shared_by_device_id") == device_id)
+        )
+
+        sharer_dev_id = s["shared_by_device_id"]
+        if is_library_reel:
+            display_name = library_label
+        elif sharer_dev_id == "desktop-server":
+            display_name = device_repo.get_device_display_name("desktop-server")
+        else:
+            formatted = device_repo.format_device_display_name(s.get("shared_by_username"), s.get("shared_by_name"), device_id=sharer_dev_id)
+            display_name = formatted if formatted != "Unknown device" else device_repo.get_device_display_name(sharer_dev_id, fallback=sharer_dev_id)
+
+        if is_library_reel:
+            orig_disp = library_label
+            orig_author_name = library_label
+        elif orig_id == "desktop-server":
+            orig_disp = device_repo.get_device_display_name("desktop-server")
+            orig_author_name = orig_name or orig_disp
+        else:
+            formatted_orig = device_repo.format_device_display_name(orig_username, orig_name, device_id=orig_id)
+            orig_disp = formatted_orig if formatted_orig != "Unknown device" else (orig_name or device_repo.get_device_display_name(orig_id, fallback=orig_id))
+            orig_author_name = orig_name
+
+        if reposter_name or reposter_username or s["shared_by_device_id"] == "desktop-server":
+            if s["shared_by_device_id"] == "desktop-server":
+                reposter_disp = device_repo.get_device_display_name("desktop-server")
+            else:
+                formatted_rep = device_repo.format_device_display_name(reposter_username, reposter_name, device_id=s["shared_by_device_id"])
+                reposter_disp = formatted_rep if formatted_rep != "Unknown device" else (reposter_name or device_repo.get_device_display_name(s["shared_by_device_id"], fallback=s["shared_by_device_id"]))
+        else:
+            reposter_disp = s["shared_by_device_id"]
+
+        reels.append({
+            "reel_id": reel_id,
+            "share_id": s["share_id"],
+            "media_id": s.get("media_id"),
+            "path": s["relative_path"],
+            "shared_by": display_name,
+            "shared_by_device_id": orig_id if is_library_reel else s["shared_by_device_id"],
+            "is_repost": is_repost,
+            "user_has_reposted": has_reposted,
+            "original_author": {
+                "device_id": orig_id,
+                "name": orig_author_name,
+                "username": None if is_library_reel else orig_username,
+                "display_name": orig_disp,
+            },
+            "reposted_by": {
+                "device_id": s["shared_by_device_id"],
+                "name": reposter_name,
+                "username": reposter_username,
+                "display_name": reposter_disp,
+            } if is_repost else None,
+            "caption": s.get("group_caption") or s.get("caption"),
+            "created_at": s["created_at"],
+            "watched_at": s.get("watched_at"),
+            "watch_time_sec": s.get("watch_time_sec", 0.0),
+            "duration_sec": s.get("duration_sec", 0.0),
+            "is_saved": reel_id in saved_ids or str(s["share_id"]) in saved_ids,
+            "reaction_counts": counts_map.get(s["media_id"], {}) if s.get("media_id") else {},
+            "user_reactions": user_map.get(s["media_id"], []) if s.get("media_id") else [],
+            "comment_count": comment_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+            "repost_count": repost_counts.get(s["media_id"], 0) if s.get("media_id") else 0,
+            "is_own_post": s["shared_by_device_id"] == device_id and not is_library_reel,
+            "group_id": s.get("share_group_id"),
+        })
+
+    total = len(reels)
+    return {"reels": reels, "has_more": (offset + limit) < total or len(video_rows) == limit, "total": total}
+
+
+@router.delete("/api/reels/history/{reel_id:path}")
+@router.delete("/reels/history/{reel_id:path}")
+async def delete_watch_history(
+    reel_id: str,
+    device_id: str = Query(...),
+    share_id: int | None = Query(None),
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    deleted = reels_repo.delete_watch_history_item(device_id, reel_id, share_id)
+    return {"ok": True, "deleted": deleted, "reel_id": reel_id}
+
+
+@router.delete("/api/reels/history")
+@router.delete("/reels/history")
+async def delete_watch_history_query(
+    device_id: str = Query(...),
+    reel_id: str | None = Query(None),
+    share_id: int | None = Query(None),
+    authorization: str = Header(None),
+    token: str = Query(None),
+):
+    verify_api_key_or_device_token(authorization, token, device_id, device_repo.verify_device_token)
+    target_reel_id = reel_id or (str(share_id) if share_id is not None else "")
+    if not target_reel_id:
+        raise HTTPException(status_code=400, detail="reel_id or share_id required")
+    deleted = reels_repo.delete_watch_history_item(device_id, target_reel_id, share_id)
+    return {"ok": True, "deleted": deleted, "reel_id": target_reel_id}

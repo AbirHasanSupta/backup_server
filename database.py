@@ -889,6 +889,27 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_reel_telem_device ON reel_telemetry(device_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_reel_telem_device_recent ON reel_telemetry(device_id, created_at DESC)")
 
+    # 19. reel_watch_history table for reel view history
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reel_watch_history
+        (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id       TEXT    NOT NULL,
+            reel_id         TEXT    NOT NULL,
+            share_id        INTEGER NOT NULL,
+            media_id        INTEGER,
+            watched_at      INTEGER NOT NULL,
+            watch_time_sec  REAL    NOT NULL DEFAULT 0.0,
+            duration_sec    REAL    NOT NULL DEFAULT 0.0,
+            UNIQUE (device_id, reel_id)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watch_history_device ON reel_watch_history(device_id, watched_at DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watch_history_share ON reel_watch_history(share_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watch_history_reel ON reel_watch_history(reel_id)")
+
     conn.commit()
     conn.close()
 
@@ -1745,6 +1766,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
             conn.execute("DELETE FROM reactions WHERE media_id = ?", (new_id,))
             conn.execute("UPDATE comments SET media_id = ? WHERE media_id = ?", (old_id, new_id))
             conn.execute("UPDATE saved_reels SET media_id = ? WHERE media_id = ?", (old_id, new_id))
+            conn.execute("UPDATE reel_watch_history SET media_id = ? WHERE media_id = ?", (old_id, new_id))
             conn.execute("UPDATE reel_telemetry SET media_id = ? WHERE media_id = ?", (old_id, new_id))
             conn.execute("DELETE FROM media_index WHERE id = ?", (new_id,))
 
@@ -1870,6 +1892,23 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
         # Migrate reel_telemetry
         conn.execute(
             "UPDATE reel_telemetry SET device_id = ? WHERE device_id = ?",
+            (new_device_id, old_device_id),
+        )
+
+        # Migrate reel_watch_history
+        conn.execute(
+            """
+            DELETE FROM reel_watch_history AS new_hist
+            WHERE new_hist.device_id = ?
+              AND EXISTS (
+                  SELECT 1 FROM reel_watch_history AS old_hist
+                  WHERE old_hist.device_id = ? AND old_hist.reel_id = new_hist.reel_id
+              )
+            """,
+            (new_device_id, old_device_id),
+        )
+        conn.execute(
+            "UPDATE reel_watch_history SET device_id = ? WHERE device_id = ?",
             (new_device_id, old_device_id),
         )
 
@@ -3955,6 +3994,7 @@ def delete_device_share_group(group_id: str, requesting_device_id: str) -> bool:
         placeholders = ",".join("?" * len(share_ids))
         conn.execute(f"DELETE FROM device_share_targets WHERE share_id IN ({placeholders})", share_ids)
         conn.execute(f"DELETE FROM saved_reels WHERE share_id IN ({placeholders})", share_ids)
+        conn.execute(f"DELETE FROM reel_watch_history WHERE share_id IN ({placeholders})", share_ids)
     _cleanup_persisted_share_files(share_ids)
     conn.execute("DELETE FROM device_shares WHERE share_group_id = ?", (group_id,))
     conn.execute("DELETE FROM device_share_groups WHERE id = ?", (group_id,))
@@ -3988,6 +4028,7 @@ def delete_device_share(share_id: int, requesting_device_id: str) -> bool:
             return delete_device_share_group(group_id, requesting_device_id)
     conn.execute("DELETE FROM device_share_targets WHERE share_id = ?", (share_id,))
     conn.execute("DELETE FROM saved_reels WHERE share_id = ?", (share_id,))
+    conn.execute("DELETE FROM reel_watch_history WHERE share_id = ?", (share_id,))
     _cleanup_persisted_share_files([share_id])
     conn.execute("DELETE FROM device_shares WHERE id = ?", (share_id,))
     conn.commit()
@@ -4308,6 +4349,87 @@ def get_saved_reels(device_id: str, offset: int = 0, limit: int = 50) -> list[di
         LIMIT ? OFFSET ?
         """,
         (device_id, device_id, device_id, device_id, limit, offset),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def record_watch_history(
+    device_id: str,
+    reel_id: str,
+    share_id: int,
+    media_id: int | None = None,
+    watch_time_sec: float = 0.0,
+    duration_sec: float = 0.0,
+) -> bool:
+    """Record or update a watched reel entry. Keeps only the latest view per reel."""
+    if not device_id or not reel_id:
+        return False
+    conn = get_conn()
+    now_ts = int(_time.time())
+    conn.execute(
+        """
+        INSERT INTO reel_watch_history (device_id, reel_id, share_id, media_id, watched_at, watch_time_sec, duration_sec)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(device_id, reel_id) DO UPDATE SET
+            share_id = excluded.share_id,
+            media_id = COALESCE(excluded.media_id, reel_watch_history.media_id),
+            watched_at = excluded.watched_at,
+            watch_time_sec = excluded.watch_time_sec,
+            duration_sec = excluded.duration_sec
+        """,
+        (device_id, str(reel_id), int(share_id), media_id, now_ts, float(watch_time_sec), float(duration_sec)),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def delete_watch_history_item(device_id: str, reel_id: str, share_id: int | None = None) -> bool:
+    """Remove a reel from a device's watch history by reel_id or share_id."""
+    if not device_id:
+        return False
+    conn = get_conn()
+    if share_id is not None:
+        cur = conn.execute(
+            "DELETE FROM reel_watch_history WHERE device_id = ? AND (reel_id = ? OR share_id = ?)",
+            (device_id, str(reel_id), int(share_id)),
+        )
+    else:
+        cur = conn.execute(
+            "DELETE FROM reel_watch_history WHERE device_id = ? AND reel_id = ?",
+            (device_id, str(reel_id)),
+        )
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def get_watch_history(device_id: str, offset: int = 0, limit: int = 50) -> list[dict]:
+    """Return watched reels for a device, newest watched first."""
+    conn = get_read_conn()
+    rows = conn.execute(
+        """
+        SELECT rwh.reel_id, rwh.share_id, rwh.watched_at, rwh.watch_time_sec, rwh.duration_sec,
+               ds.media_id, ds.source_type, ds.source_key, ds.relative_path,
+               ds.size, ds.modified_time, ds.caption, ds.shared_by_device_id,
+               ds.created_at, ds.share_group_id,
+               ds.original_shared_by_device_id, ds.repost_of_share_id, ds.is_library_reel,
+               d.device_name AS shared_by_name, d.username AS shared_by_username,
+               orig_d.device_name AS orig_shared_by_name, orig_d.username AS orig_shared_by_username,
+               COALESCE(dsg.caption, ds.caption) AS group_caption,
+               dsg.post_kind AS post_kind, dsg.post_title AS post_title
+        FROM reel_watch_history rwh
+        JOIN device_shares ds ON ds.id = rwh.share_id
+        LEFT JOIN devices d ON d.device_id = ds.shared_by_device_id
+        LEFT JOIN devices orig_d ON orig_d.device_id = ds.original_shared_by_device_id
+        LEFT JOIN device_share_groups dsg ON dsg.id = ds.share_group_id
+        WHERE rwh.device_id = ?
+        ORDER BY rwh.watched_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (device_id, limit, offset),
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]

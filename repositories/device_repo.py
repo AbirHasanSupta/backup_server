@@ -379,6 +379,7 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
                     cur.execute("DELETE FROM reactions WHERE media_id = %s", (new_id,))
                     cur.execute("UPDATE comments SET media_id = %s WHERE media_id = %s", (old_id, new_id))
                     cur.execute("UPDATE saved_reels SET media_id = %s WHERE media_id = %s", (old_id, new_id))
+                    cur.execute("UPDATE reel_watch_history SET media_id = %s WHERE media_id = %s", (old_id, new_id))
                     cur.execute("UPDATE reel_telemetry SET media_id = %s WHERE media_id = %s", (old_id, new_id))
                     cur.execute("DELETE FROM media_index WHERE id = %s", (new_id,))
 
@@ -509,6 +510,23 @@ def merge_device_id(old_device_id: str, new_device_id: str, new_device_ip: str) 
                 # reel_telemetry
                 cur.execute(
                     "UPDATE reel_telemetry SET device_id = %s WHERE device_id = %s",
+                    (new_device_id, old_device_id),
+                )
+
+                # reel_watch_history
+                cur.execute(
+                    """
+                    DELETE FROM reel_watch_history old_h
+                    WHERE old_h.device_id = %s
+                      AND EXISTS (
+                          SELECT 1 FROM reel_watch_history new_h
+                          WHERE new_h.device_id = %s AND new_h.reel_id = old_h.reel_id
+                      )
+                    """,
+                    (old_device_id, new_device_id),
+                )
+                cur.execute(
+                    "UPDATE reel_watch_history SET device_id = %s WHERE device_id = %s",
                     (new_device_id, old_device_id),
                 )
 

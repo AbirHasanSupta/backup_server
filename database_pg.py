@@ -379,6 +379,21 @@ def init_pg_db():
             );
             CREATE INDEX IF NOT EXISTS idx_reel_telem_share ON reel_telemetry(share_id);
             CREATE INDEX IF NOT EXISTS idx_reel_telem_device_recent ON reel_telemetry(device_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS reel_watch_history (
+                id BIGSERIAL PRIMARY KEY,
+                device_id VARCHAR(64) NOT NULL,
+                reel_id VARCHAR(128) NOT NULL,
+                share_id BIGINT NOT NULL,
+                media_id BIGINT,
+                watched_at BIGINT NOT NULL,
+                watch_time_sec DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                duration_sec DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                UNIQUE (device_id, reel_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_watch_history_device ON reel_watch_history(device_id, watched_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_watch_history_share ON reel_watch_history(share_id);
+            CREATE INDEX IF NOT EXISTS idx_watch_history_reel ON reel_watch_history(reel_id);
             """)
 
             conn.commit()
@@ -400,6 +415,7 @@ def init_pg_db():
                 ("trip_media_id_seq",             "trip_media",           "id"),
                 ("saved_reels_id_seq",            "saved_reels",          "id"),
                 ("reel_telemetry_id_seq",         "reel_telemetry",       "id"),
+                ("reel_watch_history_id_seq",     "reel_watch_history",   "id"),
                 ("device_share_targets_id_seq",   "device_share_targets", "id"),
             ]
             with conn.cursor() as seq_cur:
@@ -493,7 +509,8 @@ def backup_pg_to_host() -> dict:
     tables = [
         "devices", "files", "sync_sessions", "media_index", "trips",
         "trip_media", "reactions", "comments", "device_share_groups",
-        "device_shares", "device_share_targets", "saved_reels", "reel_telemetry", "geocode_cache"
+        "device_shares", "device_share_targets", "saved_reels", "reel_telemetry",
+        "reel_watch_history", "geocode_cache"
     ]
 
     dump_data: dict[str, Any] = {

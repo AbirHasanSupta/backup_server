@@ -468,10 +468,11 @@ def delete_device_share_group(group_id: str, device_id: str) -> bool:
         # Collect file paths before the CASCADE delete wipes the rows.
         _pg_cleanup_persisted_share_files(share_ids)
 
-        # Explicitly delete saved_reels — Postgres saved_reels has no FK cascade on share_id.
+        # Explicitly delete saved_reels and reel_watch_history — Postgres has no FK cascade on share_id.
         if share_ids:
             sr_ph = ",".join(["?"] * len(share_ids))
             execute_write(f"DELETE FROM saved_reels WHERE share_id IN ({sr_ph})", share_ids)
+            execute_write(f"DELETE FROM reel_watch_history WHERE share_id IN ({sr_ph})", share_ids)
 
         # Delete the group — Postgres CASCADE removes device_shares and device_share_targets
         # via foreign-key ON DELETE CASCADE on share_group_id / share_id respectively.
@@ -513,8 +514,9 @@ def delete_device_share(share_id: int, device_id: str) -> bool:
         # Collect persisted file path before the row is gone.
         _pg_cleanup_persisted_share_files([share_id])
 
-        # Explicitly delete saved_reels (no FK cascade in Postgres saved_reels).
+        # Explicitly delete saved_reels and reel_watch_history (no FK cascade in Postgres).
         execute_write("DELETE FROM saved_reels WHERE share_id = ?", (share_id,))
+        execute_write("DELETE FROM reel_watch_history WHERE share_id = ?", (share_id,))
 
         # Delete the share row — CASCADE removes device_share_targets via FK.
         n = execute_write(

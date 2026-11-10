@@ -302,6 +302,11 @@ def _build_migration_plan() -> list[dict]:  # noqa: C901
             "pg_table": "reel_telemetry",
             "transform": None,
         },
+        {
+            "sqlite_table": "reel_watch_history",
+            "pg_table": "reel_watch_history",
+            "transform": None,
+        },
         # scan_dirs & cleanup_log exist in SQLite but NOT in PG schema — skip.
     ]
 
@@ -673,6 +678,21 @@ def _init_pg_schema_direct(pg_conn) -> None:
         created_at BIGINT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_reel_telem_share ON reel_telemetry(share_id);
+
+    CREATE TABLE IF NOT EXISTS reel_watch_history (
+        id BIGSERIAL PRIMARY KEY,
+        device_id VARCHAR(64) NOT NULL,
+        reel_id VARCHAR(128) NOT NULL,
+        share_id BIGINT NOT NULL,
+        media_id BIGINT,
+        watched_at BIGINT NOT NULL,
+        watch_time_sec DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        duration_sec DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        UNIQUE (device_id, reel_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_watch_history_device ON reel_watch_history(device_id, watched_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_watch_history_share ON reel_watch_history(share_id);
+    CREATE INDEX IF NOT EXISTS idx_watch_history_reel ON reel_watch_history(reel_id);
     """
 
     with pg_conn.cursor() as cur:
@@ -699,6 +719,7 @@ _SEQUENCE_TABLE_MAP = [
     ("trip_media_id_seq",           "trip_media",           "id"),
     ("saved_reels_id_seq",          "saved_reels",          "id"),
     ("reel_telemetry_id_seq",       "reel_telemetry",       "id"),
+    ("reel_watch_history_id_seq",   "reel_watch_history",   "id"),
     ("device_share_targets_id_seq", "device_share_targets", "id"),
 ]
 
