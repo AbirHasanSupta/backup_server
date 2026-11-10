@@ -170,6 +170,26 @@ class DesktopServerDisplayNameTests(unittest.TestCase):
             for p in http_server_posts:
                 self.assertEqual(p["shared_by"], self.expected_server_name)
 
+            # 5. Check Pending Notifications endpoint (/api/notifications/pending)
+            notif_status, _, notif_body = _request(
+                self.app,
+                "GET",
+                f"/api/notifications/pending?device_id={self.test_device_id}",
+                headers={"Authorization": f"Bearer {self.test_token}"},
+            )
+            self.assertEqual(notif_status, 200, notif_body.decode("utf-8", "ignore"))
+            notif_data = json.loads(notif_body)
+            unseen_posts = notif_data.get("posts", [])
+            self.assertGreater(len(unseen_posts), 0)
+            for p in unseen_posts:
+                if p.get("shared_by_device_id") == "desktop-server":
+                    self.assertEqual(p.get("shared_by"), self.expected_server_name)
+                    self.assertEqual(p.get("shared_by_name"), self.expected_server_name)
+                    self.assertEqual(p.get("shared_by_device_name"), self.expected_server_name)
+                    self.assertEqual(p.get("device_name"), self.expected_server_name)
+                    self.assertNotEqual(p.get("shared_by"), "Unknown device")
+                    self.assertNotEqual(p.get("shared_by_name"), "Unknown device")
+
         finally:
             if os.path.exists(tmp_video):
                 try:

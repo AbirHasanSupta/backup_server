@@ -150,10 +150,17 @@ class WebSocketService:
         shared_by_device_id: str,
         post_kind: str | None = None,
     ) -> None:
+        from repositories import device_repo
+        if shared_by_device_id == "desktop-server" or not shared_by or shared_by == "Unknown device":
+            shared_by = device_repo.get_device_display_name(shared_by_device_id, fallback="Desktop Server")
         event_data = {
             "group_id": group_id,
+            "id": group_id,
             "caption": caption,
             "shared_by": shared_by,
+            "shared_by_name": shared_by,
+            "shared_by_device_name": shared_by,
+            "device_name": shared_by,
             "shared_by_device_id": shared_by_device_id,
             "post_kind": post_kind,
         }

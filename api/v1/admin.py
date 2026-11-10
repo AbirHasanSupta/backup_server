@@ -1489,6 +1489,19 @@ async def create_admin_post_by_paths(
         body.caption or None,
         items,
     )
+    try:
+        from services.ws_service import ws_service
+        server_name = device_repo.get_device_display_name(body.shared_by_device_id)
+        group_id = res.get("group_id") or res.get("share_group_id") or ""
+        ws_service.notify_new_share(
+            target_device_ids=body.target_device_ids,
+            group_id=group_id,
+            caption=body.caption or None,
+            shared_by=server_name,
+            shared_by_device_id=body.shared_by_device_id,
+        )
+    except Exception:
+        pass
     return res
 
 

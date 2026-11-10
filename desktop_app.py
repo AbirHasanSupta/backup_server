@@ -2064,6 +2064,20 @@ class BackupServerApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 except Exception:
                     continue
             result = create_device_share(DESKTOP_SHARE_DEVICE_ID, targets, caption, items) if items else {"ok": False}
+            if result.get("ok"):
+                try:
+                    from services.ws_service import ws_service
+                    from repositories import device_repo
+                    srv_name = device_repo.get_device_display_name(DESKTOP_SHARE_DEVICE_ID)
+                    ws_service.notify_new_share(
+                        target_device_ids=targets,
+                        group_id=result.get("group_id") or result.get("share_group_id") or "",
+                        caption=caption or None,
+                        shared_by=srv_name,
+                        shared_by_device_id=DESKTOP_SHARE_DEVICE_ID,
+                    )
+                except Exception:
+                    pass
 
             def _finish():
                 self._post_btn.configure(state="normal", text="Post to Devices")

@@ -3850,7 +3850,31 @@ def get_unseen_share_notifications(target_device_id: str) -> list[dict]:
         (target_device_id,),
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+
+    enriched: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        sharer_id = d.get("shared_by_device_id")
+        if sharer_id == "desktop-server":
+            server_name = get_device_display_name("desktop-server")
+            d["shared_by"] = server_name
+            d["shared_by_name"] = server_name
+            d["shared_by_device_name"] = server_name
+            d["device_name"] = server_name
+        else:
+            disp = format_device_display_name(
+                username=d.get("shared_by_username"),
+                device_name=d.get("shared_by_name"),
+                device_id=sharer_id,
+                fallback=sharer_id or "Nearby Device",
+            )
+            name_val = disp if disp and disp != "Unknown device" else (d.get("shared_by_name") or get_device_display_name(sharer_id, fallback=sharer_id or "Nearby Device"))
+            d["shared_by"] = name_val
+            d["shared_by_name"] = d.get("shared_by_name") or name_val
+            d["shared_by_device_name"] = d.get("shared_by_device_name") or name_val
+            d["device_name"] = d.get("device_name") or name_val
+        enriched.append(d)
+    return enriched
 
 
 def mark_share_notifications_seen(target_device_id: str, group_ids: list[str]) -> None:

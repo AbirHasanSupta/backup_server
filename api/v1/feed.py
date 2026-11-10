@@ -685,12 +685,26 @@ async def create_direct_post(
         if not share_items:
             raise HTTPException(status_code=400, detail="No valid items to share")
 
-        return social_repo.create_device_share(
+        res = social_repo.create_device_share(
             shared_by_device_id,
             targets,
             caption or None,
             share_items,
         )
+        try:
+            from services.ws_service import ws_service
+            server_name = device_repo.get_device_display_name(shared_by_device_id)
+            group_id = res.get("group_id") or res.get("share_group_id") or ""
+            ws_service.notify_new_share(
+                target_device_ids=targets,
+                group_id=group_id,
+                caption=caption or None,
+                shared_by=server_name,
+                shared_by_device_id=shared_by_device_id,
+            )
+        except Exception:
+            pass
+        return res
     except Exception:
         for p in persisted_paths:
             try:
@@ -972,10 +986,18 @@ async def get_pending_notifications(
     for p in posts:
         sharer_id = p.get("shared_by_device_id")
         if sharer_id == "desktop-server":
-            p["shared_by"] = device_repo.get_device_display_name("desktop-server")
+            server_name = device_repo.get_device_display_name("desktop-server")
+            p["shared_by"] = server_name
+            p["shared_by_name"] = server_name
+            p["shared_by_device_name"] = server_name
+            p["device_name"] = server_name
         else:
             disp = feed_service.format_display_name(p.get("shared_by_username"), p.get("shared_by_name"))
-            p["shared_by"] = disp if disp != "Unknown device" else device_repo.get_device_display_name(sharer_id, fallback=sharer_id)
+            name_val = disp if disp and disp != "Unknown device" else device_repo.get_device_display_name(sharer_id, fallback=sharer_id or "Nearby Device")
+            p["shared_by"] = name_val
+            p["shared_by_name"] = p.get("shared_by_name") or name_val
+            p["shared_by_device_name"] = p.get("shared_by_device_name") or name_val
+            p["device_name"] = p.get("device_name") or name_val
     return {"posts": posts}
 
 
